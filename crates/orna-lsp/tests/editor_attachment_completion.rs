@@ -21,6 +21,8 @@ mod syntax_v1_action_signature_contract;
 mod syntax_v1_depth_contract;
 #[path = "support/syntax_v1_diagnostics_document_links_contract.rs"]
 mod syntax_v1_diagnostics_document_links_contract;
+#[path = "support/syntax_v1_document_symbols_contract.rs"]
+mod syntax_v1_document_symbols_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
 mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
@@ -147,6 +149,8 @@ fn vim_lsp_attaches_and_exposes_hover_semantic_tokens_and_completion() {
             .is_empty()
     );
     let document_links_fixture = root.join("crates/orna-lsp/tests/fixtures/document-links-v1.orna");
+    let document_symbols_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/document-symbols-v1.orna");
     let document_link_target_fixture =
         root.join("crates/orna-lsp/tests/fixtures/library/math.orna");
     let document_link_directory_target_fixture =
@@ -154,6 +158,10 @@ fn vim_lsp_attaches_and_exposes_hover_semantic_tokens_and_completion() {
     assert_eq!(
         fs::read_to_string(&document_links_fixture).unwrap(),
         DOCUMENT_LINKS_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_symbols_fixture).unwrap(),
+        syntax_v1_document_symbols_contract::SOURCE
     );
     assert_eq!(
         fs::read_to_string(&document_link_target_fixture).unwrap(),
@@ -550,6 +558,9 @@ endfunction
 function! OrnaCaptureDocumentLinks(name, data) abort
     let g:orna_document_link_responses[a:name] = a:data['response']['result']
 endfunction
+function! OrnaCaptureDocumentSymbols(data) abort
+    let g:orna_document_symbols_response = a:data['response']['result']
+endfunction
 let g:orna_diagnostic_responses = {{}}
 execute 'edit ' . fnameescape($ORNA_TEST_DIAGNOSTIC_FIXTURE)
 call assert_equal('orna', &filetype)
@@ -635,6 +646,25 @@ while !has_key(g:orna_document_link_responses, 'ambiguous') && reltimefloat(relt
     sleep 10m
 endwhile
 call assert_true(has_key(g:orna_document_link_responses, 'ambiguous'), 'vim-lsp ambiguous document-link request timed out')
+
+execute 'edit ' . fnameescape($ORNA_TEST_DOCUMENT_SYMBOLS_FIXTURE)
+call assert_equal('orna', &filetype)
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !lsp#capabilities#has_completion_provider('orna') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(lsp#capabilities#has_completion_provider('orna'), 'document-symbol fixture did not attach')
+let s:document_symbols_document = lsp#get_text_document_identifier()
+call lsp#send_request('orna', {{
+    \ 'method': 'textDocument/documentSymbol',
+    \ 'params': {{ 'textDocument': s:document_symbols_document }},
+    \ 'on_notification': function('OrnaCaptureDocumentSymbols'),
+\ }})
+let s:deadline = reltimefloat(reltime()) + 10.0
+while !exists('g:orna_document_symbols_response') && reltimefloat(reltime()) < s:deadline
+    sleep 10m
+endwhile
+call assert_true(exists('g:orna_document_symbols_response'), 'vim-lsp document-symbol request timed out')
 call writefile([json_encode({{
     \ 'omnifunc': &l:omnifunc,
     \ 'completion': s:response['result'],
@@ -682,6 +712,7 @@ call writefile([json_encode({{
     \ 'document_links_ambiguous': g:orna_document_link_responses.ambiguous,
     \ 'document_links_uri': s:document_links_document['uri'],
     \ 'document_links_target_uri': s:document_link_target_document['uri'],
+    \ 'document_symbols': g:orna_document_symbols_response,
     \ 'consumer_uri': s:consumer_document['uri'],
     \ 'provider_uri': s:provider_document['uri'],
     \ 'references': s:references,
@@ -716,6 +747,10 @@ qa!
         .env("ORNA_TEST_DIAGNOSTIC_FIXTURE", &diagnostic_fixture)
         .env("ORNA_DIAGNOSTIC_RECOVERY_SOURCE", &diagnostic_recovery)
         .env("ORNA_TEST_DOCUMENT_LINKS_FIXTURE", &document_links_fixture)
+        .env(
+            "ORNA_TEST_DOCUMENT_SYMBOLS_FIXTURE",
+            &document_symbols_fixture,
+        )
         .env(
             "ORNA_TEST_DOCUMENT_LINK_TARGET_FIXTURE",
             &document_link_target_fixture,
@@ -853,6 +888,10 @@ qa!
         &evidence["document_links_ambiguous"],
         "Vim vim-lsp with ambiguous targets",
     );
+    syntax_v1_document_symbols_contract::assert_contract(
+        &evidence["document_symbols"],
+        "Vim vim-lsp",
+    );
     let consumer_uri = evidence["consumer_uri"]
         .as_str()
         .expect("Vim consumer document URI");
@@ -879,7 +918,7 @@ qa!
         "Vim vim-lsp",
     );
     println!(
-        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass SIGNATURE_HELP=pass CODE_ACTION=pass WORKSPACE_SYMBOL=pass CALL_HIERARCHY=pass FOLDING_RANGE=pass SELECTION_RANGE=pass DIAGNOSTICS=pass DOCUMENT_LINKS=pass"
+        "Vim integration evidence: ATTACHED=pass DEPENDENCY_ORDER=consumer-before-provider OMNIFUNC=pass COMPLETION=pass HOVER=pass REFERENCES=pass RENAME=pass SEMANTIC_TOKENS=pass SEMANTIC_DEPTH=pass RANGED_TOKENS=pass INLAY_HINT_DEPTH=pass SIGNATURE_HELP=pass CODE_ACTION=pass WORKSPACE_SYMBOL=pass CALL_HIERARCHY=pass FOLDING_RANGE=pass SELECTION_RANGE=pass DIAGNOSTICS=pass DOCUMENT_LINKS=pass DOCUMENT_SYMBOLS=pass"
     );
 }
 
@@ -915,8 +954,15 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
         provider < fixture,
         "provider URI must sort before consumer URI"
     );
+    let document_symbols_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/document-symbols-v1.orna");
+    assert_eq!(
+        fs::read_to_string(&document_symbols_fixture).unwrap(),
+        syntax_v1_document_symbols_contract::SOURCE
+    );
     let script = temporary_path("el");
     let completion_result_path = temporary_path("json");
+    let document_symbols_result_path = temporary_path("document-symbols.json");
     let plugin = root.join("editors/emacs/orna-eglot.el");
     let expected = completion_contract::expected_keywords()
         .iter()
@@ -948,7 +994,8 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
         (t nil)))
 
 (let ((buffer (find-file-noselect {}))
-      provider-buffer)
+      provider-buffer
+      document-symbols-buffer)
   (unwind-protect
       (with-current-buffer buffer
         (unless (eq major-mode 'orna-mode) (error "Orna major mode did not load"))
@@ -1004,13 +1051,28 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
             (unless capf (error "Eglot completion-at-point returned no completion surface"))
             (unless (member "add" (mapcar #'substring-no-properties candidates))
               (error "completion-at-point omitted add: %S" candidates)))
+          (setq document-symbols-buffer
+                (find-file-noselect (getenv "ORNA_DOCUMENT_SYMBOLS_FIXTURE")))
+          (with-current-buffer document-symbols-buffer
+            (let ((deadline (+ (float-time) 12.0)))
+              (while (and (not (eglot-managed-p)) (< (float-time) deadline))
+                (accept-process-output nil 0.05)))
+            (unless (eglot-managed-p)
+              (error "Eglot did not attach document-symbol fixture"))
+            (let* ((server (eglot-current-server))
+                   (response (jsonrpc-request server :textDocument/documentSymbol
+                                              (eglot--TextDocumentPositionParams))))
+              (with-temp-file (getenv "ORNA_DOCUMENT_SYMBOLS_RESULT")
+                (insert (json-encode response)))))
           (princ "EMACS_LSP_ATTACHMENT=pass\n")
           (princ "EMACS_DEPENDENCY_ORDER=consumer-before-provider\n")
           (princ "EMACS_COMPLETION_KEYWORDS=pass\n")
           (princ "EMACS_COMPLETION_ADD=pass\n")
-          (princ "EMACS_COMPLETION_AT_POINT=pass\n")))
+          (princ "EMACS_COMPLETION_AT_POINT=pass\n")
+          (princ "EMACS_LSP_DOCUMENT_SYMBOLS=pass\n")))
     (kill-buffer buffer)
-    (when (buffer-live-p provider-buffer) (kill-buffer provider-buffer))))
+    (when (buffer-live-p provider-buffer) (kill-buffer provider-buffer))
+    (when (buffer-live-p document-symbols-buffer) (kill-buffer document-symbols-buffer))))
 "#,
         elisp_string(&plugin.display().to_string()),
         elisp_string(env!("CARGO_BIN_EXE_orna-lsp")),
@@ -1024,6 +1086,11 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
         .arg(&script)
         .current_dir(&root)
         .env("ORNA_COMPLETION_RESULT", &completion_result_path)
+        .env("ORNA_DOCUMENT_SYMBOLS_FIXTURE", &document_symbols_fixture)
+        .env(
+            "ORNA_DOCUMENT_SYMBOLS_RESULT",
+            &document_symbols_result_path,
+        )
         .output()
         .unwrap_or_else(|error| panic!("start Emacs at {}: {error}", emacs.display()));
     let _ = fs::remove_file(script);
@@ -1040,12 +1107,19 @@ fn emacs_eglot_attaches_and_exposes_syntax_v1_completion_at_point() {
     let completion_result: Value =
         serde_json::from_str(&completion_result).expect("decode Emacs Eglot completion evidence");
     completion_contract::assert_lsp_completion_contract(&completion_result, "Emacs Eglot");
+    let document_symbols_result = fs::read_to_string(&document_symbols_result_path)
+        .expect("Emacs Eglot document-symbol evidence JSON");
+    let _ = fs::remove_file(&document_symbols_result_path);
+    let document_symbols_result: Value = serde_json::from_str(&document_symbols_result)
+        .expect("decode Emacs Eglot document-symbol evidence");
+    syntax_v1_document_symbols_contract::assert_contract(&document_symbols_result, "Emacs Eglot");
     for evidence in [
         "EMACS_LSP_ATTACHMENT=pass",
         "EMACS_DEPENDENCY_ORDER=consumer-before-provider",
         "EMACS_COMPLETION_KEYWORDS=pass",
         "EMACS_COMPLETION_ADD=pass",
         "EMACS_COMPLETION_AT_POINT=pass",
+        "EMACS_LSP_DOCUMENT_SYMBOLS=pass",
     ] {
         assert!(
             stdout.contains(evidence),

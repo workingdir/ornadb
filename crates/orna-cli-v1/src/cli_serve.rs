@@ -33,6 +33,8 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GIT_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
 const SESSION_LEASE_MS: u64 = MAX_SESSION_LEASE;
+const SERVE_MODULE_PATH: &str = "main.orna";
+const SERVE_ENTRY: &str = "serve";
 
 struct ServeState {
     root: PathBuf,
@@ -230,7 +232,8 @@ fn new_serve_state_with_project(
     })?;
     let mut application =
         ApplicationLiveAdapter::new(ApplicationAuthority::new(catalogue, Limits::default()))
-            .with_runtime_identity(identity.database_id, identity.repository_id);
+            .with_runtime_identity(identity.database_id, identity.repository_id)
+            .with_module(SERVE_MODULE_PATH, SERVE_ENTRY);
     if let Some(project) = project {
         application = application.with_loaded_project(project);
     }
@@ -1567,7 +1570,7 @@ fn render_home_document(identity: RuntimeIdentity, content: &InspectionNode) -> 
     page.push_str("</head><body><main><h1>Orna database</h1>");
     render_inspection_node(content, &mut page);
     page.push_str(&format!(
-        "<section id=\"live-repl\" data-database=\"{}\"><h2>REPL</h2><label for=\"repl-source\">Orna input</label><textarea id=\"repl-source\" rows=\"4\" spellcheck=\"false\">1 + 1</textarea><button id=\"repl-run\" type=\"button\" disabled>Run</button><p id=\"repl-status\" aria-live=\"polite\">Connecting to the runtime…</p><pre id=\"repl-events\">No run yet.</pre></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section>",
+        "<section id=\"live-repl\" data-database=\"{}\"><h2>Run the selected Orna source</h2><label for=\"repl-source\">Orna input</label><textarea id=\"repl-source\" rows=\"4\" spellcheck=\"false\">serve()</textarea><button id=\"repl-run\" type=\"button\" disabled>Run</button><p id=\"repl-status\" aria-live=\"polite\">Connecting to the runtime…</p><pre id=\"repl-events\">No run yet.</pre></section><section aria-labelledby=\"live-title\"><h2 id=\"live-title\">Live presentation</h2><p id=\"live-status\" role=\"status\" aria-live=\"polite\">Connecting to the database…</p><div id=\"live-presentation\"></div></section>",
         html_escape(&database)
     ));
     page.push_str(&format!(
@@ -2149,9 +2152,11 @@ fn unavailable_response() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_live_v1::LiveApplication;
     use std::process::Command;
 
     const SERVE_FIXTURE: &str = include_str!("../tests/fixtures/serve-no-autoload.orna");
+    const SERVE_ENTRY_FIXTURE: &str = include_str!("../tests/fixtures/serve-entry.orna");
 
     fn git_succeeds(directory: &Path, arguments: &[&str]) {
         let output = Command::new("git")
@@ -2173,6 +2178,60 @@ mod tests {
             std::fs::write(table_directory.join(format!("{id}.orna")), source)
                 .expect("write crate-local playground row fixture");
         }
+    }
+
+    #[test]
+    fn selected_serve_entry_runs_through_the_live_evaluator_and_returns_a_typed_result() {
+        let mut state = new_serve_state(
+            PathBuf::new(),
+            RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            "127.0.0.1:9000".parse().expect("loopback address"),
+            orna_semantic_v1::Catalogue::authoritative_core(),
+        )
+        .expect("serve state");
+        let request = [4; 16];
+        let fingerprint = [5; 32];
+        let message = Message::Eval {
+            source: SERVE_ENTRY_FIXTURE.to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: PresentationContext {
+                locale: "en".into(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".into(),
+                supported_kinds: vec!["text".into(), "group".into()],
+            },
+            fingerprint,
+        };
+
+        let response = state
+            .application
+            .eval([3; 16], request, &message)
+            .expect("selected serve source evaluates");
+        assert_eq!(response.request, Some(request));
+        assert_eq!(response.watch, None);
+        let Message::Result {
+            status,
+            value,
+            fingerprint: result_fingerprint,
+            diagnostic,
+        } = response.message
+        else {
+            panic!("Run returns a typed Result message");
+        };
+        assert_eq!(status, orna_protocol_v1::ResultStatus::Success);
+        assert_eq!(result_fingerprint, fingerprint);
+        assert_eq!(diagnostic, None);
+        assert_eq!(
+            value.expect("typed Run result").raw(),
+            &orna_foundation_v1::OvbRaw::Int(42.into())
+        );
     }
 
     fn listing_page(root: &Path, path: &str) -> Response {
@@ -2234,6 +2293,7 @@ mod tests {
         assert!(home.contains("href=\"/playground/\""));
         assert!(home.contains("id=\"live-repl\""));
         assert!(home.contains("id=\"repl-source\""));
+        assert!(home.contains(">serve()</textarea>"));
         assert!(home.contains("id=\"live-presentation\""));
         assert!(home.contains("id=\"run-events-source\""));
         assert!(home.contains("src=\"/playground/assets/serve-home.mjs\""));
