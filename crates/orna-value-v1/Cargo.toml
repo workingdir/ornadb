@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
-description = "Orna 1.0 OVB-1 canonical values, schemas and identities"
+description = "Orna OVB-1 compatibility and format-3 canonical values"
 
 [dependencies]
 num-bigint = "0.4.6"

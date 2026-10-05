@@ -1,0 +1,328 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use super::*;
+
+fn hex_bytes(value: &str) -> Vec<u8> {
+    (0..value.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&value[at..at + 2], 16).unwrap())
+        .collect()
+}
+
+fn counting_resolver(bytes: &[u8]) -> Arc<CountingResolver> {
+    Arc::new(CountingResolver {
+        bytes: bytes.to_vec(),
+        reads: AtomicUsize::new(0),
+        max_request: AtomicUsize::new(0),
+    })
+}
+
+fn test_context(resolver: Arc<dyn BlobResolver>) -> Format3Context {
+    test_context_with_quota(
+        resolver,
+        Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+    )
+}
+
+fn test_context_with_quota(resolver: Arc<dyn BlobResolver>, quota: Format3Quota) -> Format3Context {
+    let database = [1; 16];
+    Format3Context::from_persisted(
+        database,
+        Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+        GitHash::Sha1,
+        NativeOid::from_bytes(&[9; 20]).unwrap(),
+        NativeOid::from_bytes(&[8; 20]).unwrap(),
+        AvailabilityState::Available,
+        OwnerLifetime::new([3; 16]),
+        quota,
+        resolver,
+    )
+    .unwrap()
+}
+
+#[test]
+fn published_blob_vectors_use_explicit_profiles() {
+    let ovb2 = Blob::from_bytes_with_annotation(b"abc".to_vec(), "text/plain;charset=utf-8", None)
+        .unwrap();
+    assert_eq!(
+        encode_ovb2(&ovb2).unwrap(),
+        hex_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6")
+    );
+
+    let identity = ContentIdentity::from_bytes(b"abc");
+    let context = test_context(counting_resolver(b"abc"));
+    let reference = context
+        .reference(identity, NativeOid::from_bytes(&[0x7f; 20]).unwrap())
+        .unwrap();
+    let rov3 =
+        Blob::from_reference_with_annotation(reference, "text/plain;charset=utf-8", None).unwrap();
+    assert!(!rov3.is_hydrated());
+    assert_eq!(
+        encode_rov3(&rov3).unwrap(),
+        hex_bytes(
+            "d9eacf85035820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad7818746578742f706c61696e3b636861727365743d7574662d38f6547f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f"
+        )
+    );
+    let decoded_rov3 = decode_rov3_in_context(&encode_rov3(&rov3).unwrap(), &context).unwrap();
+    assert_eq!(decoded_rov3.content_identity(), rov3.content_identity());
+    assert_eq!(decoded_rov3.media_type(), rov3.media_type());
+    assert_eq!(decoded_rov3.descriptor_oid(), rov3.descriptor_oid());
+
+    let sov3 = Blob::from_semantic_commitment_in_context(
+        identity,
+        &context,
+        "text/plain;charset=utf-8",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        encode_sov3(&sov3).unwrap(),
+        hex_bytes(
+            "d9ead084035820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad7818746578742f706c61696e3b636861727365743d7574662d38f6"
+        )
+    );
+    let decoded_sov3 = decode_sov3_in_context(&encode_sov3(&sov3).unwrap(), &context).unwrap();
+    assert_eq!(decoded_sov3.content_identity(), sov3.content_identity());
+    assert_eq!(decoded_sov3.media_type(), sov3.media_type());
+    assert_eq!(
+        decoded_sov3.same_content(&sov3),
+        Err(Error::ContentUnavailable)
+    );
+    assert_eq!(decode_ovb2(&encode_ovb2(&ovb2).unwrap()).unwrap(), ovb2);
+}
+
+#[test]
+fn legacy_codec_rejects_new_tags_and_profiles_do_not_mix() {
+    let raw = Raw::Tag(
+        60110,
+        Box::new(Raw::Array(vec![
+            Raw::Bytes(b"abc".to_vec()),
+            Raw::Text("text/plain".to_owned()),
+            Raw::Null,
+        ])),
+    );
+    assert_eq!(Value::new(raw.clone()), Err(Error::InvalidTag));
+    assert_eq!(
+        ContextValue::new_in_context(
+            &test_context(counting_resolver(b"abc")),
+            ValueFormat::Rov3,
+            raw,
+        ),
+        Err(Error::InvalidProfile)
+    );
+}
+
+#[test]
+fn raw_reference_and_spoofed_context_cannot_authorize_reads() {
+    let identity = ContentIdentity::from_bytes(b"abc");
+    let raw = Raw::Tag(
+        60111,
+        Box::new(Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Bytes(identity.sha256().to_vec()),
+            Raw::Text("text/plain".to_owned()),
+            Raw::Null,
+            Raw::Bytes(vec![7; 20]),
+        ])),
+    );
+    assert_eq!(
+        ContextValue::new(ValueFormat::Rov3, raw),
+        Err(Error::InvalidContext)
+    );
+    let authorized_context = test_context(counting_resolver(b"abc"));
+    let authorized_blob = Blob::from_reference(
+        authorized_context
+            .reference(identity, NativeOid::from_bytes(&[7; 20]).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let encoded = encode_rov3(&authorized_blob).unwrap();
+    assert_eq!(decode_rov3(&encoded), Err(Error::InvalidContext));
+
+    let resolver = counting_resolver(b"abc");
+    let database = [4; 16];
+    let owner = OwnerLifetime::new([5; 16]);
+    let quota = Format3Quota::new(8 * 1024 * 1024, 1024).unwrap();
+    let valid_pin = Snapshot::cwd(database, [6; 16], 0.into()).unwrap();
+    let mut forged_pin = valid_pin.clone();
+    let Snapshot::Cwd { id, .. } = &mut forged_pin else {
+        unreachable!();
+    };
+    *id = [0xa5; 32];
+    assert!(matches!(
+        Format3Context::from_persisted(
+            database,
+            forged_pin,
+            GitHash::Sha1,
+            NativeOid::from_bytes(&[9; 20]).unwrap(),
+            NativeOid::from_bytes(&[8; 20]).unwrap(),
+            AvailabilityState::Available,
+            owner.clone(),
+            quota,
+            resolver.clone(),
+        ),
+        Err(Error::InvalidContext)
+    ));
+    assert!(matches!(
+        Format3Context::from_persisted(
+            database,
+            Snapshot::cwd([8; 16], [6; 16], 0.into()).unwrap(),
+            GitHash::Sha1,
+            NativeOid::from_bytes(&[9; 20]).unwrap(),
+            NativeOid::from_bytes(&[8; 20]).unwrap(),
+            AvailabilityState::Available,
+            owner,
+            quota,
+            resolver.clone(),
+        ),
+        Err(Error::InvalidContext)
+    ));
+    assert!(matches!(
+        Format3Context::from_persisted(
+            database,
+            valid_pin,
+            GitHash::Sha1,
+            NativeOid::from_bytes(&[9; 32]).unwrap(),
+            NativeOid::from_bytes(&[8; 20]).unwrap(),
+            AvailabilityState::Available,
+            OwnerLifetime::new([5; 16]),
+            quota,
+            resolver.clone(),
+        ),
+        Err(Error::InvalidContext)
+    ));
+
+    let context = test_context(resolver.clone());
+    let reference = context
+        .reference(identity, NativeOid::from_bytes(&[1; 20]).unwrap())
+        .unwrap();
+    let blob = Blob::from_reference(reference).unwrap();
+    context.cancel();
+    assert_eq!(blob.read(0, 3), Err(Error::Cancelled));
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn rov3_oid_width_must_match_the_bound_context_algorithm() {
+    let context = test_context(counting_resolver(b"abc"));
+    let raw = Raw::Tag(
+        ROV3_BLOB_TAG,
+        Box::new(Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Bytes(ContentIdentity::from_bytes(b"abc").sha256().to_vec()),
+            Raw::Text("text/plain".to_owned()),
+            Raw::Null,
+            Raw::Bytes(vec![7; 32]),
+        ])),
+    );
+    assert_eq!(
+        ContextValue::new_in_context(&context, ValueFormat::Rov3, raw),
+        Err(Error::InvalidOid)
+    );
+}
+
+#[test]
+fn expiration_is_monotonic_and_cannot_restore_availability() {
+    let context = test_context(counting_resolver(b"abc"));
+    let reference = context
+        .reference(
+            ContentIdentity::from_bytes(b"abc"),
+            NativeOid::from_bytes(&[1; 20]).unwrap(),
+        )
+        .unwrap();
+    let blob = Blob::from_reference(reference).unwrap();
+    context.expire();
+    assert_eq!(context.availability(), AvailabilityState::Expired);
+    assert_eq!(blob.read(0, 1), Err(Error::OwnerExpired));
+}
+
+#[test]
+fn full_reads_and_content_comparisons_honor_small_read_quotas() {
+    let quota = Format3Quota::new(2, 1_u64 << 62).unwrap();
+    let left_resolver = counting_resolver(b"payload");
+    let right_resolver = counting_resolver(b"payload");
+    let identity = ContentIdentity::from_bytes(b"payload");
+    let left_context = test_context_with_quota(left_resolver.clone(), quota);
+    let right_context = test_context_with_quota(right_resolver.clone(), quota);
+    let left = Blob::from_reference(
+        left_context
+            .reference(identity, NativeOid::from_bytes(&[1; 20]).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let right = Blob::from_reference(
+        right_context
+            .reference(identity, NativeOid::from_bytes(&[2; 20]).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(left.read_to_end().unwrap(), b"payload");
+    assert_eq!(left.same_content(&right).unwrap(), true);
+    assert!(left_resolver.max_request.load(Ordering::SeqCst) <= 2);
+    assert!(right_resolver.max_request.load(Ordering::SeqCst) <= 2);
+}
+
+#[test]
+fn lazy_reference_metadata_and_semantic_encoding_do_not_read_payload() {
+    let resolver = counting_resolver(b"payload");
+    let identity = ContentIdentity::from_bytes(b"payload");
+    let context = test_context(resolver.clone());
+    let reference = context
+        .reference(identity, NativeOid::from_bytes(&[3; 20]).unwrap())
+        .unwrap();
+    let blob = Blob::from_reference_with_annotation(reference, "audio/mpeg", None).unwrap();
+    assert_eq!(blob.length(), 7);
+    assert_eq!(blob.media_type(), "audio/mpeg");
+    assert_eq!(blob.suffix(), None);
+    assert_eq!(
+        encode_rov3(&blob).unwrap(),
+        encode_rov3(&blob.annotate("audio/mpeg", Some("mp3")).unwrap()).unwrap()
+    );
+    assert_eq!(
+        encode_sov3(&blob).unwrap(),
+        encode_sov3(&blob.annotate("audio/mpeg", Some("mp3")).unwrap()).unwrap()
+    );
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(blob.read(1, 3).unwrap(), b"ayl");
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn content_identity_is_separate_from_annotated_value_equality() {
+    let left = Blob::from_bytes_with_annotation(b"same".to_vec(), "text/plain", None).unwrap();
+    let right = left.annotate("text/plain", Some("text")).unwrap();
+    assert!(left.same_content(&right).unwrap());
+    assert!(!left.value_eq(&right).unwrap());
+
+    let identity = ContentIdentity::from_bytes(b"same");
+    let first = Blob::from_semantic_commitment(identity, "text/plain", None).unwrap();
+    let second = Blob::from_semantic_commitment(identity, "text/plain", None).unwrap();
+    assert_eq!(first.same_content(&second), Err(Error::ContentUnavailable));
+    assert_eq!(first.value_eq(&second), Err(Error::ContentUnavailable));
+}
+
+struct CountingResolver {
+    bytes: Vec<u8>,
+    reads: AtomicUsize,
+    max_request: AtomicUsize,
+}
+
+impl BlobResolver for CountingResolver {
+    fn read_range(
+        &self,
+        _reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.max_request
+            .fetch_max(length as usize, Ordering::SeqCst);
+        let start = offset as usize;
+        let end = start + length as usize;
+        Ok(self.bytes[start..end].to_vec())
+    }
+}
