@@ -4878,6 +4878,7 @@ ac4b5bd45f85752bb533edb822535e86c367ca279b15777b97efa8a1d9bc07bc  crates/orna-st
 71350754c1396537ec5d34ac06b4baf0d78d3d3e23b4addd0dade5eebfa86b3c  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f168.orna
 14ef966013cc06fea7eecb7834c85c5cb4c404270fc455a2a0d5b74643d8f391  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f172.orna
 0adf6d8a3fdec9ed2258ca694aa14a2baed2609f945442d02f3603eaf0ca7b1f  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f175.orna
+db29db61a36e41a99ff184f8c5559659572a22ad09402a3119322ba61ee740bf  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-f178.orna
 6cb47f10f48d3d9e44847bee829896c37567d318ae571ef9be9b75e1ed554949  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-p38rq.orna
 86c408396e12b18f51adbb5a8322c9b4c4d9b363f60643bc708f9d2bf3183cdc  crates/orna-storage-v1/tests/fixtures/paired-nested-handoff-identities-q0rmw.orna
 ec14b6d4fb56a1d52768d3471ca0cd4980ccce1e1c0aa8603e2ffbec16064520  crates/orna-storage-v1/tests/fixtures/paired-nested-replay-identities-f84.orna
