@@ -34,6 +34,7 @@ pub struct Collector {
 pub struct GeneratedSysArtifacts {
     pub api_json: String,
     pub schema_json: String,
+    pub catalogue_json: String,
     pub provider_abi_json: String,
     pub binding_modules: BTreeMap<String, String>,
     pub binding_modules_json: String,
@@ -94,7 +95,8 @@ pub fn generate_sys_artifacts(
     validate_collection(functions)?;
     let function_metadata = functions
         .iter()
-        .map(|function| function.metadata.clone())
+        .filter(|function| function_is_admitted_to_format_3(&function.metadata))
+        .map(|function| published_function_metadata(&function.metadata))
         .collect::<Vec<_>>();
     let api = generate_system_api_document(registry, function_metadata)?;
     validate_published_schema_shape(&api, schema)?;
@@ -104,7 +106,12 @@ pub fn generate_sys_artifacts(
     let mut schema_json = canonical_pretty_json(schema).map_err(|error| error.to_string())?;
     schema_json.push('\n');
 
-    let provider_abi = generate_provider_abi(functions, &api)?;
+    let published_functions = functions
+        .iter()
+        .filter(|function| function_is_admitted_to_format_3(&function.metadata))
+        .cloned()
+        .collect::<Vec<_>>();
+    let provider_abi = generate_provider_abi(&published_functions, &api)?;
     let mut provider_abi_json =
         canonical_pretty_json(&provider_abi).map_err(|error| error.to_string())?;
     provider_abi_json.push('\n');
@@ -121,11 +128,41 @@ pub fn generate_sys_artifacts(
     Ok(GeneratedSysArtifacts {
         api_json,
         schema_json,
+        catalogue_json: generate_system_catalogue_json(functions)?,
         provider_abi_json,
         binding_modules,
         binding_modules_json,
         binding_bundle,
     })
+}
+
+/// Generate the internal native catalogue projection. Unlike `api/sys.json`,
+/// this keeps the explicit format admissions so runtime selection can remain
+/// typed and fail closed. It is not a value codec or executable dispatch map.
+pub fn generate_system_catalogue_json(functions: &[Function]) -> Result<String, String> {
+    let functions = functions
+        .iter()
+        .map(|function| function.metadata.clone())
+        .collect::<Vec<_>>();
+    let catalogue = serde_json::json!({"functions": functions});
+    let mut json = canonical_pretty_json(&catalogue).map_err(|error| error.to_string())?;
+    json.push('\n');
+    Ok(json)
+}
+
+fn function_is_admitted_to_format_3(metadata: &Value) -> bool {
+    metadata
+        .get("contexts")
+        .and_then(Value::as_array)
+        .is_none_or(|contexts| contexts.iter().any(|context| context == "format-3"))
+}
+
+fn published_function_metadata(metadata: &Value) -> Value {
+    let mut metadata = metadata.clone();
+    if let Some(object) = metadata.as_object_mut() {
+        object.remove("contexts");
+    }
+    metadata
 }
 
 fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, String> {
@@ -731,12 +768,14 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
     // These are the fields consumed by semantic SystemApi. Rejecting unknown
     // keys catches annotation typos that serde would otherwise silently drop.
     const REQUIRED: [&str; 4] = ["name", "effect", "signature", "purpose"];
-    const OPTIONAL: [&str; 5] = [
+    const OPTIONAL: [&str; 7] = [
         "contract",
         "preconditions",
         "ownership",
         "snapshot_rule",
         "documentation",
+        "since",
+        "contexts",
     ];
 
     for field in REQUIRED {
@@ -751,6 +790,29 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
     }
     for field in OPTIONAL {
         if let Some(value) = object.get(field) {
+            if field == "contexts" {
+                let contexts = value.as_array().ok_or_else(|| {
+                    "function metadata field `contexts` must be an array".to_owned()
+                })?;
+                if contexts.is_empty() {
+                    return Err("function metadata field `contexts` must not be empty".to_owned());
+                }
+                let mut seen = BTreeSet::new();
+                for context in contexts {
+                    let Some(context) = context.as_str() else {
+                        return Err("function metadata context entries must be strings".to_owned());
+                    };
+                    if !matches!(context, "format-1" | "format-2" | "format-3") {
+                        return Err(format!("unknown function metadata context `{context}`"));
+                    }
+                    if !seen.insert(context) {
+                        return Err(format!(
+                            "function metadata contexts contains duplicate `{context}`"
+                        ));
+                    }
+                }
+                continue;
+            }
             let Some(value) = value.as_str() else {
                 return Err(format!(
                     "function metadata field `{field}` must be a string"
@@ -791,7 +853,7 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
         return Err(format!("unknown system API effect `{effect}`"));
     }
 
-    let requires_contract = name.starts_with("sys.admin.");
+    let requires_contract = name.starts_with("sys.admin.") || name.starts_with("sys.blob.");
     let requires_preconditions = FUNCTIONS_WITH_PRECONDITIONS.contains(&name);
     let requires_ownership = matches!(name, "sys.start(Value)" | "sys.start<T>");
     let requires_snapshot_rule = matches!(
@@ -811,25 +873,32 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
         }
     }
 
-    // Freeze the published 1.0 effect partition at generation time. The
-    // semantic loader applies the same surface rule before calls are admitted.
-    let expected_effect = if name.starts_with("sys.admin.plan_checkout") {
-        "read"
-    } else if name.starts_with("sys.admin.") {
-        "admin"
-    } else if matches!(
-        name,
-        "sys.invoke(Value)"
-            | "sys.invoke<T>"
-            | "sys.start(Value)"
-            | "sys.start<T>"
-            | "sys.await"
-            | "sys.cancel"
-    ) {
-        "invoke"
-    } else {
-        "read"
-    };
+    // Freeze the published effect partition at generation time. The semantic
+    // loader applies the same surface rule before calls are admitted.
+    let expected_effect =
+        if name == "sys.admin.review_commit" || name.starts_with("sys.admin.plan_checkout") {
+            "read"
+        } else if name.starts_with("sys.admin.") {
+            "admin"
+        } else if matches!(
+            name,
+            "sys.invoke(Value)"
+                | "sys.invoke<T>"
+                | "sys.start(Value)"
+                | "sys.start<T>"
+                | "sys.await"
+                | "sys.cancel"
+                | "sys.blob.begin"
+                | "sys.blob.append"
+                | "sys.blob.finish"
+                | "sys.blob.abort"
+                | "sys.blob.capture_file"
+                | "sys.blob.resource"
+        ) {
+            "invoke"
+        } else {
+            "read"
+        };
     if effect != expected_effect {
         return Err(format!(
             "function `{name}` requires effect `{expected_effect}`, found `{effect}`"
@@ -1176,14 +1245,52 @@ fn validate_removed_names(value: &Value) -> Result<(), String> {
         .ok_or_else(|| "system API `removed_names` must be an object".to_owned())?;
     for (name, descriptor) in names {
         let context = format!("system API removed name `{name}`");
-        let descriptor =
-            validate_object_fields(descriptor, &context, &["replacement", "diagnostic"], &[])?;
-        for field in ["replacement", "diagnostic"] {
-            validate_nonblank_string(
-                descriptor.get(field).expect("required field was checked"),
-                &format!("{context}.{field}"),
-            )?;
+        let descriptor = validate_object_fields(
+            descriptor,
+            &context,
+            &["replacement", "diagnostic"],
+            &["reason"],
+        )?;
+        let replacement = descriptor
+            .get("replacement")
+            .expect("required field was checked");
+        if !replacement.is_null() {
+            validate_nonblank_string(replacement, &format!("{context}.replacement"))?;
         }
+        validate_nonblank_string(
+            descriptor
+                .get("diagnostic")
+                .expect("required field was checked"),
+            &format!("{context}.diagnostic"),
+        )?;
+        if let Some(reason) = descriptor.get("reason") {
+            validate_nonblank_string(reason, &format!("{context}.reason"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_value_profiles(value: &Value) -> Result<(), String> {
+    let profiles = value
+        .as_object()
+        .ok_or_else(|| "system API `value_profiles` must be an object".to_owned())?;
+    let expected = ["new", "stored", "semantic", "legacy_wire"];
+    if profiles.len() != expected.len()
+        || expected.iter().any(|name| !profiles.contains_key(*name))
+        || profiles
+            .keys()
+            .any(|name| !expected.contains(&name.as_str()))
+    {
+        return Err(
+            "system API `value_profiles` must contain exactly new, stored, semantic and legacy_wire"
+                .to_owned(),
+        );
+    }
+    for name in expected {
+        validate_nonblank_string(
+            profiles.get(name).expect("profile key was checked"),
+            &format!("system API value profile `{name}`"),
+        )?;
     }
     Ok(())
 }
@@ -1202,6 +1309,7 @@ const BUILTIN_TYPES: &[&str] = &[
     "PresentTree",
     "Str",
     "TimeZone",
+    "Unit",
 ];
 
 #[derive(Default)]
@@ -1406,13 +1514,12 @@ fn validate_cross_inventory_names(api: &Value) -> Result<(), String> {
                 "removed system API name `{removed}` is still publicly declared"
             ));
         }
-        let replacement = descriptor["replacement"]
-            .as_str()
-            .expect("validated replacement");
-        if !api_paths.contains(replacement) {
-            return Err(format!(
-                "removed system API name `{removed}` has unresolved replacement `{replacement}`"
-            ));
+        if let Some(replacement) = descriptor["replacement"].as_str() {
+            if !api_paths.contains(replacement) {
+                return Err(format!(
+                    "removed system API name `{removed}` has unresolved replacement `{replacement}`"
+                ));
+            }
         }
     }
     Ok(())
@@ -1687,7 +1794,10 @@ fn validate_api_type_graph(api: &Value, names: &ApiTypeNames) -> Result<(), Stri
         let parsed = parse_signature_identity(signature)?;
         let mut saw_default = false;
         for (index, (_, has_default)) in parsed.parameters.iter().enumerate() {
-            if !has_default && saw_default {
+            // The final Blob writer contract intentionally keeps the optional
+            // expected length first while requiring the total max bound.
+            let final_blob_bound = name == "sys.blob.begin" && index == 1;
+            if !has_default && saw_default && !final_blob_bound {
                 return Err(format!(
                     "function `{name}` parameter {index} is required after a defaulted parameter"
                 ));
@@ -2073,12 +2183,13 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
     let object = api
         .as_object()
         .ok_or_else(|| "system API document must be a JSON object".to_owned())?;
-    const TOP_LEVEL_FIELDS: [&str; 15] = [
+    const TOP_LEVEL_FIELDS: [&str; 16] = [
         "title",
         "language_version",
         "sys_version",
         "status",
         "source_of_truth",
+        "value_profiles",
         "removed_names",
         "singletons",
         "opaque_identifiers",
@@ -2161,6 +2272,7 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
     }
 
     validate_removed_names(&object["removed_names"])?;
+    validate_value_profiles(&object["value_profiles"])?;
     validate_named_rows(
         &object["singletons"],
         "singletons",

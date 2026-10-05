@@ -5,9 +5,9 @@ use std::{
 };
 
 use orna_sys_v1::{
-    SystemDispatchTable, SystemEffect, SystemProviderAbi, system_api_json, system_api_schema_json,
-    system_binding_modules_json, system_binding_stubs, system_dispatch_table,
-    system_function_descriptor, system_host_operation_registry_json,
+    SystemDispatchTable, SystemEffect, SystemProviderAbi, system_api_catalogue_json,
+    system_api_json, system_api_schema_json, system_binding_modules_json, system_binding_stubs,
+    system_dispatch_table, system_function_descriptor, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
     system_provider_abi_schema_json,
 };
@@ -23,7 +23,7 @@ mod build_provider;
 #[path = "../build_support.rs"]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "b569785bfaa204b366b2cee444c01a9aa8dd74c710852fdad925dcfae60a256f";
+const SYS_API_V1_SHA256: &str = "06ea44ae524baa1310c0b84b63f58c5ed2a90d7cc5b67d248c8cbbf9538f04fb";
 
 fn regenerate() -> build_support::GeneratedSysArtifacts {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -88,6 +88,10 @@ fn verify_generated_output_tree(
 ) -> Result<(), String> {
     for (relative_path, expected) in [
         ("api_sys.json", artifacts.api_json.as_str()),
+        (
+            "system_api_catalogue.json",
+            artifacts.catalogue_json.as_str(),
+        ),
         ("system_api_schema.json", artifacts.schema_json.as_str()),
         (
             "system_provider_abi.json",
@@ -134,6 +138,7 @@ fn copy_output_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
     for name in [
         "api_sys.json",
+        "system_api_catalogue.json",
         "system_api_schema.json",
         "system_provider_abi.json",
         "system_provider_abi.schema.json",
@@ -201,7 +206,7 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
     let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
     assert_eq!(
         api_hash, SYS_API_V1_SHA256,
-        "on-demand API retains the frozen 1.0 bytes"
+        "on-demand API retains the frozen final 1.1 bytes"
     );
     let embedded_api_json = system_api_json();
     let artifact_matrix = [
@@ -216,6 +221,12 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
             regenerated.schema_json.as_str(),
             system_api_schema_json(),
             "system_api_schema.json",
+        ),
+        (
+            "native format/context sys catalogue",
+            regenerated.catalogue_json.as_str(),
+            system_api_catalogue_json(),
+            "system_api_catalogue.json",
         ),
         (
             "typed provider dispatch registry",
