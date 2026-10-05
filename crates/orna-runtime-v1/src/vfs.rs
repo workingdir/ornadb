@@ -52,6 +52,10 @@ impl CacheProjection {
         self.generation
     }
 
+    fn belongs_to(&self, epoch: &SharedCacheEpoch) -> bool {
+        Arc::ptr_eq(&self.epoch.generation, &epoch.generation)
+    }
+
     pub async fn is_current(&self) -> bool {
         self.generation == *self.epoch.generation.lock().await
     }
@@ -136,26 +140,40 @@ impl VfsRepositoryCache {
         self.epoch.generation().await
     }
 
-    /// Admits an initial immutable image to this repository view. Images can
-    /// be admitted only once; an image already bound to another epoch cannot
-    /// be relabeled with this scope's current generation.
+    /// Admits an immutable image to this repository view. Images sharing a
+    /// current projection from this scope reuse that projection; stale or
+    /// foreign bindings cannot be relabeled with the current generation.
     pub async fn managed_file<S>(
         &self,
         image: Arc<VfsFileSnapshot<S>>,
     ) -> Result<Arc<ManagedFile<S>>, VfsRepositoryCacheError> {
         if image.pin.projection().is_some() {
+            if self.has_current_projection(&image).await {
+                return Ok(self.managed_file_for_image(image));
+            }
             return Err(VfsRepositoryCacheError::ImageAlreadyScoped);
         }
         let projection = self.epoch.capture().await;
-        image
-            .pin
-            .projection
-            .set(projection)
-            .map_err(|_| VfsRepositoryCacheError::ImageAlreadyScoped)?;
-        Ok(Arc::new(ManagedFile {
+        if image.pin.projection.set(projection).is_err()
+            && !self.has_current_projection(&image).await
+        {
+            return Err(VfsRepositoryCacheError::ImageAlreadyScoped);
+        }
+        Ok(self.managed_file_for_image(image))
+    }
+
+    async fn has_current_projection<S>(&self, image: &VfsFileSnapshot<S>) -> bool {
+        match image.pin.projection() {
+            Some(projection) => projection.belongs_to(&self.epoch) && projection.is_current().await,
+            None => false,
+        }
+    }
+
+    fn managed_file_for_image<S>(&self, image: Arc<VfsFileSnapshot<S>>) -> Arc<ManagedFile<S>> {
+        Arc::new(ManagedFile {
             state: Mutex::new(ManagedFileState { image }),
             cache_epoch: self.epoch.clone(),
-        }))
+        })
     }
 }
 
@@ -1057,13 +1075,26 @@ mod tests {
             .managed_file(Arc::clone(&raw_target_image))
             .await
             .unwrap();
-        let sibling = repository.managed_file(fixture_image()).await.unwrap();
+        let sibling_image = Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::clone(&stale_snapshot)),
+            Arc::clone(&raw_target_image.bytes),
+        ));
+        assert!(!Arc::ptr_eq(&raw_target_image, &sibling_image));
+        let sibling = repository
+            .managed_file(Arc::clone(&sibling_image))
+            .await
+            .unwrap();
+        assert!(std::ptr::eq(
+            raw_target_image.projection().unwrap(),
+            sibling_image.projection().unwrap()
+        ));
         let old_handle = target.open_read().await;
         let sibling_handle = sibling.open_read().await;
         let old_bytes = old_handle.read_at(0, old_handle.len() as usize);
         let directory = SnapshotReaddirCursor::new(old_handle.pin().clone_pin(), 0_u64);
         let attributes = old_handle.project(("size", old_handle.len()));
         assert_eq!(old_handle.projection().unwrap().generation(), 0);
+        assert_eq!(sibling_handle.projection().unwrap().generation(), 0);
         assert!(old_handle.projection_is_current().await.unwrap());
         assert!(directory.projection_is_current().await.unwrap());
         assert!(sibling_handle.projection_is_current().await.unwrap());
