@@ -37708,9 +37708,9 @@ fn nested_checkpoint_identity_survives_paired_rewind_handoff_chain_compaction_fo
         })
         .collect::<Vec<_>>();
     assert_eq!(checkpoint_identities.len(), 4);
-    assert_eq!(handoff_identities.len(), 3);
-    assert_eq!(compaction_identities.len(), 3);
-    assert_eq!(rewind_identities.len(), 3);
+    assert_eq!(handoff_identities.len(), 4);
+    assert_eq!(compaction_identities.len(), 4);
+    assert_eq!(rewind_identities.len(), 4);
     assert_eq!(checkpoint_identities[0], checkpoint_identities[1]);
     assert_ne!(checkpoint_identities[1], checkpoint_identities[2]);
 
