@@ -1,8 +1,9 @@
 use std::path::Path;
 
 use orna_sys_v1::{
-    ClockProviderError, EnvironmentProviderError, FilesystemProviderError, HttpProviderError,
-    ProcessProviderError, system_host_operation_registry, system_host_operation_registry_json,
+    ClockProviderError, EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError,
+    FilesystemProviderError, HttpProviderError, ProcessProviderError,
+    system_host_operation_registry, system_host_operation_registry_json,
     system_host_operation_registry_schema_json,
 };
 
@@ -140,6 +141,64 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
                 .all(|op| { op.provider == provider_name && op.effects == [expected_effect] })
         );
     }
+}
+
+#[test]
+fn generated_environment_declarations_match_executable_native_dispatch() {
+    let registry = system_host_operation_registry();
+    let role_name = "host.std.io.environment@1.0";
+    let declarations = registry
+        .binding_declarations_for_role(role_name)
+        .expect("environment declarations are generated from the typed registry");
+    assert_eq!(declarations.len(), 2);
+    assert_eq!(
+        declarations
+            .iter()
+            .map(|declaration| declaration.operation.as_str())
+            .collect::<Vec<_>>(),
+        ["std.io.environment.get", "std.io.environment.require"]
+    );
+    for declaration in &declarations {
+        let operation = registry
+            .operation(&declaration.operation)
+            .expect("generated declaration has a registered native operation");
+        assert_eq!(declaration.module, "std.io.environment");
+        assert!(
+            declaration
+                .source
+                .contains(&format!("// host-op: {}", operation.name))
+        );
+        let tail = operation
+            .signature
+            .strip_prefix(&format!("fn {}", operation.name))
+            .expect("signature is keyed by operation name");
+        let local_name = operation.name.rsplit('.').next().unwrap();
+        assert!(
+            declaration
+                .source
+                .contains(&format!("pub fn {local_name}{tail}"))
+        );
+    }
+
+    let provider = EnvironmentProvider::from_snapshot([(
+        "APP_MODE".to_owned(),
+        Some("native-registry".to_owned()),
+    )])
+    .expect("host-approved environment snapshot");
+    let get = registry.operation("std.io.environment.get").unwrap();
+    assert_eq!(
+        provider.dispatch(get, "APP_MODE"),
+        Ok(EnvironmentDispatchValue::Optional(Some(
+            "native-registry".to_owned()
+        )))
+    );
+    let require = registry.operation("std.io.environment.require").unwrap();
+    assert_eq!(
+        provider.dispatch(require, "APP_MODE"),
+        Ok(EnvironmentDispatchValue::Required(
+            "native-registry".to_owned()
+        ))
+    );
 }
 
 #[test]
