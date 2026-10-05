@@ -57350,24 +57350,24 @@ fn nested_compaction_identity_survives_paired_handoff_checkpoint_rewind_fold_han
     assert_ne!(f178_handoff_pair(0), f178_handoff_pair(1));
     assert_eq!(f178_handoff_pair(0), f178_handoff_pair(2));
     assert_eq!(main.nested_handoff_identity, f178_handoff_pair(0));
-    assert_eq!(main.slots[0].nested_handoff_identity, f178_handoff_pair(0));
+    assert_eq!(main.slots[0].restored_slot.nested_handoff_identity, f178_handoff_pair(0));
     assert_eq!(retry.nested_handoff_identity, f178_handoff_pair(1));
-    assert_eq!(retry.slots[0].nested_handoff_identity, f178_handoff_pair(1));
+    assert_eq!(retry.slots[0].restored_slot.nested_handoff_identity, f178_handoff_pair(1));
     assert_eq!(reused.nested_handoff_identity, f178_handoff_pair(2));
     assert_ne!(main.nested_handoff_identity, main.checkpoint_chain_nested_handoff_identity);
     assert_eq!(main.nested_checkpoint_identity, outer_checkpoint_pair(0));
-    assert_eq!(main.slots[0].nested_checkpoint_identity, outer_checkpoint_pair(0));
+    assert_eq!(main.slots[0].restored_slot.nested_checkpoint_identity, outer_checkpoint_pair(0));
     assert_ne!(main.nested_checkpoint_identity, main.rewind_chain_nested_checkpoint_identity);
     assert_eq!(retry.nested_checkpoint_identity, outer_checkpoint_pair(1));
-    assert_eq!(retry.slots[0].nested_checkpoint_identity, outer_checkpoint_pair(1));
+    assert_eq!(retry.slots[0].restored_slot.nested_checkpoint_identity, outer_checkpoint_pair(1));
     assert_eq!(reused.nested_checkpoint_identity, outer_checkpoint_pair(2));
     assert_ne!(f176_rewind_pair(0), f176_rewind_pair(1));
     assert_eq!(f176_rewind_pair(0), f176_rewind_pair(2));
     assert_eq!(main.nested_rewind_identity, f176_rewind_pair(0));
-    assert_eq!(main.slots[0].restored_slot.nested_rewind_identity, f176_rewind_pair(0));
+    assert_eq!(main.slots[0].restored_slot.restored_slot.nested_rewind_identity, f176_rewind_pair(0));
     assert_ne!(main.nested_rewind_identity, main.checkpoint_chain_nested_rewind_identity);
     assert_eq!(retry.nested_rewind_identity, f176_rewind_pair(1));
-    assert_eq!(retry.slots[0].restored_slot.nested_rewind_identity, f176_rewind_pair(1));
+    assert_eq!(retry.slots[0].restored_slot.restored_slot.nested_rewind_identity, f176_rewind_pair(1));
     assert_eq!(reused.nested_rewind_identity, f176_rewind_pair(2));
     assert_ne!(rewind_handoff_chain_rewind_pair(0), rewind_handoff_chain_rewind_pair(1));
     assert_eq!(rewind_handoff_chain_rewind_pair(0), rewind_handoff_chain_rewind_pair(2));
@@ -57390,13 +57390,13 @@ fn nested_compaction_identity_survives_paired_handoff_checkpoint_rewind_fold_han
     assert_ne!(outer_handoff_pair(0), outer_handoff_pair(1));
     assert_eq!(outer_handoff_pair(0), outer_handoff_pair(2));
     assert_eq!(main.checkpoint_chain_nested_handoff_identity, outer_handoff_pair(0));
-    assert_eq!(main.slots[0].restored_slot.restored_slot.nested_handoff_identity, outer_handoff_pair(0));
+    assert_eq!(main.slots[0].restored_slot.restored_slot.restored_slot.nested_handoff_identity, outer_handoff_pair(0));
     assert_eq!(
         main.rewind_checkpoint_nested_handoff_identity,
         rewind_checkpoint_nested_handoff_pair(0)
     );
     assert_eq!(
-        main.slots[0].restored_slot.restored_slot
+        main.slots[0].restored_slot.restored_slot.restored_slot
             .restored_slot
             .restored_slot
             .restored_slot
@@ -57410,13 +57410,13 @@ fn nested_compaction_identity_survives_paired_handoff_checkpoint_rewind_fold_han
         main.checkpoint_chain_nested_rewind_identity,
         main.checkpoint_handoff_chain_nested_rewind_identity
     );
-    assert_eq!(main.slots[0].restored_slot.restored_slot.restored_slot.nested_rewind_identity, f174_rewind_pair(0));
+    assert_eq!(main.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.nested_rewind_identity, f174_rewind_pair(0));
     assert_eq!(
         main.checkpoint_handoff_chain_nested_rewind_identity,
         checkpoint_handoff_chain_rewind_pair(0)
     );
     assert_eq!(
-        main.slots[0].restored_slot.restored_slot.restored_slot
+        main.slots[0].restored_slot.restored_slot.restored_slot.restored_slot
             .restored_slot
             .restored_slot
             .restored_slot
@@ -57426,13 +57426,13 @@ fn nested_compaction_identity_survives_paired_handoff_checkpoint_rewind_fold_han
     assert_ne!(main.checkpoint_handoff_chain_nested_rewind_identity, main.rewind_handoff_chain_nested_rewind_identity);
     assert_eq!(main.rewind_chain_nested_checkpoint_identity, f173_checkpoint_pair(0));
     assert_ne!(main.rewind_chain_nested_checkpoint_identity, main.handoff_rewind_chain_nested_checkpoint_identity);
-    assert_eq!(main.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.nested_checkpoint_identity, f173_checkpoint_pair(0));
+    assert_eq!(main.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.nested_checkpoint_identity, f173_checkpoint_pair(0));
     assert_eq!(
         main.handoff_rewind_chain_nested_checkpoint_identity,
         handoff_rewind_chain_checkpoint_pair(0)
     );
     assert_eq!(
-        main.slots[0].restored_slot.restored_slot.restored_slot
+        main.slots[0].restored_slot.restored_slot.restored_slot.restored_slot
             .restored_slot
             .restored_slot
             .restored_slot
@@ -57440,7 +57440,7 @@ fn nested_compaction_identity_survives_paired_handoff_checkpoint_rewind_fold_han
             .nested_checkpoint_identity,
         handoff_rewind_chain_checkpoint_pair(0)
     );
-    assert_eq!(main.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.nested_rewind_identity, rewind_handoff_chain_rewind_pair(0));
+    assert_eq!(main.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.nested_rewind_identity, rewind_handoff_chain_rewind_pair(0));
     assert_eq!(main.rewind_handoff_chain_nested_rewind_identity, rewind_handoff_chain_rewind_pair(0));
     assert_eq!(
         main.handoff_chain_nested_rewind_identity,
@@ -57467,15 +57467,15 @@ fn nested_compaction_identity_survives_paired_handoff_checkpoint_rewind_fold_han
     );
     assert_eq!(retry.checkpoint_chain_nested_handoff_identity, outer_handoff_pair(1));
     assert_eq!(retry.rewind_checkpoint_nested_handoff_identity, rewind_checkpoint_nested_handoff_pair(1));
-    assert_eq!(retry.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.nested_handoff_identity, rewind_checkpoint_nested_handoff_pair(1));
+    assert_eq!(retry.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.nested_handoff_identity, rewind_checkpoint_nested_handoff_pair(1));
     assert_eq!(retry.checkpoint_chain_nested_rewind_identity, f174_rewind_pair(1));
     assert_eq!(retry.checkpoint_handoff_chain_nested_rewind_identity, checkpoint_handoff_chain_rewind_pair(1));
-    assert_eq!(retry.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.nested_rewind_identity, checkpoint_handoff_chain_rewind_pair(1));
+    assert_eq!(retry.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.nested_rewind_identity, checkpoint_handoff_chain_rewind_pair(1));
     assert_eq!(retry.rewind_chain_nested_checkpoint_identity, f173_checkpoint_pair(1));
     assert_eq!(retry.handoff_rewind_chain_nested_checkpoint_identity, handoff_rewind_chain_checkpoint_pair(1));
-    assert_eq!(retry.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.nested_checkpoint_identity, f173_checkpoint_pair(1));
+    assert_eq!(retry.slots[0].restored_slot.restored_slot.restored_slot.restored_slot.restored_slot.nested_checkpoint_identity, f173_checkpoint_pair(1));
     assert_eq!(
-        retry.slots[0].restored_slot.restored_slot.restored_slot
+        retry.slots[0].restored_slot.restored_slot.restored_slot.restored_slot
             .restored_slot
             .restored_slot
             .restored_slot
