@@ -1,0 +1,6 @@
+slicing.take("", 0) == ""
+&& slicing.take("alpha", 0) == ""
+&& slicing.take("alpha", 3) == "alp"
+&& slicing.take("alpha", 99) == "alpha"
+&& slicing.take("A🙂Z", 2) == "A🙂"
+&& slicing.take("é🙂z", 2) == "é"

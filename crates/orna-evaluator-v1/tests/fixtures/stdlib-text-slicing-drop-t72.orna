@@ -1,0 +1,6 @@
+slicing.drop("", 2) == ""
+&& slicing.drop("alpha", 0) == "alpha"
+&& slicing.drop("alpha", 2) == "pha"
+&& slicing.drop("alpha", 99) == ""
+&& slicing.drop("A🙂Z", 1) == "🙂Z"
+&& slicing.drop("é🙂z", 2) == "🙂z"
