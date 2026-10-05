@@ -463,6 +463,9 @@ fn parse_database_record(bytes: &[u8]) -> Result<DatabaseRecord, FormatContextEr
         .find(|field| field.name == "database_id")
         .ok_or(FormatContextError::MetadataInvalid)
         .and_then(|field| parse_database_id(&field.value))?;
+    if canonical_database_bytes(&database_id).as_slice() != bytes {
+        return Err(FormatContextError::MetadataInvalid);
+    }
     Ok(DatabaseRecord::Format3(database_id))
 }
 
@@ -498,25 +501,10 @@ fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextEr
     {
         return Err(FormatContextError::MetadataInvalid);
     }
-    let format = fields
-        .iter()
-        .find(|field| field.name == "repository_format")
-        .and_then(|field| integer_literal(&field.value))
-        .ok_or(FormatContextError::MetadataInvalid)?;
-    let profile = fields
-        .iter()
-        .find(|field| field.name == "storage_profile")
-        .and_then(|field| string_literal(&field.value))
-        .ok_or(FormatContextError::MetadataInvalid)?;
-    if profile.is_empty() {
-        return Err(FormatContextError::MetadataInvalid);
-    }
-    match format {
-        1 => Ok(RepositoryFormat::Legacy1),
-        2 => Ok(RepositoryFormat::Legacy2),
-        3 => Err(FormatContextError::UnknownFormat),
-        _ => Err(FormatContextError::UnknownFormat),
-    }
+    // The final publication names legacy reader coordinates as format 1/2,
+    // but does not enumerate any legacy `storage_profile` pair. Do not import
+    // historical draft/current-writer profile names into final admission.
+    Err(FormatContextError::MetadataInvalid)
 }
 
 fn parse_database_id(value: &Expr) -> Result<DatabaseId, FormatContextError> {
@@ -560,4 +548,18 @@ pub(super) fn string_literal(value: &Expr) -> Option<&str> {
         return None;
     };
     text.strip_prefix('"')?.strip_suffix('"')
+}
+
+pub(super) fn canonical_database_bytes(database_id: &DatabaseId) -> Vec<u8> {
+    format!(
+        "{{\n    repository_format: {FINAL_REPOSITORY_FORMAT},\n    database_id: \"{database_id}\",\n}}\n"
+    )
+    .into_bytes()
+}
+
+pub(super) fn parse_canonical_database(bytes: &[u8]) -> Result<DatabaseId, ()> {
+    match parse_database_record(bytes).map_err(|_| ())? {
+        DatabaseRecord::Format3(database_id) => Ok(database_id),
+        DatabaseRecord::LegacySidecar(_) => Err(()),
+    }
 }

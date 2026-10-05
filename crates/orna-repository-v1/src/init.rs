@@ -1,10 +1,9 @@
 //! Canonical tracked repository metadata initialization.
 //!
-//! The record spelling in this module is an implementation-defined encoding:
-//! the repository chapters require the information, but do not prescribe exact
-//! bytes.  We deliberately use ordinary Orna record expressions and validate
-//! every persisted record through `orna-syntax-v1`; this module is not a
-//! second parser for an ad hoc metadata language.
+//! The final format-3 database record uses the publication's canonical byte
+//! spelling. We deliberately use ordinary Orna record expressions and
+//! validate every persisted record through `orna-syntax-v1`; this module is
+//! not a second parser for an ad hoc metadata language.
 
 use std::{
     ffi::OsString,
@@ -30,8 +29,8 @@ const FORMAT_FILE: &str = "format.orna";
 const DATABASE_FILE: &str = "database.orna";
 const MAIN_FILE: &str = "main.orna";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
-const REPOSITORY_FORMAT: i64 = 1;
-const STORAGE_PROFILE: &str = "compact-storage-v1";
+const REPOSITORY_FORMAT: i64 = 3;
+const STORAGE_PROFILE: &str = "store-3";
 const MAX_INHERITED_GIT_CONFIG_ENTRIES: usize = 1024;
 
 /// A stable repository identity, represented by UUIDv4 bytes.
@@ -314,12 +313,12 @@ fn inspect_metadata_unlocked(
     let database = read_regular_file(&metadata_root.join(DATABASE_FILE))?;
     match (format, database) {
         (None, None) => Err(RepositoryInitError::MetadataIncomplete),
-        (Some(format), Some(database)) => {
-            parse_format(&format)?;
+        (None, Some(database)) => {
             let database_id = parse_database(&database)?;
             Ok(Some(RepositoryMetadata { database_id }))
         }
-        _ => Err(RepositoryInitError::MetadataIncomplete),
+        (Some(_), Some(_)) => Err(RepositoryInitError::MetadataUnsupported),
+        (_, None) => Err(RepositoryInitError::MetadataIncomplete),
     }
 }
 
@@ -348,7 +347,6 @@ fn stage_metadata(
     staging: &TempDir,
     metadata: &RepositoryMetadata,
 ) -> Result<(), RepositoryInitError> {
-    create_new_file(&staging.path().join(FORMAT_FILE), format_bytes())?;
     create_new_file(
         &staging.path().join(DATABASE_FILE),
         &database_bytes(metadata),
@@ -568,54 +566,13 @@ fn open_lock_file(path: &Path) -> Result<File, RepositoryInitError> {
         .map_err(|_| RepositoryInitError::LocalStateUnavailable)
 }
 
-fn format_bytes() -> &'static [u8] {
-    b"{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n"
-}
-
 fn database_bytes(metadata: &RepositoryMetadata) -> Vec<u8> {
-    format!("{{database_id: \"{}\"}}\n", metadata.database_id).into_bytes()
-}
-
-fn parse_format(bytes: &[u8]) -> Result<(), RepositoryInitError> {
-    let fields = parse_record(bytes)?;
-    if fields.len() != 2 {
-        return Err(RepositoryInitError::MetadataMalformed);
-    }
-    let Some(repository_format) = fields
-        .iter()
-        .find(|field| field.name == "repository_format")
-    else {
-        return Err(RepositoryInitError::MetadataMalformed);
-    };
-    let Some(storage_profile) = fields.iter().find(|field| field.name == "storage_profile") else {
-        return Err(RepositoryInitError::MetadataMalformed);
-    };
-    if fields
-        .iter()
-        .any(|field| field.name != "repository_format" && field.name != "storage_profile")
-    {
-        return Err(RepositoryInitError::MetadataMalformed);
-    }
-    if format_context::integer_literal(&repository_format.value) != Some(REPOSITORY_FORMAT)
-        || format_context::string_literal(&storage_profile.value) != Some(STORAGE_PROFILE)
-    {
-        return Err(RepositoryInitError::MetadataUnsupported);
-    }
-    Ok(())
+    format_context::canonical_database_bytes(&metadata.database_id)
 }
 
 fn parse_database(bytes: &[u8]) -> Result<DatabaseId, RepositoryInitError> {
-    let fields = parse_record(bytes)?;
-    if fields.len() != 1 || fields[0].name != "database_id" {
-        return Err(RepositoryInitError::MetadataMalformed);
-    }
-    let value = format_context::string_literal(&fields[0].value)
-        .ok_or(RepositoryInitError::MetadataMalformed)?;
-    DatabaseId::from_str(value).map_err(|_| RepositoryInitError::MetadataMalformed)
-}
-
-fn parse_record(bytes: &[u8]) -> Result<Vec<orna_syntax_v1::RecordField>, RepositoryInitError> {
-    format_context::parse_record(bytes).map_err(|_| RepositoryInitError::MetadataMalformed)
+    format_context::parse_canonical_database(bytes)
+        .map_err(|_| RepositoryInitError::MetadataMalformed)
 }
 
 impl FromStr for DatabaseId {
@@ -665,14 +622,13 @@ mod tests {
         let initialized = initialize_repository(&target).unwrap();
         let database_id = initialized.metadata().database_id().to_string();
         assert!(initialized.created());
-        assert_eq!(
-            fs::read_to_string(target.join(FORMAT_DIRECTORY).join(FORMAT_FILE)).unwrap(),
-            "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n"
-        );
+        assert_eq!(initialized.metadata().repository_format(), 3);
+        assert_eq!(initialized.metadata().storage_profile(), "store-3");
         assert_eq!(
             fs::read_to_string(target.join(FORMAT_DIRECTORY).join(DATABASE_FILE)).unwrap(),
-            format!("{{database_id: \"{database_id}\"}}\n")
+            format!("{{\n    repository_format: 3,\n    database_id: \"{database_id}\",\n}}\n")
         );
+        assert!(!target.join(FORMAT_DIRECTORY).join(FORMAT_FILE).exists());
         assert_eq!(fs::read(target.join("main.orna")).unwrap(), b"");
         assert_eq!(
             inspect_metadata(initialized.repository())
