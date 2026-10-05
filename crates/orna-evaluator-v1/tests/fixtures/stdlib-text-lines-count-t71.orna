@@ -1,0 +1,4 @@
+lines.count("") == 0
+&& lines.count("alpha") == 1
+&& lines.count("alpha\r\nbeta\rgamma\n") == 4
+&& lines.split("é🙂\rnext") == ["é🙂", "next"]
