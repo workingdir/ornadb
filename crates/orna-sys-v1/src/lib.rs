@@ -681,16 +681,18 @@ pub enum SystemEffect {
 mod system_api;
 pub use system_api::*;
 
+// The format/context selector remains an internal proof until the repository
+// owner supplies an owner-issued capability seam.
+#[cfg(test)]
 mod format_api_selection;
-pub use format_api_selection::*;
 
 /// Returns final-format declaration metadata for a portable system function.
 ///
-/// This compatibility lookup is deliberately not an availability resolver:
-/// historical-only callables are absent. Select a callable for a recorded
-/// repository using [`system_callable_for`] instead. The descriptor is static
-/// declaration metadata and does not grant invocation or administrative
-/// authority.
+/// This compatibility lookup exposes final-format declaration metadata only.
+/// Repository/runtime context selection remains an internal non-production
+/// projection until the repository owner supplies an owner-issued capability.
+/// The descriptor is static declaration metadata and does not grant
+/// invocation or administrative authority.
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
     SYSTEM_FUNCTION_DESCRIPTORS
         .iter()

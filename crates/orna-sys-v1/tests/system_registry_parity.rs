@@ -6,8 +6,8 @@ use std::{
 
 use orna_sys_v1::{
     SystemDispatchTable, SystemEffect, SystemProviderAbi, system_api_json, system_api_schema_json,
-    system_api_selection_json, system_binding_modules_json, system_binding_stubs,
-    system_dispatch_table, system_function_descriptor, system_host_operation_registry_json,
+    system_binding_modules_json, system_binding_stubs, system_dispatch_table,
+    system_function_descriptor, system_host_operation_registry_json,
     system_host_operation_registry_schema_json, system_provider_abi_json,
     system_provider_abi_schema_json,
 };
@@ -202,6 +202,12 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
             .expect("second typed provider schema projection"),
         "dispatch schema generation is stable across independent runs"
     );
+    let generated_selection = fs::read_to_string(out_dir.join("system_api_selection.json"))
+        .expect("internal format/context selection build output");
+    assert_eq!(
+        regenerated.api_selection_json, generated_selection,
+        "internal format/context selection output matches native generation"
+    );
 
     let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
     assert_eq!(
@@ -221,12 +227,6 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
             regenerated.schema_json.as_str(),
             system_api_schema_json(),
             "system_api_schema.json",
-        ),
-        (
-            "native format/context API selection",
-            regenerated.api_selection_json.as_str(),
-            system_api_selection_json(),
-            "system_api_selection.json",
         ),
         (
             "typed provider dispatch registry",
