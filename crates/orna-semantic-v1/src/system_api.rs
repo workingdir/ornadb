@@ -875,6 +875,7 @@ fn language_type_arities() -> BTreeMap<String, usize> {
         ("Relation", 1),
         ("Str", 0),
         ("TimeZone", 0),
+        ("Unit", 0),
     ]
     .into_iter()
     .map(|(name, arity)| (name.to_owned(), arity))
@@ -919,7 +920,10 @@ fn parse_function(
             return Err(SystemApiError::InvalidFunction);
         }
         let ty = parse_and_validate_type(ty, type_arities, &type_parameters)?;
-        if default.is_none() && saw_default {
+        // The final Blob writer signature keeps an optional expected length
+        // first while requiring the total max bound as its second parameter.
+        let required_blob_bound = raw.name == "sys.blob.begin" && parameters.len() == 1;
+        if default.is_none() && saw_default && !required_blob_bound {
             return Err(SystemApiError::InvalidDefault);
         }
         if let Some(default) = default {
@@ -964,6 +968,10 @@ fn validate_function_metadata(
     ownership: Option<&str>,
     snapshot_rule: Option<&str>,
 ) -> Result<(), SystemApiError> {
+    // Administrative operations must declare their transition contract. The
+    // final 1.1 system catalogue also carries descriptive contract references
+    // on non-administrative Blob operations, so those references are optional
+    // but must never be blank when present.
     let requires_contract = label.starts_with("sys.admin.");
     let requires_preconditions = orna_sys_v1::system_dispatch_table()
         .operation(label)
@@ -980,7 +988,7 @@ fn validate_function_metadata(
         || preconditions.is_some_and(blank)
         || ownership.is_some_and(blank)
         || snapshot_rule.is_some_and(blank)
-        || (requires_contract != contract.is_some())
+        || (requires_contract && contract.is_none())
         || (requires_preconditions != preconditions.is_some())
         || (requires_ownership != ownership.is_some())
         || (requires_snapshot_rule != snapshot_rule.is_some())
@@ -2859,20 +2867,23 @@ mod tests {
 
     #[test]
     fn retired_sys_diagnostics_must_be_declared_failure_codes() {
-        let mut undeclared = document();
-        undeclared["removed_names"]["sys.runtime"]["diagnostic"] =
-            serde_json::Value::String("sys.unpublished.diagnostic".into());
+        let undeclared = generated_system_api_json().replacen(
+            "\"diagnostic\": \"ORNA100-E-SYS-RUNTIME\"",
+            "\"diagnostic\": \"sys.unpublished.diagnostic\"",
+            1,
+        );
+        assert_ne!(undeclared, generated_system_api_json());
         assert_eq!(
-            SystemApi::from_json(&undeclared.to_string()),
+            SystemApi::from_json(&undeclared),
             Err(SystemApiError::InvalidRemovedName)
         );
 
-        let final_authority = document();
-        assert_eq!(
-            final_authority["removed_names"]["sys.admin.set_storage_preference"]["diagnostic"],
-            serde_json::Value::String("sys.version.incompatible".into())
-        );
-        assert!(SystemApi::from_json(&final_authority.to_string()).is_ok());
+        let final_authority = SystemApi::embedded().expect("final authority is consumable");
+        assert!(matches!(
+            final_authority.resolve(&["sys", "admin", "set_storage_preference"]),
+            PathResolution::Removed(RemovedName { replacement: None, diagnostic })
+                if diagnostic == "sys.version.incompatible"
+        ));
     }
 
     #[test]
