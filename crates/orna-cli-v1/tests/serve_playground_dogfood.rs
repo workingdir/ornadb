@@ -1089,7 +1089,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         "Sample",
         &[("live-after-start", LIVE_PROGRAM_ROW)],
     );
-    let uncommitted_programs = curl(&format!("{base_url}/api/examples"), &[])
+    let uncommitted_programs = curl(&format!("{base_url}/api/examples"), &["--max-time", "15"])
         .expect("curl the catalog while the new program row is uncommitted");
     assert_eq!(uncommitted_programs.status, 200);
     let uncommitted_programs: JsonValue =
@@ -1124,7 +1124,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             "add live playground program",
         ],
     );
-    let live_examples = curl(&format!("{base_url}/api/examples"), &[])
+    let live_examples = curl(&format!("{base_url}/api/examples"), &["--max-time", "15"])
         .expect("curl the live database program catalog");
     assert_eq!(live_examples.status, 200);
     let live_examples: JsonValue =
