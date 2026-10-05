@@ -964,8 +964,12 @@ fn hover_symbol(symbol: &EditorSymbol) -> Hover {
         EditorSymbolKind::Function => "function",
         EditorSymbolKind::Type => "type",
         EditorSymbolKind::Enum => "enum",
+        EditorSymbolKind::EnumVariant => "enum variant",
         EditorSymbolKind::Table => "table",
         EditorSymbolKind::Protocol => "protocol",
+        EditorSymbolKind::Method => "method",
+        EditorSymbolKind::Field => "field",
+        EditorSymbolKind::Constant => "constant",
         EditorSymbolKind::Other => "declaration",
     };
     crate::hover::declaration(
@@ -1454,8 +1458,12 @@ pub fn completion_at(
                 EditorSymbolKind::Function => CompletionItemKind::FUNCTION,
                 EditorSymbolKind::Type => CompletionItemKind::STRUCT,
                 EditorSymbolKind::Enum => CompletionItemKind::ENUM,
+                EditorSymbolKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
                 EditorSymbolKind::Table => CompletionItemKind::CLASS,
                 EditorSymbolKind::Protocol => CompletionItemKind::INTERFACE,
+                EditorSymbolKind::Method => CompletionItemKind::METHOD,
+                EditorSymbolKind::Field => CompletionItemKind::FIELD,
+                EditorSymbolKind::Constant => CompletionItemKind::CONSTANT,
                 EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
             };
             let insert_text = if symbol.kind == EditorSymbolKind::Function {
@@ -1583,8 +1591,12 @@ fn append_standard_symbols<'a>(
             EditorSymbolKind::Function => CompletionItemKind::FUNCTION,
             EditorSymbolKind::Type => CompletionItemKind::STRUCT,
             EditorSymbolKind::Enum => CompletionItemKind::ENUM,
+            EditorSymbolKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
             EditorSymbolKind::Table => CompletionItemKind::CLASS,
             EditorSymbolKind::Protocol => CompletionItemKind::INTERFACE,
+            EditorSymbolKind::Method => CompletionItemKind::METHOD,
+            EditorSymbolKind::Field => CompletionItemKind::FIELD,
+            EditorSymbolKind::Constant => CompletionItemKind::CONSTANT,
             EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
         };
         let insert_text = if snippets && symbol.kind == EditorSymbolKind::Function {
