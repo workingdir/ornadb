@@ -1,11 +1,17 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
+use orna_syntax_v1::{Declaration, parse_module};
 use orna_sys_v1::{
     ClockProviderError, EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError,
     FilesystemProviderError, HttpProviderError, ProcessProviderError,
-    system_host_operation_registry, system_host_operation_registry_json,
-    system_host_operation_registry_schema_json,
+    system_host_binding_modules_json, system_host_binding_stubs, system_host_operation_registry,
+    system_host_operation_registry_json, system_host_operation_registry_schema_json,
 };
+
+#[path = "../src/abi_version.rs"]
+mod abi_version;
+#[path = "../src/host_registry_model.rs"]
+mod host_registry_model;
 
 #[path = "../build_host.rs"]
 mod build_host;
@@ -141,6 +147,99 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
                 .all(|op| { op.provider == provider_name && op.effects == [expected_effect] })
         );
     }
+}
+
+#[test]
+fn generated_host_binding_artifacts_are_registry_backed_and_parse_as_orna_modules() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let host_registry = build_host::generate_typed_host_registry(&source_root)
+        .expect("native host operations regenerate as a typed registry from Rust annotations");
+    let host_registry_json = build_host::serialize_host_registry(&host_registry)
+        .expect("typed host registry serializes deterministically");
+    assert_eq!(host_registry_json, system_host_operation_registry_json());
+    let artifacts = build_host::generate_host_binding_artifacts(&host_registry)
+        .expect("typed native host registry emits binding declarations");
+    assert_eq!(
+        artifacts,
+        build_host::generate_host_binding_artifacts(&host_registry)
+            .expect("independent declaration generation is deterministic")
+    );
+    assert_eq!(artifacts.bundle, system_host_binding_stubs());
+    assert_eq!(artifacts.modules_json, system_host_binding_modules_json());
+
+    let out_dir = Path::new(env!("OUT_DIR"));
+    assert_eq!(
+        std::fs::read_to_string(out_dir.join("system_host_bindings.orna"))
+            .expect("generated host binding bundle exists"),
+        artifacts.bundle
+    );
+    assert_eq!(
+        std::fs::read_to_string(out_dir.join("system_host_binding_modules.json"))
+            .expect("generated host module manifest exists"),
+        artifacts.modules_json
+    );
+    let embedded_modules: BTreeMap<String, String> =
+        serde_json::from_str(system_host_binding_modules_json())
+            .expect("generated host module manifest is valid JSON");
+    assert_eq!(embedded_modules, artifacts.modules);
+
+    let registry = system_host_operation_registry();
+    let mut parsed_operations = Vec::new();
+    for (relative_path, expected_source) in &artifacts.modules {
+        let source =
+            std::fs::read_to_string(out_dir.join("system_host_bindings").join(relative_path))
+                .unwrap_or_else(|error| {
+                    panic!("read generated host module {relative_path}: {error}")
+                });
+        assert_eq!(&source, expected_source);
+        let parsed = parse_module(&source);
+        assert!(
+            parsed.is_ok(),
+            "generated host module {relative_path} parses: {:?}",
+            parsed.diagnostics
+        );
+        let module = relative_path
+            .strip_suffix(".orna")
+            .expect("generated host module uses the Orna extension")
+            .replace('/', ".");
+        assert_eq!(
+            source
+                .lines()
+                .find_map(|line| line.strip_prefix("// host-module: ")),
+            Some(module.as_str())
+        );
+        let markers = source
+            .lines()
+            .filter_map(|line| line.strip_prefix("// host-op: "))
+            .collect::<Vec<_>>();
+        assert_eq!(markers.len(), parsed.value.items.len());
+        for (marker, item) in markers.into_iter().zip(&parsed.value.items) {
+            let operation = registry.operation(marker).unwrap_or_else(|| {
+                panic!("emitted host declaration has registered operation {marker}")
+            });
+            let Declaration::Function { signature, .. } = &item.declaration else {
+                panic!("generated host declaration {marker} is not a function");
+            };
+            assert_eq!(
+                signature.name,
+                operation.name.rsplit('.').next().unwrap(),
+                "parsed declaration name for {marker}"
+            );
+            assert_eq!(
+                operation.name.rsplit_once('.').map(|(parent, _)| parent),
+                Some(module.as_str()),
+                "generated module path for {marker}"
+            );
+            parsed_operations.push(marker.to_owned());
+        }
+    }
+    assert_eq!(parsed_operations.len(), registry.operations().count());
+    assert!(
+        registry
+            .operations()
+            .all(|operation| parsed_operations.iter().any(|name| name == &operation.name)),
+        "every typed native operation has one parsed emitted declaration"
+    );
 }
 
 #[test]

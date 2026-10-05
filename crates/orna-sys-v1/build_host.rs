@@ -1,16 +1,28 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use quote::ToTokens;
+use serde::Serialize;
 use serde_json::{Value, json};
 use syn::visit::Visit;
 
+use crate::abi_version::AbiVersion;
+use crate::host_registry_model::{
+    HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
+};
+
 #[derive(Default)]
 struct Collector {
-    operations: BTreeMap<String, Value>,
+    operations: BTreeMap<String, HostOperationDescriptor>,
     errors: Vec<String>,
 }
 
-pub fn generate_host_registry(source_root: &Path) -> Result<String, String> {
+fn collect_host_operations(
+    source_root: &Path,
+) -> Result<BTreeMap<String, HostOperationDescriptor>, String> {
     fn visit_sources(root: &Path, collector: &mut Collector) -> Result<(), String> {
         let mut entries = fs::read_dir(root)
             .map_err(|error| format!("read {}: {error}", root.display()))?
@@ -41,45 +53,150 @@ pub fn generate_host_registry(source_root: &Path) -> Result<String, String> {
         return Err("sys host-operation registry must not be empty".to_owned());
     }
 
-    let mut roles = BTreeMap::<String, Value>::new();
-    for operation in collector.operations.values() {
-        let role = operation["role"]
-            .as_str()
-            .ok_or_else(|| "host operation role must be a string".to_owned())?;
-        let provider = operation["provider"]
-            .as_str()
-            .ok_or_else(|| "host operation provider must be a string".to_owned())?;
-        let version = operation["version"].clone();
-        let effects = operation["effects"].clone();
-        let entry = roles.entry(role.to_owned()).or_insert_with(|| {
-            json!({
-                "name": role,
-                "version": version,
-                "provider": provider,
-                "effects": effects,
-                "operations": [],
-                "required": true,
-            })
-        });
-        if entry["provider"] != provider
-            || entry["version"] != version
-            || entry["effects"] != effects
+    Ok(collector.operations)
+}
+
+pub fn generate_typed_host_registry(
+    source_root: &Path,
+) -> Result<SystemHostOperationRegistry, String> {
+    let operations = collect_host_operations(source_root)?;
+    let mut roles = BTreeMap::<String, HostProviderRole>::new();
+    for operation in operations.values() {
+        let entry = roles
+            .entry(operation.role.clone())
+            .or_insert_with(|| HostProviderRole {
+                name: operation.role.clone(),
+                version: operation.version,
+                provider: operation.provider.clone(),
+                effects: operation.effects.clone(),
+                operations: Vec::new(),
+                required: true,
+            });
+        if entry.provider != operation.provider
+            || entry.version != operation.version
+            || entry.effects != operation.effects
         {
             return Err(format!(
-                "host role `{role}` has inconsistent provider contracts"
+                "host role `{}` has inconsistent provider contracts",
+                operation.role
             ));
         }
-        entry["operations"]
-            .as_array_mut()
-            .expect("generated role operation array")
-            .push(operation["name"].clone());
+        entry.operations.push(operation.name.clone());
     }
-    let registry = json!({
-        "abi_version": {"major": 1, "minor": 0},
-        "operations": collector.operations.into_values().collect::<Vec<_>>(),
-        "roles": roles.into_values().collect::<Vec<_>>(),
-    });
-    serde_json::to_string_pretty(&registry).map_err(|error| error.to_string())
+    SystemHostOperationRegistry::from_parts(
+        AbiVersion::V1_0,
+        operations.into_values().collect(),
+        roles.into_values().collect(),
+    )
+}
+
+#[derive(Serialize)]
+struct HostRegistryDocument {
+    abi_version: AbiVersion,
+    operations: Vec<HostOperationDescriptor>,
+    roles: Vec<HostProviderRole>,
+}
+
+pub fn serialize_host_registry(registry: &SystemHostOperationRegistry) -> Result<String, String> {
+    let document = HostRegistryDocument {
+        abi_version: registry.abi_version(),
+        operations: registry.operations().cloned().collect(),
+        roles: registry.roles().cloned().collect(),
+    };
+    let canonical_value = serde_json::to_value(document).map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&canonical_value).map_err(|error| error.to_string())
+}
+
+pub fn generate_host_registry(source_root: &Path) -> Result<String, String> {
+    let registry = generate_typed_host_registry(source_root)?;
+    serialize_host_registry(&registry)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedHostBindingArtifacts {
+    pub modules: BTreeMap<String, String>,
+    pub modules_json: String,
+    pub bundle: String,
+}
+
+/// Emit the consumer-facing Orna declarations from the typed native registry.
+/// The generated functions are signature stubs; evaluation still dispatches to
+/// the Rust implementation named by each registry operation.
+pub fn generate_host_binding_artifacts(
+    registry: &SystemHostOperationRegistry,
+) -> Result<GeneratedHostBindingArtifacts, String> {
+    let mut referenced = BTreeSet::new();
+    let mut declarations = BTreeMap::<String, Vec<(String, String)>>::new();
+    for role in registry.roles() {
+        for declaration in registry.binding_declarations_for_role(&role.name)? {
+            if !referenced.insert(declaration.operation.clone()) {
+                return Err(format!(
+                    "native host operation `{}` appears in multiple roles",
+                    declaration.operation
+                ));
+            }
+            let operation = registry.operation(&declaration.operation).ok_or_else(|| {
+                format!(
+                    "native host role `{}` references missing operation `{}`",
+                    role.name, declaration.operation
+                )
+            })?;
+            if operation.role != role.name {
+                return Err(format!(
+                    "native host operation `{}` has a mismatched role",
+                    declaration.operation
+                ));
+            }
+            let relative_path = format!("{}.orna", declaration.module.replace('.', "/"));
+            declarations
+                .entry(relative_path)
+                .or_default()
+                .push((declaration.operation, declaration.source));
+        }
+    }
+    if referenced.len() != registry.operations().count() {
+        let missing = registry
+            .operations()
+            .map(|operation| operation.name.as_str())
+            .filter(|name| !referenced.contains(*name))
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "native host operations are not assigned to a role: {missing:?}"
+        ));
+    }
+
+    let mut modules = BTreeMap::new();
+    for (relative_path, mut module_declarations) in declarations {
+        module_declarations.sort_by(|left, right| left.0.cmp(&right.0));
+        let module_name = relative_path
+            .strip_suffix(".orna")
+            .expect("generated host module path has .orna extension")
+            .replace('/', ".");
+        let mut source = format!("// host-module: {module_name}\n");
+        for (_, declaration) in module_declarations {
+            source.push_str(&declaration);
+        }
+        modules.insert(relative_path, source);
+    }
+
+    let mut modules_json =
+        serde_json::to_string_pretty(&modules).map_err(|error| error.to_string())?;
+    modules_json.push('\n');
+    let mut bundle = String::from(
+        "// Generated native host binding declaration bundle. Module markers identify emitted .orna files.\n",
+    );
+    for (relative_path, source) in &modules {
+        bundle.push_str("\n// host-file: ");
+        bundle.push_str(relative_path);
+        bundle.push('\n');
+        bundle.push_str(source);
+    }
+
+    Ok(GeneratedHostBindingArtifacts {
+        modules,
+        modules_json,
+        bundle,
+    })
 }
 
 pub fn generate_host_registry_schema() -> Result<String, String> {
@@ -449,11 +566,12 @@ impl<'ast> Visit<'ast> for Collector {
                             })
                             .collect(),
                     );
-                    let name = metadata["name"]
-                        .as_str()
-                        .ok_or_else(|| "host operation name must be a string".to_owned())?
-                        .to_owned();
-                    Ok((name, metadata))
+                    let operation: HostOperationDescriptor = serde_json::from_value(metadata)
+                        .map_err(|error| {
+                            format!("invalid typed host-operation metadata: {error}")
+                        })?;
+                    let name = operation.name.clone();
+                    Ok((name, operation))
                 });
             match result {
                 Ok((name, metadata)) => {
