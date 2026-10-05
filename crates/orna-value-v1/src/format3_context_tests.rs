@@ -1,16 +1,9 @@
-#![cfg(feature = "test-support")]
-
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
-use orna_value_v1::{
-    AvailabilityState, Blob, BlobResolver, ContentIdentity, ContentReference, ContextValue, Error,
-    Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Raw, Snapshot, Value,
-    ValueFormat, decode_ovb2, decode_rov3, decode_rov3_in_context, decode_sov3_in_context,
-    encode_ovb2, encode_rov3, encode_sov3,
-};
+use super::*;
 
 fn hex_bytes(value: &str) -> Vec<u8> {
     (0..value.len())
@@ -19,9 +12,24 @@ fn hex_bytes(value: &str) -> Vec<u8> {
         .collect()
 }
 
+fn counting_resolver(bytes: &[u8]) -> Arc<CountingResolver> {
+    Arc::new(CountingResolver {
+        bytes: bytes.to_vec(),
+        reads: AtomicUsize::new(0),
+        max_request: AtomicUsize::new(0),
+    })
+}
+
 fn test_context(resolver: Arc<dyn BlobResolver>) -> Format3Context {
+    test_context_with_quota(
+        resolver,
+        Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+    )
+}
+
+fn test_context_with_quota(resolver: Arc<dyn BlobResolver>, quota: Format3Quota) -> Format3Context {
     let database = [1; 16];
-    Format3Context::for_tests(
+    Format3Context::from_persisted(
         database,
         Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
         GitHash::Sha1,
@@ -29,7 +37,7 @@ fn test_context(resolver: Arc<dyn BlobResolver>) -> Format3Context {
         NativeOid::from_bytes(&[8; 20]).unwrap(),
         AvailabilityState::Available,
         OwnerLifetime::new([3; 16]),
-        Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+        quota,
         resolver,
     )
     .unwrap()
@@ -45,10 +53,7 @@ fn published_blob_vectors_use_explicit_profiles() {
     );
 
     let identity = ContentIdentity::from_bytes(b"abc");
-    let context = test_context(Arc::new(CountingResolver {
-        bytes: b"abc".to_vec(),
-        reads: AtomicUsize::new(0),
-    }));
+    let context = test_context(counting_resolver(b"abc"));
     let reference = context
         .reference(identity, NativeOid::from_bytes(&[0x7f; 20]).unwrap())
         .unwrap();
@@ -102,10 +107,7 @@ fn legacy_codec_rejects_new_tags_and_profiles_do_not_mix() {
     assert_eq!(Value::new(raw.clone()), Err(Error::InvalidTag));
     assert_eq!(
         ContextValue::new_in_context(
-            &test_context(Arc::new(CountingResolver {
-                bytes: b"abc".to_vec(),
-                reads: AtomicUsize::new(0),
-            })),
+            &test_context(counting_resolver(b"abc")),
             ValueFormat::Rov3,
             raw,
         ),
@@ -130,10 +132,7 @@ fn raw_reference_and_spoofed_context_cannot_authorize_reads() {
         ContextValue::new(ValueFormat::Rov3, raw),
         Err(Error::InvalidContext)
     );
-    let authorized_context = test_context(Arc::new(CountingResolver {
-        bytes: b"abc".to_vec(),
-        reads: AtomicUsize::new(0),
-    }));
+    let authorized_context = test_context(counting_resolver(b"abc"));
     let authorized_blob = Blob::from_reference(
         authorized_context
             .reference(identity, NativeOid::from_bytes(&[7; 20]).unwrap())
@@ -143,19 +142,22 @@ fn raw_reference_and_spoofed_context_cannot_authorize_reads() {
     let encoded = encode_rov3(&authorized_blob).unwrap();
     assert_eq!(decode_rov3(&encoded), Err(Error::InvalidContext));
 
-    let resolver = Arc::new(CountingResolver {
-        bytes: b"abc".to_vec(),
-        reads: AtomicUsize::new(0),
-    });
+    let resolver = counting_resolver(b"abc");
     let database = [4; 16];
     let owner = OwnerLifetime::new([5; 16]);
     let quota = Format3Quota::new(8 * 1024 * 1024, 1024).unwrap();
+    let valid_pin = Snapshot::cwd(database, [6; 16], 0.into()).unwrap();
+    let mut forged_pin = valid_pin.clone();
+    let Snapshot::Cwd { id, .. } = &mut forged_pin else {
+        unreachable!();
+    };
+    *id = [0xa5; 32];
     assert!(matches!(
-        Format3Context::for_tests(
+        Format3Context::from_persisted(
             database,
-            Snapshot::cwd(database, [6; 16], 0.into()).unwrap(),
+            forged_pin,
             GitHash::Sha1,
-            NativeOid::from_bytes(&[9; 32]).unwrap(),
+            NativeOid::from_bytes(&[9; 20]).unwrap(),
             NativeOid::from_bytes(&[8; 20]).unwrap(),
             AvailabilityState::Available,
             owner.clone(),
@@ -165,7 +167,7 @@ fn raw_reference_and_spoofed_context_cannot_authorize_reads() {
         Err(Error::InvalidContext)
     ));
     assert!(matches!(
-        Format3Context::for_tests(
+        Format3Context::from_persisted(
             database,
             Snapshot::cwd([8; 16], [6; 16], 0.into()).unwrap(),
             GitHash::Sha1,
@@ -178,12 +180,22 @@ fn raw_reference_and_spoofed_context_cannot_authorize_reads() {
         ),
         Err(Error::InvalidContext)
     ));
+    assert!(matches!(
+        Format3Context::from_persisted(
+            database,
+            valid_pin,
+            GitHash::Sha1,
+            NativeOid::from_bytes(&[9; 32]).unwrap(),
+            NativeOid::from_bytes(&[8; 20]).unwrap(),
+            AvailabilityState::Available,
+            OwnerLifetime::new([5; 16]),
+            quota,
+            resolver.clone(),
+        ),
+        Err(Error::InvalidContext)
+    ));
 
     let context = test_context(resolver.clone());
-    assert_eq!(
-        context.reference(identity, NativeOid::from_bytes(&[1; 32]).unwrap()),
-        Err(Error::InvalidOid)
-    );
     let reference = context
         .reference(identity, NativeOid::from_bytes(&[1; 20]).unwrap())
         .unwrap();
@@ -193,31 +205,70 @@ fn raw_reference_and_spoofed_context_cannot_authorize_reads() {
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
 }
 
-struct CountingResolver {
-    bytes: Vec<u8>,
-    reads: AtomicUsize,
+#[test]
+fn rov3_oid_width_must_match_the_bound_context_algorithm() {
+    let context = test_context(counting_resolver(b"abc"));
+    let raw = Raw::Tag(
+        ROV3_BLOB_TAG,
+        Box::new(Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Bytes(ContentIdentity::from_bytes(b"abc").sha256().to_vec()),
+            Raw::Text("text/plain".to_owned()),
+            Raw::Null,
+            Raw::Bytes(vec![7; 32]),
+        ])),
+    );
+    assert_eq!(
+        ContextValue::new_in_context(&context, ValueFormat::Rov3, raw),
+        Err(Error::InvalidOid)
+    );
 }
 
-impl BlobResolver for CountingResolver {
-    fn read_range(
-        &self,
-        _reference: &ContentReference,
-        offset: u64,
-        length: u64,
-    ) -> orna_value_v1::Result<Vec<u8>> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        let start = offset as usize;
-        let end = start + length as usize;
-        Ok(self.bytes[start..end].to_vec())
-    }
+#[test]
+fn expiration_is_monotonic_and_cannot_restore_availability() {
+    let context = test_context(counting_resolver(b"abc"));
+    let reference = context
+        .reference(
+            ContentIdentity::from_bytes(b"abc"),
+            NativeOid::from_bytes(&[1; 20]).unwrap(),
+        )
+        .unwrap();
+    let blob = Blob::from_reference(reference).unwrap();
+    context.expire();
+    assert_eq!(context.availability(), AvailabilityState::Expired);
+    assert_eq!(blob.read(0, 1), Err(Error::OwnerExpired));
+}
+
+#[test]
+fn full_reads_and_content_comparisons_honor_small_read_quotas() {
+    let quota = Format3Quota::new(2, 1_u64 << 62).unwrap();
+    let left_resolver = counting_resolver(b"payload");
+    let right_resolver = counting_resolver(b"payload");
+    let identity = ContentIdentity::from_bytes(b"payload");
+    let left_context = test_context_with_quota(left_resolver.clone(), quota);
+    let right_context = test_context_with_quota(right_resolver.clone(), quota);
+    let left = Blob::from_reference(
+        left_context
+            .reference(identity, NativeOid::from_bytes(&[1; 20]).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let right = Blob::from_reference(
+        right_context
+            .reference(identity, NativeOid::from_bytes(&[2; 20]).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(left.read_to_end().unwrap(), b"payload");
+    assert_eq!(left.same_content(&right).unwrap(), true);
+    assert!(left_resolver.max_request.load(Ordering::SeqCst) <= 2);
+    assert!(right_resolver.max_request.load(Ordering::SeqCst) <= 2);
 }
 
 #[test]
 fn lazy_reference_metadata_and_semantic_encoding_do_not_read_payload() {
-    let resolver = Arc::new(CountingResolver {
-        bytes: b"payload".to_vec(),
-        reads: AtomicUsize::new(0),
-    });
+    let resolver = counting_resolver(b"payload");
     let identity = ContentIdentity::from_bytes(b"payload");
     let context = test_context(resolver.clone());
     let reference = context
@@ -252,4 +303,26 @@ fn content_identity_is_separate_from_annotated_value_equality() {
     let second = Blob::from_semantic_commitment(identity, "text/plain", None).unwrap();
     assert_eq!(first.same_content(&second), Err(Error::ContentUnavailable));
     assert_eq!(first.value_eq(&second), Err(Error::ContentUnavailable));
+}
+
+struct CountingResolver {
+    bytes: Vec<u8>,
+    reads: AtomicUsize,
+    max_request: AtomicUsize,
+}
+
+impl BlobResolver for CountingResolver {
+    fn read_range(
+        &self,
+        _reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.max_request
+            .fetch_max(length as usize, Ordering::SeqCst);
+        let start = offset as usize;
+        let end = start + length as usize;
+        Ok(self.bytes[start..end].to_vec())
+    }
 }
