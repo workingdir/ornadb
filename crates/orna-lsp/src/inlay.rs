@@ -214,24 +214,51 @@ fn add_parameter_hints(
     range: &Range,
     hints: &mut Vec<InlayHint>,
 ) {
-    let Expr::Name {
-        text: callee_name,
-        span: callee_span,
-    } = callee
-    else {
-        return;
+    let parameter_names = match callee {
+        Expr::Name {
+            text: callee_name,
+            span: callee_span,
+        } => {
+            if locals::binding_at(tree, callee_name, callee_span).is_some() {
+                return;
+            }
+            if let Some(signature) = function_signature(tree, callee_name) {
+                signature
+                    .parameters
+                    .iter()
+                    .map(|parameter| match &parameter.pattern {
+                        Pattern::Name(name, _) => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                let Some(name) = analysis::expression_name(callee) else {
+                    return;
+                };
+                let Some(parameters) =
+                    analysis::standard_parameter_names_for_call(tree, &name, callee)
+                else {
+                    return;
+                };
+                parameters
+            }
+        }
+        _ => {
+            let Some(name) = analysis::expression_name(callee) else {
+                return;
+            };
+            let Some(parameters) = analysis::standard_parameter_names_for_call(tree, &name, callee)
+            else {
+                return;
+            };
+            parameters
+        }
     };
-    if locals::binding_at(tree, callee_name, callee_span).is_some() {
-        return;
-    }
-    let Some(signature) = function_signature(tree, callee_name) else {
-        return;
-    };
-    for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
+    for (argument, parameter_name) in arguments.iter().zip(&parameter_names) {
         if argument.name.is_some() {
             continue;
         }
-        let Pattern::Name(name, _) = &parameter.pattern else {
+        let Some(name) = parameter_name else {
             continue;
         };
         let position = mapper.position(argument.value.span().start);
@@ -296,15 +323,17 @@ fn infer_type(expression: &Expr, tree: &SyntaxTree, text: &str) -> Option<String
             (left == right).then_some(left)
         }
         Expr::Call { callee, .. } | Expr::GenericCall { callee, .. } => {
-            let Expr::Name { text: name, .. } = callee.as_ref() else {
-                return None;
-            };
-            let signature = function_signature(tree, name)?;
-            signature
-                .result
-                .as_ref()
-                .and_then(|ty| source_type(text, ty))
-                .or_else(|| infer_type_from_body(tree, signature, text))
+            if let Expr::Name { text: name, .. } = callee.as_ref()
+                && let Some(signature) = function_signature(tree, name)
+            {
+                return signature
+                    .result
+                    .as_ref()
+                    .and_then(|ty| source_type(text, ty))
+                    .or_else(|| infer_type_from_body(tree, signature, text));
+            }
+            let name = analysis::expression_name(callee)?;
+            analysis::standard_result_type_for_call(tree, &name, callee)
         }
         Expr::Control {
             kind: ControlKind::If,
