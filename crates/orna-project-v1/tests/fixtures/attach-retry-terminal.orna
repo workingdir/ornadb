@@ -1,0 +1,1 @@
+pub fn package_value(): Int = 903;
