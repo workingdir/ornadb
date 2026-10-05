@@ -10,7 +10,8 @@ use std::{cmp::Ordering, collections::BTreeMap, fmt, sync::Arc};
 use sha2::{Digest, Sha256};
 
 use crate::native_graph::{
-    GraphError, MAX_REFS, NODE_DATA_LIMIT, NativeObjectId, NativeObjectKind,
+    CborValue, GraphError, MAX_REFS, NODE_DATA_LIMIT, NativeObjectId, NativeObjectKind,
+    decode_canonical_cbor, row_fields_dependencies,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
@@ -355,6 +356,43 @@ impl TypedKey {
         }
         Ok(output)
     }
+
+    pub(crate) fn decode_canonical(bytes: &[u8]) -> Result<Self, RowStoreError> {
+        if bytes.len() > KEY_CANONICAL_LIMIT {
+            return Err(RowStoreError::KeyTooLarge(bytes.len()));
+        }
+        let value = decode_canonical_cbor(bytes)?;
+        let key = Self::from_cbor(value)?;
+        if key.canonical_bytes()?.as_slice() != bytes {
+            return Err(RowStoreError::InvalidCanonicalKey);
+        }
+        Ok(key)
+    }
+
+    fn from_cbor(value: CborValue) -> Result<Self, RowStoreError> {
+        match value {
+            CborValue::Null => Ok(Self::Null),
+            CborValue::Bool(value) => Ok(Self::Bool(value)),
+            CborValue::Unsigned(value) => Ok(Self::UInt(value)),
+            CborValue::Negative(magnitude) => {
+                let value = -1i128 - i128::from(magnitude);
+                Ok(Self::Int(
+                    i64::try_from(value).map_err(|_| RowStoreError::InvalidCanonicalKey)?,
+                ))
+            }
+            CborValue::Text(value) => Ok(Self::Text(value)),
+            CborValue::Bytes(value) => Ok(Self::Bytes(value)),
+            CborValue::Array(values) => Ok(Self::Tuple(
+                values
+                    .into_iter()
+                    .map(Self::from_cbor)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            CborValue::Map(_) | CborValue::Tag(_, _) | CborValue::Float64(_) => {
+                Err(RowStoreError::InvalidCanonicalKey)
+            }
+        }
+    }
 }
 
 impl Ord for TypedKey {
@@ -491,6 +529,14 @@ impl RowValue {
             encoded,
             dependencies,
         })
+    }
+
+    pub(crate) fn decode_canonical_fields(encoded: Vec<u8>) -> Result<Self, RowStoreError> {
+        let dependencies = row_fields_dependencies(&encoded)?
+            .into_iter()
+            .map(|dependency| RowDependency::new(dependency.oid().clone(), dependency.kind()))
+            .collect();
+        Self::inline(encoded, dependencies).map_err(|_| RowStoreError::InvalidCanonicalRowValue)
     }
 
     pub fn overflow(reference: ValueOverflowRef) -> Self {
@@ -815,6 +861,8 @@ pub enum RowStoreError {
     InvalidKeyRange,
     RowsNotStrictlyOrdered,
     RowCountMismatch,
+    InvalidCanonicalKey,
+    InvalidCanonicalRowValue,
     UnsupportedWriterProfile,
     LegacyFormatReadOnly(u8),
     Native(GraphError),
@@ -851,6 +899,12 @@ impl fmt::Display for RowStoreError {
                 f.write_str("admitted row keys are not strictly logically ordered")
             }
             Self::RowCountMismatch => f.write_str("row-map count does not match admitted rows"),
+            Self::InvalidCanonicalKey => {
+                f.write_str("persisted row key is not a supported canonical typed key")
+            }
+            Self::InvalidCanonicalRowValue => {
+                f.write_str("persisted row value is not a canonical stored-field tuple")
+            }
             Self::UnsupportedWriterProfile => f.write_str("legacy writer profile is unsupported"),
             Self::LegacyFormatReadOnly(format) => {
                 write!(f, "repository format {format} is reader-only")
