@@ -692,6 +692,46 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
         "reordering descriptors preserves the paired cost and restore-envelope identity"
     );
     assert_eq!(
+        text(
+            child_a,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_transition"
+        ),
+        "initialized_cost_restore_envelope_carry"
+    );
+    assert_eq!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_policy"
+        ),
+        "advance_on_distinct_composite_states_and_carry_exact_repeats"
+    );
+    assert_eq!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_transition"
+        ),
+        "advanced_cost_restore_envelope_carry"
+    );
+    assert_eq!(
+        text(
+            child_b,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_identity"
+        ),
+        text(
+            reordered_joins["pair:table:ChildB"],
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_identity"
+        ),
+        "reordering descriptors preserves the distinct-state carry identity"
+    );
+    assert_eq!(
+        text(
+            tail,
+            "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_transition"
+        ),
+        "advanced_cost_restore_envelope_carry",
+        "sparse input only appends a new composite state when evidence advances"
+    );
+    assert_eq!(
         integer(tail, "paired_window_cost_restoration_restore_fold_count"),
         2
     );
@@ -1353,6 +1393,17 @@ fn nested_window_identities_survive_paired_cost_restore_folds_and_sparse_edges()
                 "paired_window_cost_restoration_cost_window_restore_envelope_chain_fold_identity"
             ),
             "the composite identity binds window, cost, and restore ancestry"
+        );
+        assert_ne!(
+            text(
+                child_b,
+                "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_identity"
+            ),
+            text(
+                changed,
+                "paired_window_cost_restoration_cost_window_restore_envelope_chain_carry_identity"
+            ),
+            "the distinct-state carry identity preserves changed ancestry"
         );
     }
     assert_ne!(

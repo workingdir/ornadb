@@ -21,6 +21,25 @@ export function exampleIndexForPath(
   return requestedIndex >= 0 ? requestedIndex : 0;
 }
 
+export function exampleIndexForSearch(
+  examples: readonly Pick<Example, 'path'>[],
+  search: string,
+): number {
+  return exampleIndexForPath(examples, new URLSearchParams(search).get('example'));
+}
+
+export function pushExampleSelection(
+  history: Pick<History, 'state' | 'pushState'>,
+  currentUrl: string,
+  selectedPath: string,
+): boolean {
+  const url = new URL(currentUrl);
+  if (url.searchParams.get('example') === selectedPath) return false;
+  url.searchParams.set('example', selectedPath);
+  history.pushState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  return true;
+}
+
 export function exampleIndexForKey(
   key: string,
   currentIndex: number,
