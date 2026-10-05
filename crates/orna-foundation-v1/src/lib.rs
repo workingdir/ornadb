@@ -19,47 +19,6 @@ pub type CanonicalValue = Value;
 pub type TypeDescriptor = SchemaDescriptor;
 pub type CanonicalSnapshot = Snapshot;
 
-/// Read-only identity view implemented by the repository-owned opaque schema
-/// generation. Runtime requests retain the actual token and compare this
-/// identity with the validator that decoded the candidate rows.
-///
-/// # Safety
-/// Implementations must be backed by a repository-issued schema-generation
-/// capability and return that capability's immutable identity.
-pub unsafe trait SchemaGenerationIdentity: Send + Sync {
-    fn identity_digest(&self) -> [u8; 32];
-}
-
-/// Safe metadata view implemented only by the repository-owned native pin
-/// capability. This is not a pin token: the concrete authority remains
-/// `orna_repository_v1::native_graph::ProtectedContentPin`.
-///
-/// # Safety
-/// Implementations must report the identity of an actual durable local Git
-/// protection ref whose complete object closure was verified and flushed.
-pub unsafe trait ProtectedContentPinIdentity: Send + Sync {
-    fn id(&self) -> [u8; 16];
-    fn repository_id(&self) -> [u8; 16];
-    fn database_id(&self) -> [u8; 16];
-    fn content_length(&self) -> u64;
-    fn content_sha256(&self) -> [u8; 32];
-}
-
-/// Identity of a protected native content graph copied into an accepted row
-/// transaction. The record itself carries no authority to read or release the
-/// graph pin.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProtectedContentTransferRecord {
-    pub pin_id: [u8; 16],
-    pub repository_id: [u8; 16],
-    pub database_id: [u8; 16],
-    pub content_length: u64,
-    pub content_sha256: [u8; 32],
-    pub mutation_id: [u8; 16],
-    pub table: String,
-    pub row_key: Vec<u8>,
-}
-
 /// `sys.RowRef<T>` as OVB tag 60010. Key and snapshot context are identity.
 #[derive(Clone, Eq, PartialEq)]
 pub struct RowRef {
