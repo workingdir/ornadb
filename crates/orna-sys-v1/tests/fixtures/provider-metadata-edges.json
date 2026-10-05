@@ -1,0 +1,71 @@
+{
+  "operation": "sys.meta<T>",
+  "api_function": "sys.meta",
+  "role": "langitem.sys.meta",
+  "role_version": "1.0",
+  "signature": "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
+  "metadata_type": "sys.ValueMetadata<T>",
+  "wrong_result_type": "sys.ValueMetadata<sys.NotTheInputType>",
+  "fields": [
+    { "name": "static_type", "type": "sys.TypeRef" },
+    { "name": "nominal_type", "type": "sys.TypeRef?" },
+    { "name": "protocols", "type": "Relation<sys.Protocol>" },
+    { "name": "codecs", "type": "[Str]" },
+    { "name": "redacted", "type": "Bool" }
+  ],
+  "cases": [
+    {
+      "name": "public-unregistered-primitive",
+      "value_type": "Int",
+      "result_type": "sys.ValueMetadata<Int>",
+      "redacted": false,
+      "metadata": {
+        "static_type": "Int",
+        "nominal_type": null,
+        "protocols": [],
+        "codecs": [],
+        "redacted": false
+      }
+    },
+    {
+      "name": "public-nominal-with-multiple-protocols",
+      "value_type": "app.Record",
+      "result_type": "sys.ValueMetadata<app.Record>",
+      "redacted": false,
+      "metadata": {
+        "static_type": "app.Record",
+        "nominal_type": "app.Record",
+        "protocols": ["protocol.A", "protocol.Z"],
+        "codecs": ["codec.cbor", "codec.json"],
+        "redacted": false
+      }
+    },
+    {
+      "name": "protected-nominal-value",
+      "value_type": "app.Credential",
+      "result_type": "sys.ValueMetadata<app.Credential>",
+      "redacted": true,
+      "payload_sentinel": "PRIVATE_CREDENTIAL_PAYLOAD_8197",
+      "metadata": {
+        "static_type": "app.Credential",
+        "nominal_type": "app.Credential",
+        "protocols": ["protocol.Secret"],
+        "codecs": ["codec.secret"],
+        "redacted": true
+      }
+    },
+    {
+      "name": "nested-optional-list-value",
+      "value_type": "[app.Token?]",
+      "result_type": "sys.ValueMetadata<[app.Token?]>",
+      "redacted": false,
+      "metadata": {
+        "static_type": "[app.Token?]",
+        "nominal_type": null,
+        "protocols": ["protocol.Collection"],
+        "codecs": ["codec.list"],
+        "redacted": false
+      }
+    }
+  ]
+}
