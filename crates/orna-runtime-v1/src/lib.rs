@@ -120,7 +120,11 @@ CREATE TABLE IF NOT EXISTS accepted_content_pin (
     content_length INTEGER NOT NULL CHECK (content_length >= 0),
     content_sha256 BLOB NOT NULL CHECK (length(content_sha256) = 32),
     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
-    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0)
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+    checkpoint_generation INTEGER CHECK (
+        checkpoint_generation IS NULL OR checkpoint_generation > 0
+    ),
+    FOREIGN KEY (checkpoint_generation) REFERENCES checkpoint(generation)
 );
 CREATE TABLE IF NOT EXISTS table_row (
     table_id TEXT NOT NULL CHECK (length(table_id) > 0),
@@ -3970,6 +3974,7 @@ impl RuntimeState {
             .execute_batch(SCHEMA)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        migrate_accepted_content_pin_checkpoint(&connection).await?;
         migrate_admin_checkpoint_reset_receipts(&connection).await?;
         Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
         migrate_runtime_table_history(&connection).await?;
@@ -5915,6 +5920,25 @@ impl RuntimeState {
                 RuntimeError::InvalidTableMutation,
             ));
         }
+        let next = append_mutations_tx(
+            &transaction,
+            context.capture(),
+            &encoded,
+            next_digest,
+            faults,
+        )
+        .await
+        .map_err(TableActivationError::Runtime)?;
+        let checkpoint_generation = next
+            .generation()
+            .to_u64_digits()
+            .1
+            .first()
+            .copied()
+            .unwrap_or(0);
+        let checkpoint_generation = i64::try_from(checkpoint_generation).map_err(|_| {
+            TableActivationError::Runtime(RuntimeError::RecoveryInvalid)
+        })?;
         let owner_epoch = i64::try_from(writer.epoch).map_err(|_| {
             TableActivationError::Runtime(RuntimeError::InvalidTableMutation)
         })?;
@@ -5929,7 +5953,7 @@ impl RuntimeState {
             };
             transaction
                 .execute(
-                    "INSERT INTO accepted_content_pin (pin_id, repository_id, database_id, descriptor_oid_algorithm, descriptor_oid, content_length, content_sha256, owner_id, owner_epoch) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO accepted_content_pin (pin_id, repository_id, database_id, descriptor_oid_algorithm, descriptor_oid, content_length, content_sha256, owner_id, owner_epoch, checkpoint_generation) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         &transfer.pin_id()[..],
                         &transfer.repository_id()[..],
@@ -5940,6 +5964,7 @@ impl RuntimeState {
                         &identity.sha256()[..],
                         &writer.owner_id[..],
                         owner_epoch,
+                        checkpoint_generation,
                     ],
                 )
                 .await
@@ -5947,15 +5972,6 @@ impl RuntimeState {
                     TableActivationError::Runtime(RuntimeError::StorageUnavailable)
                 })?;
         }
-        let next = append_mutations_tx(
-            &transaction,
-            context.capture(),
-            &encoded,
-            next_digest,
-            faults,
-        )
-        .await
-        .map_err(TableActivationError::Runtime)?;
         transaction
             .commit()
             .await
@@ -12252,6 +12268,8 @@ impl RuntimeState {
             _ => return Err(RuntimeError::RecoveryInvalid),
         }
         self.validate_checkpoint_anchors().await?;
+        self.validate_accepted_content_pin_recovery(generation)
+            .await?;
         self.validate_stream_checkpoint_history(&capture, generation)
             .await?;
         self.validate_stream_controls().await?;
@@ -12279,6 +12297,91 @@ impl RuntimeState {
             let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let evidence = decode_request_execution_evidence(&row, 5)?;
             validate_request_execution_evidence(&status, evidence)?;
+        }
+        Ok(())
+    }
+
+    async fn validate_accepted_content_pin_recovery(
+        &self,
+        current_generation: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT pin.pin_id, pin.repository_id, pin.database_id,
+                        pin.descriptor_oid_algorithm, pin.descriptor_oid,
+                        pin.content_length, pin.content_sha256, pin.owner_id,
+                        pin.owner_epoch, pin.checkpoint_generation,
+                        checkpoint.generation, runtime.database_id
+                 FROM accepted_content_pin AS pin
+                 LEFT JOIN checkpoint
+                   ON checkpoint.generation = pin.checkpoint_generation
+                 JOIN runtime_meta AS runtime ON runtime.singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let pin_id: [u8; 16] = fixed(
+                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let _repository_id: [u8; 32] = fixed(
+                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let database_id: [u8; 16] = fixed(
+                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let descriptor_oid_algorithm: i64 =
+                row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let descriptor_oid: Vec<u8> =
+                row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let expected_oid_length = match descriptor_oid_algorithm {
+                1 => 20,
+                2 => 32,
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            };
+            let content_length: i64 = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let _content_sha256: [u8; 32] = fixed(
+                row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let owner_id: [u8; 16] = fixed(
+                row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let owner_epoch: i64 = row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let checkpoint_generation: Option<i64> =
+                row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let anchored_generation: Option<i64> =
+                row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let runtime_database_id: [u8; 16] = fixed(
+                row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_id(pin_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_id(owner_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let Some(checkpoint_generation) = checkpoint_generation else {
+                return Err(RuntimeError::RecoveryInvalid);
+            };
+            if database_id != runtime_database_id
+                || content_length < 0
+                || descriptor_oid.len() != expected_oid_length
+                || owner_epoch <= 0
+                || checkpoint_generation <= 0
+                || u64::try_from(checkpoint_generation)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?
+                    > current_generation
+                || anchored_generation != Some(checkpoint_generation)
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
         Ok(())
     }
@@ -18550,6 +18653,119 @@ fn validate_digest(value: [u8; 32]) -> Result<(), RuntimeError> {
     }
 }
 
+async fn migrate_accepted_content_pin_checkpoint(
+    connection: &Connection,
+) -> Result<(), RuntimeError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut rows = transaction
+        .query("PRAGMA table_info(accepted_content_pin)", ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut has_descriptor_oid = false;
+    let mut has_checkpoint_generation = false;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let column: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        has_descriptor_oid |= column == "descriptor_oid_algorithm";
+        has_checkpoint_generation |= column == "checkpoint_generation";
+    }
+    drop(rows);
+
+    if !has_descriptor_oid {
+        let mut legacy = transaction
+            .query(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'accepted_content_pin_legacy_unverified_v1'",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if legacy
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        drop(legacy);
+        transaction
+            .execute(
+                "ALTER TABLE accepted_content_pin
+                 RENAME TO accepted_content_pin_legacy_unverified_v1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .execute(
+                "CREATE TABLE accepted_content_pin (
+                    pin_id BLOB PRIMARY KEY CHECK (length(pin_id) = 16),
+                    repository_id BLOB NOT NULL CHECK (length(repository_id) = 32),
+                    database_id BLOB NOT NULL CHECK (length(database_id) = 16),
+                    descriptor_oid_algorithm INTEGER NOT NULL CHECK (descriptor_oid_algorithm IN (1, 2)),
+                    descriptor_oid BLOB NOT NULL CHECK (
+                        (descriptor_oid_algorithm = 1 AND length(descriptor_oid) = 20) OR
+                        (descriptor_oid_algorithm = 2 AND length(descriptor_oid) = 32)
+                    ),
+                    content_length INTEGER NOT NULL CHECK (content_length >= 0),
+                    content_sha256 BLOB NOT NULL CHECK (length(content_sha256) = 32),
+                    owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+                    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+                    checkpoint_generation INTEGER CHECK (
+                        checkpoint_generation IS NULL OR checkpoint_generation > 0
+                    ),
+                    FOREIGN KEY (checkpoint_generation) REFERENCES checkpoint(generation)
+                )",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    } else if !has_checkpoint_generation {
+        transaction
+            .execute(
+                "ALTER TABLE accepted_content_pin
+                 ADD COLUMN checkpoint_generation INTEGER
+                 REFERENCES checkpoint(generation)",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    // Earlier accepted-pin writes shared their immediate transaction with a
+    // checkpoint but did not record its generation. Anchor those records to
+    // the latest retained checkpoint; no checkpoint means recovery must fail
+    // closed rather than treating the metadata as accepted state.
+    transaction
+        .execute(
+            "UPDATE accepted_content_pin
+             SET checkpoint_generation = (SELECT MAX(generation) FROM checkpoint)
+             WHERE checkpoint_generation IS NULL
+               AND EXISTS (SELECT 1 FROM checkpoint)",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+             VALUES ('accepted-content-pin-checkpoint-v1')",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -19959,6 +20175,158 @@ mod tests {
             state.committed_table_row("books", &[1]).await.unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn accepted_pin_checkpoint_recovers_committed_state_and_discards_interrupted_state() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let cwd_generation = activation_test_cwd_generation(0);
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+        state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation,
+                mutations: &[table_mutation(5, 1, Some(9))],
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(
+            reopened.latest_checkpoint().await.unwrap().unwrap().generation,
+            1
+        );
+
+        // Model a process interruption after the candidate row, checkpoint,
+        // and transfer metadata have been written but before COMMIT. This is
+        // SQL transaction fault injection, not a pin issuer or transfer proof.
+        let interrupted_context = reopened.begin_activation().await.unwrap();
+        let interrupted_mutation = table_mutation(7, 2, Some(8));
+        let encoded = interrupted_mutation.runtime_mutation().unwrap();
+        let transaction = reopened
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        apply_table_mutation_tx(&transaction, &interrupted_mutation)
+            .await
+            .unwrap();
+        let interrupted_capture = append_mutations_tx(
+            &transaction,
+            interrupted_context.capture(),
+            &[encoded],
+            digest(8),
+            &NoFault,
+        )
+        .await
+        .unwrap();
+        let interrupted_generation = i64::try_from(
+            interrupted_capture
+                .generation()
+                .to_u64_digits()
+                .1
+                .first()
+                .copied()
+                .unwrap_or(0),
+        )
+        .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO accepted_content_pin
+                 (pin_id, repository_id, database_id, descriptor_oid_algorithm,
+                  descriptor_oid, content_length, content_sha256, owner_id,
+                  owner_epoch, checkpoint_generation)
+                 VALUES (?1, ?2, ?3, 1, ?4, 0, ?5, ?6, 1, ?7)",
+                params![
+                    id(88).to_vec(),
+                    vec![0x88; 32],
+                    id(1).to_vec(),
+                    vec![0; 20],
+                    vec![0; 32],
+                    id(7).to_vec(),
+                    interrupted_generation,
+                ],
+            )
+            .await
+            .unwrap();
+        drop(transaction);
+        drop(reopened);
+
+        let recovered = open_state(&repo).await;
+        assert_eq!(
+            recovered.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(
+            recovered.committed_table_row("books", &[2]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            recovered.latest_checkpoint().await.unwrap().unwrap().generation,
+            1
+        );
+        let mut pins = recovered
+            .connection
+            .query("SELECT COUNT(*) FROM accepted_content_pin", ())
+            .await
+            .unwrap();
+        assert_eq!(pins.next().await.unwrap().unwrap().get::<i64>(0).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn accepted_pin_without_checkpoint_fails_closed_on_restart() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        // Inject persisted orphan metadata directly to exercise startup
+        // recovery. This is corruption fault injection, not a pin issuer.
+        state
+            .connection
+            .execute(
+                "INSERT INTO accepted_content_pin
+                 (pin_id, repository_id, database_id, descriptor_oid_algorithm,
+                  descriptor_oid, content_length, content_sha256, owner_id,
+                  owner_epoch, checkpoint_generation)
+                 VALUES (?1, ?2, ?3, 1, ?4, 0, ?5, ?6, 1, NULL)",
+                params![
+                    id(88).to_vec(),
+                    vec![0x88; 32],
+                    id(1).to_vec(),
+                    vec![0; 20],
+                    vec![0; 32],
+                    id(7).to_vec(),
+                ],
+            )
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened = RuntimeState::open(
+            &repo,
+            RuntimeIdentity {
+                database_id: id(1),
+                repository_id: id(2),
+            },
+            digest(3),
+        )
+        .await;
+        assert!(matches!(reopened, Err(RuntimeError::RecoveryInvalid)));
     }
 
     #[tokio::test]
