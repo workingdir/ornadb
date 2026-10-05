@@ -1,0 +1,7 @@
+{ id: "nested-checkpoint/main", name: "outer/checkpoint-left-a", city: "outer/checkpoint-right-a", }
+
+{ id: "nested-checkpoint/reused", name: "outer/checkpoint-left-a", city: "outer/checkpoint-right-a", }
+
+{ id: "nested-checkpoint/distinct", name: "outer/checkpoint-left-b", city: "outer/checkpoint-right-b", }
+
+{ id: "nested-checkpoint/malformed", name: "outer/checkpoint-left-error", city: "outer/checkpoint-right-error", }
