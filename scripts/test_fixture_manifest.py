@@ -120,7 +120,7 @@ class FixtureManifestTests(unittest.TestCase):
                     f"sys binding fixture hash is pinned: {fixture_path}",
                 )
 
-        self.assertEqual(fixture_count, 16, "all parity fixture includes are hash-pinned")
+        self.assertEqual(fixture_count, 18, "all parity fixture includes are hash-pinned")
 
     def test_standard_snapshot_replay_fixtures_are_local_and_hash_pinned(self) -> None:
         workspace = Path(__file__).resolve().parents[1]
@@ -208,6 +208,47 @@ class FixtureManifestTests(unittest.TestCase):
                 f"{digest}  {fixture_path}\n",
                 manifest,
                 f"evaluator snapshot fixture hash is pinned: {fixture_path}",
+            )
+
+    def test_runtime_historical_snapshot_fixtures_are_local_and_hash_pinned(self) -> None:
+        workspace = Path(__file__).resolve().parents[1]
+        manifest = (workspace / "scripts/fixture-manifest.sha256").read_text(
+            encoding="utf-8"
+        )
+        test_path = "crates/orna-runtime-v1/tests/historical_snapshots.rs"
+        source = (workspace / test_path).read_text(encoding="utf-8")
+        include_pattern = re.compile(r'include_str!\(\s*"([^"\n]+)"\s*\)')
+        include_paths = include_pattern.findall(source)
+        self.assertEqual(
+            len(include_paths),
+            185,
+            f"{test_path} retains all historical snapshot behavior inputs",
+        )
+
+        fixture_names = set()
+        for include_path in include_paths:
+            self.assertTrue(
+                include_path.startswith("fixtures/"),
+                f"historical snapshot inputs stay in the owning crate: {include_path}",
+            )
+            relative_path = Path(include_path)
+            self.assertNotIn("..", relative_path.parts)
+            fixture_names.add(relative_path.relative_to("fixtures").as_posix())
+
+        self.assertEqual(
+            len(fixture_names),
+            39,
+            "historical snapshot behavior keeps its full unique fixture set",
+        )
+        for fixture_name in sorted(fixture_names):
+            fixture_path = f"crates/orna-runtime-v1/tests/fixtures/{fixture_name}"
+            fixture = workspace / fixture_path
+            self.assertTrue(fixture.is_file(), f"missing crate-local fixture: {fixture_path}")
+            digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
+            self.assertIn(
+                f"{digest}  {fixture_path}\n",
+                manifest,
+                f"runtime historical snapshot fixture hash is pinned: {fixture_path}",
             )
 
 
