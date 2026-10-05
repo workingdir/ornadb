@@ -1,0 +1,6 @@
+lines.split("alpha") == ["alpha"]
+&& lines.split("alpha\nbeta") == ["alpha", "beta"]
+&& lines.split("alpha\r\nbeta") == ["alpha", "beta"]
+&& lines.split("alpha\rbeta") == ["alpha", "beta"]
+&& lines.split("alpha\n\nbeta\n") == ["alpha", "", "beta", ""]
+&& lines.split("\r\n") == ["", ""]
