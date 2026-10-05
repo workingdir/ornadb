@@ -144,8 +144,135 @@ struct ContextIdentity([u8; 32]);
 /// integration.  The fields bind the local owner, database, immutable store
 /// root and schema generation; callers cannot create a context from raw OIDs.
 #[derive(Debug)]
+struct PrivateRefCleanupOwner {
+    repository: crate::Repository,
+}
+
+impl PrivateRefCleanupOwner {
+    fn git_command(&self) -> Command {
+        let mut command = Command::new("git");
+        command
+            .current_dir(self.repository.worktree())
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        command
+    }
+
+    fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, GraphError> {
+        let output = self
+            .git_command()
+            .args(args)
+            .output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(if args.first() == Some(&"cat-file") {
+                GraphError::UnknownObjectAvailability
+            } else {
+                GraphError::GitCommandFailed
+            });
+        }
+        Ok(output.stdout)
+    }
+
+    fn delete_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
+        self.git_output(&["update-ref", "-d", reference, &oid.to_hex()])?;
+        self.sync_ref_directories(reference)
+    }
+
+    fn sync_ref_directories(&self, reference: &str) -> Result<(), GraphError> {
+        let common_dir_output = self.git_output(&["rev-parse", "--git-common-dir"])?;
+        let common_dir = resolve_git_path(self.repository.worktree(), &common_dir_output)?;
+        let common_dir = fs::canonicalize(common_dir).map_err(|_| GraphError::DurabilityFailed)?;
+        let ref_path_output = self.git_output(&["rev-parse", "--git-path", reference])?;
+        let ref_path = resolve_git_path(self.repository.worktree(), &ref_path_output)?;
+        let mut directory = ref_path
+            .parent()
+            .ok_or(GraphError::DurabilityFailed)?
+            .to_path_buf();
+        let directory = loop {
+            match fs::canonicalize(&directory) {
+                Ok(directory) => break directory,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if !directory.pop() {
+                        return Err(GraphError::DurabilityFailed);
+                    }
+                }
+                Err(_) => return Err(GraphError::DurabilityFailed),
+            }
+        };
+        if !directory.starts_with(&common_dir) {
+            return Err(GraphError::DurabilityFailed);
+        }
+        let mut current = directory;
+        loop {
+            sync_directory(&current)?;
+            if current == common_dir || !current.pop() {
+                break;
+            }
+        }
+        let packed_refs = common_dir.join("packed-refs");
+        match fs::symlink_metadata(&packed_refs) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(GraphError::DurabilityFailed);
+                }
+                File::open(&packed_refs)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| GraphError::DurabilityFailed)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(GraphError::DurabilityFailed),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct PendingPrivateRefCleanup {
+    owner: Arc<PrivateRefCleanupOwner>,
+    reference: String,
+    oid: NativeOid,
+    armed: bool,
+}
+
+impl PendingPrivateRefCleanup {
+    fn new(owner: Arc<PrivateRefCleanupOwner>, reference: String, oid: NativeOid) -> Self {
+        Self {
+            owner,
+            reference,
+            oid,
+            armed: true,
+        }
+    }
+
+    fn cleanup(&mut self) {
+        if self.armed {
+            let _ = self.owner.delete_protected_ref(&self.reference, &self.oid);
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingPrivateRefCleanup {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+#[derive(Debug)]
 pub struct NativeGraphContext {
     repository: crate::Repository,
+    private_ref_owner: Arc<PrivateRefCleanupOwner>,
     repository_id: [u8; 32],
     identity: ContextIdentity,
     database_id: [u8; 16],
@@ -192,6 +319,9 @@ impl NativeGraphContext {
             return Err(GraphError::ContextMismatch);
         }
         let context = Self {
+            private_ref_owner: Arc::new(PrivateRefCleanupOwner {
+                repository: repository.clone(),
+            }),
             repository,
             repository_id,
             identity: ContextIdentity(identity),
@@ -798,6 +928,115 @@ impl NativeGraphContext {
         self.admit_blob(descriptor)
     }
 
+    /// Captures an already-authorized, stable input stream into native OGB-2
+    /// objects and returns a context-bound candidate rooted by a provisional
+    /// private ref. `max_bytes` is an explicit per-capture ceiling; the source
+    /// is never reopened by path.
+    pub fn capture_blob_candidate<R: Read>(
+        &self,
+        mut authorized_source: R,
+        max_bytes: u64,
+        scope: &RepositoryReadScope,
+    ) -> Result<CapturedBlobCandidate, GraphError> {
+        scope.authorize(self)?;
+        if max_bytes > MAX_SIGNED_LENGTH {
+            return Err(GraphError::InvalidLength(max_bytes));
+        }
+        if max_bytes > scope.byte_quota {
+            return Err(GraphError::ReadQuotaExceeded);
+        }
+        let mut digest = crate::blob_store::ContentDigest::new();
+        let mut chunker = StreamingGearChunker::new();
+        let mut written = BTreeSet::new();
+        let mut index =
+            CaptureIndexBuilder::new(self, &mut written, scope.max_objects, scope);
+        let mut total = 0u64;
+        let mut input = [0u8; 64 * 1024];
+
+        loop {
+            scope.check_cancelled()?;
+            let count = match authorized_source.read(&mut input) {
+                Ok(count) => count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(GraphError::CaptureReadFailed),
+            };
+            if count == 0 {
+                break;
+            }
+            let next_total = total
+                .checked_add(count as u64)
+                .ok_or(GraphError::InvalidLength(u64::MAX))?;
+            if next_total > max_bytes {
+                return Err(GraphError::ReadQuotaExceeded);
+            }
+            let reservation = scope.reserve_payload(count as u64)?;
+            digest
+                .update(&input[..count])
+                .map_err(|_| GraphError::InvalidLength(next_total))?;
+            for byte in &input[..count] {
+                if let Some(chunk) = chunker.push(*byte) {
+                    index.push_chunk_bytes(chunk)?;
+                }
+            }
+            total = next_total;
+            reservation.commit(count as u64);
+        }
+        if let Some(chunk) = chunker.finish() {
+            index.push_chunk_bytes(chunk)?;
+        }
+
+        let identity = digest.finish();
+        let byte_root = index.finish()?;
+        let descriptor_oid = self.write_capture_node(
+            &NodeData::BlobDescriptor {
+                length: identity.length(),
+                raw_sha256: identity.sha256(),
+                byte_root,
+            },
+            &mut written,
+            scope.max_objects,
+        )?;
+        let descriptor = self.read_blob_descriptor(
+            &descriptor_oid,
+            scope,
+            &mut ObjectBudget::new(
+                scope.max_objects,
+                scope.max_objects,
+                Arc::clone(&scope.objects_used),
+                scope.metadata_quota,
+                Arc::clone(&scope.metadata_used),
+            ),
+        )?;
+        let reference = self.admit_blob(descriptor)?;
+        let objects = self.verify_full_blob(&reference, scope)?;
+        self.sync_object_closure(&objects, scope)?;
+
+        let pin_id = *crate::Uuid::new_v4().as_bytes();
+        let pin_hex = hex_encode(&pin_id);
+        let provisional_ref = format!("refs/orna/pins/pending/{pin_hex}");
+        if let Err(error) = self.create_protected_ref(&provisional_ref, &descriptor_oid) {
+            let _ = self.delete_protected_ref(&provisional_ref, &descriptor_oid);
+            return Err(error);
+        }
+        let cleanup = PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            provisional_ref,
+            descriptor_oid.clone(),
+        );
+        Ok(CapturedBlobCandidate {
+            context: self.identity,
+            repository_id: self.repository_id,
+            database_id: self.database_id,
+            owner_id: self.owner_id,
+            snapshot_id: self.snapshot_id,
+            algorithm: self.algorithm,
+            pin_id,
+            descriptor_oid,
+            identity,
+            cleanup,
+        })
+    }
+
     /// Reads one bounded half-open byte range from the descriptor's native Git
     /// graph. Returned bytes are unavailable until every intersecting chunk's
     /// native Git ID, length and raw SHA-256 have been checked.
@@ -891,35 +1130,78 @@ impl NativeGraphContext {
         let pin_hex = hex_encode(&pin_id);
         let protected_ref = format!("refs/orna/pins/{pin_hex}");
         let provisional_ref = format!("refs/orna/pins/pending/{pin_hex}");
-        if let Err(error) = self.create_protected_ref(&provisional_ref, &reference.descriptor_oid) {
-            let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
-            return Err(error);
+        let cleanup = PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            provisional_ref,
+            reference.descriptor_oid.clone(),
+        );
+        self.create_protected_ref(&cleanup.reference, &reference.descriptor_oid)?;
+        self.finish_protection(reference, pin_id, cleanup, protected_ref, scope)
+    }
+
+    /// Verifies and promotes a candidate produced by this exact graph owner.
+    /// The candidate is consumed, so it cannot be accepted twice.
+    pub fn protect_captured_blob(
+        &self,
+        candidate: CapturedBlobCandidate,
+        scope: &RepositoryReadScope,
+    ) -> Result<ProtectedContentPin, GraphError> {
+        let CapturedBlobCandidate {
+            context,
+            repository_id,
+            database_id,
+            owner_id,
+            snapshot_id,
+            algorithm,
+            pin_id,
+            descriptor_oid,
+            identity,
+            cleanup,
+        } = candidate;
+        if context != self.identity
+            || repository_id != self.repository_id
+            || database_id != self.database_id
+            || owner_id != self.owner_id
+            || snapshot_id != self.snapshot_id
+            || algorithm != self.algorithm
+            || !Arc::ptr_eq(&cleanup.owner, &self.private_ref_owner)
+            || cleanup.reference != format!("refs/orna/pins/pending/{}", hex_encode(&pin_id))
+            || cleanup.oid != descriptor_oid
+        {
+            return Err(GraphError::ContextMismatch);
         }
-        let objects = match self.verify_full_blob(reference, scope) {
-            Ok(objects) => objects,
-            Err(error) => {
-                // If cleanup fails, keeping an orphaned private ref is safer
-                // than exposing unverified bytes to concurrent collection.
-                let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
-                return Err(error);
-            }
+        let reference = AdmittedBlobReference {
+            context,
+            database_id,
+            owner_id,
+            snapshot_id,
+            descriptor_oid,
+            identity,
         };
-        if let Err(error) = self
-            .sync_object_closure(&objects, scope)
-            .and_then(|()| scope.check_cancelled())
-        {
-            let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
-            return Err(error);
-        }
-        if let Err(error) =
-            self.promote_protected_ref(&provisional_ref, &protected_ref, &reference.descriptor_oid)
-        {
-            let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
-            return Err(error);
-        }
+        scope.authorize(self)?;
+        let protected_ref = format!("refs/orna/pins/{}", hex_encode(&pin_id));
+        self.finish_protection(&reference, pin_id, cleanup, protected_ref, scope)
+    }
+
+    fn finish_protection(
+        &self,
+        reference: &AdmittedBlobReference,
+        pin_id: [u8; 16],
+        mut cleanup: PendingPrivateRefCleanup,
+        protected_ref: String,
+        scope: &RepositoryReadScope,
+    ) -> Result<ProtectedContentPin, GraphError> {
+        let objects = self.verify_full_blob(reference, scope)?;
+        self.sync_object_closure(&objects, scope)?;
+        scope.check_cancelled()?;
+        self.promote_protected_ref(
+            &cleanup.reference,
+            &protected_ref,
+            &reference.descriptor_oid,
+        )?;
+        cleanup.disarm();
         // If syncing the promoted ref fails, leave it rooted. Returning no pin
-        // is safe; deleting a possibly durable root here could expose objects
-        // to concurrent GC. The unissued ref is a recoverable orphan.
+        // is safe; deleting a possibly durable root could expose objects to GC.
         self.sync_git_ref(&protected_ref)?;
         ProtectedContentPin::issue_after_durable_ref(
             self.repository_id,
@@ -1423,19 +1705,86 @@ impl NativeGraphContext {
         NativeOid::from_hex(self.algorithm, hex)
     }
 
+    fn write_capture_object(
+        &self,
+        kind: &str,
+        bytes: &[u8],
+        written: &mut BTreeSet<NativeOid>,
+        object_limit: u64,
+    ) -> Result<NativeOid, GraphError> {
+        let mut child = self
+            .git_command()
+            .args(["hash-object", "-w", "-t", kind, "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        child
+            .stdin
+            .take()
+            .ok_or(GraphError::GitCommandFailed)?
+            .write_all(bytes)
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(GraphError::GitCommandFailed);
+        }
+        let hex = std::str::from_utf8(&output.stdout)
+            .map_err(|_| GraphError::GitObjectMalformed)?
+            .trim();
+        let oid = NativeOid::from_hex(self.algorithm, hex)?;
+        if !written.contains(&oid) && written.len() as u64 >= object_limit {
+            return Err(GraphError::InventoryQuotaExceeded);
+        }
+        written.insert(oid.clone());
+        Ok(oid)
+    }
+
+    fn write_capture_node(
+        &self,
+        node: &NodeData,
+        written: &mut BTreeSet<NativeOid>,
+        object_limit: u64,
+    ) -> Result<NativeOid, GraphError> {
+        let envelope = NativeNodeEnvelope::from_node(node)?;
+        if envelope.data.len() > NODE_DATA_LIMIT {
+            return Err(GraphError::NodeDataTooLarge(envelope.data.len()));
+        }
+        let data_oid = self.write_capture_object("blob", &envelope.data, written, object_limit)?;
+        let mut root_entries = vec![ParsedGitTreeEntry {
+            mode: b"100644".to_vec(),
+            name: b"data".to_vec(),
+            oid: data_oid,
+        }];
+        if !envelope.refs.is_empty() {
+            let mut refs_entries = Vec::with_capacity(envelope.refs.len());
+            for reference in envelope.refs {
+                refs_entries.push(ParsedGitTreeEntry {
+                    mode: match reference.kind {
+                        NativeObjectKind::Blob => b"100644".to_vec(),
+                        NativeObjectKind::Tree => b"40000".to_vec(),
+                    },
+                    name: reference.oid.to_hex().into_bytes(),
+                    oid: reference.oid,
+                });
+            }
+            let refs_bytes = encode_git_tree(refs_entries)?;
+            let refs_oid = self.write_capture_object("tree", &refs_bytes, written, object_limit)?;
+            root_entries.push(ParsedGitTreeEntry {
+                mode: b"40000".to_vec(),
+                name: b"refs".to_vec(),
+                oid: refs_oid,
+            });
+        }
+        let tree = encode_git_tree(root_entries)?;
+        self.write_capture_object("tree", &tree, written, object_limit)
+    }
+
     fn git_command(&self) -> Command {
-        let mut command = Command::new("git");
-        command
-            .current_dir(self.repository.worktree())
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_OBJECT_DIRECTORY")
-            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
-        command
+        self.private_ref_owner.git_command()
     }
 
     fn create_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
@@ -1480,8 +1829,8 @@ impl NativeGraphContext {
     }
 
     fn delete_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
-        self.git_output(&["update-ref", "-d", reference, &oid.to_hex()])?;
-        self.sync_ref_directories(reference)
+        self.private_ref_owner
+            .delete_protected_ref(reference, oid)
     }
 
     fn sync_git_ref(&self, reference: &str) -> Result<(), GraphError> {
@@ -1498,50 +1847,7 @@ impl NativeGraphContext {
     }
 
     fn sync_ref_directories(&self, reference: &str) -> Result<(), GraphError> {
-        let common_dir_output = self.git_output(&["rev-parse", "--git-common-dir"])?;
-        let common_dir = resolve_git_path(self.repository.worktree(), &common_dir_output)?;
-        let common_dir = fs::canonicalize(common_dir).map_err(|_| GraphError::DurabilityFailed)?;
-        let ref_path_output = self.git_output(&["rev-parse", "--git-path", reference])?;
-        let ref_path = resolve_git_path(self.repository.worktree(), &ref_path_output)?;
-        let mut directory = ref_path
-            .parent()
-            .ok_or(GraphError::DurabilityFailed)?
-            .to_path_buf();
-        let directory = loop {
-            match fs::canonicalize(&directory) {
-                Ok(directory) => break directory,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if !directory.pop() {
-                        return Err(GraphError::DurabilityFailed);
-                    }
-                }
-                Err(_) => return Err(GraphError::DurabilityFailed),
-            }
-        };
-        if !directory.starts_with(&common_dir) {
-            return Err(GraphError::DurabilityFailed);
-        }
-        let mut current = directory;
-        loop {
-            sync_directory(&current)?;
-            if current == common_dir || !current.pop() {
-                break;
-            }
-        }
-        let packed_refs = common_dir.join("packed-refs");
-        match fs::symlink_metadata(&packed_refs) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_file() {
-                    return Err(GraphError::DurabilityFailed);
-                }
-                File::open(&packed_refs)
-                    .and_then(|file| file.sync_all())
-                    .map_err(|_| GraphError::DurabilityFailed)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(GraphError::DurabilityFailed),
-        }
-        Ok(())
+        self.private_ref_owner.sync_ref_directories(reference)
     }
 
     fn sync_object_closure(
@@ -1769,6 +2075,227 @@ struct ParsedGitTreeEntry {
     mode: Vec<u8>,
     name: Vec<u8>,
     oid: NativeOid,
+}
+
+struct StreamingGearChunker {
+    table: [u64; 256],
+    accumulator: u64,
+    chunk: Vec<u8>,
+}
+
+impl StreamingGearChunker {
+    fn new() -> Self {
+        let mut table = [0u64; 256];
+        for (byte, slot) in table.iter_mut().enumerate() {
+            let mut hasher = Sha256::new();
+            hasher.update(crate::blob_store::GEAR_SEED);
+            hasher.update([byte as u8]);
+            *slot = u64::from_be_bytes(hasher.finalize()[..8].try_into().unwrap());
+        }
+        Self {
+            table,
+            accumulator: 0,
+            chunk: Vec::with_capacity(crate::blob_store::GEAR_MAXIMUM),
+        }
+    }
+
+    fn push(&mut self, byte: u8) -> Option<Vec<u8>> {
+        self.accumulator = self
+            .accumulator
+            .wrapping_shl(1)
+            .wrapping_add(self.table[byte as usize]);
+        self.chunk.push(byte);
+        let length = self.chunk.len();
+        if length >= crate::blob_store::GEAR_MINIMUM
+            && (self.accumulator & crate::blob_store::GEAR_MASK == 0
+                || length == crate::blob_store::GEAR_MAXIMUM)
+        {
+            self.accumulator = 0;
+            Some(std::mem::replace(
+                &mut self.chunk,
+                Vec::with_capacity(crate::blob_store::GEAR_MAXIMUM),
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn finish(self) -> Option<Vec<u8>> {
+        (!self.chunk.is_empty()).then_some(self.chunk)
+    }
+}
+
+struct CaptureIndexBuilder<'a> {
+    graph: &'a NativeGraphContext,
+    written: &'a mut BTreeSet<NativeOid>,
+    object_limit: u64,
+    scope: &'a RepositoryReadScope,
+    levels: Vec<Vec<ByteIndexEntry>>,
+}
+
+impl<'a> CaptureIndexBuilder<'a> {
+    fn new(
+        graph: &'a NativeGraphContext,
+        written: &'a mut BTreeSet<NativeOid>,
+        object_limit: u64,
+        scope: &'a RepositoryReadScope,
+    ) -> Self {
+        Self {
+            graph,
+            written,
+            object_limit,
+            scope,
+            levels: vec![Vec::new()],
+        }
+    }
+
+    fn push_chunk(
+        &mut self,
+        length: u64,
+        target: NativeOid,
+        chunk_sha256: [u8; 32],
+    ) -> Result<(), GraphError> {
+        self.push_entry(
+            0,
+            ByteIndexEntry {
+                span_length: length,
+                target,
+                chunk_sha256: Some(chunk_sha256),
+            },
+        )
+    }
+
+    fn push_chunk_bytes(&mut self, chunk: Vec<u8>) -> Result<(), GraphError> {
+        let length = chunk.len() as u64;
+        let chunk_sha256 = crate::blob_store::digest_bytes(&chunk).sha256();
+        let target = self.graph.write_capture_object(
+            "blob",
+            &chunk,
+            self.written,
+            self.object_limit,
+        )?;
+        self.push_chunk(length, target, chunk_sha256)
+    }
+
+    fn push_entry(&mut self, level: usize, entry: ByteIndexEntry) -> Result<(), GraphError> {
+        self.scope.check_cancelled()?;
+        if level > MAX_GRAPH_HEIGHT as usize {
+            return Err(GraphError::HeightExceeded(level as u8));
+        }
+        if self.levels.len() <= level {
+            self.levels.resize_with(level + 1, Vec::new);
+        }
+        let entries = &mut self.levels[level];
+        entries.push(entry);
+        let anchor = entries
+            .last()
+            .ok_or(GraphError::InvalidByteIndex)
+            .and_then(|entry| byte_index_anchor(level as u32, entry))?;
+        if entries.len() == MAX_REFS || (entries.len() >= 16 && anchor) {
+            self.flush_level(level)?;
+        }
+        Ok(())
+    }
+
+    fn flush_level(&mut self, level: usize) -> Result<(), GraphError> {
+        self.scope.check_cancelled()?;
+        let entries = std::mem::take(
+            self.levels
+                .get_mut(level)
+                .ok_or(GraphError::InvalidByteIndex)?,
+        );
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let total_length = entries.iter().try_fold(0u64, |total, entry| {
+            total
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)
+        })?;
+        let oid = self.graph.write_capture_node(
+            &NodeData::ByteIndex {
+                height: level as u8,
+                total_length,
+                entries,
+            },
+            self.written,
+            self.object_limit,
+        )?;
+        self.push_entry(
+            level + 1,
+            ByteIndexEntry {
+                span_length: total_length,
+                target: oid,
+                chunk_sha256: None,
+            },
+        )
+    }
+
+    fn finish(mut self) -> Result<Option<NativeOid>, GraphError> {
+        loop {
+            let Some(level) = self.levels.iter().position(|entries| !entries.is_empty()) else {
+                return Ok(None);
+            };
+            let only_top_entry = level > 0
+                && self.levels[level].len() == 1
+                && self.levels.iter().skip(level + 1).all(Vec::is_empty);
+            if only_top_entry {
+                return Ok(self.levels[level].first().map(|entry| entry.target.clone()));
+            }
+            self.flush_level(level)?;
+        }
+    }
+}
+
+fn byte_index_anchor(level: u32, entry: &ByteIndexEntry) -> Result<bool, GraphError> {
+    let mut token = Vec::new();
+    if level == 0 {
+        array(&mut token, 2);
+        uint(&mut token, entry.span_length);
+        bytes(
+            &mut token,
+            entry
+                .chunk_sha256
+                .as_ref()
+                .ok_or(GraphError::InvalidByteIndex)?,
+        );
+    } else {
+        if entry.chunk_sha256.is_some() {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        token.extend_from_slice(entry.target.as_bytes());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"orna.ogb.index.v2\0");
+    hasher.update(level.to_be_bytes());
+    hasher.update(token);
+    let digest = hasher.finalize();
+    Ok(digest[31] & 0x3f == 0)
+}
+
+fn encode_git_tree(mut entries: Vec<ParsedGitTreeEntry>) -> Result<Vec<u8>, GraphError> {
+    entries.sort_by(git_tree_cmp);
+    if entries.windows(2).any(|pair| {
+        git_tree_cmp(&pair[0], &pair[1]) != std::cmp::Ordering::Less
+    }) {
+        return Err(GraphError::InvalidTreeEnvelope);
+    }
+    let mut output = Vec::new();
+    for entry in entries {
+        if !matches!(entry.mode.as_slice(), b"100644" | b"40000")
+            || entry.name.is_empty()
+            || entry.name.contains(&0)
+            || entry.name.contains(&b'/')
+        {
+            return Err(GraphError::InvalidTreeEnvelope);
+        }
+        output.extend_from_slice(&entry.mode);
+        output.push(b' ');
+        output.extend_from_slice(&entry.name);
+        output.push(0);
+        output.extend_from_slice(entry.oid.as_bytes());
+    }
+    Ok(output)
 }
 
 const MAX_VERIFY_EDGES: u64 = 4_000_000;
@@ -2052,6 +2579,23 @@ impl ProtectedContentTransfer {
     pub const fn content_identity(&self) -> crate::blob_store::ContentIdentity {
         self.identity
     }
+}
+
+/// An opaque, owner-issued pre-row Blob candidate. It retains its provisional
+/// native ref until accepted through `protect_captured_blob`; dropping an
+/// unaccepted candidate removes that ref. Raw OIDs are not exposed as
+/// capture authority.
+pub struct CapturedBlobCandidate {
+    context: ContextIdentity,
+    repository_id: [u8; 32],
+    database_id: [u8; 16],
+    owner_id: [u8; 16],
+    snapshot_id: [u8; 32],
+    algorithm: GitHashAlgorithm,
+    pin_id: [u8; 16],
+    descriptor_oid: NativeOid,
+    identity: crate::blob_store::ContentIdentity,
+    cleanup: PendingPrivateRefCleanup,
 }
 
 /// Proof that a complete content closure was verified, flushed and rooted by
@@ -3536,6 +4080,151 @@ mod persisted_orp_tests {
     use super::*;
     use crate::row_store::{RowValue, TypedKey};
 
+    fn fixture_git_object(directory: &Path, kind: &str, content: &[u8]) -> NativeOid {
+        let mut child = Command::new("git")
+            .current_dir(directory)
+            .args(["hash-object", "-w", "-t", kind, "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn fixture hash-object");
+        child
+            .stdin
+            .take()
+            .expect("hash-object stdin")
+            .write_all(content)
+            .expect("write fixture object");
+        let output = child.wait_with_output().expect("wait for hash-object");
+        assert!(
+            output.status.success(),
+            "git hash-object failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        NativeOid::from_hex(
+            GitHashAlgorithm::Sha1,
+            std::str::from_utf8(&output.stdout)
+                .expect("hash-object prints UTF-8")
+                .trim(),
+        )
+        .expect("fixture object ID")
+    }
+
+    fn fixture_git_node(directory: &Path, node: &NodeData) -> NativeOid {
+        let envelope = NativeNodeEnvelope::from_node(node).expect("canonical fixture node");
+        let data = fixture_git_object(directory, "blob", &envelope.data);
+        let mut entries = vec![ParsedGitTreeEntry {
+            mode: b"100644".to_vec(),
+            name: b"data".to_vec(),
+            oid: data,
+        }];
+        if !envelope.refs.is_empty() {
+            let refs = envelope
+                .refs
+                .into_iter()
+                .map(|reference| ParsedGitTreeEntry {
+                    mode: match reference.kind {
+                        NativeObjectKind::Blob => b"100644".to_vec(),
+                        NativeObjectKind::Tree => b"40000".to_vec(),
+                    },
+                    name: reference.oid.to_hex().into_bytes(),
+                    oid: reference.oid,
+                })
+                .collect();
+            let refs = encode_git_tree(refs).expect("canonical refs tree");
+            entries.push(ParsedGitTreeEntry {
+                mode: b"40000".to_vec(),
+                name: b"refs".to_vec(),
+                oid: fixture_git_object(directory, "tree", &refs),
+            });
+        }
+        let tree = encode_git_tree(entries).expect("canonical node tree");
+        fixture_git_object(directory, "tree", &tree)
+    }
+
+    fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
+        let directory = tempfile::tempdir().expect("create capture repository");
+        let root = directory.path();
+        let init = Command::new("git")
+            .current_dir(root)
+            .args(["init", "--quiet", "--template="])
+            .status()
+            .expect("initialize capture repository");
+        assert!(init.success());
+
+        let schema_bytes = b"sealed capture test schema";
+        let schema_digest: [u8; 32] = Sha256::digest(schema_bytes).into();
+        let chunk = fixture_git_object(root, "blob", schema_bytes);
+        let byte_root = fixture_git_node(
+            root,
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: schema_bytes.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: schema_bytes.len() as u64,
+                    target: chunk,
+                    chunk_sha256: Some(schema_digest),
+                }],
+            },
+        );
+        let schema_oid = fixture_git_node(
+            root,
+            &NodeData::Schema {
+                encoded_length: schema_bytes.len() as u64,
+                schema_digest,
+                byte_root,
+            },
+        );
+
+        let algorithm = GitHashAlgorithm::Sha1;
+        let database_id = [0x31; 16];
+        let relation_id = [0x32; 16];
+        let store_root = NativeOid::new(algorithm, [0x33; 20]).expect("store-root fixture ID");
+        let schema_generation = crate::row_store::SchemaGeneration::issue(
+            database_id,
+            relation_id,
+            schema_oid,
+            schema_digest,
+            0,
+        );
+        let version = crate::row_store::RowMapVersion::issue(
+            database_id,
+            relation_id,
+            store_root.clone(),
+            schema_generation,
+            store_root.clone(),
+            0,
+            Some(0),
+        )
+        .expect("consistent fixture row-map version");
+        let snapshot = crate::row_store::RowMapSnapshot::issue(version, [0x34; 32], Vec::new())
+            .expect("sealed empty fixture row map");
+        let repository = crate::Repository::discover(root).expect("discover capture repository");
+        let graph = NativeGraphContext::issue(
+            repository,
+            [0x35; 32],
+            [0x36; 32],
+            database_id,
+            [0x37; 16],
+            [0x38; 32],
+            algorithm,
+            store_root,
+            schema_digest,
+            snapshot,
+        )
+        .expect("issue graph context after verifying fixture schema");
+        (directory, graph)
+    }
+
+    fn fixture_ref_exists(directory: &Path, reference: &str) -> bool {
+        Command::new("git")
+            .current_dir(directory)
+            .args(["show-ref", "--verify", "--quiet", reference])
+            .status()
+            .expect("inspect fixture ref")
+            .success()
+    }
+
     fn rows_domain(relation: [u8; 16], schema: [u8; 32]) -> Vec<u8> {
         let mut domain = vec![0x83, 0x64];
         domain.extend_from_slice(b"rows");
@@ -3744,6 +4433,94 @@ mod persisted_orp_tests {
             ));
         }
     }
+
+    #[test]
+    fn captured_blob_candidate_is_promoted_to_a_durable_pin() {
+        let (directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"captured Blob bytes";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pin_id = candidate.pin_id;
+        let pending_ref = format!("refs/orna/pins/pending/{}", hex_encode(&pin_id));
+
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("verify and accept captured candidate");
+
+        assert_eq!(
+            pin.content_identity(),
+            crate::blob_store::digest_bytes(payload)
+        );
+        assert!(fixture_ref_exists(directory.path(), pin.protected_ref()));
+        assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn cancelled_captured_candidate_cleans_its_provisional_ref() {
+        let (directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"candidate rejected before acceptance";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pending_ref = format!(
+            "refs/orna/pins/pending/{}",
+            hex_encode(&candidate.pin_id)
+        );
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
+
+        graph.cancel_reads();
+        assert!(matches!(
+            graph.protect_captured_blob(candidate, &scope),
+            Err(GraphError::ReadCancelled)
+        ));
+        assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn wrong_context_rejection_cleans_issuing_candidate_ref() {
+        let (issuing_directory, issuing_graph) = capture_test_context();
+        let (_other_directory, other_graph) = capture_test_context();
+        let issuing_scope = issuing_graph.open_read_scope().expect("issuing read scope");
+        let other_scope = other_graph.open_read_scope().expect("other read scope");
+        let payload = b"candidate belongs to issuing graph";
+        let candidate = issuing_graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &issuing_scope)
+            .expect("capture candidate under issuing graph");
+        let pending_ref = format!(
+            "refs/orna/pins/pending/{}",
+            hex_encode(&candidate.pin_id)
+        );
+        assert!(fixture_ref_exists(issuing_directory.path(), &pending_ref));
+
+        assert!(matches!(
+            other_graph.protect_captured_blob(candidate, &other_scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert!(!fixture_ref_exists(issuing_directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn abandoned_candidate_drops_its_provisional_ref() {
+        let (directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"candidate abandoned before acceptance";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture candidate");
+        let pending_ref = format!(
+            "refs/orna/pins/pending/{}",
+            hex_encode(&candidate.pin_id)
+        );
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
+
+        drop(candidate);
+
+        assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3784,6 +4561,7 @@ pub enum GraphError {
     GitObjectHashMismatch,
     ChunkTooLarge(u64),
     GitCommandFailed,
+    CaptureReadFailed,
     ObjectUnavailable,
     DurabilityFailed,
     ObjectDurabilityUnavailable,
@@ -3858,6 +4636,7 @@ impl fmt::Display for GraphError {
             }
             Self::ChunkTooLarge(size) => write!(f, "chunk size {size} exceeds OGB-2 bound"),
             Self::GitCommandFailed => f.write_str("required local Git command failed"),
+            Self::CaptureReadFailed => f.write_str("authorized Blob capture input failed"),
             Self::ObjectUnavailable => f.write_str("required native Git object is unavailable"),
             Self::DurabilityFailed => f.write_str("native graph durability sync failed"),
             Self::ObjectDurabilityUnavailable => {
