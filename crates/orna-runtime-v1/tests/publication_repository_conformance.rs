@@ -27,6 +27,11 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
 fn repository() -> (TempDir, Repository) {
     let directory = tempfile::tempdir().expect("temporary Git repository");
     git(directory.path(), &["init", "--quiet", "--initial-branch=main"]);
+    git(directory.path(), &["config", "user.name", "Orna Test"]);
+    git(
+        directory.path(),
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
     fs::write(directory.path().join("main.orna"), MAIN_SOURCE)
         .expect("write checked-in Orna source fixture");
     git(directory.path(), &["add", "main.orna"]);
