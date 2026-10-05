@@ -61,6 +61,8 @@ pub use activation::{
 mod checkpoint_bootstrap;
 mod catalogue;
 mod invocation;
+/// FUSE-free projected file and EDIT-1 replacement APIs for runtime owners.
+pub mod vfs;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
     CatalogueFunction, CatalogueFunctionDeclaration, CatalogueModule, CatalogueModuleDeclaration,
