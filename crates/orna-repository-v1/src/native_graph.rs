@@ -20,6 +20,8 @@ use std::{
     },
 };
 
+use sha2::{Digest, Sha256};
+
 pub const REPOSITORY_FORMAT: u8 = 3;
 pub const NODE_DATA_LIMIT: usize = 65_536;
 pub const MAX_REFS: usize = 256;
@@ -268,6 +270,440 @@ impl NativeGraphContext {
         self.cancelled.store(true, AtomicOrdering::Release);
     }
 
+    /// Performs one bounded logical-key lookup against this context's pinned
+    /// primary ORP root. The key is a logical typed key, not a native OID.
+    pub fn lookup_row(
+        &self,
+        key: &crate::row_store::TypedKey,
+        scope: &RepositoryReadScope,
+    ) -> Result<Option<crate::row_store::AdmittedRow>, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+        let root = version.primary_root().clone();
+        let domain = rows_domain_for_version(version);
+        let entry = {
+            let mut objects = ObjectBudget::new(
+                scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+                scope.max_objects,
+                Arc::clone(&scope.objects_used),
+                scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+                Arc::clone(&scope.metadata_used),
+            );
+            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+            let root_node = read_node(&root)?;
+            validate_ordered_root_node(&root_node, &domain, expected_count)?;
+            find_ordered_entry_with(&mut read_node, root_node, &domain, None, None, key)?
+        };
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let value = self.decode_persisted_row_value(entry.value, scope, &mut objects)?;
+        Ok(Some(crate::row_store::AdmittedRow::issue(
+            version, key, value,
+        )))
+    }
+
+    /// Reads a bounded logical-key interval from the pinned primary ORP root.
+    /// The result cap is part of `KeyRange`; object and metadata budgets are
+    /// fixed by the owner-issued read scope.
+    pub fn range_rows(
+        &self,
+        range: &crate::row_store::KeyRange,
+        scope: &RepositoryReadScope,
+    ) -> Result<Vec<crate::row_store::AdmittedRow>, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+        let root = version.primary_root().clone();
+        let domain = rows_domain_for_version(version);
+        let entries = {
+            let mut objects = ObjectBudget::new(
+                scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+                scope.max_objects,
+                Arc::clone(&scope.objects_used),
+                scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+                Arc::clone(&scope.metadata_used),
+            );
+            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+            let root_node = read_node(&root)?;
+            validate_ordered_root_node(&root_node, &domain, expected_count)?;
+            let mut entries = Vec::with_capacity(range.limit());
+            collect_ordered_range_with(
+                &mut read_node,
+                root_node,
+                &domain,
+                None,
+                None,
+                range.lower_inclusive(),
+                range.upper_exclusive(),
+                range.limit(),
+                &mut entries,
+            )?;
+            entries
+        };
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        entries
+            .into_iter()
+            .map(|entry| {
+                let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                let value = self.decode_persisted_row_value(entry.value, scope, &mut objects)?;
+                Ok(crate::row_store::AdmittedRow::issue(version, key, value))
+            })
+            .collect()
+    }
+
+    fn decode_persisted_row_value(
+        &self,
+        encoded: Vec<u8>,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+    ) -> Result<crate::row_store::RowValue, GraphError> {
+        let value = decode_canonical_cbor(&encoded)?;
+        let row_value = match &value {
+            CborValue::Tag(60113, payload) => {
+                let oid = overflow_tag_oid(payload, self.algorithm)?;
+                let verified =
+                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new())?;
+                crate::row_store::RowValue::overflow(verified.reference)
+            }
+            CborValue::Array(_) => {
+                let mut overflow_oids = BTreeSet::new();
+                collect_overflow_oids(&value, self.algorithm, &mut overflow_oids)?;
+                for oid in overflow_oids {
+                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new())?;
+                }
+                crate::row_store::RowValue::decode_canonical_fields(encoded)
+                    .map_err(|_| GraphError::NonCanonicalData)?
+            }
+            _ => return Err(GraphError::NonCanonicalData),
+        };
+
+        if matches!(&row_value, crate::row_store::RowValue::Overflow(_)) {
+            return Ok(row_value);
+        }
+
+        for dependency in row_value.dependencies() {
+            if dependency.kind() != NativeObjectKind::Tree {
+                return Err(GraphError::WrongReferenceKind);
+            }
+            let node = self.read_native_node(dependency.oid(), scope, objects)?;
+            match node {
+                NodeData::BlobDescriptor { .. } => {}
+                NodeData::ValueOverflow { .. } => {} // Nested overflow was verified above.
+                other => {
+                    return Err(GraphError::WrongNodeKind {
+                        expected: NodeKind::BlobDescriptor,
+                        actual: other.kind(),
+                    });
+                }
+            }
+        }
+        Ok(row_value)
+    }
+
+    fn verify_value_overflow(
+        &self,
+        oid: &NativeOid,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+        active: &mut BTreeSet<NativeOid>,
+    ) -> Result<VerifiedValueOverflow, GraphError> {
+        if !active.insert(oid.clone()) {
+            return Err(GraphError::ContextMismatch);
+        }
+        let result = (|| {
+            let node = self.read_native_node(oid, scope, objects)?;
+            let NodeData::ValueOverflow {
+                encoded_length,
+                semantic_digest,
+                byte_root,
+                dependency_root,
+            } = node
+            else {
+                return Err(GraphError::WrongNodeKind {
+                    expected: NodeKind::ValueOverflow,
+                    actual: node.kind(),
+                });
+            };
+            if encoded_length > crate::row_store::ROW_CANONICAL_LIMIT as u64 {
+                return Err(GraphError::InvalidLength(encoded_length));
+            }
+            objects.record_metadata(encoded_length)?;
+            let capacity = usize::try_from(encoded_length)
+                .map_err(|_| GraphError::InvalidLength(encoded_length))?;
+            let mut encoded = Vec::new();
+            encoded
+                .try_reserve_exact(capacity)
+                .map_err(|_| GraphError::ReadQuotaExceeded)?;
+            self.read_full_index_bytes(
+                &byte_root,
+                encoded_length,
+                None,
+                scope,
+                objects,
+                &mut encoded,
+            )?;
+            if encoded.len() as u64 != encoded_length {
+                return Err(GraphError::ContentIdentityMismatch);
+            }
+            let rov_value = decode_canonical_content(&encoded)?;
+            let sov_value = self.to_sov_value(rov_value.clone(), scope, objects, active)?;
+            let semantic_bytes = canonical_value_bytes(&sov_value);
+            let actual_digest: [u8; 32] = Sha256::digest(&semantic_bytes).into();
+            if actual_digest != semantic_digest {
+                return Err(GraphError::ContentIdentityMismatch);
+            }
+
+            let mut expected_dependencies = BTreeMap::new();
+            collect_row_dependencies(&rov_value, &mut expected_dependencies)?;
+            let actual_dependencies = match &dependency_root {
+                Some(root) => self.read_dependency_index(root, scope, objects)?,
+                None => BTreeSet::new(),
+            };
+            if expected_dependencies
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != actual_dependencies
+            {
+                return Err(GraphError::ContextMismatch);
+            }
+            for dependency in actual_dependencies {
+                let dependency_node = self.read_native_node(&dependency, scope, objects)?;
+                match dependency_node {
+                    NodeData::BlobDescriptor { .. } => {}
+                    NodeData::ValueOverflow { .. } => {
+                        self.verify_value_overflow(&dependency, scope, objects, active)?;
+                    }
+                    other => {
+                        return Err(GraphError::WrongNodeKind {
+                            expected: NodeKind::BlobDescriptor,
+                            actual: other.kind(),
+                        });
+                    }
+                }
+            }
+            let reference = crate::row_store::ValueOverflowRef::from_native_node(
+                oid.clone(),
+                encoded_length,
+                semantic_digest,
+                byte_root,
+                dependency_root,
+            )
+            .map_err(|_| GraphError::NonCanonicalData)?;
+            Ok(VerifiedValueOverflow {
+                reference,
+                semantic_value: sov_value,
+            })
+        })();
+        active.remove(oid);
+        result
+    }
+
+    fn to_sov_value(
+        &self,
+        value: CborValue,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+        active: &mut BTreeSet<NativeOid>,
+    ) -> Result<CborValue, GraphError> {
+        match value {
+            CborValue::Tag(60111, payload) => {
+                let CborValue::Array(fields) = *payload else {
+                    return Err(GraphError::NonCanonicalData);
+                };
+                if fields.len() != 5
+                    || !matches!(fields.first(), Some(CborValue::Unsigned(length)) if *length <= MAX_SIGNED_LENGTH)
+                    || !matches!(fields.get(1), Some(CborValue::Bytes(digest)) if digest.len() == 32)
+                    || !matches!(fields.get(2), Some(CborValue::Text(_)))
+                    || !matches!(fields.get(3), Some(CborValue::Null | CborValue::Text(_)))
+                    || !matches!(fields.get(4), Some(CborValue::Bytes(oid)) if oid.len() == self.algorithm.width())
+                {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                Ok(CborValue::Tag(
+                    60112,
+                    Box::new(CborValue::Array(fields.into_iter().take(4).collect())),
+                ))
+            }
+            CborValue::Tag(60113, payload) => {
+                let oid = overflow_tag_oid(&payload, self.algorithm)?;
+                Ok(self
+                    .verify_value_overflow(&oid, scope, objects, active)?
+                    .semantic_value)
+            }
+            CborValue::Array(values) => Ok(CborValue::Array(
+                values
+                    .into_iter()
+                    .map(|value| self.to_sov_value(value, scope, objects, active))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            CborValue::Map(entries) => {
+                let mut transformed = entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        Ok((
+                            self.to_sov_value(key, scope, objects, active)?,
+                            self.to_sov_value(value, scope, objects, active)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, GraphError>>()?;
+                transformed.sort_by_cached_key(|(key, _)| canonical_value_bytes(key));
+                if transformed.windows(2).any(|pair| {
+                    canonical_value_bytes(&pair[0].0) == canonical_value_bytes(&pair[1].0)
+                }) {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                Ok(CborValue::Map(transformed))
+            }
+            CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+            scalar => Ok(scalar),
+        }
+    }
+
+    fn read_dependency_index(
+        &self,
+        root: &NativeOid,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+    ) -> Result<BTreeSet<NativeOid>, GraphError> {
+        let mut output = BTreeSet::new();
+        let mut previous = None;
+        self.walk_dependency_index(root, None, scope, objects, &mut previous, &mut output)?;
+        if output.is_empty() {
+            return Err(GraphError::ContextMismatch);
+        }
+        Ok(output)
+    }
+
+    fn walk_dependency_index(
+        &self,
+        oid: &NativeOid,
+        expected_height: Option<u8>,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+        previous: &mut Option<NativeOid>,
+        output: &mut BTreeSet<NativeOid>,
+    ) -> Result<(), GraphError> {
+        let node = self.read_native_node(oid, scope, objects)?;
+        let NodeData::DependencyIndex { height, children } = node else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::DependencyIndex,
+                actual: node.kind(),
+            });
+        };
+        if expected_height.is_some_and(|expected| expected != height) {
+            return Err(GraphError::InvalidDomain);
+        }
+        for child in children {
+            if height == 0 {
+                if previous.as_ref().is_some_and(|last| last >= &child) {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                *previous = Some(child.clone());
+                output.insert(child);
+            } else {
+                self.walk_dependency_index(
+                    &child,
+                    Some(height - 1),
+                    scope,
+                    objects,
+                    previous,
+                    output,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn read_full_index_bytes(
+        &self,
+        oid: &NativeOid,
+        expected_length: u64,
+        expected_height: Option<u8>,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+        output: &mut Vec<u8>,
+    ) -> Result<u8, GraphError> {
+        let node = self.read_native_node(oid, scope, objects)?;
+        let NodeData::ByteIndex {
+            height,
+            total_length,
+            entries,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::ByteIndex,
+                actual: node.kind(),
+            });
+        };
+        if total_length != expected_length
+            || expected_height.is_some_and(|expected| expected != height)
+        {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        let mut sum = 0u64;
+        for entry in entries {
+            scope.check_cancelled()?;
+            sum = sum
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            if height == 0 {
+                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+                    return Err(GraphError::InvalidByteIndex);
+                }
+                let reservation = scope.reserve_payload(entry.span_length)?;
+                let chunk = self.read_git_object(
+                    NativeObjectKind::Blob,
+                    &entry.target,
+                    crate::blob_store::GEAR_MAXIMUM as u64,
+                    scope,
+                    objects,
+                )?;
+                if chunk.len() as u64 != entry.span_length
+                    || entry.chunk_sha256 != Some(crate::blob_store::digest_bytes(&chunk).sha256())
+                {
+                    return Err(GraphError::ChunkDigestMismatch);
+                }
+                output
+                    .try_reserve(chunk.len())
+                    .map_err(|_| GraphError::ReadQuotaExceeded)?;
+                output.extend_from_slice(&chunk);
+                reservation.commit(entry.span_length);
+            } else {
+                self.read_full_index_bytes(
+                    &entry.target,
+                    entry.span_length,
+                    Some(height - 1),
+                    scope,
+                    objects,
+                    output,
+                )?;
+            }
+        }
+        if sum != total_length {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        Ok(height)
+    }
+
     pub const fn algorithm(&self) -> GitHashAlgorithm {
         self.algorithm
     }
@@ -336,11 +772,12 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
     ) -> Result<AdmittedBlobReference, GraphError> {
         scope.authorize(self)?;
+        let persisted_row = self.lookup_row(row.key(), scope)?;
         if row.version().database_id() != &self.database_id
             || row.version().store_root() != &self.store_root
             || row.version().schema().schema_digest() != &self.schema_digest
             || descriptor_oid.algorithm() != self.algorithm
-            || self.row_snapshot.get(row.key()).as_ref() != Some(row)
+            || persisted_row.as_ref() != Some(row)
         {
             return Err(GraphError::ContextMismatch);
         }
@@ -1985,6 +2422,7 @@ impl NodeData {
             Self::OrderedLeaf { domain, entries } => {
                 check_domain(domain)?;
                 check_count(entries.len())?;
+                check_leaf_key_order(domain, entries)?;
                 array(&mut output, 4);
                 uint(&mut output, 1);
                 uint(&mut output, 1);
@@ -2006,6 +2444,7 @@ impl NodeData {
                 check_domain(domain)?;
                 check_height(*height)?;
                 check_count(entries.len())?;
+                check_branch_fence_order(domain, entries)?;
                 array(&mut output, 5);
                 uint(&mut output, 1);
                 uint(&mut output, 2);
@@ -2098,6 +2537,12 @@ impl NodeData {
             Self::DependencyIndex { height, children } => {
                 check_height(*height)?;
                 check_count(children.len())?;
+                if children
+                    .windows(2)
+                    .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+                {
+                    return Err(GraphError::NonCanonicalData);
+                }
                 array(&mut output, 4);
                 uint(&mut output, 1);
                 uint(&mut output, 7);
@@ -2284,6 +2729,803 @@ pub(crate) fn validate_native_node(
     Ok(data)
 }
 
+/// Loads one relation's sealed ORP identity from the pinned format-3 store.
+/// Rows are not materialized here: lookup/range operations traverse the
+/// selected primary map lazily through the issued NativeGraphContext.
+pub(crate) fn load_format3_row_map(
+    repository: &crate::Repository,
+    algorithm: GitHashAlgorithm,
+    store_root: NativeObjectId,
+    database_id: [u8; 16],
+    snapshot_id: [u8; 32],
+    relation_id: [u8; 16],
+) -> Result<crate::row_store::RowMapSnapshot, GraphError> {
+    if store_root.algorithm() != algorithm {
+        return Err(GraphError::InvalidOidWidth {
+            expected: algorithm.width(),
+            actual: store_root.as_bytes().len(),
+        });
+    }
+    let mut reader = PinnedNativeGraphReader::new(repository.clone(), algorithm);
+    let root = reader.read_native_node(&store_root)?;
+    let NodeData::StoreRoot { relation_map } = root else {
+        return Err(GraphError::WrongNodeKind {
+            expected: NodeKind::StoreRoot,
+            actual: root.kind(),
+        });
+    };
+    let relations_domain = canonical_domain(vec![
+        CborValue::Text("relations".to_owned()),
+        CborValue::Bytes(database_id.to_vec()),
+    ]);
+    let relation_key = crate::row_store::TypedKey::Bytes(relation_id.to_vec());
+    let relation = reader
+        .find_ordered_entry(&relation_map, &relations_domain, &relation_key)?
+        .ok_or(GraphError::ContextMismatch)?;
+    let (schema_oid, primary_root, secondary_root, row_count) =
+        decode_relation_value(&relation.value, algorithm)?;
+
+    // The current profile does not define a complete secondary-domain tuple
+    // beyond requiring ORP-1 pages. Do not silently admit an unrecognized
+    // index domain against this row root.
+    if secondary_root.is_some() {
+        return Err(GraphError::InvalidDomain);
+    }
+
+    let schema_node = reader.read_native_node(&schema_oid)?;
+    let NodeData::Schema {
+        encoded_length,
+        schema_digest,
+        byte_root,
+    } = schema_node
+    else {
+        return Err(GraphError::WrongNodeKind {
+            expected: NodeKind::Schema,
+            actual: schema_node.kind(),
+        });
+    };
+    reader.verify_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+
+    let rows_domain = canonical_domain(vec![
+        CborValue::Text("rows".to_owned()),
+        CborValue::Bytes(relation_id.to_vec()),
+        CborValue::Bytes(schema_digest.to_vec()),
+    ]);
+    reader.validate_map_root(&primary_root, &rows_domain, row_count)?;
+
+    let generation = u64::from_be_bytes(snapshot_id[..8].try_into().unwrap_or([0; 8]));
+    let schema = crate::row_store::SchemaGeneration::issue(
+        database_id,
+        relation_id,
+        schema_oid,
+        schema_digest,
+        generation,
+    );
+    let version = crate::row_store::RowMapVersion::issue(
+        database_id,
+        relation_id,
+        store_root.clone(),
+        schema,
+        primary_root,
+        generation,
+        Some(row_count),
+    )
+    .map_err(|_| GraphError::ContextMismatch)?;
+    let mut authority = Sha256::new();
+    authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
+    authority.update(database_id);
+    authority.update(snapshot_id);
+    authority.update(store_root.as_bytes());
+    authority.update(relation_id);
+    authority.update(version.primary_root().as_bytes());
+    authority.update(schema_digest);
+    authority.update(row_count.to_be_bytes());
+    crate::row_store::RowMapSnapshot::issue_lazy(version, authority.finalize().into())
+        .map_err(|_| GraphError::ContextMismatch)
+}
+
+fn canonical_domain(fields: Vec<CborValue>) -> Vec<u8> {
+    canonical_value_bytes(&CborValue::Array(fields))
+}
+
+fn decode_relation_value(
+    encoded: &[u8],
+    algorithm: GitHashAlgorithm,
+) -> Result<(NativeObjectId, NativeObjectId, Option<NativeObjectId>, u64), GraphError> {
+    let CborValue::Array(fields) = decode_canonical_cbor(encoded)? else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    if fields.len() != 4 {
+        return Err(GraphError::NonCanonicalData);
+    }
+    let decode_oid = |value: Option<&CborValue>| -> Result<NativeObjectId, GraphError> {
+        let CborValue::Bytes(bytes) = value.ok_or(GraphError::NonCanonicalData)? else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        NativeObjectId::new(algorithm, bytes)
+    };
+    let schema_oid = decode_oid(fields.first())?;
+    let primary_root = decode_oid(fields.get(1))?;
+    let secondary_root = match fields.get(2).ok_or(GraphError::NonCanonicalData)? {
+        CborValue::Null => None,
+        CborValue::Bytes(bytes) => Some(NativeObjectId::new(algorithm, bytes)?),
+        _ => return Err(GraphError::NonCanonicalData),
+    };
+    let Some(CborValue::Unsigned(row_count)) = fields.get(3) else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    if *row_count > MAX_SIGNED_LENGTH {
+        return Err(GraphError::InvalidLength(*row_count));
+    }
+    Ok((schema_oid, primary_root, secondary_root, *row_count))
+}
+
+struct PinnedNativeGraphReader {
+    repository: crate::Repository,
+    algorithm: GitHashAlgorithm,
+    seen: BTreeSet<NativeObjectId>,
+    metadata_bytes: u64,
+}
+
+impl PinnedNativeGraphReader {
+    fn new(repository: crate::Repository, algorithm: GitHashAlgorithm) -> Self {
+        Self {
+            repository,
+            algorithm,
+            seen: BTreeSet::new(),
+            metadata_bytes: 0,
+        }
+    }
+
+    fn validate_map_root(
+        &mut self,
+        root: &NativeObjectId,
+        expected_domain: &[u8],
+        expected_count: u64,
+    ) -> Result<(), GraphError> {
+        let root_node = self.read_native_node(root)?;
+        match root_node {
+            NodeData::OrderedLeaf { domain, entries } => {
+                if domain != expected_domain || entries.len() as u64 != expected_count {
+                    return Err(GraphError::InvalidCount(entries.len()));
+                }
+            }
+            NodeData::OrderedBranch {
+                domain, entries, ..
+            } => {
+                if domain != expected_domain || entries.len() == 1 {
+                    return Err(GraphError::InvalidDomain);
+                }
+                let count = entries.iter().try_fold(0u64, |sum, entry| {
+                    sum.checked_add(entry.row_count)
+                        .filter(|count| *count <= MAX_SIGNED_LENGTH)
+                        .ok_or(GraphError::InvalidCount(usize::MAX))
+                })?;
+                if count != expected_count {
+                    return Err(GraphError::InvalidCount(
+                        usize::try_from(count).unwrap_or(usize::MAX),
+                    ));
+                }
+            }
+            actual => {
+                return Err(GraphError::WrongNodeKind {
+                    expected: NodeKind::OrderedLeaf,
+                    actual: actual.kind(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn find_ordered_entry(
+        &mut self,
+        root: &NativeObjectId,
+        expected_domain: &[u8],
+        key: &crate::row_store::TypedKey,
+    ) -> Result<Option<OrderedLeafEntry>, GraphError> {
+        let node = self.read_native_node(root)?;
+        let mut read_node = |oid: &NativeOid| self.read_native_node(oid);
+        find_ordered_entry_with(&mut read_node, node, expected_domain, None, None, key)
+    }
+
+    fn read_native_node(&mut self, oid: &NativeObjectId) -> Result<NodeData, GraphError> {
+        if oid.algorithm() != self.algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: self.algorithm.width(),
+                actual: oid.as_bytes().len(),
+            });
+        }
+        let tree = self.read_object(NativeObjectKind::Tree, oid, MAX_INDEXED_TREE_BYTES)?;
+        let entries = parse_git_tree(&tree, self.algorithm, 2)?;
+        let mut data_oid = None;
+        let mut refs_oid = None;
+        for entry in entries {
+            match entry.name.as_slice() {
+                b"data" if entry.mode.as_slice() == b"100644" => data_oid = Some(entry.oid),
+                b"refs" if entry.mode.as_slice() == b"40000" => refs_oid = Some(entry.oid),
+                _ => return Err(GraphError::InvalidTreeEnvelope),
+            }
+        }
+        let data = self.read_object(
+            NativeObjectKind::Blob,
+            &data_oid.ok_or(GraphError::MissingNodeData)?,
+            NODE_DATA_LIMIT as u64,
+        )?;
+        let mut refs = Vec::new();
+        if let Some(refs_oid) = refs_oid {
+            let raw_refs =
+                self.read_object(NativeObjectKind::Tree, &refs_oid, MAX_INDEXED_TREE_BYTES)?;
+            for entry in parse_git_tree(&raw_refs, self.algorithm, MAX_REFS)? {
+                let name =
+                    std::str::from_utf8(&entry.name).map_err(|_| GraphError::MalformedOid)?;
+                let named_oid = NativeOid::from_hex(self.algorithm, name)?;
+                if named_oid != entry.oid {
+                    return Err(GraphError::MalformedReferenceName);
+                }
+                let kind = match entry.mode.as_slice() {
+                    b"100644" => NativeObjectKind::Blob,
+                    b"40000" => NativeObjectKind::Tree,
+                    _ => return Err(GraphError::WrongReferenceKind),
+                };
+                refs.push(NativeRefEntry::new(named_oid, kind));
+            }
+        }
+        validate_native_node(
+            &ValidatedRepositoryContext {
+                algorithm: self.algorithm,
+            },
+            &NativeNodeEnvelope::new(data, refs),
+        )
+    }
+
+    fn read_object(
+        &mut self,
+        kind: NativeObjectKind,
+        oid: &NativeObjectId,
+        maximum: u64,
+    ) -> Result<Vec<u8>, GraphError> {
+        if oid.algorithm() != self.algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: self.algorithm.width(),
+                actual: oid.as_bytes().len(),
+            });
+        }
+        let hex = oid.to_hex();
+        let kind_output = self.git_output(&["cat-file", "-t", &hex])?;
+        let actual_kind = match kind_output.as_slice() {
+            b"tree\n" => NativeObjectKind::Tree,
+            b"blob\n" => NativeObjectKind::Blob,
+            _ => return Err(GraphError::UnsupportedGitObjectType),
+        };
+        if actual_kind != kind {
+            return Err(GraphError::WrongObjectKind {
+                expected: kind,
+                actual: actual_kind,
+            });
+        }
+        let size_output = self.git_output(&["cat-file", "-s", &hex])?;
+        let size = std::str::from_utf8(&size_output)
+            .map_err(|_| GraphError::GitObjectMalformed)?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| GraphError::GitObjectMalformed)?;
+        if size > maximum {
+            return Err(GraphError::NodeDataTooLarge(
+                usize::try_from(size).unwrap_or(usize::MAX),
+            ));
+        }
+        if self.seen.insert(oid.clone()) {
+            if self.seen.len() as u64 > MAX_FULL_VERIFY_OBJECTS {
+                return Err(GraphError::InventoryQuotaExceeded);
+            }
+            self.metadata_bytes = self
+                .metadata_bytes
+                .checked_add(size)
+                .ok_or(GraphError::MetadataQuotaExceeded)?;
+            if self.metadata_bytes > MAX_FULL_METADATA_BYTES {
+                return Err(GraphError::MetadataQuotaExceeded);
+            }
+        }
+        let type_name = match kind {
+            NativeObjectKind::Tree => "tree",
+            NativeObjectKind::Blob => "blob",
+        };
+        let output = self.git_output(&["cat-file", type_name, &hex])?;
+        if output.len() as u64 != size {
+            return Err(GraphError::GitObjectMalformed);
+        }
+        let hash = self.hash_object(type_name, &output)?;
+        if hash != *oid {
+            return Err(GraphError::GitObjectHashMismatch);
+        }
+        Ok(output)
+    }
+
+    fn verify_full_byte_index(
+        &mut self,
+        root: &NativeObjectId,
+        expected_length: u64,
+        expected_digest: [u8; 32],
+    ) -> Result<(), GraphError> {
+        let mut hasher = Sha256::new();
+        let (length, _) = self.walk_byte_index(root, None, &mut hasher)?;
+        let digest: [u8; 32] = hasher.finalize().into();
+        if length != expected_length || digest != expected_digest {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        Ok(())
+    }
+
+    fn walk_byte_index(
+        &mut self,
+        oid: &NativeObjectId,
+        expected_height: Option<u8>,
+        hasher: &mut Sha256,
+    ) -> Result<(u64, u8), GraphError> {
+        let node = self.read_native_node(oid)?;
+        let NodeData::ByteIndex {
+            height,
+            total_length,
+            entries,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::ByteIndex,
+                actual: node.kind(),
+            });
+        };
+        if expected_height.is_some_and(|expected| expected != height) {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        let mut total = 0u64;
+        for entry in entries {
+            if height == 0 {
+                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+                    return Err(GraphError::InvalidByteIndex);
+                }
+                let chunk = self.read_object(
+                    NativeObjectKind::Blob,
+                    &entry.target,
+                    crate::blob_store::GEAR_MAXIMUM as u64,
+                )?;
+                let chunk_digest: [u8; 32] = Sha256::digest(&chunk).into();
+                if chunk.len() as u64 != entry.span_length
+                    || entry.chunk_sha256 != Some(chunk_digest)
+                {
+                    return Err(GraphError::ChunkDigestMismatch);
+                }
+                hasher.update(&chunk);
+            } else {
+                let (child_length, child_height) =
+                    self.walk_byte_index(&entry.target, Some(height - 1), hasher)?;
+                if child_length != entry.span_length || child_height + 1 != height {
+                    return Err(GraphError::InvalidByteIndex);
+                }
+            }
+            total = total
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)?;
+        }
+        if total != total_length {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        Ok((total, height))
+    }
+
+    fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, GraphError> {
+        let output = self
+            .git_command()
+            .args(args)
+            .output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(if args.first() == Some(&"cat-file") {
+                GraphError::UnknownObjectAvailability
+            } else {
+                GraphError::GitCommandFailed
+            });
+        }
+        Ok(output.stdout)
+    }
+
+    fn hash_object(&self, kind: &str, data: &[u8]) -> Result<NativeObjectId, GraphError> {
+        let mut child = self
+            .git_command()
+            .args(["hash-object", "-t", kind, "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        child
+            .stdin
+            .take()
+            .ok_or(GraphError::GitCommandFailed)?
+            .write_all(data)
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(GraphError::GitCommandFailed);
+        }
+        let hex = std::str::from_utf8(&output.stdout)
+            .map_err(|_| GraphError::GitObjectMalformed)?
+            .trim();
+        NativeObjectId::from_hex(self.algorithm, hex)
+    }
+
+    fn git_command(&self) -> Command {
+        let mut command = Command::new("git");
+        command
+            .current_dir(self.repository.worktree())
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        command
+    }
+}
+
+fn find_ordered_entry_with(
+    read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
+    node: NodeData,
+    expected_domain: &[u8],
+    expected_height: Option<u8>,
+    lower_exclusive: Option<&crate::row_store::TypedKey>,
+    key: &crate::row_store::TypedKey,
+) -> Result<Option<OrderedLeafEntry>, GraphError> {
+    match node {
+        NodeData::OrderedLeaf { domain, entries } => {
+            if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
+                return Err(GraphError::InvalidDomain);
+            }
+            let mut decoded: Vec<(crate::row_store::TypedKey, &OrderedLeafEntry)> =
+                Vec::with_capacity(entries.len());
+            for entry in &entries {
+                let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                if decoded.last().is_some_and(|(last, _)| last >= &entry_key) {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                decoded.push((entry_key, entry));
+            }
+            if lower_exclusive
+                .is_some_and(|lower| decoded.first().is_some_and(|(minimum, _)| minimum <= lower))
+            {
+                return Err(GraphError::NonCanonicalData);
+            }
+            Ok(decoded
+                .binary_search_by(|(candidate, _)| candidate.cmp(key))
+                .ok()
+                .map(|index| decoded[index].1.clone()))
+        }
+        NodeData::OrderedBranch {
+            domain,
+            height,
+            entries,
+        } => {
+            if domain != expected_domain
+                || height == 0
+                || expected_height.is_some_and(|expected| expected != height)
+                || entries.is_empty()
+            {
+                return Err(GraphError::InvalidDomain);
+            }
+            let bounds = ordered_node_bounds_with(
+                read_node,
+                NodeData::OrderedBranch {
+                    domain: domain.clone(),
+                    height,
+                    entries: entries.clone(),
+                },
+                expected_domain,
+                expected_height,
+            )?;
+            if lower_exclusive.is_some_and(|lower| bounds.1 <= *lower) {
+                return Err(GraphError::NonCanonicalData);
+            }
+            let mut previous_fence = None;
+            for entry in &entries {
+                let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                if key <= &fence {
+                    let child = read_node(&entry.child)?;
+                    let child_bounds = ordered_node_bounds_with(
+                        read_node,
+                        child.clone(),
+                        expected_domain,
+                        Some(height - 1),
+                    )?;
+                    if child_bounds.0 != entry.row_count
+                        || child_bounds.2 != fence
+                        || previous_fence
+                            .as_ref()
+                            .is_some_and(|previous| child_bounds.1 <= *previous)
+                    {
+                        return Err(GraphError::InvalidCount(
+                            usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
+                        ));
+                    }
+                    return find_ordered_entry_with(
+                        read_node,
+                        child,
+                        expected_domain,
+                        Some(height - 1),
+                        previous_fence.as_ref(),
+                        key,
+                    );
+                }
+                previous_fence = Some(fence);
+            }
+            Ok(None)
+        }
+        other => Err(GraphError::WrongNodeKind {
+            expected: NodeKind::OrderedLeaf,
+            actual: other.kind(),
+        }),
+    }
+}
+
+fn ordered_node_bounds_with(
+    read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
+    node: NodeData,
+    expected_domain: &[u8],
+    expected_height: Option<u8>,
+) -> Result<(u64, crate::row_store::TypedKey, crate::row_store::TypedKey), GraphError> {
+    match node {
+        NodeData::OrderedLeaf { domain, entries } => {
+            if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
+                return Err(GraphError::InvalidDomain);
+            }
+            let first = entries.first().ok_or(GraphError::InvalidCount(0))?;
+            let last = entries.last().ok_or(GraphError::InvalidCount(0))?;
+            let minimum = crate::row_store::TypedKey::decode_canonical(&first.key)
+                .map_err(|_| GraphError::NonCanonicalData)?;
+            let maximum = crate::row_store::TypedKey::decode_canonical(&last.key)
+                .map_err(|_| GraphError::NonCanonicalData)?;
+            Ok((entries.len() as u64, minimum, maximum))
+        }
+        NodeData::OrderedBranch {
+            domain,
+            height,
+            entries,
+        } => {
+            if domain != expected_domain
+                || height == 0
+                || expected_height.is_some_and(|expected| expected != height)
+                || entries.is_empty()
+            {
+                return Err(GraphError::InvalidDomain);
+            }
+            let total_count = entries.iter().try_fold(0u64, |sum, entry| {
+                sum.checked_add(entry.row_count)
+                    .filter(|count| *count <= MAX_SIGNED_LENGTH)
+                    .ok_or(GraphError::InvalidCount(usize::MAX))
+            })?;
+            let first = entries.first().ok_or(GraphError::InvalidCount(0))?;
+            let last = entries.last().ok_or(GraphError::InvalidCount(0))?;
+            let first_fence =
+                crate::row_store::TypedKey::decode_canonical(&first.inclusive_max_key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+            let last_fence = crate::row_store::TypedKey::decode_canonical(&last.inclusive_max_key)
+                .map_err(|_| GraphError::NonCanonicalData)?;
+            let first_node = read_node(&first.child)?;
+            let first_bounds =
+                ordered_node_bounds_with(read_node, first_node, expected_domain, Some(height - 1))?;
+            if first_bounds.0 != first.row_count || first_bounds.2 != first_fence {
+                return Err(GraphError::InvalidCount(
+                    usize::try_from(first_bounds.0).unwrap_or(usize::MAX),
+                ));
+            }
+            let (minimum, maximum) = if std::ptr::eq(first, last) {
+                (first_bounds.1, first_bounds.2)
+            } else {
+                let last_node = read_node(&last.child)?;
+                let last_bounds = ordered_node_bounds_with(
+                    read_node,
+                    last_node,
+                    expected_domain,
+                    Some(height - 1),
+                )?;
+                if last_bounds.0 != last.row_count || last_bounds.2 != last_fence {
+                    return Err(GraphError::InvalidCount(
+                        usize::try_from(last_bounds.0).unwrap_or(usize::MAX),
+                    ));
+                }
+                if last_bounds.1 <= first_bounds.2 {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                (first_bounds.1, last_bounds.2)
+            };
+            Ok((total_count, minimum, maximum))
+        }
+        other => Err(GraphError::WrongNodeKind {
+            expected: NodeKind::OrderedLeaf,
+            actual: other.kind(),
+        }),
+    }
+}
+
+fn rows_domain(relation_id: &[u8; 16], schema_digest: &[u8; 32]) -> Vec<u8> {
+    canonical_domain(vec![
+        CborValue::Text("rows".to_owned()),
+        CborValue::Bytes(relation_id.to_vec()),
+        CborValue::Bytes(schema_digest.to_vec()),
+    ])
+}
+
+fn validate_ordered_root_node(
+    node: &NodeData,
+    expected_domain: &[u8],
+    expected_count: u64,
+) -> Result<(), GraphError> {
+    match node {
+        NodeData::OrderedLeaf { domain, entries } => {
+            if domain != expected_domain || entries.len() as u64 != expected_count {
+                return Err(GraphError::InvalidCount(entries.len()));
+            }
+        }
+        NodeData::OrderedBranch {
+            domain, entries, ..
+        } => {
+            if domain != expected_domain || entries.len() < 2 {
+                return Err(GraphError::InvalidDomain);
+            }
+            let count = entries.iter().try_fold(0u64, |sum, entry| {
+                sum.checked_add(entry.row_count)
+                    .filter(|count| *count <= MAX_SIGNED_LENGTH)
+                    .ok_or(GraphError::InvalidCount(usize::MAX))
+            })?;
+            if count != expected_count {
+                return Err(GraphError::InvalidCount(
+                    usize::try_from(count).unwrap_or(usize::MAX),
+                ));
+            }
+        }
+        actual => {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::OrderedLeaf,
+                actual: actual.kind(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn collect_ordered_range_with(
+    read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
+    node: NodeData,
+    expected_domain: &[u8],
+    expected_height: Option<u8>,
+    lower_exclusive: Option<&crate::row_store::TypedKey>,
+    lower_inclusive: Option<&crate::row_store::TypedKey>,
+    upper_exclusive: Option<&crate::row_store::TypedKey>,
+    limit: usize,
+    output: &mut Vec<OrderedLeafEntry>,
+) -> Result<(), GraphError> {
+    if output.len() >= limit {
+        return Ok(());
+    }
+    match node {
+        NodeData::OrderedLeaf { domain, entries } => {
+            if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
+                return Err(GraphError::InvalidDomain);
+            }
+            let mut previous: Option<crate::row_store::TypedKey> = None;
+            for entry in entries {
+                let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                if previous.as_ref().is_some_and(|last| last >= &key)
+                    || lower_exclusive.is_some_and(|lower| key <= *lower)
+                {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                previous = Some(key.clone());
+                if lower_inclusive.is_some_and(|lower| key < *lower) {
+                    continue;
+                }
+                if upper_exclusive.is_some_and(|upper| key >= *upper) {
+                    break;
+                }
+                output.push(entry);
+                if output.len() >= limit {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        NodeData::OrderedBranch {
+            domain,
+            height,
+            entries,
+        } => {
+            if domain != expected_domain
+                || height == 0
+                || expected_height.is_some_and(|expected| expected != height)
+                || entries.is_empty()
+            {
+                return Err(GraphError::InvalidDomain);
+            }
+            let mut total_count = 0u64;
+            let mut previous_fence: Option<crate::row_store::TypedKey> = None;
+            for entry in entries {
+                total_count = total_count
+                    .checked_add(entry.row_count)
+                    .filter(|count| *count <= MAX_SIGNED_LENGTH)
+                    .ok_or(GraphError::InvalidCount(usize::MAX))?;
+                let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                if previous_fence
+                    .as_ref()
+                    .is_some_and(|previous| previous >= &fence)
+                {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                if upper_exclusive.is_some_and(|upper| {
+                    previous_fence
+                        .as_ref()
+                        .is_some_and(|previous| previous >= upper)
+                }) {
+                    break;
+                }
+                if lower_inclusive.is_some_and(|lower| fence < *lower) {
+                    previous_fence = Some(fence);
+                    continue;
+                }
+                let child = read_node(&entry.child)?;
+                let child_bounds = ordered_node_bounds_with(
+                    read_node,
+                    child.clone(),
+                    expected_domain,
+                    Some(height - 1),
+                )?;
+                if child_bounds.0 != entry.row_count
+                    || child_bounds.2 != fence
+                    || previous_fence
+                        .as_ref()
+                        .is_some_and(|previous| child_bounds.1 <= *previous)
+                {
+                    return Err(GraphError::InvalidCount(
+                        usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
+                    ));
+                }
+                let overlaps = lower_inclusive.is_none_or(|lower| child_bounds.2 >= *lower)
+                    && upper_exclusive.is_none_or(|upper| child_bounds.1 < *upper);
+                if overlaps {
+                    collect_ordered_range_with(
+                        read_node,
+                        child,
+                        expected_domain,
+                        Some(height - 1),
+                        previous_fence.as_ref(),
+                        lower_inclusive,
+                        upper_exclusive,
+                        limit,
+                        output,
+                    )?;
+                }
+                previous_fence = Some(fence);
+                if output.len() >= limit {
+                    break;
+                }
+            }
+            if total_count > MAX_SIGNED_LENGTH {
+                return Err(GraphError::InvalidCount(usize::MAX));
+            }
+            Ok(())
+        }
+        other => Err(GraphError::WrongNodeKind {
+            expected: NodeKind::OrderedLeaf,
+            actual: other.kind(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod persisted_orp_tests {
     use super::*;
@@ -2395,6 +3637,240 @@ mod persisted_orp_tests {
         )
         .expect("OGS accepts a well-formed overflow edge");
         assert!(RowValue::decode_canonical_fields(overflow_value).is_err());
+    }
+
+    #[test]
+    fn orp_orders_leaf_keys_and_branch_fences_by_typed_value_not_cbor_bytes() {
+        let domain = rows_domain([0x22; 16], [0x33; 32]);
+        let boolean = TypedKey::Bool(false).canonical_bytes().unwrap();
+        let bytes = TypedKey::Bytes(vec![0]).canonical_bytes().unwrap();
+        assert!(
+            boolean > bytes,
+            "fixture encodings must oppose logical order"
+        );
+        let leaf = NodeData::OrderedLeaf {
+            domain: domain.clone(),
+            entries: vec![
+                OrderedLeafEntry {
+                    key: boolean.clone(),
+                    value: vec![0x80],
+                },
+                OrderedLeafEntry {
+                    key: bytes.clone(),
+                    value: vec![0x80],
+                },
+            ],
+        };
+        assert!(leaf.encode_canonical().is_ok());
+        let reversed = NodeData::OrderedLeaf {
+            domain: domain.clone(),
+            entries: vec![
+                OrderedLeafEntry {
+                    key: bytes.clone(),
+                    value: vec![0x80],
+                },
+                OrderedLeafEntry {
+                    key: boolean.clone(),
+                    value: vec![0x80],
+                },
+            ],
+        };
+        assert!(matches!(
+            reversed.encode_canonical(),
+            Err(GraphError::NonCanonicalData)
+        ));
+
+        let first = NativeObjectId::new(GitHashAlgorithm::Sha1, &[0x41; 20]).unwrap();
+        let second = NativeObjectId::new(GitHashAlgorithm::Sha1, &[0x42; 20]).unwrap();
+        let branch = NodeData::OrderedBranch {
+            domain: domain.clone(),
+            height: 1,
+            entries: vec![
+                OrderedBranchEntry {
+                    inclusive_max_key: boolean.clone(),
+                    child: first.clone(),
+                    row_count: 5_000_000,
+                },
+                OrderedBranchEntry {
+                    inclusive_max_key: bytes.clone(),
+                    child: second.clone(),
+                    row_count: 5_000_000,
+                },
+            ],
+        };
+        assert!(branch.encode_canonical().is_ok());
+        let reversed_fences = NodeData::OrderedBranch {
+            domain: domain.clone(),
+            height: 1,
+            entries: vec![
+                OrderedBranchEntry {
+                    inclusive_max_key: bytes,
+                    child: first.clone(),
+                    row_count: 1,
+                },
+                OrderedBranchEntry {
+                    inclusive_max_key: boolean,
+                    child: second.clone(),
+                    row_count: 1,
+                },
+            ],
+        };
+        assert!(matches!(
+            reversed_fences.encode_canonical(),
+            Err(GraphError::NonCanonicalData)
+        ));
+        assert!(validate_ordered_root_node(&branch, &domain, 10_000_000).is_ok());
+    }
+
+    #[test]
+    fn orp_rejects_unrecognized_or_malformed_domain_tuples() {
+        let mut unknown = vec![0x82, 0x61, b'x', 0x50];
+        unknown.extend_from_slice(&[0; 16]);
+        let mut malformed_rows = vec![0x82, 0x64, b'r', b'o', b'w', b's', 0x50];
+        malformed_rows.extend_from_slice(&[0; 16]);
+        for domain in [unknown, malformed_rows] {
+            assert!(matches!(
+                NodeData::OrderedLeaf {
+                    domain,
+                    entries: Vec::new(),
+                }
+                .encode_canonical(),
+                Err(GraphError::InvalidDomain)
+            ));
+        }
+    }
+
+    #[test]
+    fn lazy_orp_point_and_range_traversal_reads_bounded_relation_paths() {
+        use crate::row_store::{RowMapSnapshot, RowMapVersion, SchemaGeneration};
+
+        let domain = rows_domain([0x22; 16], [0x33; 32]);
+        let mut nodes = std::collections::BTreeMap::new();
+        let mut next_oid = 1u32;
+        let mut put_node = |node: NodeData| {
+            let mut oid_bytes = [0u8; 20];
+            oid_bytes[..4].copy_from_slice(&next_oid.to_be_bytes());
+            next_oid += 1;
+            let oid = NativeOid::new(GitHashAlgorithm::Sha1, oid_bytes).unwrap();
+            nodes.insert(oid.clone(), node);
+            oid
+        };
+
+        let mut root_entries = Vec::new();
+        for branch_index in 0..4u64 {
+            let mut branch_entries = Vec::new();
+            for leaf_index in 0..8u64 {
+                let first_key = (branch_index * 8 + leaf_index) * 8;
+                let entries: Vec<_> = (first_key..first_key + 8)
+                    .map(|number| OrderedLeafEntry {
+                        key: TypedKey::UInt(number).canonical_bytes().unwrap(),
+                        value: vec![0x81, 0x01],
+                    })
+                    .collect();
+                let fence = entries.last().unwrap().key.clone();
+                let leaf = put_node(NodeData::OrderedLeaf {
+                    domain: domain.clone(),
+                    entries,
+                });
+                branch_entries.push(OrderedBranchEntry {
+                    inclusive_max_key: fence,
+                    child: leaf,
+                    row_count: 8,
+                });
+            }
+            let fence = branch_entries.last().unwrap().inclusive_max_key.clone();
+            let branch = put_node(NodeData::OrderedBranch {
+                domain: domain.clone(),
+                height: 1,
+                entries: branch_entries,
+            });
+            root_entries.push(OrderedBranchEntry {
+                inclusive_max_key: fence,
+                child: branch,
+                row_count: 64,
+            });
+        }
+        let root = put_node(NodeData::OrderedBranch {
+            domain: domain.clone(),
+            height: 2,
+            entries: root_entries,
+        });
+        drop(put_node);
+
+        let database_id = [0x11; 16];
+        let relation_id = [0x22; 16];
+        let store_root = NativeOid::new(GitHashAlgorithm::Sha1, [0xfe; 20]).unwrap();
+        let schema_oid = NativeOid::new(GitHashAlgorithm::Sha1, [0xfd; 20]).unwrap();
+        let schema = SchemaGeneration::issue(database_id, relation_id, schema_oid, [0x33; 32], 9);
+        let version = RowMapVersion::issue(
+            database_id,
+            relation_id,
+            store_root,
+            schema,
+            root.clone(),
+            9,
+            Some(256),
+        )
+        .unwrap();
+        let snapshot = RowMapSnapshot::issue_lazy(version, [0x44; 32]).unwrap();
+        assert!(!snapshot.is_materialized());
+        assert_eq!(snapshot.version().primary_root(), &root);
+        assert_eq!(snapshot.version().row_count(), Some(256));
+
+        let point_key = TypedKey::UInt(139);
+        let mut point_reads = 1usize; // the context reads the pinned root first
+        let root_node = nodes.get(&root).unwrap().clone();
+        validate_ordered_root_node(&root_node, &domain, 256).unwrap();
+        let point = find_ordered_entry_with(
+            &mut |oid| {
+                point_reads += 1;
+                nodes.get(oid).cloned().ok_or(GraphError::ObjectUnavailable)
+            },
+            root_node,
+            &domain,
+            None,
+            None,
+            &point_key,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(TypedKey::decode_canonical(&point.key).unwrap(), point_key);
+        assert!(point_reads <= 16, "point lookup read {point_reads} nodes");
+
+        let lower = TypedKey::UInt(137);
+        let upper = TypedKey::UInt(143);
+        let mut range_reads = 1usize; // the context reads the pinned root first
+        let root_node = nodes.get(&root).unwrap().clone();
+        validate_ordered_root_node(&root_node, &domain, 256).unwrap();
+        let mut rows = Vec::new();
+        collect_ordered_range_with(
+            &mut |oid| {
+                range_reads += 1;
+                nodes.get(oid).cloned().ok_or(GraphError::ObjectUnavailable)
+            },
+            root_node,
+            &domain,
+            None,
+            None,
+            Some(&lower),
+            Some(&upper),
+            3,
+            &mut rows,
+        )
+        .unwrap();
+        let keys: Vec<_> = rows
+            .iter()
+            .map(|row| TypedKey::decode_canonical(&row.key).unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                TypedKey::UInt(137),
+                TypedKey::UInt(138),
+                TypedKey::UInt(139)
+            ]
+        );
+        assert!(range_reads <= 16, "bounded range read {range_reads} nodes");
     }
 }
 
@@ -2571,19 +4047,98 @@ fn check_height(height: u8) -> Result<(), GraphError> {
     }
 }
 
-fn check_domain(domain: &[u8]) -> Result<(), GraphError> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OrderedDomain {
+    Relations([u8; 16]),
+    Rows([u8; 16], [u8; 32]),
+}
+
+fn parse_ordered_domain(domain: &[u8]) -> Result<OrderedDomain, GraphError> {
     if domain.is_empty() || domain.len() > 256 {
-        Err(GraphError::InvalidDomain)
-    } else {
-        match decode_canonical_cbor(domain)? {
-            CborValue::Array(values)
-                if values.len() >= 2 && matches!(values.first(), Some(CborValue::Text(_))) =>
-            {
-                Ok(())
-            }
-            _ => Err(GraphError::InvalidDomain),
-        }
+        return Err(GraphError::InvalidDomain);
     }
+    let CborValue::Array(fields) = decode_canonical_cbor(domain)? else {
+        return Err(GraphError::InvalidDomain);
+    };
+    let Some(CborValue::Text(name)) = fields.first() else {
+        return Err(GraphError::InvalidDomain);
+    };
+    match name.as_str() {
+        "relations" if fields.len() == 2 => {
+            let Some(CborValue::Bytes(database_id)) = fields.get(1) else {
+                return Err(GraphError::InvalidDomain);
+            };
+            Ok(OrderedDomain::Relations(
+                database_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| GraphError::InvalidDomain)?,
+            ))
+        }
+        "rows" if fields.len() == 3 => {
+            let (Some(CborValue::Bytes(relation_id)), Some(CborValue::Bytes(schema_digest))) =
+                (fields.get(1), fields.get(2))
+            else {
+                return Err(GraphError::InvalidDomain);
+            };
+            Ok(OrderedDomain::Rows(
+                relation_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| GraphError::InvalidDomain)?,
+                schema_digest
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| GraphError::InvalidDomain)?,
+            ))
+        }
+        _ => Err(GraphError::InvalidDomain),
+    }
+}
+
+fn check_domain(domain: &[u8]) -> Result<(), GraphError> {
+    parse_ordered_domain(domain).map(|_| ())
+}
+
+fn check_leaf_key_order(domain: &[u8], entries: &[OrderedLeafEntry]) -> Result<(), GraphError> {
+    let domain = parse_ordered_domain(domain)?;
+    let mut previous: Option<crate::row_store::TypedKey> = None;
+    for entry in entries {
+        let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        if matches!(domain, OrderedDomain::Relations(_))
+            && !matches!(&key, crate::row_store::TypedKey::Bytes(bytes) if bytes.len() == 16)
+        {
+            return Err(GraphError::InvalidDomain);
+        }
+        if previous.as_ref().is_some_and(|previous| previous >= &key) {
+            return Err(GraphError::NonCanonicalData);
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
+
+fn check_branch_fence_order(
+    domain: &[u8],
+    entries: &[OrderedBranchEntry],
+) -> Result<(), GraphError> {
+    let domain = parse_ordered_domain(domain)?;
+    let mut previous: Option<crate::row_store::TypedKey> = None;
+    for entry in entries {
+        let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        if matches!(domain, OrderedDomain::Relations(_))
+            && !matches!(&fence, crate::row_store::TypedKey::Bytes(bytes) if bytes.len() == 16)
+        {
+            return Err(GraphError::InvalidDomain);
+        }
+        if previous.as_ref().is_some_and(|previous| previous >= &fence) {
+            return Err(GraphError::NonCanonicalData);
+        }
+        previous = Some(fence);
+    }
+    Ok(())
 }
 
 fn validate_canonical_value(bytes: &[u8]) -> Result<(), GraphError> {
@@ -2597,8 +4152,16 @@ fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
 }
 
 pub(crate) fn decode_canonical_cbor(bytes: &[u8]) -> Result<CborValue, GraphError> {
-    if bytes.len() > NODE_DATA_LIMIT {
-        return Err(GraphError::NodeDataTooLarge(bytes.len()));
+    decode_canonical_cbor_limited(bytes, NODE_DATA_LIMIT)
+}
+
+fn decode_canonical_content(bytes: &[u8]) -> Result<CborValue, GraphError> {
+    decode_canonical_cbor_limited(bytes, crate::row_store::ROW_CANONICAL_LIMIT)
+}
+
+fn decode_canonical_cbor_limited(bytes: &[u8], maximum: usize) -> Result<CborValue, GraphError> {
+    if bytes.len() > maximum {
+        return Err(GraphError::InvalidLength(bytes.len() as u64));
     }
     let mut reader = CborReader::new(bytes);
     let value = reader.value()?;
@@ -2628,81 +4191,47 @@ fn leaf_value_dependencies(
 ) -> Result<Vec<NativeDependency>, GraphError> {
     let parsed = decode_canonical_cbor(value)?;
     let mut dependencies = BTreeMap::<NativeObjectId, NativeObjectKind>::new();
-    match decode_canonical_cbor(domain)? {
-        CborValue::Array(mut domain_fields) => {
-            let domain_name = match domain_fields.drain(..).next() {
-                Some(CborValue::Text(name)) => name,
-                _ => return Err(GraphError::InvalidDomain),
+    match parse_ordered_domain(domain)? {
+        OrderedDomain::Relations(_) => {
+            let CborValue::Array(fields) = parsed else {
+                return Err(GraphError::NonCanonicalData);
             };
-            match domain_name.as_str() {
-                "relations" => {
-                    if let CborValue::Array(fields) = decode_canonical_cbor(domain)? {
-                        if fields.len() != 2
-                            || !matches!(
-                                fields.get(1),
-                                Some(CborValue::Bytes(id)) if id.len() == 16
-                            )
-                        {
-                            return Err(GraphError::InvalidDomain);
-                        }
-                    }
-                    let CborValue::Array(fields) = parsed else {
-                        return Err(GraphError::NonCanonicalData);
-                    };
-                    if fields.len() != 4
-                        || !matches!(
-                            fields.get(3),
-                            Some(CborValue::Unsigned(count)) if *count <= MAX_SIGNED_LENGTH
-                        )
-                    {
-                        return Err(GraphError::NonCanonicalData);
-                    }
-                    for index in [0usize, 1] {
-                        let CborValue::Bytes(oid) =
-                            fields.get(index).ok_or(GraphError::NonCanonicalData)?
-                        else {
-                            return Err(GraphError::NonCanonicalData);
-                        };
-                        insert_leaf_dependency(
-                            &mut dependencies,
-                            oid_from_width(oid)?,
-                            NativeObjectKind::Tree,
-                        )?;
-                    }
-                    match fields.get(2).ok_or(GraphError::NonCanonicalData)? {
-                        CborValue::Null => {}
-                        CborValue::Bytes(oid) => insert_leaf_dependency(
-                            &mut dependencies,
-                            oid_from_width(oid)?,
-                            NativeObjectKind::Tree,
-                        )?,
-                        _ => return Err(GraphError::NonCanonicalData),
-                    }
-                }
-                "rows" => {
-                    if let CborValue::Array(fields) = decode_canonical_cbor(domain)? {
-                        if fields.len() != 3
-                            || !matches!(
-                                fields.get(1),
-                                Some(CborValue::Bytes(id)) if id.len() == 16
-                            )
-                            || !matches!(
-                                fields.get(2),
-                                Some(CborValue::Bytes(digest)) if digest.len() == 32
-                            )
-                        {
-                            return Err(GraphError::InvalidDomain);
-                        }
-                    }
-                    if !matches!(parsed, CborValue::Array(_) | CborValue::Tag(60113, _)) {
-                        return Err(GraphError::NonCanonicalData);
-                    }
-                    collect_row_dependencies(&parsed, &mut dependencies)?;
-                }
-                _ => collect_row_dependencies(&parsed, &mut dependencies)?,
+            if fields.len() != 4
+                || !matches!(
+                    fields.get(3),
+                    Some(CborValue::Unsigned(count)) if *count <= MAX_SIGNED_LENGTH
+                )
+            {
+                return Err(GraphError::NonCanonicalData);
+            }
+            for index in [0usize, 1] {
+                let CborValue::Bytes(oid) =
+                    fields.get(index).ok_or(GraphError::NonCanonicalData)?
+                else {
+                    return Err(GraphError::NonCanonicalData);
+                };
+                insert_leaf_dependency(
+                    &mut dependencies,
+                    oid_from_width(oid)?,
+                    NativeObjectKind::Tree,
+                )?;
+            }
+            match fields.get(2).ok_or(GraphError::NonCanonicalData)? {
+                CborValue::Null => {}
+                CborValue::Bytes(oid) => insert_leaf_dependency(
+                    &mut dependencies,
+                    oid_from_width(oid)?,
+                    NativeObjectKind::Tree,
+                )?,
+                _ => return Err(GraphError::NonCanonicalData),
             }
         }
-        _ => return Err(GraphError::InvalidDomain),
+        OrderedDomain::Rows(_, _) => {
+            if !matches!(parsed, CborValue::Array(_) | CborValue::Tag(60113, _)) {
+                return Err(GraphError::NonCanonicalData);
+            }
+            collect_row_dependencies(&parsed, &mut dependencies)?;
+        }
     }
     Ok(dependencies
         .into_iter()
@@ -2710,9 +4239,61 @@ fn leaf_value_dependencies(
         .collect())
 }
 
+struct VerifiedValueOverflow {
+    reference: crate::row_store::ValueOverflowRef,
+    semantic_value: CborValue,
+}
+
+fn rows_domain_for_version(version: &crate::row_store::RowMapVersion) -> Vec<u8> {
+    rows_domain(version.relation_id(), version.schema().schema_digest())
+}
+
+fn overflow_tag_oid(
+    payload: &CborValue,
+    algorithm: GitHashAlgorithm,
+) -> Result<NativeOid, GraphError> {
+    let CborValue::Array(fields) = payload else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    if fields.len() != 1 {
+        return Err(GraphError::NonCanonicalData);
+    }
+    let CborValue::Bytes(bytes) = fields.first().ok_or(GraphError::NonCanonicalData)? else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    NativeOid::new(algorithm, bytes)
+}
+
+fn collect_overflow_oids(
+    value: &CborValue,
+    algorithm: GitHashAlgorithm,
+    output: &mut BTreeSet<NativeOid>,
+) -> Result<(), GraphError> {
+    match value {
+        CborValue::Tag(60113, payload) => {
+            output.insert(overflow_tag_oid(payload, algorithm)?);
+        }
+        CborValue::Tag(60111, _) => {}
+        CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
+        CborValue::Array(values) => {
+            for value in values {
+                collect_overflow_oids(value, algorithm, output)?;
+            }
+        }
+        CborValue::Map(entries) => {
+            for (key, value) in entries {
+                collect_overflow_oids(key, algorithm, output)?;
+                collect_overflow_oids(value, algorithm, output)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub(crate) fn row_fields_dependencies(value: &[u8]) -> Result<Vec<NativeDependency>, GraphError> {
     let parsed = decode_canonical_cbor(value)?;
-    if !matches!(parsed, CborValue::Array(_)) {
+    if !matches!(parsed, CborValue::Array(_) | CborValue::Tag(60113, _)) {
         return Err(GraphError::NonCanonicalData);
     }
     let mut dependencies = BTreeMap::new();
