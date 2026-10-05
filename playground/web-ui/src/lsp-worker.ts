@@ -1,9 +1,11 @@
-type Action = 'diagnostics' | 'completions' | 'hover' | 'signature_help';
+type Action = 'diagnostics' | 'completions' | 'hover' | 'signature_help' | 'inlay_hints';
+type Position = { line: number; character: number };
 type Request = {
   id: number;
   action: Action;
   source: string;
-  position?: { line: number; character: number };
+  position?: Position;
+  range?: { start: Position; end: Position };
 };
 type Reply = { id: number; value?: unknown; error?: string };
 type OrnaLspModule = {
@@ -12,6 +14,13 @@ type OrnaLspModule = {
   completions: (source: string, line: number, character: number) => string;
   hover: (source: string, line: number, character: number) => string;
   signature_help: (source: string, line: number, character: number) => string;
+  inlay_hints: (
+    source: string,
+    startLine: number,
+    startCharacter: number,
+    endLine: number,
+    endCharacter: number,
+  ) => string;
 };
 
 const workerScope = globalThis as unknown as {
@@ -35,13 +44,37 @@ workerScope.addEventListener('message', async ({ data }) => {
     const lsp = await loadLsp();
     const line = data.position?.line ?? 0;
     const character = data.position?.character ?? 0;
-    const serialized = data.action === 'diagnostics'
-      ? lsp.diagnostics(data.source)
-      : data.action === 'completions'
-        ? lsp.completions(data.source, line, character)
-        : data.action === 'hover'
-          ? lsp.hover(data.source, line, character)
-          : lsp.signature_help(data.source, line, character);
+    let serialized: string;
+    switch (data.action) {
+      case 'diagnostics':
+        serialized = lsp.diagnostics(data.source);
+        break;
+      case 'completions':
+        serialized = lsp.completions(data.source, line, character);
+        break;
+      case 'hover':
+        serialized = lsp.hover(data.source, line, character);
+        break;
+      case 'signature_help':
+        serialized = lsp.signature_help(data.source, line, character);
+        break;
+      case 'inlay_hints': {
+        const lines = data.source.split(/\r?\n/);
+        const start = data.range?.start ?? { line: 0, character: 0 };
+        const end = data.range?.end ?? {
+          line: lines.length - 1,
+          character: [...(lines.at(-1) ?? '')].length,
+        };
+        serialized = lsp.inlay_hints(
+            data.source,
+          start.line,
+          start.character,
+          end.line,
+          end.character,
+        );
+        break;
+      }
+    }
     workerScope.postMessage({ id: data.id, value: JSON.parse(serialized) });
   } catch (error) {
     workerScope.postMessage({
