@@ -2244,6 +2244,94 @@ mod tests {
     }
 
     #[test]
+    fn equal_revision_conflicting_moved_snapshot_preserves_recovery_fence() {
+        let limits = Limits::default();
+        let initial_children = vec![nested_present_child(18), nested_present_child(1)];
+        let initial = snapshot_with_children(3, "before-move", initial_children.clone());
+        assert!(Envelope::decode(&initial, limits).is_ok());
+
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(initial.clone());
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            limits,
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 3 }
+        );
+
+        let move_beyond_bound = delta_with_operations(
+            3,
+            4,
+            vec![move_between_paths_operation(
+                nested_child_path(0, 1),
+                nested_child_path(19, 0),
+            )],
+        );
+        assert!(move_beyond_bound.len() < limits.max_message_bytes);
+        assert!(Envelope::decode(&move_beyond_bound, limits).is_ok());
+        let original = driver.presentation().published().cloned().unwrap();
+        driver.io.incoming.push_back(move_beyond_bound);
+        assert!(matches!(
+            block_on(driver.receive_once()),
+            Ok(LiveSessionEvent::ResyncSent { .. })
+        ));
+        assert_resync_frame(&driver.io.sent[0]);
+        let request = Envelope::decode(&driver.io.sent[0], limits)
+            .unwrap()
+            .request
+            .expect("moved-tree recovery request is correlated");
+
+        let conflicting_snapshot = frame_with_request(
+            16,
+            [7; 16],
+            Some(request),
+            snapshot_body_with_children(3, "conflicting-equal", initial_children.clone()),
+        );
+        assert!(Envelope::decode(&conflicting_snapshot, limits).is_ok());
+        driver.io.incoming.push_back(conflicting_snapshot);
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::ResyncAwaitingSnapshot { request }
+        );
+        assert_eq!(driver.io.sent.len(), 1);
+        assert_eq!(driver.presentation().published(), Some(&original));
+        assert!(driver.presentation().awaiting_snapshot());
+        assert_eq!(driver.renderer.revisions, vec![3]);
+        assert_eq!(driver.renderer.trees, vec![snapshot_present(&initial)]);
+
+        driver.io.incoming.push_back(frame_with_request(
+            16,
+            [7; 16],
+            Some(request),
+            snapshot_body_with_children(4, "recovered", initial_children.clone()),
+        ));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::SnapshotPublished { revision: 4 }
+        );
+        driver.io.incoming.push_back(delta(4, 5, "after-recovery"));
+        assert_eq!(
+            block_on(driver.receive_once()).unwrap(),
+            LiveSessionEvent::DeltaPublished { revision: 5 }
+        );
+
+        let recovered = snapshot_with_children(5, "after-recovery", initial_children);
+        assert_eq!(
+            driver.presentation().published().unwrap().present(),
+            &snapshot_present(&recovered)
+        );
+        assert_eq!(driver.renderer.revisions, vec![3, 4, 5]);
+        assert_eq!(driver.renderer.trees[2], snapshot_present(&recovered));
+        assert!(!driver.presentation().awaiting_snapshot());
+    }
+
+    #[test]
     fn bad_base_and_mid_patch_failure_send_resync_without_changing_tree() {
         let mut io = MemoryIo::default();
         io.incoming.push_back(snapshot(0));
