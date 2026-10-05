@@ -32,6 +32,7 @@ const source = [
   '    let next = increment(value);',
   '    next',
   '}',
+  'pub fn shadowed(increment: Int): Int = increment;',
   'pub fn bounded(value: Int, lower: Int, upper: Int): Int = clamp(value, lower, upper);',
   'pub fn qualified_bounded(value: Int, lower: Int, upper: Int): Int = std.math.clamp(value, lower, upper);',
 ].join('\n');
@@ -59,6 +60,67 @@ const hover = JSON.parse(lsp.hover(source, hoverPosition.line, hoverPosition.cha
 const hoverText = JSON.stringify(hover);
 assert.match(hoverText, /fn increment\(value: Int\): Int/);
 assert.match(hoverText, /exact successor/);
+
+const definition = JSON.parse(lsp.definition(
+  source,
+  hoverPosition.line,
+  hoverPosition.character,
+));
+assert.equal(definition.uri, 'orna-stdlib:///std/math.orna');
+const standardSource = await get('/playground/assets/stdlib/std/math.orna');
+assert.match(standardSource.headers.get('content-type') ?? '', /text\/plain/);
+const standardText = await standardSource.text();
+assert.match(standardText, /pub fn increment\(value: Int\)/);
+const declarationLine = standardText.split(/\r?\n/)[definition.range.start.line];
+assert.equal(
+  declarationLine.slice(definition.range.start.character, definition.range.end.character),
+  'increment',
+);
+
+const qualifiedNavigationOffset = source.indexOf('std.math.increment(value)')
+  + 'std.math.increment'.length - 1;
+const qualifiedPosition = positionAt(qualifiedNavigationOffset);
+const qualifiedDefinition = JSON.parse(lsp.definition(
+  source,
+  qualifiedPosition.line,
+  qualifiedPosition.character,
+));
+assert.equal(qualifiedDefinition.uri, 'orna-stdlib:///std/math.orna');
+assert.deepEqual(qualifiedDefinition.range, definition.range);
+
+const references = JSON.parse(lsp.references(
+  source,
+  hoverPosition.line,
+  hoverPosition.character,
+  true,
+));
+assert.equal(references.length, 4, 'standard declaration, import, and two calls');
+assert.equal(references.filter(({ uri }) => uri === 'orna-stdlib:///std/math.orna').length, 1);
+assert.equal(references.filter(({ uri }) => uri === 'file:///playground/main.orna').length, 3);
+const qualifiedReferences = JSON.parse(lsp.references(
+  source,
+  qualifiedPosition.line,
+  qualifiedPosition.character,
+  true,
+));
+assert.deepEqual(qualifiedReferences, references);
+
+const shadowOffset = source.lastIndexOf('increment;') + 1;
+const shadowPosition = positionAt(shadowOffset);
+const shadowDefinition = JSON.parse(lsp.definition(
+  source,
+  shadowPosition.line,
+  shadowPosition.character,
+));
+assert.equal(shadowDefinition.uri, 'file:///playground/main.orna');
+const shadowReferences = JSON.parse(lsp.references(
+  source,
+  shadowPosition.line,
+  shadowPosition.character,
+  true,
+));
+assert.equal(shadowReferences.length, 2, 'local parameter declaration and use');
+assert.ok(shadowReferences.every(({ uri }) => uri === 'file:///playground/main.orna'));
 
 const clampOffset = source.indexOf('clamp(value, lower, upper)');
 assert.notEqual(clampOffset, -1);
@@ -110,3 +172,4 @@ console.log('served WASM completion order: increment, incremental; exact match p
 console.log('served WASM hover: std.math.increment signature and documentation verified');
 console.log('served WASM signature help: std.math.clamp active upper parameter and hints verified');
 console.log('served WASM inlay hints: imported and qualified std calls plus inferred result type verified');
+console.log('served WASM definition/references: DB standard source, imported and qualified calls, and local shadowing verified');

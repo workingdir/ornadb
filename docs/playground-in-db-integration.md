@@ -46,9 +46,12 @@ polls it every two seconds and swaps both stylesheet links only after both
 revision-pinned rows load, then updates Monaco's theme from the new CSS tokens.
 
 Monaco uses the database-served shell assets to run the Orna LSP worker. The
-worker supplies standard-library completion, hover, signature help, and
-parameter and inferred type hints alongside diagnostics. Standard call hints
-use the same pinned source catalogue as hover and signature help. The
+worker supplies standard-library completion, hover, go-to-definition,
+references, signature help, and parameter and inferred type hints alongside
+diagnostics. Standard source files are emitted as Asset rows from the path
+manifest used by the pinned source catalogue, so F12 and Shift+F12 open source
+through the database route `/playground/assets/stdlib/std/...`. Standard call
+hints and navigation use the same pinned source catalogue. The
 `/playground/assets/embed.js` classic script creates an iframe pointed at the
 same database's `/playground/embed` route. Set `data-target` to append the
 iframe to a container, and optionally set `data-height`, `data-title`, or
@@ -99,5 +102,7 @@ active `orna serve` database:
 npm run prove:served-assists -- http://127.0.0.1:18087
 ```
 
-It verifies completion ranking, standard-library hover and signature help, and
-imported and qualified standard-library inlay hints from the served module.
+It verifies completion ranking, standard-library hover and signature help,
+imported and qualified standard-library inlay hints, definition and reference
+locations backed by the served standard source asset, and local shadowing from
+the served module.

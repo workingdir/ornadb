@@ -21,6 +21,7 @@ if (arguments_.length > 1 || arguments_.some((argument) => argument !== '--check
 const checkOnly = arguments_.includes('--check');
 const mediaTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
+  ['.orna', 'text/plain; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
   ['.mjs', 'text/javascript; charset=utf-8'],
   ['.css', 'text/css; charset=utf-8'],
@@ -89,10 +90,25 @@ function styleRow(id, name, css) {
   return `{ id: ${ornaString(id)}, name: ${ornaString(name)}, css: ${ornaString(css)} }\n`;
 }
 
+const standardSourceManifest = await readFile(
+  join(repository, 'crates/orna-standard-sources/src/lib.rs'),
+  'utf8',
+);
+const standardSourcePaths = [...standardSourceManifest.matchAll(
+  /^pub const REFERENCE_STANDARD_[A-Z0-9_]+_PATH_V1: &str = "([^"]+)";$/gm,
+)].map(([, path]) => path);
+if (standardSourcePaths.length !== 75) {
+  throw new Error(`Expected 75 canonical standard source paths, found ${standardSourcePaths.length}.`);
+}
+
 const extraAssets = [
   ['assets/presentation.mjs', join(repository, 'playground/shared/presentation.mjs')],
   ['assets/serve-home.mjs', join(repository, 'crates/orna-cli-v1/src/serve_home.mjs')],
   ['assets/serve-playground.mjs', join(repository, 'crates/orna-cli-v1/src/serve_playground.mjs')],
+  ...standardSourcePaths.map((path) => [
+    `assets/stdlib/${path}`,
+    join(repository, 'stdlib', path),
+  ]),
 ];
 
 async function expectedRows() {

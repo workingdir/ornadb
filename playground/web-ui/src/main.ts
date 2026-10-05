@@ -15,7 +15,7 @@ import { startStyleReload } from './style-reload';
 import './theme.css';
 import './layout.css';
 
-type LspAction = 'diagnostics' | 'completions' | 'hover' | 'signature_help' | 'inlay_hints';
+type LspAction = 'diagnostics' | 'completions' | 'hover' | 'definition' | 'references' | 'signature_help' | 'inlay_hints';
 type Position = { line: number; character: number };
 type DocumentRange = { start: Position; end: Position };
 type LspReply = { id: number; value?: unknown; error?: string };
@@ -99,11 +99,12 @@ function requestLsp(
   source: string,
   position?: Position,
   range?: DocumentRange,
+  includeDeclaration?: boolean,
 ): Promise<unknown> {
   const id = nextLspId++;
   return new Promise((resolve, reject) => {
     pendingLsp.set(id, { resolve, reject });
-    lspWorker.postMessage({ id, action, source, position, range });
+    lspWorker.postMessage({ id, action, source, position, range, includeDeclaration });
   });
 }
 
@@ -115,6 +116,40 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function lspRange(value: unknown): monaco.Range | undefined {
+  const range = asRecord(value);
+  const start = asRecord(range?.start);
+  const end = asRecord(range?.end);
+  if (!start || !end) return undefined;
+  const startLine = Number(start.line);
+  const startCharacter = Number(start.character);
+  const endLine = Number(end.line);
+  const endCharacter = Number(end.character);
+  if (![startLine, startCharacter, endLine, endCharacter].every(Number.isInteger)) return undefined;
+  return new monaco.Range(startLine + 1, startCharacter + 1, endLine + 1, endCharacter + 1);
+}
+
+async function editorLocation(value: unknown, model: monaco.editor.ITextModel) {
+  const location = asRecord(value);
+  const range = lspRange(location?.range);
+  if (!range) return undefined;
+  const target = typeof location?.uri === 'string' ? monaco.Uri.parse(location.uri) : model.uri;
+  if (target.scheme !== 'orna-stdlib') return { uri: model.uri, range };
+  if (!target.path.startsWith('/std/')) return undefined;
+  const path = target.path.slice('/std/'.length);
+  if (path.split('/').some((segment) => segment.length === 0 || segment === '.' || segment === '..')) {
+    return undefined;
+  }
+  const uri = monaco.Uri.from({ scheme: 'orna-stdlib', path: target.path });
+  let standardModel = monaco.editor.getModel(uri);
+  if (!standardModel) {
+    const response = await fetch(`/playground/assets/stdlib/std/${path}`);
+    if (!response.ok) throw new Error(`Standard source request failed (${response.status}).`);
+    standardModel = monaco.editor.createModel(await response.text(), 'orna', uri);
+  }
+  return { uri, range };
 }
 
 function completionKind(kind: unknown): monaco.languages.CompletionItemKind | undefined {
@@ -164,6 +199,31 @@ monaco.languages.registerHoverProvider('orna', {
     }));
     const text = hoverMarkdown(response?.contents);
     return text ? { contents: [{ value: text }] } : null;
+  },
+});
+
+monaco.languages.registerDefinitionProvider('orna', {
+  async provideDefinition(model, position, token) {
+    if (token.isCancellationRequested) return null;
+    const response = await requestLsp('definition', model.getValue(), {
+      line: position.lineNumber - 1,
+      character: position.column - 1,
+    });
+    if (token.isCancellationRequested) return null;
+    return await editorLocation(response, model) ?? null;
+  },
+});
+
+monaco.languages.registerReferenceProvider('orna', {
+  async provideReferences(model, position, context, token) {
+    if (token.isCancellationRequested) return [];
+    const response = await requestLsp('references', model.getValue(), {
+      line: position.lineNumber - 1,
+      character: position.column - 1,
+    }, undefined, context.includeDeclaration);
+    if (token.isCancellationRequested) return [];
+    const locations = await Promise.all(asArray(response).map((value) => editorLocation(value, model)));
+    return locations.filter((location) => location !== undefined);
   },
 });
 
@@ -307,7 +367,7 @@ async function initializeEditor(): Promise<void> {
     language: config.language.id,
     theme: 'orna-basic',
     inlayHints: { enabled: 'on' },
-    ariaLabel: 'Orna source editor',
+    ariaLabel: 'Orna source editor. F12 opens a definition; Shift+F12 lists references.',
     automaticLayout: true,
     minimap: { enabled: false },
     scrollBeyondLastLine: false,

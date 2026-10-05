@@ -1,4 +1,4 @@
-type Action = 'diagnostics' | 'completions' | 'hover' | 'signature_help' | 'inlay_hints';
+type Action = 'diagnostics' | 'completions' | 'hover' | 'definition' | 'references' | 'signature_help' | 'inlay_hints';
 type Position = { line: number; character: number };
 type Request = {
   id: number;
@@ -6,6 +6,7 @@ type Request = {
   source: string;
   position?: Position;
   range?: { start: Position; end: Position };
+  includeDeclaration?: boolean;
 };
 type Reply = { id: number; value?: unknown; error?: string };
 type OrnaLspModule = {
@@ -13,6 +14,8 @@ type OrnaLspModule = {
   diagnostics: (source: string) => string;
   completions: (source: string, line: number, character: number) => string;
   hover: (source: string, line: number, character: number) => string;
+  definition: (source: string, line: number, character: number) => string;
+  references: (source: string, line: number, character: number, includeDeclaration: boolean) => string;
   signature_help: (source: string, line: number, character: number) => string;
   inlay_hints: (
     source: string,
@@ -54,6 +57,12 @@ workerScope.addEventListener('message', async ({ data }) => {
         break;
       case 'hover':
         serialized = lsp.hover(data.source, line, character);
+        break;
+      case 'definition':
+        serialized = lsp.definition(data.source, line, character);
+        break;
+      case 'references':
+        serialized = lsp.references(data.source, line, character, data.includeDeclaration ?? false);
         break;
       case 'signature_help':
         serialized = lsp.signature_help(data.source, line, character);
