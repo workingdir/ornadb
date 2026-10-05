@@ -262,6 +262,8 @@ fn open_playground_presentation_session(
     let session_response = curl(
         &format!("{base_url}/orna/session"),
         &[
+            "--max-time",
+            "15",
             "--request",
             "POST",
             "--header",
