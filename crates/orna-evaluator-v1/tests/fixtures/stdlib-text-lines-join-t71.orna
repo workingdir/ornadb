@@ -1,0 +1,5 @@
+lines.join([]) == ""
+&& lines.join(["alpha"]) == "alpha"
+&& lines.join(["alpha", "", "beta"]) == "alpha\n\nbeta"
+&& lines.normalise("alpha\r\nbeta\rgamma\n") == "alpha\nbeta\ngamma\n"
+&& lines.split(lines.normalise("alpha\r\nbeta\rgamma\n")) == ["alpha", "beta", "gamma", ""]
