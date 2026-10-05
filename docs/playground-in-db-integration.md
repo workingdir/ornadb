@@ -81,9 +81,14 @@ The test initializes a temporary Orna Git database, commits crate-local
 `orna serve` process without a build directory, then uses curl to check the
 Git listing, database-resident shell, editor configuration, embeddable script,
 CSS/JavaScript and WebAssembly rows, committed examples, and live session. It
-commits new Route and Entry rows after startup and proves the new HTML route
-and JavaScript asset (with the checked media type) change from 404 to 200
-without restarting the server. It also checks DB-resident Theme/Layout CSS,
+commits new Route and Entry rows after startup and proves their URLs change
+from 404 to an HTML page and a JavaScript asset with the checked media type,
+without restarting the server. A WebSocket client follows the existing watch,
+fingerprinted Eval, and Resync exchange to prove independent results and
+presentation deltas. While that WebSocket remains open, the test commits a new
+Route and Entry rows after startup and proves their URLs change from 404 to
+an HTML page and a JavaScript asset with the checked media type, without
+restarting the server. It also checks DB-resident Theme/Layout CSS,
 an uncommitted style remaining invisible, the committed revision changing both
 styles, and the old revision continuing to serve both old styles. A WebSocket
 client follows the existing watch, fingerprinted Eval, and Resync exchange to
@@ -91,6 +96,9 @@ prove independent results and presentation deltas. While that WebSocket
 remains open, the test commits a new Route, Entry, Asset, and Sample snapshot
 and concurrently fetches the asset and example feed to prove the responses use
 committed database rows during live presentation deltas.
+Before the live session, it also commits a crate-local Sample after the server
+starts, checks that `/api/examples` adds that exact program source without a
+restart, and evaluates the fetched source through the authenticated WebSocket.
 
 The browser assist proof loads the LSP JavaScript and WebAssembly from an
 active `orna serve` database:
@@ -101,3 +109,7 @@ npm run prove:served-assists -- http://127.0.0.1:18087
 
 It verifies completion ranking, standard-library hover and signature help, and
 imported and qualified standard-library inlay hints from the served module.
+It also starts two independent Node workers that fetch the shell, LSP binding,
+and WebAssembly from `orna serve` concurrently. Each worker requests hints for
+a different standard-library source and checks its own labels and source
+positions, which catches cross-client response or document-state leakage.
