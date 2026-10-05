@@ -1,0 +1,7 @@
+{ id: "history-62/handoff/main", name: "history-62/left/handoff-a", city: "history-62/right/handoff-a", }
+
+{ id: "history-62/handoff/reused", name: "history-62/left/handoff-a", city: "history-62/right/handoff-a", }
+
+{ id: "history-62/handoff/distinct", name: "history-62/left/handoff-b", city: "history-62/right/handoff-b", }
+
+{ id: "history-62/handoff/malformed", name: "history-62/left/handoff-error", city: "history-62/right/handoff-error", }
