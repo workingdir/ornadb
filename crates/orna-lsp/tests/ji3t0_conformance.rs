@@ -25,6 +25,8 @@ mod syntax_v1_depth_contract;
 mod syntax_v1_diagnostics_document_links_contract;
 #[path = "support/syntax_v1_document_highlight_code_lens_contract.rs"]
 mod syntax_v1_document_highlight_code_lens_contract;
+#[path = "support/syntax_v1_document_symbols_contract.rs"]
+mod syntax_v1_document_symbols_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
 mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
@@ -643,6 +645,8 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
         root.join("crates/orna-lsp/tests/fixtures/workspace-hierarchy-caller-v1.orna");
     let document_highlight_fixture =
         root.join("crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna");
+    let document_symbols_fixture =
+        root.join("crates/orna-lsp/tests/fixtures/document-symbols-v1.orna");
     let folding_selection_fixture =
         root.join("crates/orna-lsp/tests/fixtures/folding-selection-v1.orna");
     assert_eq!(
@@ -656,6 +660,10 @@ fn neovim_loads_generated_v1_syntax_and_queries_the_lsp_server() {
     assert_eq!(
         fs::read_to_string(&document_highlight_fixture).unwrap(),
         DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE
+    );
+    assert_eq!(
+        fs::read_to_string(&document_symbols_fixture).unwrap(),
+        syntax_v1_document_symbols_contract::SOURCE
     );
     let workspace_hierarchy_requests = syntax_v1_workspace_hierarchy_contract::request_data(
         WORKSPACE_HIERARCHY_PROVIDER_SOURCE,
@@ -1050,6 +1058,20 @@ local workspace_caller_code_lenses = hierarchy_request("textDocument/codeLens", 
   textDocument = { uri = workspace_caller_uri },
 }, workspace_caller_bufnr)
 
+vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_DOCUMENT_SYMBOLS_FIXTURE))
+local document_symbols_bufnr = vim.api.nvim_get_current_buf()
+assert(vim.bo[document_symbols_bufnr].filetype == "orna", "document-symbol fixture did not select the orna filetype")
+assert(vim.wait(5000, function()
+  for _, attached in ipairs(vim.lsp.get_clients({ bufnr = document_symbols_bufnr })) do
+    if attached.name == "orna" and attached.initialized then client = attached; return true end
+  end
+  return false
+end, 10), "document-symbol fixture did not attach to orna-lsp")
+local document_symbols_uri = vim.uri_from_bufnr(document_symbols_bufnr)
+local document_symbols = hierarchy_request("textDocument/documentSymbol", {
+  textDocument = { uri = document_symbols_uri },
+}, document_symbols_bufnr)
+
 vim.cmd("edit " .. vim.fn.fnameescape(vim.env.ORNA_DOCUMENT_HIGHLIGHT_FIXTURE))
 local document_highlight_bufnr = vim.api.nvim_get_current_buf()
 assert(vim.bo[document_highlight_bufnr].filetype == "orna", "document-highlight fixture did not select the orna filetype")
@@ -1179,6 +1201,7 @@ vim.fn.writefile({ vim.fn.json_encode({
   workspace_caller_uri = workspace_caller_uri,
   workspace_provider_code_lenses = workspace_provider_code_lenses,
   workspace_caller_code_lenses = workspace_caller_code_lenses,
+  document_symbols = document_symbols,
   document_highlights = document_highlights,
   folding_ranges = folding_ranges,
   selection_ranges = selection_ranges,
@@ -1219,6 +1242,7 @@ vim.fn.writefile({
   "LSP_SELECTION_RANGE=pass",
   "LSP_DIAGNOSTICS=pass",
   "LSP_DOCUMENT_LINKS=pass",
+  "LSP_DOCUMENT_SYMBOLS=pass",
 }, vim.env.ORNA_EDITOR_RESULT)
 client:stop(true)
 vim.cmd("qa!")
@@ -1249,6 +1273,7 @@ vim.cmd("qa!")
             &workspace_provider_fixture,
         )
         .env("ORNA_WORKSPACE_CALLER_FIXTURE", &workspace_caller_fixture)
+        .env("ORNA_DOCUMENT_SYMBOLS_FIXTURE", &document_symbols_fixture)
         .env(
             "ORNA_DOCUMENT_HIGHLIGHT_FIXTURE",
             &document_highlight_fixture,
@@ -1358,6 +1383,10 @@ vim.cmd("qa!")
     let hover_semantic_result = hover_semantic_result.expect("Neovim hover and semantic JSON");
     let hover_semantic_result: Value = serde_json::from_str(&hover_semantic_result)
         .expect("decode Neovim hover and semantic result");
+    syntax_v1_document_symbols_contract::assert_contract(
+        &hover_semantic_result["document_symbols"],
+        "Neovim",
+    );
     hover_semantic_contract::assert_hover_contract(&hover_semantic_result["hover"], "Neovim");
     hover_semantic_contract::assert_semantic_token_legend(
         &hover_semantic_result["legend"],
@@ -1508,6 +1537,7 @@ vim.cmd("qa!")
             "LSP_SELECTION_RANGE=pass",
             "LSP_DIAGNOSTICS=pass",
             "LSP_DOCUMENT_LINKS=pass",
+            "LSP_DOCUMENT_SYMBOLS=pass",
         ]
     );
 }
