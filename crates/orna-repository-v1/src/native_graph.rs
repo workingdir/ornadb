@@ -265,6 +265,66 @@ impl NativeGraphContext {
         )
     }
 
+    /// Writes one canonical OGB-2 descriptor and byte-index closure into this
+    /// repository's native Git object store. The returned descriptor OID and
+    /// digest are storage inputs, not read authority; callers must bind the
+    /// descriptor into an admitted format-3 row before it can be resolved.
+    pub fn write_blob_graph<R: Read>(
+        &self,
+        reader: &mut R,
+        scope: &RepositoryReadScope,
+    ) -> Result<(NativeOid, crate::ContentIdentity), GraphError> {
+        scope.authorize(self)?;
+        let mut writer = ByteIndexGraphWriter::new(self, scope);
+        let mut content = crate::blob_store::ContentDigest::new();
+        let gear = ogb2_gear_table();
+        let mut input = [0u8; 64 * 1024];
+        let mut chunk = Vec::with_capacity(crate::blob_store::GEAR_MAXIMUM);
+        let mut accumulator = 0u64;
+
+        loop {
+            scope.check_cancelled()?;
+            let read = reader
+                .read(&mut input)
+                .map_err(|_| GraphError::ContentReadFailed)?;
+            if read == 0 {
+                break;
+            }
+            content
+                .update(&input[..read])
+                .map_err(|_| GraphError::InvalidLength(u64::MAX))?;
+            for byte in &input[..read] {
+                chunk.push(*byte);
+                accumulator = accumulator
+                    .wrapping_shl(1)
+                    .wrapping_add(gear[*byte as usize]);
+                let length = chunk.len();
+                if length >= crate::blob_store::GEAR_MINIMUM
+                    && (accumulator & crate::blob_store::GEAR_MASK == 0
+                        || length == crate::blob_store::GEAR_MAXIMUM)
+                {
+                    writer.write_chunk(&chunk)?;
+                    chunk.clear();
+                    accumulator = 0;
+                }
+            }
+        }
+        if !chunk.is_empty() {
+            writer.write_chunk(&chunk)?;
+        }
+
+        let identity = content.finish();
+        let byte_root = writer.finish_index(identity.length())?;
+        let descriptor = NodeData::BlobDescriptor {
+            length: identity.length(),
+            raw_sha256: identity.sha256(),
+            byte_root,
+        };
+        let descriptor_oid = writer.write_node(&descriptor)?;
+        self.sync_object_closure(&writer.objects, scope)?;
+        Ok((descriptor_oid, identity))
+    }
+
     /// Cancels every read scope opened from this repository graph context.
     pub fn cancel_reads(&self) {
         self.cancelled.store(true, AtomicOrdering::Release);
@@ -1423,6 +1483,33 @@ impl NativeGraphContext {
         NativeOid::from_hex(self.algorithm, hex)
     }
 
+    fn git_write_object(&self, kind: &str, bytes: &[u8]) -> Result<NativeOid, GraphError> {
+        let mut child = self
+            .git_command()
+            .args(["hash-object", "-w", "-t", kind, "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        child
+            .stdin
+            .take()
+            .ok_or(GraphError::GitCommandFailed)?
+            .write_all(bytes)
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(GraphError::GitCommandFailed);
+        }
+        let hex = std::str::from_utf8(&output.stdout)
+            .map_err(|_| GraphError::GitObjectMalformed)?
+            .trim();
+        NativeOid::from_hex(self.algorithm, hex)
+    }
+
     fn git_command(&self) -> Command {
         let mut command = Command::new("git");
         command
@@ -1594,6 +1681,311 @@ impl Drop for NativeGraphContext {
     fn drop(&mut self) {
         self.cancel_reads();
     }
+}
+
+#[derive(Default)]
+struct PendingByteIndexLevel {
+    entries: Vec<ByteIndexEntry>,
+    total_length: u64,
+    distinct_refs: BTreeSet<NativeOid>,
+}
+
+struct ByteIndexGraphWriter<'a> {
+    context: &'a NativeGraphContext,
+    scope: &'a RepositoryReadScope,
+    levels: Vec<PendingByteIndexLevel>,
+    objects: BTreeSet<NativeOid>,
+}
+
+impl<'a> ByteIndexGraphWriter<'a> {
+    fn new(context: &'a NativeGraphContext, scope: &'a RepositoryReadScope) -> Self {
+        Self {
+            context,
+            scope,
+            levels: Vec::new(),
+            objects: BTreeSet::new(),
+        }
+    }
+
+    fn write_chunk(&mut self, chunk: &[u8]) -> Result<(), GraphError> {
+        if chunk.is_empty() || chunk.len() > crate::blob_store::GEAR_MAXIMUM {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        self.scope.check_cancelled()?;
+        let digest = crate::blob_store::digest_bytes(chunk).sha256();
+        let reservation = self.scope.reserve_payload(chunk.len() as u64)?;
+        let oid = self.write_object("blob", chunk, true)?;
+        reservation.commit(chunk.len() as u64);
+
+        let mut token = Vec::with_capacity(43);
+        array(&mut token, 2);
+        uint(&mut token, chunk.len() as u64);
+        bytes(&mut token, &digest);
+        self.add_entry(
+            0,
+            ByteIndexEntry {
+                span_length: chunk.len() as u64,
+                target: oid,
+                chunk_sha256: Some(digest),
+            },
+            &token,
+        )
+    }
+
+    fn add_entry(
+        &mut self,
+        height: u8,
+        entry: ByteIndexEntry,
+        token: &[u8],
+    ) -> Result<(), GraphError> {
+        self.ensure_level(height);
+        loop {
+            let level = &self.levels[height as usize];
+            if !level_fits(level, height, &entry) {
+                if level.entries.is_empty() {
+                    return Err(GraphError::NodeDataTooLarge(NODE_DATA_LIMIT + 1));
+                }
+                self.emit_level(height)?;
+                continue;
+            }
+
+            let level = &mut self.levels[height as usize];
+            level.total_length = level
+                .total_length
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            level.distinct_refs.insert(entry.target.clone());
+            level.entries.push(entry);
+            let cut = level.entries.len() == MAX_REFS
+                || (level.entries.len() >= 16 && ogb2_anchor(height, token));
+            if cut && height < MAX_GRAPH_HEIGHT {
+                self.emit_level(height)?;
+            }
+            return Ok(());
+        }
+    }
+
+    fn ensure_level(&mut self, height: u8) {
+        while self.levels.len() <= height as usize {
+            self.levels.push(PendingByteIndexLevel::default());
+        }
+    }
+
+    fn emit_level(&mut self, height: u8) -> Result<(), GraphError> {
+        let span_length = self.levels[height as usize].total_length;
+        let oid = self.write_pending_node(height)?;
+        if height == MAX_GRAPH_HEIGHT {
+            return Err(GraphError::HeightExceeded(height));
+        }
+        let entry = ByteIndexEntry {
+            span_length,
+            target: oid.clone(),
+            chunk_sha256: None,
+        };
+        self.add_entry(height + 1, entry, oid.as_bytes())
+    }
+
+    fn write_pending_node(&mut self, height: u8) -> Result<NativeOid, GraphError> {
+        let level = std::mem::take(&mut self.levels[height as usize]);
+        if level.entries.is_empty() || level.total_length == 0 {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        let node = NodeData::ByteIndex {
+            height,
+            total_length: level.total_length,
+            entries: level.entries,
+        };
+        self.write_node(&node)
+    }
+
+    fn finish_index(&mut self, total_length: u64) -> Result<Option<NativeOid>, GraphError> {
+        if total_length == 0 {
+            if self.levels.iter().any(|level| !level.entries.is_empty()) {
+                return Err(GraphError::InvalidByteIndex);
+            }
+            return Ok(None);
+        }
+
+        let mut height = 0u8;
+        loop {
+            if height as usize >= self.levels.len() {
+                return Err(GraphError::InvalidByteIndex);
+            }
+            if self.levels[height as usize].entries.is_empty() {
+                height = height
+                    .checked_add(1)
+                    .ok_or(GraphError::HeightExceeded(height))?;
+                continue;
+            }
+            let higher_pending = self
+                .levels
+                .get(height as usize + 1..)
+                .unwrap_or_default()
+                .iter()
+                .any(|level| !level.entries.is_empty());
+            if height > 0 && !higher_pending && self.levels[height as usize].entries.len() == 1 {
+                return Ok(Some(self.levels[height as usize].entries[0].target.clone()));
+            }
+            if height == MAX_GRAPH_HEIGHT {
+                return self.write_pending_node(height).map(Some);
+            }
+
+            let span_length = self.levels[height as usize].total_length;
+            let oid = self.write_pending_node(height)?;
+            let parent = ByteIndexEntry {
+                span_length,
+                target: oid.clone(),
+                chunk_sha256: None,
+            };
+            self.add_entry(height + 1, parent, oid.as_bytes())?;
+            height += 1;
+        }
+    }
+
+    fn write_node(&mut self, node: &NodeData) -> Result<NativeOid, GraphError> {
+        let envelope = NativeNodeEnvelope::from_node(node)?;
+        let data_oid = self.write_object("blob", &envelope.data, false)?;
+        let mut dependencies = envelope.refs;
+        dependencies.sort_by_key(|entry| entry.oid().to_hex());
+
+        let refs_oid = if dependencies.is_empty() {
+            None
+        } else {
+            let mut refs_tree = Vec::new();
+            for dependency in dependencies {
+                let mode = match dependency.kind() {
+                    NativeObjectKind::Blob => b"100644".as_slice(),
+                    NativeObjectKind::Tree => b"40000".as_slice(),
+                };
+                append_native_tree_entry(
+                    &mut refs_tree,
+                    mode,
+                    dependency.oid().to_hex().as_bytes(),
+                    dependency.oid(),
+                );
+            }
+            Some(self.write_object("tree", &refs_tree, false)?)
+        };
+
+        let mut tree = Vec::new();
+        append_native_tree_entry(&mut tree, b"100644", b"data", &data_oid);
+        if let Some(refs_oid) = refs_oid {
+            append_native_tree_entry(&mut tree, b"40000", b"refs", &refs_oid);
+        }
+        self.write_object("tree", &tree, false)
+    }
+
+    fn write_object(
+        &mut self,
+        kind: &str,
+        bytes: &[u8],
+        payload: bool,
+    ) -> Result<NativeOid, GraphError> {
+        self.scope.check_cancelled()?;
+        let oid = self.context.git_write_object(kind, bytes)?;
+        if self.objects.insert(oid.clone()) {
+            reserve_atomic(&self.scope.objects_used, 1, self.scope.max_objects)
+                .map_err(|_| GraphError::InventoryQuotaExceeded)?;
+            if !payload {
+                reserve_atomic(
+                    &self.scope.metadata_used,
+                    bytes.len() as u64,
+                    self.scope.metadata_quota,
+                )
+                .map_err(|_| GraphError::MetadataQuotaExceeded)?;
+            }
+        }
+        Ok(oid)
+    }
+}
+
+fn level_fits(level: &PendingByteIndexLevel, height: u8, entry: &ByteIndexEntry) -> bool {
+    let count = level.entries.len() + 1;
+    if count > MAX_REFS {
+        return false;
+    }
+    let distinct =
+        level.distinct_refs.len() + usize::from(!level.distinct_refs.contains(&entry.target));
+    if distinct > MAX_REFS {
+        return false;
+    }
+    let total_length = match level.total_length.checked_add(entry.span_length) {
+        Some(total) if total <= MAX_SIGNED_LENGTH => total,
+        _ => return false,
+    };
+    let data_size = byte_index_data_size(height, total_length, &level.entries, Some(entry));
+    let oid_width = entry.target.as_bytes().len();
+    let mode_len = if height == 0 { 6 } else { 5 };
+    let refs_entry_len = mode_len + 1 + oid_width * 2 + 1 + oid_width;
+    let refs_size = distinct.saturating_mul(refs_entry_len);
+    let outer_tree_size = 23 + oid_width * 2;
+    data_size
+        .checked_add(refs_size)
+        .and_then(|size| size.checked_add(outer_tree_size))
+        .is_some_and(|size| size <= NODE_DATA_LIMIT)
+}
+
+fn byte_index_data_size(
+    height: u8,
+    total_length: u64,
+    entries: &[ByteIndexEntry],
+    additional: Option<&ByteIndexEntry>,
+) -> usize {
+    let count = entries.len() + usize::from(additional.is_some());
+    let mut size = cbor_head_size(5)
+        + cbor_head_size(1)
+        + cbor_head_size(4)
+        + cbor_head_size(u64::from(height))
+        + cbor_head_size(total_length)
+        + cbor_head_size(count as u64);
+    for entry in entries.iter().chain(additional) {
+        size += cbor_head_size(3)
+            + cbor_head_size(entry.span_length)
+            + cbor_head_size(entry.target.as_bytes().len() as u64)
+            + entry.target.as_bytes().len()
+            + entry.chunk_sha256.map_or(1, |digest| {
+                cbor_head_size(digest.len() as u64) + digest.len()
+            });
+    }
+    size
+}
+
+fn cbor_head_size(value: u64) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=255 => 2,
+        256..=65_535 => 3,
+        65_536..=4_294_967_295 => 5,
+        _ => 9,
+    }
+}
+
+fn ogb2_anchor(height: u8, token: &[u8]) -> bool {
+    let mut hasher = Sha256::new();
+    hasher.update(b"orna.ogb.index.v2\0");
+    hasher.update(u32::from(height).to_be_bytes());
+    hasher.update(token);
+    let digest = hasher.finalize();
+    digest[digest.len() - 1] & 0x3f == 0
+}
+
+fn ogb2_gear_table() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    for (byte, slot) in table.iter_mut().enumerate() {
+        let mut hasher = Sha256::new();
+        hasher.update(crate::blob_store::GEAR_SEED);
+        hasher.update([byte as u8]);
+        *slot = u64::from_be_bytes(hasher.finalize()[..8].try_into().expect("SHA-256 prefix"));
+    }
+    table
+}
+
+fn append_native_tree_entry(output: &mut Vec<u8>, mode: &[u8], name: &[u8], oid: &NativeOid) {
+    output.extend_from_slice(mode);
+    output.push(b' ');
+    output.extend_from_slice(name);
+    output.push(0);
+    output.extend_from_slice(oid.as_bytes());
 }
 
 /// Read authority minted by the repository owner for one graph context.
@@ -3784,6 +4176,7 @@ pub enum GraphError {
     GitObjectHashMismatch,
     ChunkTooLarge(u64),
     GitCommandFailed,
+    ContentReadFailed,
     ObjectUnavailable,
     DurabilityFailed,
     ObjectDurabilityUnavailable,
@@ -3858,6 +4251,7 @@ impl fmt::Display for GraphError {
             }
             Self::ChunkTooLarge(size) => write!(f, "chunk size {size} exceeds OGB-2 bound"),
             Self::GitCommandFailed => f.write_str("required local Git command failed"),
+            Self::ContentReadFailed => f.write_str("Blob input stream failed while reading"),
             Self::ObjectUnavailable => f.write_str("required native Git object is unavailable"),
             Self::DurabilityFailed => f.write_str("native graph durability sync failed"),
             Self::ObjectDurabilityUnavailable => {
