@@ -14068,6 +14068,120 @@ fn multi_table_row_read_budget_stops_at_next_table_without_partial_plan() {
 }
 
 #[test]
+fn multi_table_manifest_conflicts_are_ordered_before_row_reads_at_shared_budget() {
+    let build_inputs = || {
+        let mut merge_schema = schema(true, FieldType::Str);
+        let mut second_table = merge_schema.tables[0].clone();
+        second_table.id = id(2);
+        second_table.name = "Company".into();
+        let mut third_table = merge_schema.tables[0].clone();
+        third_table.id = id(3);
+        third_table.name = "Archive".into();
+        merge_schema.tables.extend([second_table, third_table]);
+
+        let mut base = ThreeWaySnapshot {
+            schema: merge_schema.clone(),
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+        };
+        let mut left = ThreeWaySnapshot {
+            schema: merge_schema.clone(),
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+        };
+        let mut right = ThreeWaySnapshot {
+            schema: merge_schema,
+            tables: BTreeMap::new(),
+            checkpoints: BTreeMap::new(),
+        };
+
+        // Table one is deleted on the left and edited on the right.
+        base.tables.insert(id(1), manifest(1, 1, b"table-one-base"));
+        right.tables.insert(id(1), manifest(2, 2, b"table-one-right"));
+        // Table two is added on both sides with different manifest identities.
+        left.tables.insert(id(2), manifest(3, 3, b"table-two-left"));
+        right.tables.insert(id(2), manifest(4, 4, b"table-two-right"));
+
+        // A later clean table demonstrates that exact conflict budget still
+        // completes the row phase before returning the complete conflict set.
+        base.tables.insert(id(3), manifest(5, 5, b"table-three-base"));
+        left.tables.insert(id(3), manifest(6, 6, b"table-three-left"));
+        right.tables.insert(id(3), manifest(7, 7, b"table-three-right"));
+        let mut base_row = parse_fixture(BASE, RowKeyKind::Explicit);
+        base_row.table = id(3);
+        let mut edited_row = parse_fixture(LEFT, RowKeyKind::Explicit);
+        edited_row.table = id(3);
+        let mut source = FixtureRows::default();
+        source.add(MergeSide::Base, b"table-three-base", vec![base_row]);
+        source.add(MergeSide::Left, b"table-three-left", vec![edited_row.clone()]);
+        source.add(MergeSide::Right, b"table-three-right", vec![edited_row]);
+        (base, left, right, source)
+    };
+
+    for (max_conflicts, expected_lower_bound, expected_tables) in
+        [(0, 1, vec![id(1)]), (1, 2, vec![id(1), id(2)])]
+    {
+        let (base, left, right, mut source) = build_inputs();
+        let error = merge_three_way_snapshots(
+            &base,
+            &left,
+            &right,
+            &mut source,
+            BranchMergeBudget { max_rows_examined: 10, max_conflicts },
+        )
+        .expect_err("the first table conflict above the budget stops before later phases");
+        let BranchMergeError::BudgetExceeded { report } = error else {
+            panic!("a table conflict beyond the detail budget is a budget stop")
+        };
+        assert_eq!(report.conflicts_lower_bound, expected_lower_bound);
+        assert_eq!(report.affected_tables, expected_tables.into_iter().collect());
+        assert!(report.affected_ranges.is_empty());
+        assert!(report.affected_checkpoints.is_empty());
+        assert!(source.visited.is_empty(), "a table conflict budget stop precedes row reads");
+    }
+
+    let (base, left, right, mut source) = build_inputs();
+    let error = merge_three_way_snapshots(
+        &base,
+        &left,
+        &right,
+        &mut source,
+        BranchMergeBudget { max_rows_examined: 3, max_conflicts: 2 },
+    )
+    .expect_err("exact table-conflict details remain typed while the clean third table is read");
+    let BranchMergeError::Conflicts { conflicts, report } = error else {
+        panic!("an exact conflict budget returns the complete typed conflicts")
+    };
+    assert_eq!(
+        conflicts,
+        vec![
+            BranchMergeConflict::Table {
+                table: id(1),
+                reason: "table deleted on one side and edited on the other",
+            },
+            BranchMergeConflict::Table {
+                table: id(2),
+                reason: "same table identity added differently",
+            },
+        ],
+        "table manifest conflict details follow ascending table IDs",
+    );
+    assert_eq!(report.conflicts_lower_bound, 2);
+    assert_eq!(report.rows_examined, 3);
+    assert_eq!(report.affected_tables, [id(1), id(2), id(3)].into_iter().collect());
+    assert_eq!(report.affected_ranges, [(id(3), KeyRange::all())].into_iter().collect());
+    assert_eq!(
+        source.visited,
+        vec![
+            (MergeSide::Base, b"table-three-base".to_vec()),
+            (MergeSide::Left, b"table-three-left".to_vec()),
+            (MergeSide::Right, b"table-three-right".to_vec()),
+        ],
+        "exact conflict budget continues through the later clean table only",
+    );
+}
+
+#[test]
 fn row_delete_edit_checkpoint_delete_reset_tail_closes_at_shared_budgets() {
     let before_id = b"consumer/a-before-tombstone".to_vec();
     let left_delete_before_id = b"consumer/b-left-delete-closure".to_vec();
