@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 mod syntax_v1_action_signature_contract;
 #[path = "support/syntax_v1_depth_contract.rs"]
 mod syntax_v1_depth_contract;
+#[path = "support/syntax_v1_diagnostics_document_links_contract.rs"]
+mod syntax_v1_diagnostics_document_links_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
 mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_workspace_hierarchy_contract.rs"]
@@ -34,7 +36,8 @@ const SIGNATURE_ACTIONS_SOURCE: &str = include_str!("fixtures/signature-actions-
 const MISSING_SEMICOLON_SOURCE: &str =
     include_str!("fixtures/missing-semicolon-code-action-v1.orna");
 const DOCUMENT_LINKS_SOURCE: &str = include_str!("fixtures/document-links-v1.orna");
-const DOCUMENT_LINK_TARGET_SOURCE: &str = include_str!("fixtures/document-link-target-v1.orna");
+const DOCUMENT_LINK_TARGET_SOURCE: &str = include_str!("fixtures/library/math.orna");
+const DOCUMENT_LINK_DIRECTORY_TARGET_SOURCE: &str = include_str!("fixtures/library/math/main.orna");
 const WORKSPACE_HIERARCHY_PROVIDER_SOURCE: &str =
     include_str!("fixtures/workspace-hierarchy-provider-v1.orna");
 const WORKSPACE_HIERARCHY_CALLER_SOURCE: &str =
@@ -983,6 +986,13 @@ fn incremental_changes_apply_in_order_with_utf16_positions_and_ignore_stale_vers
     initialize(&mut client);
     let initial = open(&mut client, uri, source);
     assert!(!initial["diagnostics"].as_array().unwrap().is_empty());
+    syntax_v1_diagnostics_document_links_contract::assert_published_diagnostics(
+        source,
+        uri,
+        1,
+        &initial,
+        "LSP protocol",
+    );
 
     client.notify(
         "textDocument/didChange",
@@ -999,6 +1009,12 @@ fn incremental_changes_apply_in_order_with_utf16_positions_and_ignore_stale_vers
     assert!(
         updated["diagnostics"].as_array().unwrap().is_empty(),
         "{updated}"
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_diagnostics_cleared(
+        uri,
+        2,
+        &updated,
+        "LSP protocol",
     );
 
     client.notify(
@@ -1027,6 +1043,13 @@ fn pull_diagnostics_reuse_results_and_refresh_after_versioned_changes() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let published = open(&mut client, uri, INCREMENTAL_SOURCE);
+    syntax_v1_diagnostics_document_links_contract::assert_published_diagnostics(
+        INCREMENTAL_SOURCE,
+        uri,
+        1,
+        &published,
+        "LSP pull diagnostics",
+    );
 
     let first = client.request(
         "textDocument/diagnostic",
@@ -1057,6 +1080,12 @@ fn pull_diagnostics_reuse_results_and_refresh_after_versioned_changes() {
     let updated = client.notification("textDocument/publishDiagnostics");
     assert_eq!(updated["version"], 2);
     assert!(updated["diagnostics"].as_array().unwrap().is_empty());
+    syntax_v1_diagnostics_document_links_contract::assert_diagnostics_cleared(
+        uri,
+        2,
+        &updated,
+        "LSP pull diagnostics",
+    );
 
     let refreshed = client.request(
         "textDocument/diagnostic",
@@ -1104,6 +1133,10 @@ fn document_links_resolve_open_imports_and_suppress_missing_or_ambiguous_targets
         no_open_targets.as_array().unwrap().is_empty(),
         "{no_open_targets}"
     );
+    syntax_v1_diagnostics_document_links_contract::assert_no_document_links(
+        &no_open_targets,
+        "LSP protocol without open targets",
+    );
 
     let target_diagnostics = open(&mut client, flat_target_uri, DOCUMENT_LINK_TARGET_SOURCE);
     assert!(
@@ -1127,11 +1160,17 @@ fn document_links_resolve_open_imports_and_suppress_missing_or_ambiguous_targets
     );
     assert_eq!(links[0]["target"], flat_target_uri);
     assert_eq!(links[0]["tooltip"], "Open module `library.math`");
+    syntax_v1_diagnostics_document_links_contract::assert_document_link(
+        DOCUMENT_LINKS_SOURCE,
+        &links,
+        flat_target_uri,
+        "LSP protocol",
+    );
 
     let duplicate_diagnostics = open(
         &mut client,
         directory_target_uri,
-        DOCUMENT_LINK_TARGET_SOURCE,
+        DOCUMENT_LINK_DIRECTORY_TARGET_SOURCE,
     );
     assert!(
         duplicate_diagnostics["diagnostics"]
@@ -1146,6 +1185,10 @@ fn document_links_resolve_open_imports_and_suppress_missing_or_ambiguous_targets
     assert!(
         ambiguous_links.as_array().unwrap().is_empty(),
         "{ambiguous_links}"
+    );
+    syntax_v1_diagnostics_document_links_contract::assert_no_document_links(
+        &ambiguous_links,
+        "LSP protocol with ambiguous targets",
     );
     client.shutdown();
 }
