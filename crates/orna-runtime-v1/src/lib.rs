@@ -29,14 +29,13 @@ use orna_foundation_v1::{
     SYS_STREAM_TABLE_ID, SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value,
     checkpoint_reference, failure_reference, invocation_reference, snapshot_reference,
     validate_checkpoint_reference, validate_failure_reference, validate_invocation_reference,
-    validate_run_reference, validate_stream_reference, ProtectedContentPinIdentity,
-    ProtectedContentTransferRecord, SchemaGenerationIdentity,
+    validate_run_reference, validate_stream_reference,
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
 use orna_repository_v1::{
-    CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, GitCommitRef,
-    Repository,
+    CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, CwdGeneration,
+    GitCommitRef, ProtectedContentPin, ProtectedContentTransfer, Repository,
 };
 use orna_stream_v1::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
@@ -111,13 +110,15 @@ CREATE TABLE IF NOT EXISTS pending_mutation (
 );
 CREATE TABLE IF NOT EXISTS accepted_content_pin (
     pin_id BLOB PRIMARY KEY CHECK (length(pin_id) = 16),
-    repository_id BLOB NOT NULL CHECK (length(repository_id) = 16),
+    repository_id BLOB NOT NULL CHECK (length(repository_id) = 32),
     database_id BLOB NOT NULL CHECK (length(database_id) = 16),
+    descriptor_oid_algorithm INTEGER NOT NULL CHECK (descriptor_oid_algorithm IN (1, 2)),
+    descriptor_oid BLOB NOT NULL CHECK (
+        (descriptor_oid_algorithm = 1 AND length(descriptor_oid) = 20) OR
+        (descriptor_oid_algorithm = 2 AND length(descriptor_oid) = 32)
+    ),
     content_length INTEGER NOT NULL CHECK (content_length >= 0),
     content_sha256 BLOB NOT NULL CHECK (length(content_sha256) = 32),
-    mutation_id BLOB NOT NULL CHECK (length(mutation_id) = 16),
-    table_id TEXT NOT NULL CHECK (length(table_id) > 0),
-    row_key BLOB NOT NULL CHECK (length(row_key) > 0),
     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
     owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0)
 );
@@ -2517,39 +2518,14 @@ pub struct StreamValidatedTableDeliveryCommit<'a> {
 pub struct ValidatedTableActivationCommit<'a> {
     pub writer: WriterLease,
     pub context: &'a RuntimeActivationContext,
-    /// Opaque repository-issued schema generation captured with the candidate.
-    pub schema_generation: &'a dyn SchemaGenerationIdentity,
+    /// Repository-issued CWD and schema generation used to capture the candidate.
+    pub cwd_generation: &'a CwdGeneration,
     pub mutations: &'a [TableMutation],
     /// Native graph pins that protect content referenced by the candidate.
-    pub content_pins: &'a mut [ProtectedContentPinBinding<'a>],
+    pub content_pins: &'a mut [ProtectedContentPin],
     pub next_digest: [u8; 32],
     pub validator: &'a mut dyn TableActivationCandidateValidator,
     pub faults: &'a dyn FaultInjector,
-}
-
-/// Associates a graph-issued durable content pin with the row mutation that
-/// introduces its content reference. The pin itself remains graph-owned.
-pub struct ProtectedContentPinBinding<'a> {
-    pin: &'a mut dyn ProtectedContentPinIdentity,
-    mutation_id: [u8; 16],
-    table: String,
-    row_key: Vec<u8>,
-}
-
-impl<'a> ProtectedContentPinBinding<'a> {
-    pub fn new(
-        pin: &'a mut dyn ProtectedContentPinIdentity,
-        mutation_id: [u8; 16],
-        table: impl Into<String>,
-        row_key: impl Into<Vec<u8>>,
-    ) -> Self {
-        Self {
-            pin,
-            mutation_id,
-            table: table.into(),
-            row_key: row_key.into(),
-        }
-    }
 }
 
 /// A table-backed request activation that validates its post-mutation
@@ -2678,12 +2654,10 @@ pub trait TableActivationCandidateValidator {
     /// Table relations required to validate this activation.
     fn tables(&self) -> &[String];
 
-    /// Identity of the schema generation used to decode and validate rows.
-    /// Implementations that do not bind a repository-issued generation fail
-    /// closed for table activation.
-    fn schema_generation_identity(&self) -> Option<[u8; 32]> {
-        None
-    }
+    /// Exact repository-issued CWD and schema generation used to decode and
+    /// validate rows. The runtime compares this with the captured request
+    /// before applying any candidate mutation.
+    fn cwd_generation(&self) -> &CwdGeneration;
 
     /// Returns a safe failure diagnostic when the candidate cannot commit.
     fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
@@ -2693,7 +2667,7 @@ pub trait TableActivationCandidateValidator {
     fn validate_content_pins(
         &mut self,
         _rows: &RuntimeTableRows,
-        transfers: &[ProtectedContentTransferRecord],
+        transfers: &[ProtectedContentTransfer],
     ) -> bool {
         transfers.is_empty()
     }
@@ -5844,7 +5818,7 @@ impl RuntimeState {
         let ValidatedTableActivationCommit {
             writer,
             context,
-            schema_generation,
+            cwd_generation,
             mutations,
             content_pins,
             next_digest,
@@ -5865,44 +5839,21 @@ impl RuntimeState {
         validate_mutations(&encoded, next_digest).map_err(TableActivationError::Runtime)?;
         validate_table_candidate_scope(mutations, validator.tables())
             .map_err(TableActivationError::Runtime)?;
-        if validator.schema_generation_identity() != Some(schema_generation.identity_digest()) {
+        if validator.cwd_generation() != cwd_generation {
             return Err(TableActivationError::Runtime(
                 RuntimeError::InvalidTableMutation,
             ));
         }
         let mut seen_pin_ids = BTreeMap::new();
         let mut transfers = Vec::with_capacity(content_pins.len());
-        for binding in content_pins.iter_mut() {
-            let matching_mutation = mutations.iter().any(|mutation| {
-                mutation.id == binding.mutation_id
-                    && mutation.table == binding.table
-                    && mutation.value.is_some()
-                    && mutation
-                        .rekey_to
-                        .as_deref()
-                        .unwrap_or(mutation.key.as_slice())
-                        == binding.row_key.as_slice()
-            });
-            let pin_id = binding.pin.id();
-            if !matching_mutation
-                || binding.table.is_empty()
-                || binding.row_key.is_empty()
-                || seen_pin_ids.insert(pin_id, ()).is_some()
-            {
+        for pin in content_pins.iter() {
+            let transfer = pin.transfer_record();
+            if seen_pin_ids.insert(*transfer.pin_id(), ()).is_some() {
                 return Err(TableActivationError::Runtime(
                     RuntimeError::InvalidTableMutation,
                 ));
             }
-            transfers.push(ProtectedContentTransferRecord {
-                pin_id,
-                repository_id: binding.pin.repository_id(),
-                database_id: binding.pin.database_id(),
-                content_length: binding.pin.content_length(),
-                content_sha256: binding.pin.content_sha256(),
-                mutation_id: binding.mutation_id,
-                table: binding.table.clone(),
-                row_key: binding.row_key.clone(),
-            });
+            transfers.push(transfer);
         }
         let transaction = self
             .connection
@@ -5920,6 +5871,34 @@ impl RuntimeState {
         self.require_owner(&transaction, writer)
             .await
             .map_err(TableActivationError::Runtime)?;
+        if !transfers.is_empty() {
+            let mut runtime_meta = transaction
+                .query("SELECT database_id FROM runtime_meta WHERE singleton = 1", ())
+                .await
+                .map_err(|_| {
+                    TableActivationError::Runtime(RuntimeError::StorageUnavailable)
+                })?;
+            let row = runtime_meta
+                .next()
+                .await
+                .map_err(|_| {
+                    TableActivationError::Runtime(RuntimeError::StorageUnavailable)
+                })?
+                .ok_or(TableActivationError::Runtime(RuntimeError::RecoveryInvalid))?;
+            let database_id: [u8; 16] = fixed(
+                row.get(0)
+                    .map_err(|_| TableActivationError::Runtime(RuntimeError::RecoveryInvalid))?,
+            )
+            .map_err(TableActivationError::Runtime)?;
+            if transfers
+                .iter()
+                .any(|transfer| transfer.database_id() != &database_id)
+            {
+                return Err(TableActivationError::Runtime(
+                    RuntimeError::InvalidTableMutation,
+                ));
+            }
+        }
         for mutation in mutations {
             apply_table_mutation_tx(&transaction, mutation)
                 .await
@@ -5940,21 +5919,25 @@ impl RuntimeState {
             TableActivationError::Runtime(RuntimeError::InvalidTableMutation)
         })?;
         for transfer in &transfers {
-            let content_length = i64::try_from(transfer.content_length).map_err(|_| {
+            let identity = transfer.content_identity();
+            let content_length = i64::try_from(identity.length()).map_err(|_| {
                 TableActivationError::Runtime(RuntimeError::InvalidTableMutation)
             })?;
+            let oid_algorithm = match transfer.descriptor_oid().algorithm() {
+                orna_repository_v1::GitHashAlgorithm::Sha1 => 1_i64,
+                orna_repository_v1::GitHashAlgorithm::Sha256 => 2_i64,
+            };
             transaction
                 .execute(
-                    "INSERT INTO accepted_content_pin (pin_id, repository_id, database_id, content_length, content_sha256, mutation_id, table_id, row_key, owner_id, owner_epoch) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO accepted_content_pin (pin_id, repository_id, database_id, descriptor_oid_algorithm, descriptor_oid, content_length, content_sha256, owner_id, owner_epoch) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
-                        &transfer.pin_id[..],
-                        &transfer.repository_id[..],
-                        &transfer.database_id[..],
+                        &transfer.pin_id()[..],
+                        &transfer.repository_id()[..],
+                        &transfer.database_id()[..],
+                        oid_algorithm,
+                        &transfer.descriptor_oid().as_bytes()[..],
                         content_length,
-                        &transfer.content_sha256[..],
-                        &transfer.mutation_id[..],
-                        transfer.table.as_str(),
-                        &transfer.row_key[..],
+                        &identity.sha256()[..],
                         &writer.owner_id[..],
                         owner_epoch,
                     ],
@@ -19048,6 +19031,21 @@ mod tests {
         let repository = Repository::discover(temp.path()).unwrap();
         (temp, repository)
     }
+    fn activation_test_cwd_generation(runtime: u64) -> &'static CwdGeneration {
+        static GENERATION_ZERO: std::sync::OnceLock<CwdGeneration> = std::sync::OnceLock::new();
+        static GENERATION_ONE: std::sync::OnceLock<CwdGeneration> = std::sync::OnceLock::new();
+        let generation = match runtime {
+            0 => &GENERATION_ZERO,
+            1 => &GENERATION_ONE,
+            _ => panic!("test CWD generation is outside the fixture set"),
+        };
+        generation.get_or_init(|| {
+            let (_temp, repository) = repository();
+            repository
+                .cwd_generation(orna_repository_v1::RuntimeGeneration::new(runtime))
+                .unwrap()
+        })
+    }
     async fn open_state(repo: &Repository) -> RuntimeState {
         RuntimeState::open(
             repo,
@@ -19843,7 +19841,7 @@ mod tests {
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
-        let schema_generation = TestSchemaGeneration([13; 32]);
+        let cwd_generation = activation_test_cwd_generation(0);
         let mut validator = ObservingTableActivationValidator {
             tables: vec!["books".into()],
             calls: 0,
@@ -19854,7 +19852,7 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                schema_generation: &schema_generation,
+                cwd_generation: &cwd_generation,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -19885,7 +19883,7 @@ mod tests {
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
-        let schema_generation = TestSchemaGeneration([13; 32]);
+        let cwd_generation = activation_test_cwd_generation(0);
         let before = state.capture().await.unwrap();
         let mut validator = RejectingValidator {
             tables: vec!["books".into()],
@@ -19896,7 +19894,7 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                schema_generation: &schema_generation,
+                cwd_generation: &cwd_generation,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -19928,7 +19926,7 @@ mod tests {
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
         let before = state.capture().await.unwrap();
-        let schema_generation = TestSchemaGeneration([14; 32]);
+        let cwd_generation = activation_test_cwd_generation(1);
         let mut validator = ObservingTableActivationValidator {
             tables: vec!["books".into()],
             calls: 0,
@@ -19939,7 +19937,7 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                schema_generation: &schema_generation,
+                cwd_generation: &cwd_generation,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -30702,14 +30700,6 @@ mod tests {
         }
     }
 
-    struct TestSchemaGeneration([u8; 32]);
-
-    unsafe impl SchemaGenerationIdentity for TestSchemaGeneration {
-        fn identity_digest(&self) -> [u8; 32] {
-            self.0
-        }
-    }
-
     struct TablesOnlyValidator {
         tables: Vec<String>,
         calls: usize,
@@ -30731,8 +30721,8 @@ mod tests {
             &self.tables
         }
 
-        fn schema_generation_identity(&self) -> Option<[u8; 32]> {
-            Some([13; 32])
+        fn cwd_generation(&self) -> &CwdGeneration {
+            activation_test_cwd_generation(0)
         }
 
         fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -30752,8 +30742,8 @@ mod tests {
             &self.tables
         }
 
-        fn schema_generation_identity(&self) -> Option<[u8; 32]> {
-            Some([13; 32])
+        fn cwd_generation(&self) -> &CwdGeneration {
+            activation_test_cwd_generation(0)
         }
 
         fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -30787,8 +30777,8 @@ mod tests {
             &self.tables
         }
 
-        fn schema_generation_identity(&self) -> Option<[u8; 32]> {
-            Some([13; 32])
+        fn cwd_generation(&self) -> &CwdGeneration {
+            activation_test_cwd_generation(0)
         }
 
         fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
