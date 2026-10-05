@@ -6,11 +6,16 @@
 //! handles for later value/schema/store work. It does not write rows, convert
 //! data, or interpret native graph objects.
 
-use std::{fmt, str::FromStr};
+use std::{fmt, process::Command, str::FromStr};
 
-use orna_syntax_v1::{parse_row, Expr, LiteralKind, RecordField};
+use orna_syntax_v1::{Expr, LiteralKind, RecordField, parse_row};
+use sha2::{Digest, Sha256};
 
 use crate::{CommittedTreeEntryKind, Repository, RepositoryError};
+use crate::{
+    native_graph::{GitHashAlgorithm, NativeGraphContext, NativeOid},
+    row_store::RowMapSnapshot,
+};
 
 use super::DatabaseId;
 
@@ -74,6 +79,9 @@ pub enum FormatContextError {
     SchemaRootInvalid,
     StoreRootUnavailable,
     StoreRootInvalid,
+    RowMapMismatch,
+    GraphContextUnavailable,
+    GraphContextInvalid,
 }
 
 impl FormatContextError {
@@ -91,6 +99,9 @@ impl FormatContextError {
             Self::SchemaRootInvalid => "ORNA-REPO-CONTEXT-009",
             Self::StoreRootUnavailable => "ORNA-REPO-CONTEXT-010",
             Self::StoreRootInvalid => "ORNA-REPO-CONTEXT-011",
+            Self::RowMapMismatch => "ORNA-REPO-CONTEXT-012",
+            Self::GraphContextUnavailable => "ORNA-REPO-CONTEXT-013",
+            Self::GraphContextInvalid => "ORNA-REPO-CONTEXT-014",
         }
     }
 }
@@ -109,6 +120,9 @@ impl fmt::Display for FormatContextError {
             Self::SchemaRootInvalid => "repository schema root is invalid",
             Self::StoreRootUnavailable => "repository store root is unavailable",
             Self::StoreRootInvalid => "repository store root is invalid",
+            Self::RowMapMismatch => "row map does not belong to the pinned format-3 context",
+            Self::GraphContextUnavailable => "native graph repository data is unavailable",
+            Self::GraphContextInvalid => "native graph repository data is invalid",
         })
     }
 }
@@ -146,6 +160,8 @@ impl RepositorySnapshotPin {
 #[derive(Clone, Debug)]
 pub struct SchemaRootPin {
     snapshot: RepositorySnapshotPin,
+    oid: NativeOid,
+    digest: [u8; 32],
 }
 
 /// Opaque proof that the pinned `.orna/store` tree had a valid native-tree
@@ -153,6 +169,7 @@ pub struct SchemaRootPin {
 #[derive(Clone, Debug)]
 pub struct StoreRootPin {
     snapshot: RepositorySnapshotPin,
+    oid: NativeOid,
 }
 
 /// A validated, immutable repository metadata context.
@@ -224,17 +241,36 @@ impl RepositoryFormatContext {
     /// row layers. It validates only the fixed source root in this slice.
     pub fn validate_schema_root(&self) -> Result<SchemaRootPin, FormatContextError> {
         self.require_format3()?;
-        match self.repository.read_committed_file(
+        let source = match self.repository.read_committed_file(
             &self.snapshot.commit,
             MAIN_SOURCE_PATH,
             64 * 1024,
         ) {
-            Ok(_) => Ok(SchemaRootPin {
-                snapshot: self.snapshot.clone(),
-            }),
-            Err(RepositoryError::GitUnavailable) => Err(FormatContextError::SchemaRootUnavailable),
-            Err(_) => Err(FormatContextError::SchemaRootInvalid),
-        }
+            Ok(source) => source,
+            Err(RepositoryError::GitUnavailable) => {
+                return Err(FormatContextError::SchemaRootUnavailable);
+            }
+            Err(_) => return Err(FormatContextError::SchemaRootInvalid),
+        };
+        let algorithm = repository_hash_algorithm(&self.repository)?;
+        let oid = committed_path_oid(
+            &self.repository,
+            &self.snapshot.commit,
+            algorithm,
+            MAIN_SOURCE_PATH,
+            "blob",
+        )
+        .map_err(|error| match error {
+            FormatContextError::GraphContextUnavailable => {
+                FormatContextError::SchemaRootUnavailable
+            }
+            _ => FormatContextError::SchemaRootInvalid,
+        })?;
+        Ok(SchemaRootPin {
+            snapshot: self.snapshot.clone(),
+            oid,
+            digest: Sha256::digest(&source).into(),
+        })
     }
 
     /// A non-authoritative store-root validation seam for later OGS/ORP
@@ -278,9 +314,95 @@ impl RepositoryFormatContext {
         if !found {
             return Err(FormatContextError::StoreRootUnavailable);
         }
+        let algorithm = repository_hash_algorithm(&self.repository)?;
+        let oid = committed_path_oid(
+            &self.repository,
+            &self.snapshot.commit,
+            algorithm,
+            ".orna/store",
+            "tree",
+        )
+        .map_err(|error| match error {
+            FormatContextError::GraphContextUnavailable => FormatContextError::StoreRootUnavailable,
+            _ => FormatContextError::StoreRootInvalid,
+        })?;
         Ok(StoreRootPin {
             snapshot: self.snapshot.clone(),
+            oid,
         })
+    }
+
+    /// Issues native Git graph authority only for a sealed row-map snapshot
+    /// whose database, schema identity and store root match this pinned
+    /// format-3 repository snapshot.
+    pub fn open_native_graph(
+        &self,
+        rows: &RowMapSnapshot,
+    ) -> Result<NativeGraphContext, FormatContextError> {
+        self.require_format3()?;
+        let database_id = self.require_database_id()?;
+        self.validate_schema_root()?;
+        let store = self.validate_store_root()?;
+        let version = rows.version();
+        if version.database_id() != database_id.as_bytes()
+            || version.schema().database_id() != database_id.as_bytes()
+            || version.store_root() != &store.oid
+        {
+            return Err(FormatContextError::RowMapMismatch);
+        }
+        let schema_digest = *version.schema().schema_digest();
+        let algorithm = store.oid.algorithm();
+        if version.schema().schema_oid().algorithm() != algorithm {
+            return Err(FormatContextError::GraphContextInvalid);
+        }
+        let repository_path = self
+            .repository
+            .worktree()
+            .canonicalize()
+            .map_err(|_| FormatContextError::GraphContextUnavailable)?;
+        let mut repository_hash = Sha256::new();
+        repository_hash.update(b"orna.repository.graph.repository.v1\0");
+        repository_hash.update(repository_path.to_string_lossy().as_bytes());
+        repository_hash.update(database_id.as_bytes());
+        let repository_id: [u8; 32] = repository_hash.finalize().into();
+
+        let mut snapshot_hash = Sha256::new();
+        snapshot_hash.update(b"orna.repository.graph.snapshot.v1\0");
+        snapshot_hash.update(self.snapshot.commit.as_str().as_bytes());
+        let snapshot_id: [u8; 32] = snapshot_hash.finalize().into();
+
+        let authority = rows.authority();
+        let mut owner_hash = Sha256::new();
+        owner_hash.update(b"orna.repository.graph.owner.v1\0");
+        owner_hash.update(authority);
+        let owner_digest = owner_hash.finalize();
+        let mut owner_id = [0u8; 16];
+        owner_id.copy_from_slice(&owner_digest[..16]);
+
+        let mut identity_hash = Sha256::new();
+        identity_hash.update(b"orna.repository.graph.context.v1\0");
+        identity_hash.update(repository_id);
+        identity_hash.update(database_id.as_bytes());
+        identity_hash.update(owner_id);
+        identity_hash.update(snapshot_id);
+        identity_hash.update(store.oid.as_bytes());
+        identity_hash.update(schema_digest);
+        identity_hash.update(authority);
+        let identity: [u8; 32] = identity_hash.finalize().into();
+
+        NativeGraphContext::issue(
+            self.repository.clone(),
+            repository_id,
+            identity,
+            *database_id.as_bytes(),
+            owner_id,
+            snapshot_id,
+            algorithm,
+            store.oid,
+            schema_digest,
+            rows.clone(),
+        )
+        .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
     fn require_format3(&self) -> Result<(), FormatContextError> {
@@ -341,6 +463,67 @@ impl Repository {
         let legacy_format = read_metadata_file(self, snapshot, LEGACY_FORMAT_PATH)?;
         parse_context(self.clone(), snapshot.clone(), database, legacy_format)
     }
+}
+
+fn repository_hash_algorithm(
+    repository: &Repository,
+) -> Result<GitHashAlgorithm, FormatContextError> {
+    let output = repository_git_output(repository, &["rev-parse", "--show-object-format=storage"])?;
+    match std::str::from_utf8(&output)
+        .map_err(|_| FormatContextError::GraphContextInvalid)?
+        .trim()
+    {
+        "sha1" => Ok(GitHashAlgorithm::Sha1),
+        "sha256" => Ok(GitHashAlgorithm::Sha256),
+        _ => Err(FormatContextError::GraphContextInvalid),
+    }
+}
+
+fn committed_path_oid(
+    repository: &Repository,
+    commit: &crate::GitCommitRef,
+    algorithm: GitHashAlgorithm,
+    path: &str,
+    expected_kind: &str,
+) -> Result<NativeOid, FormatContextError> {
+    let object_spec = format!("{}:{path}", commit.as_str());
+    let output = repository_git_output(repository, &["rev-parse", "--verify", &object_spec])?;
+    let hex = std::str::from_utf8(&output)
+        .map_err(|_| FormatContextError::GraphContextInvalid)?
+        .trim();
+    let oid =
+        NativeOid::from_hex(algorithm, hex).map_err(|_| FormatContextError::GraphContextInvalid)?;
+    let kind_output = repository_git_output(repository, &["cat-file", "-t", &oid.to_hex()])?;
+    if std::str::from_utf8(&kind_output)
+        .map_err(|_| FormatContextError::GraphContextInvalid)?
+        .trim()
+        != expected_kind
+    {
+        return Err(FormatContextError::GraphContextInvalid);
+    }
+    Ok(oid)
+}
+
+fn repository_git_output(
+    repository: &Repository,
+    args: &[&str],
+) -> Result<Vec<u8>, FormatContextError> {
+    let output = Command::new("git")
+        .current_dir(repository.worktree())
+        .args(args)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| FormatContextError::GraphContextUnavailable)?;
+    if !output.status.success() {
+        return Err(FormatContextError::GraphContextUnavailable);
+    }
+    Ok(output.stdout)
 }
 
 fn map_snapshot_error(error: RepositoryError) -> FormatContextError {
@@ -548,5 +731,351 @@ pub(super) fn parse_canonical_database(bytes: &[u8]) -> Result<DatabaseId, ()> {
     match parse_database_record(bytes).map_err(|_| ())? {
         DatabaseRecord::Format3(database_id) => Ok(database_id),
         DatabaseRecord::LegacySidecar(_) => Err(()),
+    }
+}
+
+#[cfg(test)]
+mod graph_bridge_tests {
+    use std::{
+        fs,
+        io::Write,
+        path::Path,
+        process::{Command, Stdio},
+    };
+
+    use sha2::{Digest, Sha256};
+    use tempfile::TempDir;
+
+    use crate::{
+        Repository,
+        native_graph::{ByteIndexEntry, GitHashAlgorithm, NativeOid, NodeData},
+        row_store::{RowMapSnapshot, RowMapVersion, SchemaGeneration},
+    };
+
+    use super::RepositoryFormatContext;
+
+    const DATABASE: &str = include_str!("../tests/fixtures/format-context/database-final.orna");
+    const DATABASE_TEMPLATE: &str =
+        include_str!("../tests/fixtures/format-context/database-template.orna");
+    const MAIN_SOURCE: &str = include_str!("../tests/fixtures/git-repository-main.orna");
+    const DATABASE_PLACEHOLDER: &str = "00000000-0000-4000-8000-000000000000";
+    const OTHER_DATABASE_ID: &str = "a4a0a7d1-4f5c-4dc4-a5bf-f3f7f6a8d7e1";
+
+    fn git(directory: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(arguments)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn repository() -> TempDir {
+        let directory = TempDir::new().expect("create graph bridge repository");
+        let root = directory.path();
+        git(
+            root,
+            &["init", "--quiet", "--initial-branch=main", "--template="],
+        );
+        git(root, &["config", "user.name", "kierandrewett"]);
+        git(root, &["config", "user.email", "kieran@drewett.dev"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.join(".orna/store")).expect("create store tree");
+        fs::write(root.join("main.orna"), MAIN_SOURCE).expect("write source fixture");
+        fs::write(root.join(".orna/database.orna"), DATABASE).expect("write database fixture");
+        fs::write(root.join(".orna/store/data"), b"store root one")
+            .expect("write first store marker");
+        git(root, &["add", "."]);
+        git(root, &["commit", "--quiet", "-m", "graph bridge fixture"]);
+        directory
+    }
+
+    fn commit(directory: &Path) {
+        git(directory, &["add", "."]);
+        git(
+            directory,
+            &["commit", "--quiet", "-m", "advance bridge fixture"],
+        );
+    }
+
+    fn context(directory: &Path) -> RepositoryFormatContext {
+        Repository::discover(directory)
+            .expect("discover fixture repository")
+            .open_format_context()
+            .expect("admit fixture format context")
+    }
+
+    fn write_git_object(
+        directory: &Path,
+        algorithm: GitHashAlgorithm,
+        kind: &str,
+        bytes: &[u8],
+    ) -> NativeOid {
+        let mut child = Command::new("git")
+            .current_dir(directory)
+            .args(["hash-object", "-w", "-t", kind, "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn git hash-object");
+        child
+            .stdin
+            .take()
+            .expect("hash-object stdin")
+            .write_all(bytes)
+            .expect("write native object bytes");
+        let output = child.wait_with_output().expect("wait for hash-object");
+        assert!(
+            output.status.success(),
+            "git hash-object: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        NativeOid::from_hex(
+            algorithm,
+            std::str::from_utf8(&output.stdout)
+                .expect("hash-object OID is UTF-8")
+                .trim(),
+        )
+        .expect("valid native OID")
+    }
+
+    fn append_tree_entry(tree: &mut Vec<u8>, mode: &str, name: &str, oid: &NativeOid) {
+        tree.extend_from_slice(mode.as_bytes());
+        tree.push(b' ');
+        tree.extend_from_slice(name.as_bytes());
+        tree.push(0);
+        tree.extend_from_slice(oid.as_bytes());
+    }
+
+    fn write_native_node(
+        directory: &Path,
+        algorithm: GitHashAlgorithm,
+        node: &NodeData,
+    ) -> NativeOid {
+        let data_oid = write_git_object(
+            directory,
+            algorithm,
+            "blob",
+            &node.encode_canonical().expect("canonical node data"),
+        );
+        let mut dependencies = node.dependencies().expect("typed node dependencies");
+        dependencies.sort_by_key(|dependency| dependency.oid().to_hex());
+        let refs_oid = if dependencies.is_empty() {
+            None
+        } else {
+            let mut refs_tree = Vec::new();
+            for dependency in dependencies {
+                let mode = match dependency.kind() {
+                    crate::native_graph::NativeObjectKind::Blob => "100644",
+                    crate::native_graph::NativeObjectKind::Tree => "40000",
+                };
+                append_tree_entry(
+                    &mut refs_tree,
+                    mode,
+                    &dependency.oid().to_hex(),
+                    dependency.oid(),
+                );
+            }
+            Some(write_git_object(directory, algorithm, "tree", &refs_tree))
+        };
+
+        let mut envelope = Vec::new();
+        append_tree_entry(&mut envelope, "100644", "data", &data_oid);
+        if let Some(refs_oid) = refs_oid {
+            append_tree_entry(&mut envelope, "40000", "refs", &refs_oid);
+        }
+        write_git_object(directory, algorithm, "tree", &envelope)
+    }
+
+    fn schema_descriptor_node(
+        directory: &Path,
+        algorithm: GitHashAlgorithm,
+        schema_bytes: &[u8],
+        encoded_length: u64,
+        schema_digest: [u8; 32],
+    ) -> NativeOid {
+        let chunk_oid = write_git_object(directory, algorithm, "blob", schema_bytes);
+        let byte_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: schema_bytes.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: schema_bytes.len() as u64,
+                    target: chunk_oid,
+                    chunk_sha256: Some(schema_digest),
+                }],
+            },
+        );
+        let schema_oid = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::Schema {
+                encoded_length,
+                schema_digest,
+                byte_root,
+            },
+        );
+        schema_oid
+    }
+
+    fn schema_node(directory: &Path, context: &RepositoryFormatContext) -> (NativeOid, [u8; 32]) {
+        let algorithm = context
+            .validate_schema_root()
+            .expect("pinned source schema root")
+            .oid
+            .algorithm();
+        let schema_bytes = MAIN_SOURCE.as_bytes();
+        let schema_digest: [u8; 32] = Sha256::digest(schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            directory,
+            algorithm,
+            schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+        (schema_oid, schema_digest)
+    }
+
+    fn sealed_rows(
+        context: &RepositoryFormatContext,
+        schema_oid: &NativeOid,
+        schema_digest: [u8; 32],
+    ) -> RowMapSnapshot {
+        let database_id = context.require_database_id().expect("database identity");
+        let store = context.validate_store_root().expect("pinned store root");
+
+        let mut relation_hash = Sha256::new();
+        relation_hash.update(b"orna.test.graph-bridge.relation.v1\0");
+        relation_hash.update(database_id.as_bytes());
+        let relation_digest = relation_hash.finalize();
+        let mut relation_id = [0u8; 16];
+        relation_id.copy_from_slice(&relation_digest[..16]);
+
+        let schema_generation = SchemaGeneration::issue(
+            *database_id.as_bytes(),
+            relation_id,
+            schema_oid.clone(),
+            schema_digest,
+            0,
+        );
+        let version = RowMapVersion::issue(
+            *database_id.as_bytes(),
+            relation_id,
+            store.oid.clone(),
+            schema_generation,
+            store.oid.clone(),
+            0,
+            Some(0),
+        )
+        .expect("consistent row-map identity");
+
+        let mut authority = Sha256::new();
+        authority.update(b"orna.test.graph-bridge.row-authority.v1\0");
+        authority.update(context.snapshot.commit.as_str().as_bytes());
+        authority.update(database_id.as_bytes());
+        RowMapSnapshot::issue(version, authority.finalize().into(), Vec::new())
+            .expect("seal row-map snapshot")
+    }
+
+    #[test]
+    fn native_graph_bridge_requires_matching_sealed_snapshot_before_scope() {
+        let directory = repository();
+        let root = directory.path();
+        let original = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &original);
+        let matching_rows = sealed_rows(&original, &schema_oid, schema_digest);
+        let graph = original
+            .open_native_graph(&matching_rows)
+            .expect("matching sealed format-3 row snapshot admits graph");
+        let _scope = graph
+            .open_read_scope()
+            .expect("graph owner issues its fixed-budget read scope");
+
+        let alternate_database = DATABASE_TEMPLATE.replace(DATABASE_PLACEHOLDER, OTHER_DATABASE_ID);
+        fs::write(root.join(".orna/database.orna"), alternate_database)
+            .expect("write alternate database fixture");
+        commit(root);
+        let other_database_context = context(root);
+        let other_database_rows = sealed_rows(&other_database_context, &schema_oid, schema_digest);
+        assert!(matches!(
+            original.open_native_graph(&other_database_rows),
+            Err(super::FormatContextError::RowMapMismatch)
+        ));
+
+        fs::write(root.join(".orna/database.orna"), DATABASE)
+            .expect("restore original database fixture");
+        fs::write(root.join(".orna/store/data"), b"store root two")
+            .expect("write different snapshot store root");
+        commit(root);
+        let other_snapshot_context = context(root);
+        let other_snapshot_rows = sealed_rows(&other_snapshot_context, &schema_oid, schema_digest);
+        assert!(matches!(
+            original.open_native_graph(&other_snapshot_rows),
+            Err(super::FormatContextError::RowMapMismatch)
+        ));
+    }
+
+    #[test]
+    fn native_graph_bridge_rejects_tampered_schema_payload_length_and_digest() {
+        let directory = repository();
+        let root = directory.path();
+        let context = context(root);
+        let algorithm = context
+            .validate_schema_root()
+            .expect("pinned source schema root")
+            .oid
+            .algorithm();
+        let valid_bytes = MAIN_SOURCE.as_bytes();
+        let valid_digest: [u8; 32] = Sha256::digest(valid_bytes).into();
+
+        let mut tampered_bytes = valid_bytes.to_vec();
+        tampered_bytes[0] ^= 1;
+        let tampered_payload = schema_descriptor_node(
+            root,
+            algorithm,
+            &tampered_bytes,
+            valid_bytes.len() as u64,
+            valid_digest,
+        );
+        let rows = sealed_rows(&context, &tampered_payload, valid_digest);
+        assert!(matches!(
+            context.open_native_graph(&rows),
+            Err(super::FormatContextError::GraphContextInvalid)
+        ));
+
+        let wrong_length = schema_descriptor_node(
+            root,
+            algorithm,
+            valid_bytes,
+            valid_bytes.len() as u64 + 1,
+            valid_digest,
+        );
+        let rows = sealed_rows(&context, &wrong_length, valid_digest);
+        assert!(matches!(
+            context.open_native_graph(&rows),
+            Err(super::FormatContextError::GraphContextInvalid)
+        ));
+
+        let mut wrong_digest = valid_digest;
+        wrong_digest[0] ^= 1;
+        let descriptor_digest_mismatch = schema_descriptor_node(
+            root,
+            algorithm,
+            valid_bytes,
+            valid_bytes.len() as u64,
+            wrong_digest,
+        );
+        let rows = sealed_rows(&context, &descriptor_digest_mismatch, valid_digest);
+        assert!(matches!(
+            context.open_native_graph(&rows),
+            Err(super::FormatContextError::GraphContextInvalid)
+        ));
     }
 }
