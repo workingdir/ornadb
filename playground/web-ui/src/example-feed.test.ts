@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  exampleIndexAfterRefresh,
   exampleIndexForKey,
   exampleIndexForPath,
   exampleIndexForSearch,
   isExample,
+  parseExampleCatalog,
   pushExampleSelection,
+  sameExampleRows,
 } from './example-feed';
 
 describe('database example feed', () => {
@@ -13,6 +16,38 @@ describe('database example feed', () => {
     expect(isExample({ name: 'Hello', path: 'playground/Sample/hello.orna' })).toBe(false);
     expect(isExample(null)).toBe(false);
     expect(isExample([])).toBe(false);
+  });
+
+  it('accepts a committed catalog revision and filters malformed rows', () => {
+    const revision = 'a'.repeat(40);
+    expect(parseExampleCatalog({
+      revision,
+      examples: [
+        { name: 'Hello', path: 'playground/Sample/hello.orna', source: '1 + 1' },
+        { name: 'Broken', path: 'playground/Sample/broken.orna' },
+      ],
+    })).toEqual({
+      revision,
+      examples: [{ name: 'Hello', path: 'playground/Sample/hello.orna', source: '1 + 1' }],
+    });
+    expect(parseExampleCatalog({ revision: 'not-a-git-revision', examples: [] })).toBeUndefined();
+  });
+
+  it('keeps the selected path after refresh and leaves removed selections empty', () => {
+    const refreshed = [
+      { path: 'playground/Sample/new.orna' },
+      { path: 'playground/Sample/hello.orna' },
+    ];
+    expect(exampleIndexAfterRefresh(refreshed, 'playground/Sample/hello.orna')).toBe(1);
+    expect(exampleIndexAfterRefresh(refreshed, 'playground/Sample/removed.orna')).toBe(-1);
+    expect(exampleIndexAfterRefresh(refreshed, null)).toBe(-1);
+  });
+
+  it('detects catalog changes without treating unrelated database commits as example updates', () => {
+    const examples = [{ name: 'Hello', path: 'playground/Sample/hello.orna', source: '1 + 1' }];
+    expect(sameExampleRows(examples, [...examples])).toBe(true);
+    expect(sameExampleRows(examples, [{ ...examples[0], source: '2 + 2' }])).toBe(false);
+    expect(sameExampleRows(examples, [])).toBe(false);
   });
 
   it('moves through the feed with arrow and page keys without wrapping', () => {

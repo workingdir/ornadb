@@ -4,12 +4,47 @@ export type Example = {
   source: string;
 };
 
+export type ExampleCatalog = {
+  revision: string;
+  examples: Example[];
+};
+
+export function isCommittedRevision(value: unknown): value is string {
+  return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value);
+}
+
 export function isExample(value: unknown): value is Example {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const example = value as Record<string, unknown>;
   return typeof example.name === 'string' &&
     typeof example.path === 'string' &&
     typeof example.source === 'string';
+}
+
+export function parseExampleCatalog(value: unknown): ExampleCatalog | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const catalog = value as Record<string, unknown>;
+  if (!isCommittedRevision(catalog.revision) || !Array.isArray(catalog.examples)) return undefined;
+  return {
+    revision: catalog.revision,
+    examples: catalog.examples.filter(isExample),
+  };
+}
+
+export function exampleIndexAfterRefresh(
+  examples: readonly Pick<Example, 'path'>[],
+  selectedPath: string | null,
+): number {
+  if (selectedPath === null) return -1;
+  return examples.findIndex((example) => example.path === selectedPath);
+}
+
+export function sameExampleRows(left: readonly Example[], right: readonly Example[]): boolean {
+  return left.length === right.length && left.every((example, index) => {
+    const candidate = right[index];
+    return candidate?.name === example.name && candidate.path === example.path &&
+      candidate.source === example.source;
+  });
 }
 
 export function exampleIndexForPath(

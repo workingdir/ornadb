@@ -2,6 +2,10 @@ export function isCommittedRevision(value: unknown): value is string {
   return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value);
 }
 
+export const PLAYGROUND_REVISION_EVENT = 'orna:playground-revision-changed';
+
+export type PlaygroundRevisionEvent = CustomEvent<{ revision: string }>;
+
 export function hasNewRevision(current: string | undefined, candidate: unknown): candidate is string {
   return isCommittedRevision(candidate) && candidate !== current;
 }
@@ -42,7 +46,8 @@ export function startStyleReload(): void {
 
   let activeTheme = theme;
   let activeLayout = layout;
-  let currentRevision: string | undefined;
+  let appliedRevision: string | undefined;
+  let observedRevision: string | undefined;
   let checking = false;
   let active = true;
   const poll = async (): Promise<void> => {
@@ -54,8 +59,12 @@ export function startStyleReload(): void {
       const value: unknown = await response.json();
       if (!responseRevision(value)) throw new Error('The server returned an invalid revision.');
       const revision = value.revision;
-      if (!hasNewRevision(currentRevision, revision)) return;
-      const replacingCommittedStyles = currentRevision !== undefined;
+      if (revision !== observedRevision) {
+        observedRevision = revision;
+        window.dispatchEvent(new CustomEvent(PLAYGROUND_REVISION_EVENT, { detail: { revision } }));
+      }
+      if (!hasNewRevision(appliedRevision, revision)) return;
+      const replacingCommittedStyles = appliedRevision !== undefined;
 
       const nextThemeHref = revisionStylesheetHref('/playground/theme.css', revision);
       const nextLayoutHref = revisionStylesheetHref('/playground/layout.css', revision);
@@ -75,7 +84,7 @@ export function startStyleReload(): void {
       activeLayout.replaceWith(nextLayout);
       activeTheme = nextTheme;
       activeLayout = nextLayout;
-      currentRevision = revision;
+      appliedRevision = revision;
       window.dispatchEvent(new Event('orna:playground-styles-updated'));
       if (status && replacingCommittedStyles) status.textContent = 'Theme and layout updated.';
     } catch {

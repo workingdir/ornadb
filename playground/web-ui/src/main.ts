@@ -9,14 +9,21 @@ import {
   signatureHelpFields,
 } from './assist-adapter';
 import {
+  exampleIndexAfterRefresh,
   exampleIndexForKey,
   exampleIndexForSearch,
-  isExample,
+  parseExampleCatalog,
   pushExampleSelection,
+  sameExampleRows,
+  type Example,
 } from './example-feed';
 import { formatRunResult, formatThrownError, type RunResult } from './results';
 import { servedRuntime } from './runtime';
-import { startStyleReload } from './style-reload';
+import {
+  PLAYGROUND_REVISION_EVENT,
+  startStyleReload,
+  type PlaygroundRevisionEvent,
+} from './style-reload';
 import './theme.css';
 import './layout.css';
 
@@ -69,6 +76,10 @@ let nextLspId = 1;
 
 let activeRun = false;
 let examplesReady = false;
+let examplesRevision: string | undefined;
+let loadedExamples: Example[] = [];
+let requestedExamplesRevision: string | undefined;
+let refreshingExamples = false;
 let liveRuntimeReady = typeof (globalThis as typeof globalThis & { ornaPlaygroundRun?: unknown }).ornaPlaygroundRun === 'function';
 const runtime = servedRuntime();
 
@@ -367,10 +378,14 @@ examplesSelect.addEventListener('keydown', (event) => {
 
 async function loadExamples(): Promise<void> {
   try {
-    const response = await fetch('/api/examples');
+    const response = await fetch('/api/examples', { cache: 'no-store' });
     if (!response.ok) throw new Error(`Examples request failed (${response.status}).`);
     const payload: unknown = await response.json();
-    const examples = asArray(asRecord(payload)?.examples).filter(isExample);
+    const catalog = parseExampleCatalog(payload);
+    if (!catalog) throw new Error('The server returned an invalid examples catalog.');
+    examplesRevision = catalog.revision;
+    loadedExamples = catalog.examples;
+    const examples = catalog.examples;
     examplesSelect.replaceChildren();
     if (examples.length === 0) {
       const empty = document.createElement('option');
@@ -406,6 +421,78 @@ async function loadExamples(): Promise<void> {
     updateRunButton();
   }
 }
+
+async function refreshExamples(): Promise<void> {
+  if (refreshingExamples) return;
+  refreshingExamples = true;
+  let retry = false;
+  try {
+    while (requestedExamplesRevision) {
+      const revision = requestedExamplesRevision;
+      requestedExamplesRevision = undefined;
+      try {
+        const response = await fetch('/api/examples', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Examples request failed (${response.status}).`);
+        const payload: unknown = await response.json();
+        const catalog = parseExampleCatalog(payload);
+        if (!catalog) throw new Error('The server returned an invalid examples catalog.');
+        if (catalog.revision !== revision) {
+          requestedExamplesRevision ??= revision;
+          retry = true;
+          break;
+        }
+        if (catalog.revision === examplesRevision) continue;
+        if (sameExampleRows(loadedExamples, catalog.examples)) {
+          examplesRevision = catalog.revision;
+          continue;
+        }
+
+        const selectedPath = examplesSelect.selectedOptions[0]?.value ?? null;
+        const selectedIndex = exampleIndexAfterRefresh(catalog.examples, selectedPath);
+        examplesSelect.replaceChildren();
+        for (const example of catalog.examples) {
+          const option = document.createElement('option');
+          option.value = example.path;
+          option.textContent = example.name;
+          option.dataset.source = example.source;
+          examplesSelect.append(option);
+        }
+        if (catalog.examples.length === 0) {
+          const empty = document.createElement('option');
+          empty.textContent = 'No database examples';
+          examplesSelect.append(empty);
+          examplesSelect.disabled = true;
+        } else {
+          examplesSelect.disabled = false;
+          examplesSelect.selectedIndex = selectedIndex;
+        }
+        examplesRevision = catalog.revision;
+        loadedExamples = catalog.examples;
+        exampleStatus.textContent = selectedPath !== null && selectedIndex < 0
+          ? 'The selected example was removed. Your editor text was kept.'
+          : `${catalog.examples.length} committed ${catalog.examples.length === 1 ? 'example' : 'examples'} updated. Your editor text was kept.`;
+      } catch {
+        requestedExamplesRevision ??= revision;
+        exampleStatus.textContent = 'The committed examples could not be refreshed. Your editor text was kept.';
+        retry = true;
+        break;
+      }
+    }
+  } finally {
+    refreshingExamples = false;
+    if (requestedExamplesRevision) {
+      if (retry) window.setTimeout(() => void refreshExamples(), 2000);
+      else void refreshExamples();
+    }
+  }
+}
+
+window.addEventListener(PLAYGROUND_REVISION_EVENT, (event) => {
+  const revision = (event as PlaygroundRevisionEvent).detail?.revision;
+  if (!revision || revision === examplesRevision) return;
+  requestedExamplesRevision = revision;
+  void refreshExamples();
+});
 
 const resultTabs = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-output-tab]'));
 const resultPanels = Array.from(document.querySelectorAll<HTMLElement>('[data-output-panel]'));
@@ -447,9 +534,9 @@ void initializeEditor()
     editorStatus.textContent = `The editor could not load: ${formatThrownError(error)}`;
     examplesReady = true;
     updateRunButton();
-  });
+  })
+  .then(() => startStyleReload());
 window.addEventListener('beforeunload', () => {
   editor?.dispose();
   lspWorker.terminate();
 }, { once: true });
-startStyleReload();

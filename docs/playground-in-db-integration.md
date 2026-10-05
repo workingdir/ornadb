@@ -42,8 +42,12 @@ serialized, while Git listings, database assets, and the example feed keep
 serving during an open presentation WebSocket. Each asset or example response
 resolves its rows from one committed `HEAD`.
 `/api/playground/revision` reports the committed Git object ID. The open page
-polls it every two seconds and swaps both stylesheet links only after both
-revision-pinned rows load, then updates Monaco's theme from the new CSS tokens.
+polls it every two seconds. On a new revision it refreshes `/api/examples` from
+that revision without restarting the server, while keeping the current example
+selection when its path remains available. Catalog refresh never replaces the
+editor buffer, so in-progress edits survive Sample additions, changes, and
+removals. The page swaps both stylesheet links only after both revision-pinned
+rows load, then updates Monaco's theme from the new CSS tokens.
 
 Monaco uses the database-served shell assets to run the Orna LSP worker. The
 worker supplies standard-library completion, hover, signature help, and
