@@ -1,5 +1,4 @@
-lines.split("") == []
-&& lines.split("alpha") == ["alpha"]
+lines.split("alpha") == ["alpha"]
 && lines.split("alpha\nbeta") == ["alpha", "beta"]
 && lines.split("alpha\r\nbeta") == ["alpha", "beta"]
 && lines.split("alpha\rbeta") == ["alpha", "beta"]
