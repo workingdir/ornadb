@@ -64,12 +64,14 @@ fn spill(
 fn restore_chain(
     checkpoint_identity: &str,
     pair_identity: &str,
+    branch_name: &str,
+    generation: u64,
 ) -> QueryPairedCheckpointSegmentCompactionChainDescription {
     QueryPairedCheckpointSegmentCompactionChainDescription {
         join_pair_identity: object(pair_identity),
         branch: MutableBranchSnapshot {
-            name: "branch:restore".to_owned(),
-            generation: 12,
+            name: branch_name.to_owned(),
+            generation,
         },
         steps: vec![QueryPairedCheckpointSegmentCompactionStepDescription {
             checkpoint_identity: object(checkpoint_identity),
@@ -98,9 +100,15 @@ fn plan(
             statistics: Some(QuerySourceStatistics {
                 estimated_rows: Some(4),
                 estimated_bytes: Some(4_000),
-                mutable_branch: (source == "Restore").then(|| MutableBranchSnapshot {
-                    name: "branch:restore".to_owned(),
-                    generation: 12,
+                mutable_branch: matches!(source, "First" | "Restore").then(|| {
+                    MutableBranchSnapshot {
+                        name: if source == "First" {
+                            "branch:first".to_owned()
+                        } else {
+                            "branch:restore".to_owned()
+                        },
+                        generation: if source == "First" { 5 } else { 12 },
+                    }
                 }),
             }),
             predicate: Some(expression(&format!("expr:join-{source}"))),
@@ -180,8 +188,18 @@ fn plan(
     ];
     let mut restore_chains = if include_restore {
         vec![
-            restore_chain(restore_checkpoint_identity, "pair:Restore"),
-            restore_chain("checkpoint:restore-first-v1", "pair:First"),
+            restore_chain(
+                restore_checkpoint_identity,
+                "pair:Restore",
+                "branch:restore",
+                12,
+            ),
+            restore_chain(
+                "checkpoint:restore-first-v1",
+                "pair:First",
+                "branch:first",
+                5,
+            ),
         ]
     } else {
         Vec::new()
