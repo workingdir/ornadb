@@ -2414,7 +2414,10 @@ fn generated_provider_metadata_edges_match_schema_and_bindings() {
     let operation = registry
         .operation(operation_name)
         .expect("sys.meta generic operation exists in the generated provider registry");
-    assert_eq!(operation.signature.source, fixture["signature"]);
+    assert_eq!(
+        operation.signature.source,
+        fixture["signature"].as_str().unwrap()
+    );
     let role = operation
         .role
         .as_ref()
@@ -2423,7 +2426,10 @@ fn generated_provider_metadata_edges_match_schema_and_bindings() {
 
     let descriptor = system_function_descriptor(api_function)
         .expect("sys.meta has a macro-generated public API descriptor");
-    assert_eq!(descriptor.signature, fixture["signature"]);
+    assert_eq!(
+        descriptor.signature,
+        fixture["signature"].as_str().unwrap()
+    );
 
     let api: Value = serde_json::from_str(&system_api_json())
         .expect("generated system API inventory is valid JSON");
@@ -2464,9 +2470,10 @@ fn generated_provider_metadata_edges_match_schema_and_bindings() {
         let value_type = case["value_type"]
             .as_str()
             .expect("metadata edge names its input type");
+        let expected_result_type = format!("sys.ValueMetadata<{value_type}>");
         assert_eq!(
-            case["result_type"],
-            format!("sys.ValueMetadata<{value_type}>")
+            case["result_type"].as_str(),
+            Some(expected_result_type.as_str())
         );
         assert_eq!(case["metadata"]["static_type"], value_type);
         assert_eq!(case["metadata"]["redacted"], case["redacted"]);

@@ -5,8 +5,9 @@ use orna_sys_v1::{
     AbiType, AbiVersion, Argument, ArgumentMap, EffectSet, FailureCode, OperationId,
     ProviderDiagnostic, ProviderFailure, ProviderId, ProviderOffer, ProviderRoleRegistry,
     SemanticRoleId, SystemDispatchTable, SystemEffect, SystemOperationProvider, SystemProviderAbi,
-    TypeId, TypedValue, system_api_json, system_api_schema_json, system_binding_stubs,
-    system_dispatch_table, system_function_descriptor, system_provider_abi,
+    TypeId, TypedValue, ValueMetadataFacts, ValueMetadataResolver, system_api_json,
+    system_api_schema_json, system_binding_stubs, system_dispatch_table, system_function_descriptor,
+    system_provider_abi, system_value_metadata,
     system_provider_abi_json, system_provider_abi_schema_json, validate_provider_offer,
 };
 use serde_json::Value;
@@ -20,6 +21,7 @@ const PROVIDER_SCHEMA_CAPTURE_EDGE_FIXTURE: &str =
 const PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE: &str =
     include_str!("fixtures/provider-function-reference-edges.json");
 const PROVIDER_CANCEL_EDGE_FIXTURE: &str = include_str!("fixtures/provider-cancel-edges.json");
+const PROVIDER_METADATA_EDGE_FIXTURE: &str = include_str!("fixtures/provider-metadata-edges.json");
 
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
@@ -5833,6 +5835,347 @@ fn provider_cancel_edges_preserve_generated_binding_and_dispatch_contracts() {
             + handle_mismatch_routes
             + result_mismatch_routes
             + omitted_reason_rejections
+    );
+}
+
+#[test]
+fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
+    let fixture: Value = serde_json::from_str(PROVIDER_METADATA_EDGE_FIXTURE)
+        .expect("crate-local provider metadata fixture is valid JSON");
+    let operation_name = fixture["operation"]
+        .as_str()
+        .expect("metadata fixture identifies its generic operation");
+    let role_name = fixture["role"]
+        .as_str()
+        .expect("metadata fixture identifies its provider role");
+
+    let provider_schema = build_provider::generate_provider_registry_schema()
+        .expect("metadata provider schema regenerates from its typed source");
+    assert_eq!(provider_schema, system_provider_abi_schema_json());
+    build_host::validate_json_against_schema(system_provider_abi_json(), &provider_schema)
+        .expect("embedded metadata contract validates against the generated provider schema");
+    build_host::validate_json_against_schema(&system_api_json(), system_api_schema_json())
+        .expect("embedded metadata descriptor validates against the generated API schema");
+
+    let table = system_provider_abi();
+    let contract = table
+        .operation(operation_name)
+        .expect("generic sys.meta operation exists in the provider table");
+    assert_eq!(
+        contract.signature.source,
+        fixture["signature"].as_str().unwrap()
+    );
+    let role = contract
+        .role
+        .as_ref()
+        .expect("sys.meta operation has a role");
+    assert_eq!(role.as_str(), role_name);
+    let role_contract = table.role(role_name).expect("sys.meta role is registered");
+    assert_eq!(
+        format!(
+            "{}.{}",
+            role_contract.version.major, role_contract.version.minor
+        ),
+        fixture["role_version"].as_str().unwrap()
+    );
+    assert_eq!(
+        contract.signature.type_parameters,
+        ["T".to_owned()],
+        "metadata dispatch preserves its generic value witness"
+    );
+
+    let mut direct_abi_json: Value =
+        serde_json::from_str(system_provider_abi_json()).expect("generated ABI is valid JSON");
+    let direct_provider_id = ProviderId::new("fixture.metadata.direct").unwrap();
+    let role_rows = direct_abi_json["roles"]
+        .as_array_mut()
+        .expect("generated provider ABI has role rows");
+    let role_row = role_rows
+        .iter_mut()
+        .find(|row| row["name"] == role_name)
+        .expect("generated provider ABI contains the metadata role");
+    role_row["builtin_provider"] = Value::String(direct_provider_id.as_str().to_owned());
+    let direct_abi_json = direct_abi_json.to_string();
+    build_host::validate_json_against_schema(&direct_abi_json, &provider_schema)
+        .expect("directly bound metadata role remains schema-valid");
+    let direct_table = SystemProviderAbi::from_json(&direct_abi_json)
+        .expect("schema-validated direct metadata role parses into typed contracts");
+    let direct_role = direct_table.role(role_name).unwrap();
+    let direct_offer = ProviderOffer {
+        provider: direct_provider_id,
+        role: role.clone(),
+        version: direct_role.version,
+        effects: direct_role.effects.clone(),
+    };
+
+    let mut selected_registry = ProviderRoleRegistry::from_baked_abi(&table).unwrap();
+    let selected_offer = ProviderOffer {
+        provider: ProviderId::new("fixture.metadata.selected").unwrap(),
+        role: role.clone(),
+        version: role_contract.version,
+        effects: role_contract.effects.clone(),
+    };
+    selected_registry
+        .bind(selected_offer.clone())
+        .expect("replaceable metadata role accepts a compatible selected provider");
+
+    let cases = fixture["cases"]
+        .as_array()
+        .expect("metadata fixture has value edge cases");
+    struct FixtureMetadataResolver {
+        value_type: String,
+        metadata: Value,
+    }
+    impl ValueMetadataResolver for FixtureMetadataResolver {
+        fn value_metadata_facts(&self, static_type: &TypeId) -> Option<ValueMetadataFacts> {
+            if static_type.as_str() != self.value_type {
+                return None;
+            }
+            let nominal_type = match self.metadata["nominal_type"].as_str() {
+                Some(name) => Some(TypeId::new(name)),
+                None if self.metadata["nominal_type"].is_null() => None,
+                _ => return None,
+            };
+            let protocols = self.metadata["protocols"]
+                .as_array()?
+                .iter()
+                .map(|protocol| protocol.as_str().map(TypeId::new))
+                .collect::<Option<Vec<_>>>()?;
+            let codecs = self.metadata["codecs"]
+                .as_array()?
+                .iter()
+                .map(|codec| codec.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()?;
+            ValueMetadataFacts::new(nominal_type, protocols, codecs).ok()
+        }
+    }
+    let mut direct_routes = 0;
+    let mut selected_routes = 0;
+    let mut protected_inputs = 0;
+    for case in cases {
+        let value_type = case["value_type"]
+            .as_str()
+            .expect("metadata edge names its input type");
+        let result_type = case["result_type"]
+            .as_str()
+            .expect("metadata edge names its output type");
+        let protected = case["redacted"]
+            .as_bool()
+            .expect("metadata edge states whether its input is protected");
+        let payload = case["payload_sentinel"]
+            .as_str()
+            .unwrap_or("public-value-payload")
+            .as_bytes()
+            .to_vec();
+        let input = if protected {
+            protected_inputs += 1;
+            TypedValue::protected(TypeId::new(value_type), payload.clone())
+        } else {
+            TypedValue::public(TypeId::new(value_type), payload.clone())
+        };
+        if protected {
+            assert_eq!(input.canonical(), None, "protected payload stays private");
+        }
+        let expected_metadata = case["metadata"].clone();
+        assert_eq!(expected_metadata["static_type"], value_type);
+        assert_eq!(expected_metadata["redacted"], protected);
+        let resolver = FixtureMetadataResolver {
+            value_type: value_type.to_owned(),
+            metadata: expected_metadata.clone(),
+        };
+        let projected_metadata = system_value_metadata(&input, &resolver)
+            .unwrap_or_else(|error| panic!("{} metadata projects: {error:?}", case["name"]));
+        assert_eq!(
+            serde_json::to_value(&projected_metadata).expect("metadata projection serializes"),
+            expected_metadata,
+            "sys.meta projects only the fixture's public catalogue facts"
+        );
+        let expected_result = TypedValue::public(
+            TypeId::new(result_type),
+            serde_json::to_vec(&projected_metadata).expect("metadata projection serializes"),
+        );
+        let expected_arguments = [input.clone()];
+        let argument_types = [value_type.to_owned()];
+
+        let direct_provider = InvokeValueProvider {
+            offer: direct_offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: argument_types.to_vec(),
+            response: Ok(expected_result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        let direct_result = direct_table
+            .dispatch_to_provider(
+                operation_name,
+                &direct_provider,
+                &expected_arguments,
+                |_| Ok(()),
+            )
+            .expect("direct metadata route validates its provider contract");
+        assert_eq!(
+            direct_result,
+            orna_sys_v1::SystemDispatchResult::Returned(expected_result.clone()),
+            "direct route preserves the typed metadata result for {}",
+            case["name"]
+        );
+        assert_eq!(direct_provider.calls.load(Ordering::SeqCst), 1);
+        direct_routes += 1;
+
+        let selected_provider = InvokeValueProvider {
+            offer: selected_offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: argument_types.to_vec(),
+            response: Ok(expected_result.clone()),
+            calls: AtomicUsize::new(0),
+        };
+        let selected_result = selected_registry
+            .dispatch_to_provider(
+                &table,
+                operation_name,
+                &selected_provider,
+                &expected_arguments,
+                |_| Ok(()),
+            )
+            .expect("selected metadata route validates its provider contract");
+        assert_eq!(
+            selected_result,
+            orna_sys_v1::SystemDispatchResult::Returned(expected_result.clone()),
+            "selected route preserves the typed metadata result for {}",
+            case["name"]
+        );
+        assert_eq!(selected_provider.calls.load(Ordering::SeqCst), 1);
+        selected_routes += 1;
+
+        let direct_metadata = match direct_result {
+            orna_sys_v1::SystemDispatchResult::Returned(result) => serde_json::from_slice::<Value>(
+                result.canonical().expect("metadata result remains public"),
+            )
+            .expect("direct metadata result payload remains valid JSON"),
+            orna_sys_v1::SystemDispatchResult::Failed(code) => {
+                panic!("unexpected direct metadata failure {code}")
+            }
+        };
+        let selected_metadata = match selected_result {
+            orna_sys_v1::SystemDispatchResult::Returned(result) => serde_json::from_slice::<Value>(
+                result.canonical().expect("metadata result remains public"),
+            )
+            .expect("selected metadata result payload remains valid JSON"),
+            orna_sys_v1::SystemDispatchResult::Failed(code) => {
+                panic!("unexpected selected metadata failure {code}")
+            }
+        };
+        assert_eq!(direct_metadata, expected_metadata);
+        assert_eq!(selected_metadata, expected_metadata);
+        if let Some(sentinel) = case["payload_sentinel"].as_str() {
+            assert!(
+                !serde_json::to_string(&direct_metadata)
+                    .expect("metadata result reserializes")
+                    .contains(sentinel),
+                "metadata projection omits protected value bytes"
+            );
+            assert!(
+                !serde_json::to_string(&selected_metadata)
+                    .expect("selected metadata result reserializes")
+                    .contains(sentinel),
+                "selected metadata projection omits protected value bytes"
+            );
+        }
+    }
+
+    let first_case = &cases[0];
+    let first_type = first_case["value_type"].as_str().unwrap();
+    let first_input = TypedValue::public(TypeId::new(first_type), b"wrong-result-witness".to_vec());
+    let wrong_result_type = fixture["wrong_result_type"].as_str().unwrap();
+    let mut result_type_mismatches = 0;
+    let mut argument_count_rejections = 0;
+    for selected_route in [false, true] {
+        let offer = if selected_route {
+            selected_offer.clone()
+        } else {
+            direct_offer.clone()
+        };
+        let wrong_result_provider = InvokeValueProvider {
+            offer: offer.clone(),
+            operation: contract.id.clone(),
+            argument_types: vec![first_type.to_owned()],
+            response: Ok(TypedValue::public(
+                TypeId::new(wrong_result_type),
+                b"wrong".to_vec(),
+            )),
+            calls: AtomicUsize::new(0),
+        };
+        let wrong_result = if selected_route {
+            selected_registry.dispatch_to_provider(
+                &table,
+                operation_name,
+                &wrong_result_provider,
+                &[first_input.clone()],
+                |_| Ok(()),
+            )
+        } else {
+            direct_table.dispatch_to_provider(
+                operation_name,
+                &wrong_result_provider,
+                &[first_input.clone()],
+                |_| Ok(()),
+            )
+        };
+        assert_eq!(
+            wrong_result,
+            Err(ProviderDiagnostic::ResultTypeMismatch {
+                operation: contract.id.clone(),
+                expected: first_case["result_type"].as_str().unwrap().to_owned(),
+                actual: wrong_result_type.to_owned(),
+            })
+        );
+        assert_eq!(wrong_result_provider.calls.load(Ordering::SeqCst), 1);
+        result_type_mismatches += 1;
+
+        let arity_provider = InvokeValueProvider {
+            offer,
+            operation: contract.id.clone(),
+            argument_types: Vec::new(),
+            response: Ok(TypedValue::public(
+                TypeId::new(first_case["result_type"].as_str().unwrap()),
+                b"unused".to_vec(),
+            )),
+            calls: AtomicUsize::new(0),
+        };
+        let arity_result = if selected_route {
+            selected_registry.dispatch_to_provider(
+                &table,
+                operation_name,
+                &arity_provider,
+                &[],
+                |_| Ok(()),
+            )
+        } else {
+            direct_table.dispatch_to_provider(
+                operation_name,
+                &arity_provider,
+                &[],
+                |_| Ok(()),
+            )
+        };
+        assert_eq!(
+            arity_result,
+            Err(ProviderDiagnostic::ArgumentCountMismatch {
+                operation: contract.id.clone(),
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert_eq!(arity_provider.calls.load(Ordering::SeqCst), 0);
+        argument_count_rejections += 1;
+    }
+
+    assert_eq!(direct_routes, cases.len());
+    assert_eq!(selected_routes, cases.len());
+    assert_eq!(protected_inputs, 1);
+    println!(
+        "provider_metadata_edge_parity operation={operation_name} cases={} protected_inputs={protected_inputs} schema_validations=3 direct_routes={direct_routes} selected_routes={selected_routes} result_type_mismatches={result_type_mismatches} argument_count_rejections={argument_count_rejections} total_cases={}",
+        cases.len(),
+        cases.len() * 2 + result_type_mismatches + argument_count_rejections + 3
     );
 }
 
