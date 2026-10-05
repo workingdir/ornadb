@@ -1,4 +1,4 @@
-//! The closed Orna 1.0 canonical-value boundary (OVB-1).
+//! Orna's frozen OVB-1 compatibility values and format-3 value foundations.
 //!
 //! This crate deliberately has no storage or runtime dependencies.  Values are
 //! validated before they become digest input, and errors describe malformed
@@ -8,6 +8,10 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering},
+    },
 };
 
 use num_bigint::{BigInt, Sign};
@@ -15,6 +19,10 @@ use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
+
+#[cfg(test)]
+#[path = "format3_context_tests.rs"]
+mod format3_context_tests;
 
 pub const OVB_VERSION: &str = "OVB-1";
 pub const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
@@ -40,6 +48,19 @@ pub enum Error {
     DecimalLimit,
     DivisionByZero,
     NonFiniteDecimal,
+    InvalidMediaType,
+    InvalidSuffix,
+    IncompatibleSuffix,
+    InvalidProfile,
+    InvalidOid,
+    ContentUnavailable,
+    ContentDigestMismatch,
+    InvalidRange,
+    MissingDescriptor,
+    InvalidContext,
+    OwnerExpired,
+    Cancelled,
+    QuotaExceeded,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -194,6 +215,1641 @@ impl Value {
     pub fn protected() -> Self {
         Self(Raw::Tag(0, Box::new(Raw::Null)))
     } // unencodable marker
+}
+
+/// The explicit value profiles used by the final format-3 writer.
+///
+/// [`Value`] and [`OvbCodec`] remain the frozen OVB-1 compatibility surface.
+/// New tags are accepted only through [`ContextValue`] with the matching
+/// profile; a caller cannot accidentally serialize an ROV-3 or SOV-3 value
+/// through the old wire codec.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ValueFormat {
+    Ovb1,
+    Ovb2,
+    Rov3,
+    Sov3,
+}
+
+pub type ValueContext = ValueFormat;
+pub type ValueProfile = ValueFormat;
+
+impl ValueFormat {
+    pub const OVB1: Self = Self::Ovb1;
+    pub const OVB2: Self = Self::Ovb2;
+    pub const ROV3: Self = Self::Rov3;
+    pub const SOV3: Self = Self::Sov3;
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ovb1 => "OVB-1",
+            Self::Ovb2 => "OVB-2",
+            Self::Rov3 => "ROV-3",
+            Self::Sov3 => "SOV-3",
+        }
+    }
+}
+
+pub const OVB2_VERSION: &str = "OVB-2";
+pub const ROV3_VERSION: &str = "ROV-3";
+pub const SOV3_VERSION: &str = "SOV-3";
+pub const OVB2_BLOB_TAG: u64 = 60_110;
+pub const ROV3_BLOB_TAG: u64 = 60_111;
+pub const SOV3_BLOB_TAG: u64 = 60_112;
+pub const ROV3_OVERFLOW_TAG: u64 = 60_113;
+const MAX_BLOB_LENGTH: u64 = 1_u64 << 63;
+const MAX_BLOB_READ: u64 = 8 * 1024 * 1024;
+
+/// The raw content commitment shared by every Blob representation.
+///
+/// This is deliberately not a Git object ID: native object layout, chunking,
+/// compression and repository hash algorithm do not enter content identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ContentIdentity {
+    length: u64,
+    sha256: [u8; 32],
+}
+
+impl ContentIdentity {
+    pub fn new(length: u64, sha256: [u8; 32]) -> Result<Self> {
+        if length >= MAX_BLOB_LENGTH {
+            return Err(Error::Limit);
+        }
+        Ok(Self { length, sha256 })
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(bytes);
+        let mut sha256 = [0_u8; 32];
+        sha256.copy_from_slice(&digest.finalize());
+        // A slice cannot have a length outside the admitted in-memory range.
+        Self {
+            length: bytes.len() as u64,
+            sha256,
+        }
+    }
+
+    pub const fn length(self) -> u64 {
+        self.length
+    }
+
+    pub const fn sha256(self) -> [u8; 32] {
+        self.sha256
+    }
+}
+
+/// A native Git object ID carried by a ROV-3 descriptor reference.
+///
+/// The value layer validates width but intentionally does not interpret the
+/// referenced tree or invent a graph layout. Graph ownership stays with the
+/// storage layer.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum NativeOid {
+    Sha1([u8; 20]),
+    Sha256([u8; 32]),
+}
+
+impl NativeOid {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        match bytes.len() {
+            20 => {
+                let mut oid = [0_u8; 20];
+                oid.copy_from_slice(bytes);
+                Ok(Self::Sha1(oid))
+            }
+            32 => {
+                let mut oid = [0_u8; 32];
+                oid.copy_from_slice(bytes);
+                Ok(Self::Sha256(oid))
+            }
+            _ => Err(Error::InvalidOid),
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        match self {
+            Self::Sha1(_) => 20,
+            Self::Sha256(_) => 32,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Sha1(oid) => oid,
+            Self::Sha256(oid) => oid,
+        }
+    }
+}
+
+/// A lazy descriptor reference. The resolver is optional so a row can retain
+/// a verified reference and expose metadata while its content is offline.
+#[derive(Clone)]
+pub struct ContentReference {
+    identity: ContentIdentity,
+    descriptor_oid: NativeOid,
+    context: Arc<Format3ContextInner>,
+}
+
+pub type BlobDescriptor = ContentReference;
+pub type LazyBlobReference = ContentReference;
+
+impl fmt::Debug for ContentReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContentReference")
+            .field("identity", &self.identity)
+            .field("descriptor_oid", &self.descriptor_oid)
+            .field("context", &self.context.coordinates)
+            .finish()
+    }
+}
+
+impl PartialEq for ContentReference {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && self.descriptor_oid == other.descriptor_oid
+            && Arc::ptr_eq(&self.context, &other.context)
+    }
+}
+impl Eq for ContentReference {}
+
+impl ContentReference {
+    fn from_context(
+        identity: ContentIdentity,
+        descriptor_oid: NativeOid,
+        context: Arc<Format3ContextInner>,
+    ) -> Result<Self> {
+        if !oid_matches_algorithm(&descriptor_oid, context.git_oid_algorithm) {
+            return Err(Error::InvalidOid);
+        }
+        Ok(Self {
+            identity,
+            descriptor_oid,
+            context,
+        })
+    }
+
+    pub const fn identity(&self) -> ContentIdentity {
+        self.identity
+    }
+
+    pub fn descriptor_oid(&self) -> &NativeOid {
+        &self.descriptor_oid
+    }
+
+    pub fn has_resolver(&self) -> bool {
+        true
+    }
+
+    pub fn context(&self) -> Format3Context {
+        Format3Context {
+            inner: Arc::clone(&self.context),
+        }
+    }
+}
+
+/// The narrow lazy-read seam owned by the graph/storage layer.
+///
+/// A resolver returns only the requested range. It does not grant permission
+/// to rebind a value to another snapshot or HEAD; the descriptor and content
+/// identity passed to it are part of the held reference context. The resolver
+/// is retained only inside an owner-issued [`Format3Context`]; callers cannot
+/// attach one to a raw OID or digest.
+pub trait BlobResolver: Send + Sync {
+    fn read_range(
+        &self,
+        reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>>;
+}
+
+/// The single published format-3 coordinate set. It is intentionally closed:
+/// graph/storage implementations cannot silently mix a different writer
+/// profile into a value context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct Format3Coordinates {
+    graph: &'static str,
+    rows: &'static str,
+    blob_storage: &'static str,
+    stored_values: &'static str,
+    semantic_values: &'static str,
+    portable_values: &'static str,
+    media_policy: &'static str,
+}
+
+impl Format3Coordinates {
+    pub const fn published() -> Self {
+        Self {
+            graph: "OGS-1",
+            rows: "ORP-1",
+            blob_storage: "OGB-2",
+            stored_values: "ROV-3",
+            semantic_values: "SOV-3",
+            portable_values: "OVB-2",
+            media_policy: "MIME-1",
+        }
+    }
+
+    pub const fn graph(self) -> &'static str {
+        self.graph
+    }
+
+    pub const fn rows(self) -> &'static str {
+        self.rows
+    }
+
+    pub const fn blob_storage(self) -> &'static str {
+        self.blob_storage
+    }
+
+    pub const fn stored_values(self) -> &'static str {
+        self.stored_values
+    }
+
+    pub const fn semantic_values(self) -> &'static str {
+        self.semantic_values
+    }
+
+    pub const fn portable_values(self) -> &'static str {
+        self.portable_values
+    }
+
+    pub const fn media_policy(self) -> &'static str {
+        self.media_policy
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[repr(u8)]
+pub enum AvailabilityState {
+    Available = 0,
+    Offline = 1,
+    Incomplete = 2,
+    Expired = 3,
+}
+
+impl AvailabilityState {
+    fn from_byte(value: u8) -> Self {
+        match value {
+            0 => Self::Available,
+            1 => Self::Offline,
+            2 => Self::Incomplete,
+            _ => Self::Expired,
+        }
+    }
+}
+
+pub type ContentAvailability = AvailabilityState;
+
+struct OwnerState {
+    cancelled: AtomicBool,
+    expired: AtomicBool,
+}
+
+/// Owner/runtime lifetime shared by every lazy value resolved through a
+/// format-3 context. It is a capability marker, not a serializable handle.
+#[derive(Clone)]
+pub struct OwnerLifetime {
+    id: [u8; 16],
+    state: Arc<OwnerState>,
+}
+
+impl fmt::Debug for OwnerLifetime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OwnerLifetime")
+            .field("id", &self.id)
+            .field("cancelled", &self.is_cancelled())
+            .field("expired", &self.is_expired())
+            .finish()
+    }
+}
+
+impl OwnerLifetime {
+    pub fn new(id: [u8; 16]) -> Self {
+        Self {
+            id,
+            state: Arc::new(OwnerState {
+                cancelled: AtomicBool::new(false),
+                expired: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub const fn id(&self) -> [u8; 16] {
+        self.id
+    }
+
+    pub fn cancel(&self) {
+        self.state.cancelled.store(true, AtomicOrdering::Release);
+    }
+
+    pub fn expire(&self) {
+        self.state.expired.store(true, AtomicOrdering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state.cancelled.load(AtomicOrdering::Acquire)
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.state.expired.load(AtomicOrdering::Acquire)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Format3Quota {
+    max_read_bytes: u64,
+    max_capture_bytes: u64,
+}
+
+impl Format3Quota {
+    pub fn new(max_read_bytes: u64, max_capture_bytes: u64) -> Result<Self> {
+        if max_read_bytes == 0
+            || max_read_bytes > MAX_BLOB_READ
+            || max_capture_bytes >= MAX_BLOB_LENGTH
+        {
+            return Err(Error::InvalidContext);
+        }
+        Ok(Self {
+            max_read_bytes,
+            max_capture_bytes,
+        })
+    }
+
+    pub const fn max_read_bytes(self) -> u64 {
+        self.max_read_bytes
+    }
+
+    pub const fn max_capture_bytes(self) -> u64 {
+        self.max_capture_bytes
+    }
+}
+
+struct Format3ContextInner {
+    coordinates: Format3Coordinates,
+    git_oid_algorithm: GitHash,
+    database_uuid: [u8; 16],
+    pin: Snapshot,
+    schema_root: NativeOid,
+    store_root: NativeOid,
+    availability: AtomicU8,
+    owner: OwnerLifetime,
+    quota: Format3Quota,
+    mime_registry: MimeRegistry,
+    resolver: Arc<dyn BlobResolver>,
+}
+
+/// Shared, capability-bound context for all format-3 values.
+///
+/// The fields are private on purpose. A raw Git OID, content digest, or
+/// portable tag cannot manufacture authority to read bytes. References are
+/// minted only by this context, which retains database/pin/schema/store roots,
+/// availability, owner lifetime, cancellation, quota and the MIME registry.
+#[derive(Clone)]
+pub struct Format3Context {
+    inner: Arc<Format3ContextInner>,
+}
+
+impl fmt::Debug for Format3Context {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Format3Context")
+            .field("coordinates", &self.inner.coordinates)
+            .field("git_oid_algorithm", &self.inner.git_oid_algorithm)
+            .field("database_uuid", &self.inner.database_uuid)
+            .field("pin", &self.inner.pin)
+            .field("schema_root", &self.inner.schema_root)
+            .field("store_root", &self.inner.store_root)
+            .field("availability", &self.availability())
+            .field("owner", &self.inner.owner)
+            .field("quota", &self.inner.quota)
+            .field("resolver", &true)
+            .finish()
+    }
+}
+
+impl Format3Context {
+    // Reserved for the repository/runtime parser once it can issue the
+    // persisted-metadata and owner capability. It is intentionally not part
+    // of the public value API while that authority boundary is absent.
+    fn from_persisted(
+        database_uuid: [u8; 16],
+        pin: Snapshot,
+        git_oid_algorithm: GitHash,
+        schema_root: NativeOid,
+        store_root: NativeOid,
+        availability: AvailabilityState,
+        owner: OwnerLifetime,
+        quota: Format3Quota,
+        resolver: Arc<dyn BlobResolver>,
+    ) -> Result<Self> {
+        validate_format3_metadata(
+            database_uuid,
+            &pin,
+            git_oid_algorithm,
+            &schema_root,
+            &store_root,
+        )?;
+        Ok(Self {
+            inner: Arc::new(Format3ContextInner {
+                coordinates: Format3Coordinates::published(),
+                git_oid_algorithm,
+                database_uuid,
+                pin,
+                schema_root,
+                store_root,
+                availability: AtomicU8::new(availability as u8),
+                owner,
+                quota,
+                mime_registry: MimeRegistry::mime1(),
+                resolver,
+            }),
+        })
+    }
+
+    pub fn coordinates(&self) -> Format3Coordinates {
+        self.inner.coordinates
+    }
+
+    pub fn git_oid_algorithm(&self) -> GitHash {
+        self.inner.git_oid_algorithm
+    }
+
+    pub fn database_uuid(&self) -> [u8; 16] {
+        self.inner.database_uuid
+    }
+
+    pub fn pin(&self) -> &Snapshot {
+        &self.inner.pin
+    }
+
+    pub fn schema_root(&self) -> &NativeOid {
+        &self.inner.schema_root
+    }
+
+    pub fn store_root(&self) -> &NativeOid {
+        &self.inner.store_root
+    }
+
+    pub fn availability(&self) -> AvailabilityState {
+        AvailabilityState::from_byte(self.inner.availability.load(AtomicOrdering::Acquire))
+    }
+
+    pub fn owner(&self) -> OwnerLifetime {
+        self.inner.owner.clone()
+    }
+
+    pub fn quota(&self) -> Format3Quota {
+        self.inner.quota
+    }
+
+    pub fn mime_registry(&self) -> MimeRegistry {
+        self.inner.mime_registry
+    }
+
+    pub fn cancel(&self) {
+        self.inner.owner.cancel();
+    }
+
+    pub fn expire(&self) {
+        self.inner.owner.expire();
+        self.inner
+            .availability
+            .store(AvailabilityState::Expired as u8, AtomicOrdering::Release);
+    }
+
+    pub fn reference(
+        &self,
+        identity: ContentIdentity,
+        descriptor_oid: NativeOid,
+    ) -> Result<ContentReference> {
+        ContentReference::from_context(identity, descriptor_oid, Arc::clone(&self.inner))
+    }
+}
+
+fn validate_format3_metadata(
+    database_uuid: [u8; 16],
+    pin: &Snapshot,
+    git_oid_algorithm: GitHash,
+    schema_root: &NativeOid,
+    store_root: &NativeOid,
+) -> Result<()> {
+    validate_snapshot_pin(pin)?;
+    if snapshot_database(pin) != database_uuid
+        || !oid_matches_algorithm(schema_root, git_oid_algorithm)
+        || !oid_matches_algorithm(store_root, git_oid_algorithm)
+    {
+        return Err(Error::InvalidContext);
+    }
+    if let Snapshot::Commit { algorithm, oid, .. } = pin {
+        if *algorithm != git_oid_algorithm || oid.len() != git_oid_algorithm.oid_width() {
+            return Err(Error::InvalidContext);
+        }
+    }
+    Ok(())
+}
+
+fn validate_snapshot_pin(snapshot: &Snapshot) -> Result<()> {
+    match snapshot {
+        Snapshot::Cwd {
+            database,
+            runtime,
+            generation,
+            ..
+        } => {
+            let expected = Snapshot::cwd(*database, *runtime, generation.clone())
+                .map_err(|_| Error::InvalidContext)?;
+            if &expected != snapshot {
+                return Err(Error::InvalidContext);
+            }
+        }
+        Snapshot::Commit {
+            algorithm, oid, ..
+        } if oid.len() != algorithm.oid_width() => return Err(Error::InvalidContext),
+        Snapshot::Commit { .. } => {}
+    }
+    Ok(())
+}
+
+impl Format3ContextInner {
+    fn ensure_live(&self) -> Result<()> {
+        if self.owner.is_expired() || self.availability() == AvailabilityState::Expired {
+            return Err(Error::OwnerExpired);
+        }
+        if self.owner.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if self.availability() != AvailabilityState::Available {
+            return Err(Error::ContentUnavailable);
+        }
+        Ok(())
+    }
+
+    fn availability(&self) -> AvailabilityState {
+        AvailabilityState::from_byte(self.availability.load(AtomicOrdering::Acquire))
+    }
+
+    fn read_range(
+        &self,
+        reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>> {
+        self.ensure_live()?;
+        if length > self.quota.max_read_bytes {
+            return Err(Error::QuotaExceeded);
+        }
+        self.resolver.read_range(reference, offset, length)
+    }
+}
+
+fn oid_matches_algorithm(oid: &NativeOid, algorithm: GitHash) -> bool {
+    oid.len() == algorithm.oid_width()
+}
+
+#[derive(Clone)]
+enum BlobContent {
+    Inline(Arc<[u8]>),
+    Reference(Arc<ContentReference>),
+    Commitment,
+}
+
+/// An immutable annotated Blob with lazy content resolution.
+///
+/// Metadata, length, content identity, annotation changes and ROV-3/SOV-3
+/// encodings do not materialize payload bytes. OVB-2 full-value encoding is
+/// the explicit operation that may require hydration.
+pub struct Blob {
+    identity: ContentIdentity,
+    annotation: MediaAnnotation,
+    content: BlobContent,
+    context: Option<Format3Context>,
+}
+
+pub type BlobValue = Blob;
+pub type AnnotatedBlob = Blob;
+
+impl Clone for Blob {
+    fn clone(&self) -> Self {
+        Self {
+            identity: self.identity,
+            annotation: self.annotation.clone(),
+            content: self.content.clone(),
+            context: self.context.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for Blob {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Blob")
+            .field("identity", &self.identity)
+            .field("annotation", &self.annotation)
+            .field("hydrated", &self.is_hydrated())
+            .field("descriptor_oid", &self.descriptor_oid())
+            .field("context_bound", &self.context.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for Blob {
+    fn eq(&self, other: &Self) -> bool {
+        self.value_eq(other).unwrap_or(false)
+    }
+}
+impl Blob {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            identity: ContentIdentity::from_bytes(&bytes),
+            annotation: MediaAnnotation::default(),
+            content: BlobContent::Inline(Arc::from(bytes.into_boxed_slice())),
+            context: None,
+        }
+    }
+
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self::from_bytes(bytes)
+    }
+
+    pub fn from_bytes_with_annotation(
+        bytes: Vec<u8>,
+        media_type: &str,
+        suffix: Option<&str>,
+    ) -> Result<Self> {
+        let annotation = MediaAnnotation::new(media_type, suffix)?;
+        let identity = ContentIdentity::from_bytes(&bytes);
+        Ok(Self {
+            identity,
+            annotation,
+            content: BlobContent::Inline(Arc::from(bytes.into_boxed_slice())),
+            context: None,
+        })
+    }
+
+    pub fn from_reference(reference: ContentReference) -> Result<Self> {
+        let identity = reference.identity;
+        let context = reference.context();
+        Ok(Self {
+            identity,
+            annotation: MediaAnnotation::default(),
+            content: BlobContent::Reference(Arc::new(reference)),
+            context: Some(context),
+        })
+    }
+
+    pub fn from_reference_with_annotation(
+        reference: ContentReference,
+        media_type: &str,
+        suffix: Option<&str>,
+    ) -> Result<Self> {
+        let annotation = MediaAnnotation::new(media_type, suffix)?;
+        let identity = reference.identity;
+        let context = reference.context();
+        Ok(Self {
+            identity,
+            annotation,
+            content: BlobContent::Reference(Arc::new(reference)),
+            context: Some(context),
+        })
+    }
+
+    pub fn from_semantic_commitment(
+        identity: ContentIdentity,
+        media_type: &str,
+        suffix: Option<&str>,
+    ) -> Result<Self> {
+        Ok(Self {
+            identity,
+            annotation: MediaAnnotation::new(media_type, suffix)?,
+            content: BlobContent::Commitment,
+            context: None,
+        })
+    }
+
+    pub fn from_semantic_commitment_in_context(
+        identity: ContentIdentity,
+        context: &Format3Context,
+        media_type: &str,
+        suffix: Option<&str>,
+    ) -> Result<Self> {
+        Ok(Self {
+            identity,
+            annotation: MediaAnnotation::new(media_type, suffix)?,
+            content: BlobContent::Commitment,
+            context: Some(context.clone()),
+        })
+    }
+
+    pub const fn length(&self) -> u64 {
+        self.identity.length()
+    }
+
+    pub const fn content_identity(&self) -> ContentIdentity {
+        self.identity
+    }
+
+    pub const fn is_hydrated(&self) -> bool {
+        matches!(&self.content, BlobContent::Inline(_))
+    }
+
+    pub fn media_type(&self) -> &str {
+        self.annotation.media_type()
+    }
+
+    pub fn suffix(&self) -> Option<&str> {
+        self.annotation.suffix()
+    }
+
+    pub fn annotation(&self) -> &MediaAnnotation {
+        &self.annotation
+    }
+
+    pub fn descriptor_oid(&self) -> Option<&NativeOid> {
+        match &self.content {
+            BlobContent::Reference(reference) => Some(reference.descriptor_oid()),
+            BlobContent::Inline(_) | BlobContent::Commitment => None,
+        }
+    }
+
+    pub fn content_reference(&self) -> Option<ContentReference> {
+        match &self.content {
+            BlobContent::Reference(reference) => Some(reference.as_ref().clone()),
+            BlobContent::Inline(_) | BlobContent::Commitment => None,
+        }
+    }
+
+    /// Return a new value with the same lazy content and a new annotation.
+    pub fn annotate(&self, media_type: &str, suffix: Option<&str>) -> Result<Self> {
+        Ok(Self {
+            identity: self.identity,
+            annotation: MediaAnnotation::new(media_type, suffix)?,
+            content: self.content.clone(),
+            context: self.context.clone(),
+        })
+    }
+
+    fn read_chunk_limit(&self) -> u64 {
+        self.context
+            .as_ref()
+            .map(|context| context.quota().max_read_bytes())
+            .unwrap_or(MAX_BLOB_READ)
+            .min(MAX_BLOB_READ)
+    }
+
+    pub fn read(&self, offset: u64, length: u64) -> Result<Vec<u8>> {
+        if length > MAX_BLOB_READ || offset > self.length() {
+            return Err(Error::InvalidRange);
+        }
+        let expected = length.min(self.length() - offset);
+        if expected == 0 {
+            return Ok(Vec::new());
+        }
+        match &self.content {
+            BlobContent::Inline(bytes) => {
+                let start = usize::try_from(offset).map_err(|_| Error::Limit)?;
+                let end = start
+                    .checked_add(expected as usize)
+                    .ok_or(Error::Limit)?;
+                Ok(bytes
+                    .get(start..end)
+                    .ok_or(Error::ContentDigestMismatch)?
+                    .to_vec())
+            }
+            BlobContent::Reference(reference) => {
+                let bytes = reference.context.read_range(reference, offset, expected)?;
+                if bytes.len() as u64 != expected {
+                    return Err(Error::ContentUnavailable);
+                }
+                Ok(bytes)
+            }
+            BlobContent::Commitment => Err(Error::ContentUnavailable),
+        }
+    }
+
+    pub fn read_to_end(&self) -> Result<Vec<u8>> {
+        let capacity = usize::try_from(self.length()).map_err(|_| Error::Limit)?;
+        let mut result = Vec::new();
+        result.try_reserve_exact(capacity).map_err(|_| Error::Limit)?;
+        let mut offset = 0_u64;
+        let chunk_limit = self.read_chunk_limit();
+        while offset < self.length() {
+            let size = (self.length() - offset).min(chunk_limit);
+            result.extend(self.read(offset, size)?);
+            offset = offset.checked_add(size).ok_or(Error::Limit)?;
+        }
+        verify_content_identity(self.identity, &result)?;
+        Ok(result)
+    }
+
+    /// Compare exact bytes while ignoring annotation metadata.
+    pub fn same_content(&self, other: &Self) -> Result<bool> {
+        if self.identity != other.identity {
+            return Ok(false);
+        }
+        if self.length() == 0 {
+            let empty = ContentIdentity::from_bytes(&[]);
+            return if self.identity == empty {
+                Ok(true)
+            } else {
+                Err(Error::ContentDigestMismatch)
+            };
+        }
+        if same_content_source(&self.content, &other.content) {
+            return Ok(true);
+        }
+        let mut left_digest = Sha256::new();
+        let mut right_digest = Sha256::new();
+        let mut offset = 0_u64;
+        let chunk_limit = self.read_chunk_limit().min(other.read_chunk_limit());
+        while offset < self.length() {
+            let size = (self.length() - offset).min(chunk_limit);
+            let left = self.read(offset, size)?;
+            let right = other.read(offset, size)?;
+            if left != right {
+                return Err(Error::ContentDigestMismatch);
+            }
+            left_digest.update(&left);
+            right_digest.update(&right);
+            offset = offset.checked_add(size).ok_or(Error::Limit)?;
+        }
+        let left = left_digest.finalize();
+        let right = right_digest.finalize();
+        if left[..] != self.identity.sha256 || right[..] != self.identity.sha256 {
+            return Err(Error::ContentDigestMismatch);
+        }
+        Ok(true)
+    }
+
+    /// Compare annotations and exact content, returning unavailable when two
+    /// independent lazy commitments cannot be proved equal without bytes.
+    pub fn value_eq(&self, other: &Self) -> Result<bool> {
+        if self.annotation != other.annotation {
+            return Ok(false);
+        }
+        self.same_content(other)
+    }
+
+    pub fn to_context_value(&self, format: ValueFormat) -> Result<ContextValue> {
+        ContextValue::from_blob(self, format)
+    }
+}
+
+fn same_content_source(left: &BlobContent, right: &BlobContent) -> bool {
+    match (left, right) {
+        (BlobContent::Inline(left), BlobContent::Inline(right)) => Arc::ptr_eq(left, right),
+        (BlobContent::Reference(left), BlobContent::Reference(right)) => Arc::ptr_eq(left, right),
+        (BlobContent::Commitment, BlobContent::Commitment) => false,
+        _ => false,
+    }
+}
+
+fn verify_content_identity(identity: ContentIdentity, bytes: &[u8]) -> Result<()> {
+    if ContentIdentity::from_bytes(bytes) == identity {
+        Ok(())
+    } else {
+        Err(Error::ContentDigestMismatch)
+    }
+}
+
+/// Canonical MIME-1 annotation stored with each Blob value.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct MediaAnnotation {
+    media_type: String,
+    suffix: Option<String>,
+}
+
+/// The closed MIME-1 registry selected by format 3.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct MimeRegistry {
+    profile: &'static str,
+}
+
+impl MimeRegistry {
+    pub const fn mime1() -> Self {
+        Self { profile: "MIME-1" }
+    }
+
+    pub const fn profile(self) -> &'static str {
+        self.profile
+    }
+
+    pub fn normalize(self, media_type: &str) -> Result<String> {
+        if self.profile != "MIME-1" {
+            return Err(Error::InvalidContext);
+        }
+        normalize_media_type(media_type)
+    }
+
+    pub fn annotation(self, media_type: &str, suffix: Option<&str>) -> Result<MediaAnnotation> {
+        if self.profile != "MIME-1" {
+            return Err(Error::InvalidContext);
+        }
+        MediaAnnotation::new(media_type, suffix)
+    }
+}
+
+impl Default for MediaAnnotation {
+    fn default() -> Self {
+        Self {
+            media_type: "application/octet-stream".to_owned(),
+            suffix: None,
+        }
+    }
+}
+
+impl MediaAnnotation {
+    pub fn new(media_type: &str, suffix: Option<&str>) -> Result<Self> {
+        let media_type = normalize_media_type(media_type)?;
+        let (preferred, compatible) = media_suffixes(media_type.split(';').next().unwrap_or(&media_type));
+        let suffix = suffix.map(|value| value.to_ascii_lowercase());
+        if let Some(value) = &suffix {
+            if value.len() > 32 || !valid_suffix(value) {
+                return Err(Error::InvalidSuffix);
+            }
+            if !compatible.is_empty() && !compatible.contains(&value.as_str()) {
+                return Err(Error::IncompatibleSuffix);
+            }
+        }
+        Ok(Self {
+            media_type,
+            suffix: suffix.filter(|value| value != preferred),
+        })
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn suffix(&self) -> Option<&str> {
+        self.suffix.as_deref()
+    }
+
+    pub fn selected_suffix(&self) -> &str {
+        self.suffix.as_deref().unwrap_or_else(|| {
+            media_suffixes(self.media_type.split(';').next().unwrap_or(&self.media_type)).0
+        })
+    }
+}
+
+pub fn normalize_media_type(media_type: &str) -> Result<String> {
+    if media_type.len() > 1024 || media_type.bytes().any(|byte| !(32..=126).contains(&byte)) {
+        return Err(Error::InvalidMediaType);
+    }
+    let input = media_type.trim_matches(' ');
+    let bytes = input.as_bytes();
+    let mut at = 0;
+    let type_end = mime_token_end(bytes, at).ok_or(Error::InvalidMediaType)?;
+    let kind = input[at..type_end].to_ascii_lowercase();
+    at = type_end;
+    if bytes.get(at) != Some(&b'/') {
+        return Err(Error::InvalidMediaType);
+    }
+    at += 1;
+    let subtype_end = mime_token_end(bytes, at).ok_or(Error::InvalidMediaType)?;
+    let subtype = input[at..subtype_end].to_ascii_lowercase();
+    if kind == "*" || subtype == "*" {
+        return Err(Error::InvalidMediaType);
+    }
+    at = subtype_end;
+    let essence = match format!("{kind}/{subtype}").as_str() {
+        "application/javascript" | "application/ecmascript" | "text/ecmascript" => {
+            "text/javascript".to_owned()
+        }
+        "audio/x-wav" | "audio/wave" => "audio/wav".to_owned(),
+        "audio/x-flac" => "audio/flac".to_owned(),
+        other => other.to_owned(),
+    };
+    let mut parameters = Vec::<(String, String)>::new();
+    while at < bytes.len() {
+        while bytes.get(at) == Some(&b' ') {
+            at += 1;
+        }
+        if at == bytes.len() {
+            break;
+        }
+        if bytes[at] != b';' {
+            return Err(Error::InvalidMediaType);
+        }
+        at += 1;
+        while bytes.get(at) == Some(&b' ') {
+            at += 1;
+        }
+        let name_end = mime_token_end(bytes, at).ok_or(Error::InvalidMediaType)?;
+        let name = input[at..name_end].to_ascii_lowercase();
+        at = name_end;
+        if bytes.get(at) != Some(&b'=') {
+            return Err(Error::InvalidMediaType);
+        }
+        at += 1;
+        let value = if bytes.get(at) == Some(&b'"') {
+            at += 1;
+            let mut value = String::new();
+            let mut closed = false;
+            while at < bytes.len() {
+                let byte = bytes[at];
+                at += 1;
+                if byte == b'"' {
+                    closed = true;
+                    break;
+                }
+                if byte == b'\\' {
+                    let escaped = *bytes.get(at).ok_or(Error::InvalidMediaType)?;
+                    at += 1;
+                    value.push(escaped as char);
+                } else {
+                    value.push(byte as char);
+                }
+            }
+            if !closed {
+                return Err(Error::InvalidMediaType);
+            }
+            value
+        } else {
+            let value_end = mime_token_end(bytes, at).ok_or(Error::InvalidMediaType)?;
+            let value = input[at..value_end].to_owned();
+            at = value_end;
+            value
+        };
+        if name == "charset" {
+            if parameters.iter().any(|(existing, _)| existing == &name) {
+                return Err(Error::InvalidMediaType);
+            }
+        }
+        if parameters.iter().any(|(existing, _)| existing == &name) || parameters.len() >= 32 {
+            return Err(Error::InvalidMediaType);
+        }
+        parameters.push((name, value));
+        if let Some((name, value)) = parameters.last_mut() {
+            if name == "charset" {
+                *value = value.to_ascii_lowercase();
+            }
+        }
+    }
+    parameters.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut canonical = essence;
+    for (name, value) in parameters {
+        canonical.push(';');
+        canonical.push_str(&name);
+        canonical.push('=');
+        if valid_mime_token(value.as_bytes()) {
+            canonical.push_str(&value);
+        } else {
+            canonical.push('"');
+            for byte in value.bytes() {
+                if byte == b'\\' || byte == b'"' {
+                    canonical.push('\\');
+                }
+                canonical.push(byte as char);
+            }
+            canonical.push('"');
+        }
+    }
+    Ok(canonical)
+}
+
+pub fn selected_suffix(media_type: &str, suffix: Option<&str>) -> Result<String> {
+    Ok(MediaAnnotation::new(media_type, suffix)?.selected_suffix().to_owned())
+}
+
+fn mime_token_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut at = start;
+    while let Some(byte) = bytes.get(at).copied() {
+        if !is_mime_token(byte) {
+            break;
+        }
+        at += 1;
+    }
+    (at > start).then_some(at)
+}
+
+fn is_mime_token(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
+}
+
+fn valid_mime_token(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().copied().all(is_mime_token)
+}
+
+fn valid_suffix(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-' || byte == b'.')
+        && !value.split('.').any(str::is_empty)
+}
+
+fn media_suffixes(media_type: &str) -> (&'static str, &'static [&'static str]) {
+    match media_type {
+        "application/gzip" => ("gz", &["gz", "tar.gz", "tgz"]),
+        "application/json" => ("json", &["json"]),
+        "application/octet-stream" => ("bin", &["bin"]),
+        "application/pdf" => ("pdf", &["pdf"]),
+        "application/wasm" => ("wasm", &["wasm"]),
+        "application/zip" => ("zip", &["zip"]),
+        "audio/flac" => ("flac", &["flac"]),
+        "audio/mp4" => ("m4a", &["m4a", "m4b", "mp4", "mpg4"]),
+        "audio/mpeg" => ("mp3", &["mp1", "mp2", "mp3"]),
+        "audio/ogg" => ("ogg", &["oga", "ogg", "opus"]),
+        "audio/wav" => ("wav", &["wav"]),
+        "image/gif" => ("gif", &["gif"]),
+        "image/jpeg" => ("jpg", &["jpe", "jpeg", "jpg"]),
+        "image/png" => ("png", &["png"]),
+        "image/svg+xml" => ("svg", &["svg"]),
+        "image/webp" => ("webp", &["webp"]),
+        "text/css" => ("css", &["css"]),
+        "text/javascript" => ("js", &["js", "mjs"]),
+        "text/plain" => ("txt", &["text", "txt"]),
+        "video/mp4" => ("mp4", &["m4v", "mp4"]),
+        "video/webm" => ("webm", &["webm"]),
+        _ => ("bin", &[]),
+    }
+}
+
+/// A validated value paired with its explicit value profile.
+#[derive(Clone)]
+pub struct ContextValue {
+    format: ValueFormat,
+    raw: Raw,
+    context: Option<Format3Context>,
+}
+
+impl PartialEq for ContextValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.format == other.format && self.raw == other.raw
+    }
+}
+impl Eq for ContextValue {}
+
+impl fmt::Debug for ContextValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContextValue")
+            .field("format", &self.format)
+            .field("raw", &self.raw)
+            .field("context_bound", &self.context.is_some())
+            .finish()
+    }
+}
+
+impl ContextValue {
+    pub fn new(format: ValueFormat, raw: Raw) -> Result<Self> {
+        if matches!(format, ValueFormat::Rov3 | ValueFormat::Sov3) {
+            return Err(Error::InvalidContext);
+        }
+        Self::new_with_context(format, raw, None)
+    }
+
+    pub fn from_raw(raw: Raw, format: ValueFormat) -> Result<Self> {
+        Self::new(format, raw)
+    }
+
+    pub fn from_value(value: Value) -> Self {
+        Self {
+            format: ValueFormat::Ovb1,
+            raw: value.0,
+            context: None,
+        }
+    }
+
+    pub fn from_blob(blob: &Blob, format: ValueFormat) -> Result<Self> {
+        let context = if matches!(format, ValueFormat::Rov3 | ValueFormat::Sov3) {
+            Some(blob.context.clone().ok_or(Error::InvalidContext)?)
+        } else {
+            None
+        };
+        Self::new_with_context(format, blob.to_raw(format)?, context)
+    }
+
+    pub fn new_in_context(
+        context: &Format3Context,
+        format: ValueFormat,
+        raw: Raw,
+    ) -> Result<Self> {
+        Self::new_with_context(format, raw, Some(context.clone()))
+    }
+
+    fn new_with_context(
+        format: ValueFormat,
+        raw: Raw,
+        context: Option<Format3Context>,
+    ) -> Result<Self> {
+        if matches!(format, ValueFormat::Rov3 | ValueFormat::Sov3) && context.is_none() {
+            return Err(Error::InvalidContext);
+        }
+        let oid_algorithm = context.as_ref().map(Format3Context::git_oid_algorithm);
+        if format == ValueFormat::Ovb1 {
+            Value::new(raw.clone())?;
+        } else {
+            validate_context_raw(&raw, 0, format, oid_algorithm)?;
+        }
+        Ok(Self {
+            format,
+            raw,
+            context,
+        })
+    }
+
+    pub const fn format(&self) -> ValueFormat {
+        self.format
+    }
+
+    pub fn raw(&self) -> &Raw {
+        &self.raw
+    }
+
+    pub fn context(&self) -> Option<&Format3Context> {
+        self.context.as_ref()
+    }
+
+    pub fn into_raw(self) -> Raw {
+        self.raw
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let oid_algorithm = self.context.as_ref().map(Format3Context::git_oid_algorithm);
+        encode_context_raw(&self.raw, self.format, oid_algorithm)
+    }
+
+    pub fn decode(bytes: &[u8], format: ValueFormat) -> Result<Self> {
+        if format == ValueFormat::Ovb1 {
+            return Ok(Self::from_value(Value::decode(bytes)?));
+        }
+        if matches!(format, ValueFormat::Rov3 | ValueFormat::Sov3) {
+            return Err(Error::InvalidContext);
+        }
+        Self::decode_bytes(bytes, format, None)
+    }
+
+    fn decode_bytes(
+        bytes: &[u8],
+        format: ValueFormat,
+        context: Option<Format3Context>,
+    ) -> Result<Self> {
+        let mut reader = Reader::new(bytes);
+        let raw = reader.raw(0)?;
+        if reader.at != bytes.len() {
+            return Err(Error::TrailingBytes);
+        }
+        let value = Self::new_with_context(format, raw, context)?;
+        if value.encode()? != bytes {
+            return Err(Error::NonCanonical);
+        }
+        Ok(value)
+    }
+
+    pub fn decode_in_context(
+        bytes: &[u8],
+        format: ValueFormat,
+        context: &Format3Context,
+    ) -> Result<Self> {
+        Self::decode_bytes(bytes, format, Some(context.clone()))
+    }
+
+    pub fn blob(&self) -> Result<Blob> {
+        decode_blob_raw(&self.raw, self.format, self.context.as_ref())
+    }
+}
+
+pub fn encode_with_profile(value: &ContextValue) -> Result<Vec<u8>> {
+    value.encode()
+}
+
+pub fn decode_with_profile(bytes: &[u8], format: ValueFormat) -> Result<ContextValue> {
+    ContextValue::decode(bytes, format)
+}
+
+pub fn encode_ovb2(blob: &Blob) -> Result<Vec<u8>> {
+    blob.to_context_value(ValueFormat::Ovb2)?.encode()
+}
+
+pub fn decode_ovb2(bytes: &[u8]) -> Result<Blob> {
+    ContextValue::decode(bytes, ValueFormat::Ovb2)?.blob()
+}
+
+pub fn encode_rov3(blob: &Blob) -> Result<Vec<u8>> {
+    blob.to_context_value(ValueFormat::Rov3)?.encode()
+}
+
+pub fn decode_rov3(bytes: &[u8]) -> Result<Blob> {
+    ContextValue::decode(bytes, ValueFormat::Rov3)?.blob()
+}
+
+pub fn decode_rov3_in_context(bytes: &[u8], context: &Format3Context) -> Result<Blob> {
+    ContextValue::decode_in_context(bytes, ValueFormat::Rov3, context)?.blob()
+}
+
+pub fn encode_sov3(blob: &Blob) -> Result<Vec<u8>> {
+    blob.to_context_value(ValueFormat::Sov3)?.encode()
+}
+
+pub fn decode_sov3(bytes: &[u8]) -> Result<Blob> {
+    ContextValue::decode(bytes, ValueFormat::Sov3)?.blob()
+}
+
+pub fn decode_sov3_in_context(bytes: &[u8], context: &Format3Context) -> Result<Blob> {
+    ContextValue::decode_in_context(bytes, ValueFormat::Sov3, context)?.blob()
+}
+
+pub fn semantic_digest(domain: &str, value: &ContextValue) -> Result<[u8; 32]> {
+    if value.format != ValueFormat::Sov3
+        || domain.as_bytes().contains(&0)
+        || !domain.is_ascii()
+    {
+        return Err(Error::InvalidProfile);
+    }
+    let payload = value.encode()?;
+    let mut digest = Sha256::new();
+    digest.update(domain.as_bytes());
+    digest.update([0]);
+    digest.update(payload);
+    let mut output = [0_u8; 32];
+    output.copy_from_slice(&digest.finalize());
+    Ok(output)
+}
+
+pub fn sov3_domain_digest(domain: &str, value: &ContextValue) -> Result<[u8; 32]> {
+    semantic_digest(domain, value)
+}
+
+impl Blob {
+    fn to_raw(&self, format: ValueFormat) -> Result<Raw> {
+        match format {
+            ValueFormat::Ovb1 => Err(Error::InvalidProfile),
+            ValueFormat::Ovb2 => {
+                let bytes = self.read_to_end()?;
+                Ok(tag(
+                    OVB2_BLOB_TAG,
+                    Raw::Array(vec![
+                        Raw::Bytes(bytes),
+                        Raw::Text(self.media_type().to_owned()),
+                        self.suffix()
+                            .map(|value| Raw::Text(value.to_owned()))
+                            .unwrap_or(Raw::Null),
+                    ]),
+                ))
+            }
+            ValueFormat::Rov3 => {
+                let descriptor_oid = self.descriptor_oid().ok_or(Error::MissingDescriptor)?;
+                Ok(tag(
+                    ROV3_BLOB_TAG,
+                    Raw::Array(vec![
+                        Raw::Int(BigInt::from(self.length())),
+                        Raw::Bytes(self.identity.sha256().to_vec()),
+                        Raw::Text(self.media_type().to_owned()),
+                        self.suffix()
+                            .map(|value| Raw::Text(value.to_owned()))
+                            .unwrap_or(Raw::Null),
+                        Raw::Bytes(descriptor_oid.as_bytes().to_vec()),
+                    ]),
+                ))
+            }
+            ValueFormat::Sov3 => {
+                if self.context.is_none() {
+                    return Err(Error::InvalidContext);
+                }
+                Ok(tag(
+                    SOV3_BLOB_TAG,
+                    Raw::Array(vec![
+                        Raw::Int(BigInt::from(self.length())),
+                        Raw::Bytes(self.identity.sha256().to_vec()),
+                        Raw::Text(self.media_type().to_owned()),
+                        self.suffix()
+                            .map(|value| Raw::Text(value.to_owned()))
+                            .unwrap_or(Raw::Null),
+                    ]),
+                ))
+            }
+        }
+    }
+}
+
+fn decode_blob_raw(
+    raw: &Raw,
+    format: ValueFormat,
+    context: Option<&Format3Context>,
+) -> Result<Blob> {
+    match (format, raw) {
+        (ValueFormat::Ovb2, Raw::Tag(OVB2_BLOB_TAG, payload)) => {
+            let fields = array(payload)?;
+            let [Raw::Bytes(bytes), Raw::Text(media_type), suffix] = fields.as_slice() else {
+                return Err(Error::InvalidTag);
+            };
+            let suffix = raw_suffix(suffix)?;
+            Blob::from_bytes_with_annotation(bytes.clone(), media_type, suffix.as_deref())
+        }
+        (ValueFormat::Rov3, Raw::Tag(ROV3_BLOB_TAG, payload)) => {
+            let fields = array(payload)?;
+            let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice() else {
+                return Err(Error::InvalidTag);
+            };
+            let length = int_u64(length)?;
+            let sha = bytes32(sha)?;
+            let context = context.ok_or(Error::InvalidContext)?;
+            let reference = context.reference(
+                ContentIdentity::new(length, sha)?,
+                NativeOid::from_bytes(descriptor)?,
+            )?;
+            Blob::from_reference_with_annotation(reference, media_type, raw_suffix(suffix)?.as_deref())
+        }
+        (ValueFormat::Sov3, Raw::Tag(SOV3_BLOB_TAG, payload)) => {
+            let fields = array(payload)?;
+            let [length, sha, Raw::Text(media_type), suffix] = fields.as_slice() else {
+                return Err(Error::InvalidTag);
+            };
+            let context = context.ok_or(Error::InvalidContext)?;
+            Blob::from_semantic_commitment_in_context(
+                ContentIdentity::new(int_u64(length)?, bytes32(sha)?)?,
+                context,
+                media_type,
+                raw_suffix(suffix)?.as_deref(),
+            )
+        }
+        _ => Err(Error::InvalidValue),
+    }
+}
+
+fn raw_suffix(raw: &Raw) -> Result<Option<String>> {
+    match raw {
+        Raw::Null => Ok(None),
+        Raw::Text(value) => Ok(Some(value.clone())),
+        _ => Err(Error::InvalidTag),
+    }
+}
+
+fn validate_context_raw(
+    value: &Raw,
+    depth: usize,
+    format: ValueFormat,
+    oid_algorithm: Option<GitHash>,
+) -> Result<()> {
+    if depth > MAX_DEPTH {
+        return Err(Error::Limit);
+    }
+    match value {
+        Raw::Array(values) => {
+            for value in values {
+                validate_context_raw(value, depth + 1, format, oid_algorithm)?;
+            }
+        }
+        Raw::Map(entries) => {
+            let mut previous = None;
+            for (key, value) in entries {
+                validate_context_raw(key, depth + 1, format, oid_algorithm)?;
+                validate_context_raw(value, depth + 1, format, oid_algorithm)?;
+                let encoded = encode_context_raw(key, format, oid_algorithm)?;
+                if previous.as_ref().is_some_and(|prior: &Vec<u8>| encoded <= *prior) {
+                    return Err(Error::DuplicateOrUnorderedMapKey);
+                }
+                previous = Some(encoded);
+            }
+        }
+        Raw::Tag(number, payload)
+            if matches!(*number, OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG | ROV3_OVERFLOW_TAG) =>
+        {
+            validate_context_tag(*number, payload, format, oid_algorithm)?;
+        }
+        Raw::Tag(number, payload) => {
+            if *number == 0 {
+                return Err(Error::ProtectedValue);
+            }
+            validate_tag(*number, payload)?;
+            validate_context_raw(payload, depth + 1, format, oid_algorithm)?;
+        }
+        _ => validate_raw(value, depth)?,
+    }
+    Ok(())
+}
+
+fn validate_context_tag(
+    number: u64,
+    payload: &Raw,
+    format: ValueFormat,
+    oid_algorithm: Option<GitHash>,
+) -> Result<()> {
+    let allowed = match number {
+        OVB2_BLOB_TAG => format == ValueFormat::Ovb2,
+        ROV3_BLOB_TAG | ROV3_OVERFLOW_TAG => format == ValueFormat::Rov3,
+        SOV3_BLOB_TAG => format == ValueFormat::Sov3,
+        _ => false,
+    };
+    if !allowed {
+        return Err(Error::InvalidProfile);
+    }
+    match number {
+        OVB2_BLOB_TAG => {
+            let [Raw::Bytes(_), Raw::Text(media_type), suffix] = array(payload)?.as_slice() else {
+                return Err(Error::InvalidTag);
+            };
+            validate_annotation_fields(media_type, suffix)
+        }
+        ROV3_BLOB_TAG => {
+            let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(oid)] = array(payload)?.as_slice() else {
+                return Err(Error::InvalidTag);
+            };
+            validate_length(length)?;
+            bytes32(sha)?;
+            validate_context_oid(oid, oid_algorithm)?;
+            validate_annotation_fields(media_type, suffix)
+        }
+        SOV3_BLOB_TAG => {
+            let [length, sha, Raw::Text(media_type), suffix] = array(payload)?.as_slice() else {
+                return Err(Error::InvalidTag);
+            };
+            validate_length(length)?;
+            bytes32(sha)?;
+            validate_annotation_fields(media_type, suffix)
+        }
+        ROV3_OVERFLOW_TAG => {
+            let [Raw::Bytes(oid)] = array(payload)?.as_slice() else {
+                return Err(Error::InvalidTag);
+            };
+            validate_context_oid(oid, oid_algorithm)?;
+            Ok(())
+        }
+        _ => Err(Error::InvalidTag),
+    }
+}
+
+fn validate_context_oid(oid: &[u8], algorithm: Option<GitHash>) -> Result<()> {
+    let oid = NativeOid::from_bytes(oid)?;
+    let algorithm = algorithm.ok_or(Error::InvalidContext)?;
+    if !oid_matches_algorithm(&oid, algorithm) {
+        return Err(Error::InvalidOid);
+    }
+    Ok(())
+}
+
+fn validate_length(raw: &Raw) -> Result<u64> {
+    let length = int_u64(raw)?;
+    if length >= MAX_BLOB_LENGTH {
+        return Err(Error::Limit);
+    }
+    Ok(length)
+}
+
+fn validate_annotation_fields(media_type: &str, suffix: &Raw) -> Result<()> {
+    let suffix = raw_suffix(suffix)?;
+    let annotation = MediaAnnotation::new(media_type, suffix.as_deref())?;
+    if annotation.media_type() != media_type || annotation.suffix() != suffix.as_deref() {
+        return Err(Error::NonCanonical);
+    }
+    Ok(())
+}
+
+fn encode_context_raw(
+    value: &Raw,
+    format: ValueFormat,
+    oid_algorithm: Option<GitHash>,
+) -> Result<Vec<u8>> {
+    if format == ValueFormat::Ovb1 {
+        return encode_raw(value);
+    }
+    validate_context_raw(value, 0, format, oid_algorithm)?;
+    let mut output = Vec::new();
+    write_context_raw(value, format, oid_algorithm, &mut output)?;
+    Ok(output)
+}
+
+fn write_context_raw(
+    value: &Raw,
+    format: ValueFormat,
+    oid_algorithm: Option<GitHash>,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    match value {
+        Raw::Map(entries) => {
+            let mut encoded = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
+                encoded.push((encode_context_raw(key, format, oid_algorithm)?, key, value));
+            }
+            encoded.sort_by(|left, right| left.0.cmp(&right.0));
+            if encoded.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return Err(Error::DuplicateOrUnorderedMapKey);
+            }
+            head(output, 5, encoded.len() as u64);
+            for (key, _, value) in encoded {
+                output.extend(key);
+                write_context_raw(value, format, oid_algorithm, output)?;
+            }
+            Ok(())
+        }
+        Raw::Array(values) => {
+            head(output, 4, values.len() as u64);
+            for value in values {
+                write_context_raw(value, format, oid_algorithm, output)?;
+            }
+            Ok(())
+        }
+        Raw::Tag(number, value) => {
+            head(output, 6, *number);
+            write_context_raw(value, format, oid_algorithm, output)
+        }
+        _ => write_raw(value, output),
+    }
 }
 
 /// Compares canonical table keys by their logical values, not by OVB bytes.
@@ -1633,6 +3289,22 @@ pub enum GitHash {
     Sha1,
     Sha256,
 }
+
+impl GitHash {
+    pub const fn oid_width(self) -> usize {
+        match self {
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
+        }
+    }
+}
+
+fn snapshot_database(snapshot: &Snapshot) -> [u8; 16] {
+    match snapshot {
+        Snapshot::Cwd { database, .. } | Snapshot::Commit { database, .. } => *database,
+    }
+}
+
 impl Snapshot {
     pub fn cwd(database: [u8; 16], runtime: [u8; 16], generation: BigInt) -> Result<Self> {
         if generation.sign() == Sign::Minus {
