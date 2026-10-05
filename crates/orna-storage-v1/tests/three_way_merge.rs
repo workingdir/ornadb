@@ -35850,20 +35850,25 @@ fn nested_checkpoint_identity_survives_paired_compaction_chain_handoff_folds_816
             identities: vec![undo_compaction_identities[identity_index].clone()],
         }
     };
-    let stream = |checkpoint_id, label: &str, runs| {
+    let stream = |checkpoint_id: Vec<u8>,
+                  label: &str,
+                  runs: Vec<orna_storage_v1::BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRunSnapshot>| {
         orna_storage_v1::BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffStreamSnapshot {
             checkpoint_id,
             source_stream_id: format!("history-61/source/{label}").into_bytes(),
             runs,
         }
     };
-    let handoff = |index, streams| {
+    let handoff = |index: usize,
+                   streams: Vec<orna_storage_v1::BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffStreamSnapshot>| {
         orna_storage_v1::BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffSnapshot {
             handoff_identity: handoff_identities[index].clone(),
             streams,
         }
     };
-    let outer_fold = |checkpoint_index, rewind_index, handoffs| {
+    let outer_fold = |checkpoint_index: usize,
+                      rewind_index: usize,
+                      handoffs: Vec<orna_storage_v1::BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffSnapshot>| {
         orna_storage_v1::BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldSnapshot {
             checkpoint_identity: checkpoint_identities[checkpoint_index].clone(),
             restore_fold: orna_storage_v1::BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSnapshot {
