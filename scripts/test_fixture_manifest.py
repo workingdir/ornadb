@@ -120,7 +120,7 @@ class FixtureManifestTests(unittest.TestCase):
                     f"sys binding fixture hash is pinned: {fixture_path}",
                 )
 
-        self.assertEqual(fixture_count, 16, "all parity fixture includes are hash-pinned")
+        self.assertEqual(fixture_count, 18, "all parity fixture includes are hash-pinned")
 
     def test_standard_snapshot_replay_fixtures_are_local_and_hash_pinned(self) -> None:
         workspace = Path(__file__).resolve().parents[1]
