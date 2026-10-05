@@ -865,6 +865,9 @@ fn project_location(
     workspace_mapper: &PositionMapper<'_>,
     segments: &[SourceSegment<'_>],
 ) -> Option<lsp_types::Location> {
+    if location.uri.as_str().starts_with("orna-stdlib:") {
+        return Some(location);
+    }
     let start = workspace_mapper.byte_offset(location.range.start);
     let end = workspace_mapper.byte_offset(location.range.end);
     let segment = segments

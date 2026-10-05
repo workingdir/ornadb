@@ -184,6 +184,7 @@ pub(crate) struct EditorSymbol {
 struct StandardSymbol {
     module: String,
     symbol: EditorSymbol,
+    location: Location,
 }
 
 #[derive(Debug, Default)]
@@ -205,6 +206,10 @@ fn standard_library() -> &'static StandardLibraryIndex {
             let Ok(tokens) = lex(&source) else {
                 continue;
             };
+            let mapper = PositionMapper::new(&source);
+            let uri = format!("orna-stdlib:///{path}")
+                .parse::<Uri>()
+                .expect("standard source path is a valid URI");
             let mut prefix = String::new();
             for segment in module.split('.') {
                 if !prefix.is_empty() {
@@ -220,9 +225,16 @@ fn standard_library() -> &'static StandardLibraryIndex {
                     .iter()
                     .filter(|item| matches!(&item.visibility, Visibility::Public { .. }))
                     .filter_map(|item| {
-                        symbol_for_item(item, &source, &tokens).map(|symbol| StandardSymbol {
-                            module: module.clone(),
-                            symbol,
+                        symbol_for_item(item, &source, &tokens).map(|symbol| {
+                            let location = Location {
+                                uri: uri.clone(),
+                                range: mapper.range(&symbol.selection),
+                            };
+                            StandardSymbol {
+                                module: module.clone(),
+                                symbol,
+                                location,
+                            }
                         })
                     }),
             );
@@ -360,6 +372,39 @@ fn standard_symbol_at(
         .filter(|entry| entry.symbol.name == token.text);
     let found = matches.next()?;
     matches.next().is_none().then_some(found)
+}
+
+fn qualified_standard_symbol_at(
+    parse: &EditorParse,
+    text: &str,
+    token: &Token,
+) -> Option<&'static StandardSymbol> {
+    let chain = identifier_chain_at_span(text, &token.span)?;
+    let name = chain.last()?;
+    if token.text.as_str() != name.as_str() || chain.len() < 2 {
+        return None;
+    }
+    let qualifier = chain[..chain.len() - 1].join(".");
+    let module = resolve_standard_module(parse, &qualifier)?;
+    standard_symbol(&module, name)
+}
+
+fn standard_symbol_for_navigation(
+    parse: &EditorParse,
+    text: &str,
+    token: &Token,
+) -> Option<&'static StandardSymbol> {
+    if let Some(symbol) = qualified_standard_symbol_at(parse, text, token) {
+        return Some(symbol);
+    }
+    if crate::locals::binding_at(&parse.value, &token.text, &token.span).is_some()
+        || declaration_symbols(parse, text)
+            .iter()
+            .any(|symbol| normalized_identifier(&symbol.name) == normalized_identifier(&token.text))
+    {
+        return None;
+    }
+    standard_symbol_at(parse, text, token)
 }
 
 pub(crate) fn standard_parameter_names_for_call(
@@ -1029,6 +1074,9 @@ pub fn definition(
 ) -> Option<Location> {
     let byte = mapper.byte_offset(position);
     let token = token_at(&document.text, byte)?;
+    if let Some(symbol) = qualified_standard_symbol_at(parse, &document.text, &token) {
+        return Some(symbol.location.clone());
+    }
     if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
         return Some(Location {
             uri: document.uri.clone(),
@@ -1036,11 +1084,14 @@ pub fn definition(
         });
     }
     let symbols = declaration_symbols(parse, &document.text);
-    let symbol = symbol_for_name(&symbols, &token.text)?;
-    Some(Location {
-        uri: document.uri.clone(),
-        range: mapper.range(&symbol.selection),
-    })
+    if let Some(symbol) = symbol_for_name(&symbols, &token.text) {
+        return Some(Location {
+            uri: document.uri.clone(),
+            range: mapper.range(&symbol.selection),
+        });
+    }
+    standard_symbol_for_navigation(parse, &document.text, &token)
+        .map(|symbol| symbol.location.clone())
 }
 
 pub fn references(
@@ -1054,6 +1105,10 @@ pub fn references(
     let Some(token) = token_at(&document.text, byte) else {
         return Vec::new();
     };
+    let qualified_standard = qualified_standard_symbol_at(parse, &document.text, &token);
+    if let Some(standard) = qualified_standard {
+        return standard_references(document, parse, mapper, standard, include_declaration);
+    }
     if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
         let mut spans = crate::locals::references(&parse.value, &binding);
         if include_declaration {
@@ -1070,31 +1125,89 @@ pub fn references(
             .collect();
     }
     let symbols = declaration_symbols(parse, &document.text);
-    let Some(symbol) = symbol_for_name(&symbols, &token.text) else {
+    if let Some(symbol) = symbol_for_name(&symbols, &token.text) {
+        let name = normalized_identifier(&symbol.name);
+        let local_references = crate::locals::resolved_reference_spans(&parse.value);
+        let mut spans = reference_occurrences(&parse.value, &document.text)
+            .into_iter()
+            .filter(|(occurrence, span)| {
+                normalized_identifier(occurrence) == name
+                    && !local_references.contains(&(span.start, span.end))
+            })
+            .map(|(_, span)| span)
+            .collect::<Vec<_>>();
+        if include_declaration {
+            spans.push(symbol.selection.clone());
+        }
+        spans.sort_by_key(|span| (span.start, span.end));
+        spans.dedup_by_key(|span| (span.start, span.end));
+        return spans
+            .into_iter()
+            .map(|span| Location {
+                uri: document.uri.clone(),
+                range: mapper.range(&span),
+            })
+            .collect();
+    }
+    let standard = qualified_standard
+        .or_else(|| standard_symbol_for_navigation(parse, &document.text, &token));
+    let Some(standard) = standard else {
         return Vec::new();
     };
-    let name = normalized_identifier(&symbol.name);
-    let local_references = crate::locals::resolved_reference_spans(&parse.value);
-    let mut spans = reference_occurrences(&parse.value, &document.text)
+    standard_references(document, parse, mapper, standard, include_declaration)
+}
+
+fn standard_references(
+    document: &Document,
+    parse: &EditorParse,
+    mapper: &PositionMapper<'_>,
+    selected: &StandardSymbol,
+    include_declaration: bool,
+) -> Vec<Location> {
+    let local_symbols = declaration_symbols(parse, &document.text)
         .into_iter()
-        .filter(|(occurrence, span)| {
-            normalized_identifier(occurrence) == name
-                && !local_references.contains(&(span.start, span.end))
+        .map(|symbol| normalized_identifier(&symbol.name))
+        .collect::<BTreeSet<_>>();
+    let local_bindings = crate::locals::all_bindings(&parse.value)
+        .into_iter()
+        .map(|binding| (binding.selection.start, binding.selection.end))
+        .collect::<BTreeSet<_>>();
+    let local_references = crate::locals::resolved_reference_spans(&parse.value);
+    let mut locations = lex(&document.text)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|token| matches!(token.kind, TokenKind::Identifier { .. }))
+        .filter_map(|token| {
+            let standard =
+                qualified_standard_symbol_at(parse, &document.text, &token).or_else(|| {
+                    let span = (token.span.start, token.span.end);
+                    if local_bindings.contains(&span)
+                        || local_references.contains(&span)
+                        || local_symbols.contains(&normalized_identifier(&token.text))
+                    {
+                        return None;
+                    }
+                    standard_symbol_at(parse, &document.text, &token)
+                })?;
+            (standard.module == selected.module && standard.symbol.name == selected.symbol.name)
+                .then(|| Location {
+                    uri: document.uri.clone(),
+                    range: mapper.range(&token.span),
+                })
         })
-        .map(|(_, span)| span)
         .collect::<Vec<_>>();
     if include_declaration {
-        spans.push(symbol.selection.clone());
+        locations.push(selected.location.clone());
     }
-    spans.sort_by_key(|span| (span.start, span.end));
-    spans.dedup_by_key(|span| (span.start, span.end));
-    spans
-        .into_iter()
-        .map(|span| Location {
-            uri: document.uri.clone(),
-            range: mapper.range(&span),
-        })
-        .collect()
+    locations.sort_by(|left, right| {
+        left.uri
+            .as_str()
+            .cmp(right.uri.as_str())
+            .then_with(|| left.range.start.cmp(&right.range.start))
+            .then_with(|| left.range.end.cmp(&right.range.end))
+    });
+    locations.dedup_by(|left, right| left.uri == right.uri && left.range == right.range);
+    locations
 }
 
 pub(crate) fn local_declaration_spans(parse: &EditorParse) -> Vec<SourceSpan> {

@@ -61,6 +61,35 @@ pub fn hover(source: String, line: u32, character: u32) -> String {
     ))
 }
 
+/// Returns the definition location for the token at the requested position.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn definition(source: String, line: u32, character: u32) -> String {
+    let document = document(source);
+    let parsed = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    json(&analysis::definition(
+        &document,
+        &parsed,
+        Position { line, character },
+        &mapper,
+    ))
+}
+
+/// Returns references to the token at the requested position.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn references(source: String, line: u32, character: u32, include_declaration: bool) -> String {
+    let document = document(source);
+    let parsed = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    json(&analysis::references(
+        &document,
+        &parsed,
+        Position { line, character },
+        &mapper,
+        include_declaration,
+    ))
+}
+
 /// Returns signature help from the existing LSP signature implementation.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
 pub fn signature_help(source: String, line: u32, character: u32) -> String {
@@ -106,7 +135,9 @@ pub fn inlay_hints(
 
 #[cfg(test)]
 mod tests {
-    use super::{completions, diagnostics, hover, inlay_hints, signature_help};
+    use super::{
+        completions, definition, diagnostics, hover, inlay_hints, references, signature_help,
+    };
 
     const SOURCE: &str = include_str!("browser/fixtures/browser-intelligence.orna");
     const STANDARD_SOURCE: &str = include_str!("analysis/fixtures/standard-math-import.orna");
@@ -115,6 +146,8 @@ mod tests {
     const STANDARD_SIGNATURE_SOURCE: &str =
         include_str!("browser/fixtures/standard-signature-help.orna");
     const STANDARD_INLAY_SOURCE: &str = include_str!("browser/fixtures/standard-inlay-hints.orna");
+    const STANDARD_NAVIGATION_SOURCE: &str =
+        include_str!("browser/fixtures/standard-definition-references.orna");
 
     fn position(source: &str, byte: usize) -> (u32, u32) {
         let prefix = &source[..byte];
@@ -343,5 +376,73 @@ mod tests {
             .map(|hint| hint["label"].as_str().expect("hint label"))
             .collect::<Vec<_>>();
         assert_eq!(ranged_labels, ["value: ", "lower: ", "upper: "]);
+    }
+
+    #[test]
+    fn browser_standard_navigation_uses_db_source_uri_and_respects_local_shadowing() {
+        let call_offset = STANDARD_NAVIGATION_SOURCE
+            .find("increment(value)")
+            .expect("imported standard call")
+            + "increment".len()
+            - 1;
+        let (line, character) = position(STANDARD_NAVIGATION_SOURCE, call_offset);
+        let target: serde_json::Value = serde_json::from_str(&definition(
+            STANDARD_NAVIGATION_SOURCE.to_owned(),
+            line,
+            character,
+        ))
+        .expect("definition JSON");
+        assert_eq!(target["uri"], "orna-stdlib:///std/math.orna");
+        assert!(target["range"]["start"]["line"].as_u64().unwrap() > 0);
+
+        let reference_locations: serde_json::Value = serde_json::from_str(&references(
+            STANDARD_NAVIGATION_SOURCE.to_owned(),
+            line,
+            character,
+            true,
+        ))
+        .expect("references JSON");
+        let reference_locations = reference_locations.as_array().expect("reference list");
+        assert_eq!(
+            reference_locations.len(),
+            4,
+            "declaration, import, and two calls"
+        );
+        assert_eq!(
+            reference_locations
+                .iter()
+                .filter(|location| location["uri"] == "orna-stdlib:///std/math.orna")
+                .count(),
+            1,
+            "include declaration returns the standard source exactly once"
+        );
+
+        let local_offset = STANDARD_NAVIGATION_SOURCE
+            .rfind("increment;")
+            .expect("shadowed local use")
+            + 1;
+        let (line, character) = position(STANDARD_NAVIGATION_SOURCE, local_offset);
+        let local_target: serde_json::Value = serde_json::from_str(&definition(
+            STANDARD_NAVIGATION_SOURCE.to_owned(),
+            line,
+            character,
+        ))
+        .expect("shadowed definition JSON");
+        assert_eq!(local_target["uri"], "file:///playground/main.orna");
+        let local_references: serde_json::Value = serde_json::from_str(&references(
+            STANDARD_NAVIGATION_SOURCE.to_owned(),
+            line,
+            character,
+            true,
+        ))
+        .expect("shadowed references JSON");
+        assert_eq!(local_references.as_array().map(Vec::len), Some(2));
+        assert!(
+            local_references
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|location| location["uri"] == "file:///playground/main.orna")
+        );
     }
 }

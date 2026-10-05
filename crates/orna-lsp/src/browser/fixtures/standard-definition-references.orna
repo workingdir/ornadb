@@ -1,0 +1,5 @@
+use std.math.{increment};
+
+pub fn imported(value: Int): Int = increment(value);
+pub fn qualified(value: Int): Int = std.math.increment(value);
+pub fn shadowed(increment: Int): Int = increment;
