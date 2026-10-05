@@ -3251,6 +3251,9 @@ e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-ls
 ae26b76e75c4bf39e03664cb7cb33d461c0061fac79ddc285488509973b6d84a  crates/orna-lsp/tests/fixtures/editor-semantic-tokens.orna
 70823fa811930bdc19ac1942ce478d0dd912d6070d993f197ec760b0049ba3f6  crates/orna-lsp/tests/fixtures/expressions-v1.orna
 f05abfb8b62ad2ad18e08c3d5c08fe816c7ee4d0629cec9c7c5f9258da1e13f1  crates/orna-lsp/tests/fixtures/folding-selection-v1.orna
+8e7e9cca4dac156d1675ee35155f922f322234764bface30ac66ea5d259c7780  crates/orna-lsp/tests/fixtures/formatting-crlf-v1.orna
+3009827eb80668c09fdda821398df205bb6f0b4f7906df121dbcd851efd55aa9  crates/orna-lsp/tests/fixtures/formatting-incomplete-v1.orna
+7b3e2b9a9981e0c0fe22818ff9ab3e1a23814290e52c107be75f9b7648a4822a  crates/orna-lsp/tests/fixtures/formatting-v1.orna
 dfbd0534b1fd606ee56c29b65e86a53290489579eca500658c6742d425f70281  crates/orna-lsp/tests/fixtures/hover-completion-v1.orna
 1064c12be254992ed3d461b593b680f9a8e83fde3fb50af8db63c12b88b9b777  crates/orna-lsp/tests/fixtures/incremental-malformed-v1.orna
 d49a4b8de867606627946be5ce4c374f36ce18c0ae9d0d19e191d51498850da8  crates/orna-lsp/tests/fixtures/inline-value-linked-editing-v1.orna
@@ -3282,6 +3285,7 @@ e8255da14cded3d550315c1b02df1cec0d77918fcb9c8702ffb114a1b23e8898  crates/orna-ls
 560c44f3115869620d2b7e6c2aeac2b73d95a72e59edbc40c9e0bbba49b8b303  crates/orna-lsp/tests/fixtures/lsp-e2e-020-language-model-rename-declaration.orna
 274b0acb21ba822516449c11f540fad7b8809b6d54f84df605eb88ecb415bbbf  crates/orna-lsp/tests/fixtures/lsp-e2e-021-language-model-rename-references.orna
 e26462d689c55d2035f4ee535f113c543d433ab4e627569bb0bada85ae1c690a  crates/orna-lsp/tests/fixtures/missing-semicolon-code-action-v1.orna
+08e620147301729a77c6835a091d039eb7a7b1ec860e85178730bfab8eeaaf57  crates/orna-lsp/tests/fixtures/range-formatting-v1.orna
 034f96a2b28e9117c1edf56db04aebae41c0e67466ef3c8e84ff2aeb0e4e7f1b  crates/orna-lsp/tests/fixtures/rename-caller-v1.orna
 7477e338729cc2d0e79d3b8b240b43ab9b5712bc78dcb44076f1efc3573448b6  crates/orna-lsp/tests/fixtures/rename-provider-v1.orna
 53d7a8fd34196932558e28a0b214c772b8740c970c8bf8cf876d5d8dbf7f7910  crates/orna-lsp/tests/fixtures/semantic-token-delta-v1.orna
