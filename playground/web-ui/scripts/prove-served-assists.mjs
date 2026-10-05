@@ -33,6 +33,7 @@ const source = [
   '    next',
   '}',
   'pub fn shadowed(increment: Int): Int = increment;',
+  'pub fn qualified_increment(value: Int): Int = std.math.increment(value);',
   'pub fn bounded(value: Int, lower: Int, upper: Int): Int = clamp(value, lower, upper);',
   'pub fn qualified_bounded(value: Int, lower: Int, upper: Int): Int = std.math.clamp(value, lower, upper);',
 ].join('\n');

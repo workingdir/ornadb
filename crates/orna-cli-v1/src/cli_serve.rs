@@ -843,6 +843,7 @@ fn find_html_close_tag(html: &str, tag: &[u8]) -> Option<usize> {
 fn playground_content_type(path: &Path) -> &'static str {
     match path.extension().and_then(std::ffi::OsStr::to_str) {
         Some("html") => "text/html; charset=utf-8",
+        Some("orna") => "text/plain; charset=utf-8",
         Some("js" | "mjs") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("json") => "application/json; charset=utf-8",
@@ -2634,6 +2635,10 @@ mod tests {
         assert!(has_playground_asset_table(PLAYGROUND_SCHEMA));
         assert!(has_playground_route_table(PLAYGROUND_SCHEMA));
         assert!(has_playground_entry_table(PLAYGROUND_SCHEMA));
+        assert_eq!(
+            playground_content_type(Path::new("assets/stdlib/std/math.orna")),
+            "text/plain; charset=utf-8"
+        );
         let parsed_presentation = parse_row(ASSET_PRESENTATION);
         assert!(
             parsed_presentation.is_ok(),
