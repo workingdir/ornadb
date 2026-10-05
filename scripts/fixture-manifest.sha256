@@ -2596,7 +2596,7 @@ dacb4964d9a9c47e291587cfa5229090b5685f603b5452469faeccffe4cbd599  crates/orna-ev
 30f74f59111bc12d58644d84f450cb8e70a79bdc30ea7df846eb2f7f17c00fca  crates/orna-evaluator-v1/tests/fixtures/stdlib-text-invalid-normalisation-1b5ob.orna
 6f914dbaa83033b2be632fd2118b2fecd1df9a20cd45fd4df3475e092aa2bf5c  crates/orna-evaluator-v1/tests/fixtures/stdlib-text-invalid-normalisation-p9mvh.orna
 d52092404bf28112fbd54a3501bb4647f6296db9bf03224ffe27cd42fe5e77d6  crates/orna-evaluator-v1/tests/fixtures/stdlib-text-join-2189.orna
-47f1c117fa7d685c91e1f2f103fed760b72421964e37730319740d8d1e7b1572  crates/orna-evaluator-v1/tests/fixtures/stdlib-text-lines-boundaries-t71.orna
+04994f9614af9cdd08729a350ee2fdb603077b7465bef7976e4780bf5afede37  crates/orna-evaluator-v1/tests/fixtures/stdlib-text-lines-boundaries-t71.orna
 217cf69a64879a48927016b8af9e743bda63baa1abeeae12190271f8647b64b8  crates/orna-evaluator-v1/tests/fixtures/stdlib-text-lines-count-t71.orna
 d80769afd839ae67ff379e7c583034229713e17248a3b4e6aecf0b56d96b1999  crates/orna-evaluator-v1/tests/fixtures/stdlib-text-lines-join-t71.orna
 fd3d9f026260d6f1a593fa76073a33f6ece29c63a29a6fc42179639a9e3fc260  crates/orna-evaluator-v1/tests/fixtures/stdlib-text-lines-use-t71.orna
