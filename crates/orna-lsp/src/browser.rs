@@ -344,4 +344,76 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ranged_labels, ["value: ", "lower: ", "upper: "]);
     }
+
+    #[test]
+    fn browser_inlay_hint_documents_remain_independent_under_concurrent_requests() {
+        let shifted_source = format!("\n\n{STANDARD_INLAY_SOURCE}");
+        let (base_json, shifted_json) = std::thread::scope(|scope| {
+            let base = scope.spawn(|| {
+                let (end_line, end_character) =
+                    position(STANDARD_INLAY_SOURCE, STANDARD_INLAY_SOURCE.len());
+                inlay_hints(
+                    STANDARD_INLAY_SOURCE.to_owned(),
+                    0,
+                    0,
+                    end_line,
+                    end_character,
+                )
+            });
+            let shifted = scope.spawn(|| {
+                let (end_line, end_character) = position(&shifted_source, shifted_source.len());
+                inlay_hints(shifted_source.clone(), 0, 0, end_line, end_character)
+            });
+            (
+                base.join().expect("join base inlay request"),
+                shifted.join().expect("join shifted inlay request"),
+            )
+        });
+
+        let base: serde_json::Value = serde_json::from_str(&base_json).expect("base hint JSON");
+        let shifted: serde_json::Value =
+            serde_json::from_str(&shifted_json).expect("shifted hint JSON");
+        let decode = |response: &serde_json::Value| {
+            response
+                .as_array()
+                .expect("inlay hint list")
+                .iter()
+                .map(|hint| {
+                    (
+                        hint["label"].as_str().expect("hint label").to_owned(),
+                        hint["position"]["line"].as_u64().expect("hint line"),
+                        hint["position"]["character"]
+                            .as_u64()
+                            .expect("hint character"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let base = decode(&base);
+        let shifted = decode(&shifted);
+        assert_eq!(
+            base.iter()
+                .map(|(label, _, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            shifted
+                .iter()
+                .map(|(label, _, _)| label.as_str())
+                .collect::<Vec<_>>(),
+            "parallel documents should produce the same hints"
+        );
+        assert_eq!(base.len(), 8, "standard fixture hint count: {base:?}");
+        for (
+            (base_label, base_line, base_character),
+            (shifted_label, shifted_line, shifted_character),
+        ) in base.iter().zip(&shifted)
+        {
+            assert_eq!(base_label, shifted_label);
+            assert_eq!(
+                *shifted_line,
+                *base_line + 2,
+                "line belongs to its source document"
+            );
+            assert_eq!(shifted_character, base_character);
+        }
+    }
 }
