@@ -29,7 +29,8 @@ use orna_foundation_v1::{
     SYS_STREAM_TABLE_ID, SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value,
     checkpoint_reference, failure_reference, invocation_reference, snapshot_reference,
     validate_checkpoint_reference, validate_failure_reference, validate_invocation_reference,
-    validate_run_reference, validate_stream_reference,
+    validate_run_reference, validate_stream_reference, ProtectedContentPinIdentity,
+    ProtectedContentTransferRecord, SchemaGenerationIdentity,
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
@@ -111,6 +112,18 @@ CREATE TABLE IF NOT EXISTS pending_mutation (
     mutation_id BLOB NOT NULL UNIQUE CHECK (length(mutation_id) = 16),
     payload BLOB NOT NULL,
     digest BLOB NOT NULL CHECK (length(digest) = 32)
+);
+CREATE TABLE IF NOT EXISTS accepted_content_pin (
+    pin_id BLOB PRIMARY KEY CHECK (length(pin_id) = 16),
+    repository_id BLOB NOT NULL CHECK (length(repository_id) = 16),
+    database_id BLOB NOT NULL CHECK (length(database_id) = 16),
+    content_length INTEGER NOT NULL CHECK (content_length >= 0),
+    content_sha256 BLOB NOT NULL CHECK (length(content_sha256) = 32),
+    mutation_id BLOB NOT NULL CHECK (length(mutation_id) = 16),
+    table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+    row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+    owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0)
 );
 CREATE TABLE IF NOT EXISTS table_row (
     table_id TEXT NOT NULL CHECK (length(table_id) > 0),
@@ -2828,10 +2841,39 @@ pub struct StreamValidatedTableDeliveryCommit<'a> {
 pub struct ValidatedTableActivationCommit<'a> {
     pub writer: WriterLease,
     pub context: &'a RuntimeActivationContext,
+    /// Opaque repository-issued schema generation captured with the candidate.
+    pub schema_generation: &'a dyn SchemaGenerationIdentity,
     pub mutations: &'a [TableMutation],
+    /// Native graph pins that protect content referenced by the candidate.
+    pub content_pins: &'a mut [ProtectedContentPinBinding<'a>],
     pub next_digest: [u8; 32],
     pub validator: &'a mut dyn TableActivationCandidateValidator,
     pub faults: &'a dyn FaultInjector,
+}
+
+/// Associates a graph-issued durable content pin with the row mutation that
+/// introduces its content reference. The pin itself remains graph-owned.
+pub struct ProtectedContentPinBinding<'a> {
+    pin: &'a mut dyn ProtectedContentPinIdentity,
+    mutation_id: [u8; 16],
+    table: String,
+    row_key: Vec<u8>,
+}
+
+impl<'a> ProtectedContentPinBinding<'a> {
+    pub fn new(
+        pin: &'a mut dyn ProtectedContentPinIdentity,
+        mutation_id: [u8; 16],
+        table: impl Into<String>,
+        row_key: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            pin,
+            mutation_id,
+            table: table.into(),
+            row_key: row_key.into(),
+        }
+    }
 }
 
 /// A table-backed request activation that validates its post-mutation
@@ -2972,8 +3014,25 @@ pub trait TableActivationCandidateValidator {
         BTreeMap::new()
     }
 
+    /// Identity of the schema generation used to decode and validate rows.
+    /// Implementations that do not bind a repository-issued generation fail
+    /// closed for table activation.
+    fn schema_generation_identity(&self) -> Option<[u8; 32]> {
+        None
+    }
+
     /// Returns a safe failure diagnostic when the candidate cannot commit.
     fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
+
+    /// Confirms protected native content is represented by the accepted rows.
+    /// Legacy validators accept only candidates without content pins.
+    fn validate_content_pins(
+        &mut self,
+        _rows: &RuntimeTableRows,
+        transfers: &[ProtectedContentTransferRecord],
+    ) -> bool {
+        transfers.is_empty()
+    }
 }
 
 pub struct StreamValidatedTableMutationBatch {
@@ -6206,7 +6265,9 @@ impl RuntimeState {
         let ValidatedTableActivationCommit {
             writer,
             context,
+            schema_generation,
             mutations,
+            content_pins,
             next_digest,
             validator,
             faults,
@@ -6239,6 +6300,45 @@ impl RuntimeState {
             .map_err(TableActivationError::Runtime)?;
         validate_admitted_table_identities(context, mutations)
             .map_err(TableActivationError::Runtime)?;
+        if validator.schema_generation_identity() != Some(schema_generation.identity_digest()) {
+            return Err(TableActivationError::Runtime(
+                RuntimeError::InvalidTableMutation,
+            ));
+        }
+        let mut seen_pin_ids = BTreeMap::new();
+        let mut transfers = Vec::with_capacity(content_pins.len());
+        for binding in content_pins.iter_mut() {
+            let matching_mutation = mutations.iter().any(|mutation| {
+                mutation.id == binding.mutation_id
+                    && mutation.table == binding.table
+                    && mutation.value.is_some()
+                    && mutation
+                        .rekey_to
+                        .as_deref()
+                        .unwrap_or(mutation.key.as_slice())
+                        == binding.row_key.as_slice()
+            });
+            let pin_id = binding.pin.id();
+            if !matching_mutation
+                || binding.table.is_empty()
+                || binding.row_key.is_empty()
+                || seen_pin_ids.insert(pin_id, ()).is_some()
+            {
+                return Err(TableActivationError::Runtime(
+                    RuntimeError::InvalidTableMutation,
+                ));
+            }
+            transfers.push(ProtectedContentTransferRecord {
+                pin_id,
+                repository_id: binding.pin.repository_id(),
+                database_id: binding.pin.database_id(),
+                content_length: binding.pin.content_length(),
+                content_sha256: binding.pin.content_sha256(),
+                mutation_id: binding.mutation_id,
+                table: binding.table.clone(),
+                row_key: binding.row_key.clone(),
+            });
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -6266,6 +6366,39 @@ impl RuntimeState {
         validator
             .validate(&rows)
             .map_err(TableActivationError::ValidationFailed)?;
+        if !validator.validate_content_pins(&rows, &transfers) {
+            return Err(TableActivationError::Runtime(
+                RuntimeError::InvalidTableMutation,
+            ));
+        }
+        let owner_epoch = i64::try_from(writer.epoch).map_err(|_| {
+            TableActivationError::Runtime(RuntimeError::InvalidTableMutation)
+        })?;
+        for transfer in &transfers {
+            let content_length = i64::try_from(transfer.content_length).map_err(|_| {
+                TableActivationError::Runtime(RuntimeError::InvalidTableMutation)
+            })?;
+            transaction
+                .execute(
+                    "INSERT INTO accepted_content_pin (pin_id, repository_id, database_id, content_length, content_sha256, mutation_id, table_id, row_key, owner_id, owner_epoch) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        &transfer.pin_id[..],
+                        &transfer.repository_id[..],
+                        &transfer.database_id[..],
+                        content_length,
+                        &transfer.content_sha256[..],
+                        &transfer.mutation_id[..],
+                        transfer.table.as_str(),
+                        &transfer.row_key[..],
+                        &writer.owner_id[..],
+                        owner_epoch,
+                    ],
+                )
+                .await
+                .map_err(|_| {
+                    TableActivationError::Runtime(RuntimeError::StorageUnavailable)
+                })?;
+        }
         let next = append_mutations_tx(
             &transaction,
             context.capture(),
@@ -20637,6 +20770,7 @@ mod tests {
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
+        let schema_generation = TestSchemaGeneration([13; 32]);
         let mut validator = ObservingTableActivationValidator {
             tables: vec!["books".into()],
             calls: 0,
@@ -20647,7 +20781,9 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
+                schema_generation: &schema_generation,
                 mutations: &[table_mutation(5, 1, Some(9))],
+                content_pins: &mut [],
                 next_digest: digest(6),
                 validator: &mut validator,
                 faults: &NoFault,
@@ -20813,6 +20949,7 @@ mod tests {
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
+        let schema_generation = TestSchemaGeneration([13; 32]);
         let before = state.capture().await.unwrap();
         let mut validator = RejectingValidator {
             tables: vec!["books".into()],
@@ -20823,7 +20960,9 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
+                schema_generation: &schema_generation,
                 mutations: &[table_mutation(5, 1, Some(9))],
+                content_pins: &mut [],
                 next_digest: digest(6),
                 validator: &mut validator,
                 faults: &NoFault,
@@ -20838,6 +20977,48 @@ mod tests {
             }))
         ));
         assert_eq!(validator.calls, 1);
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn validated_table_activation_rejects_a_different_captured_schema_generation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let before = state.capture().await.unwrap();
+        let schema_generation = TestSchemaGeneration([14; 32]);
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+
+        let result = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                schema_generation: &schema_generation,
+                mutations: &[table_mutation(5, 1, Some(9))],
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(TableActivationError::Runtime(
+                RuntimeError::InvalidTableMutation
+            ))
+        ));
+        assert_eq!(validator.calls, 0);
         assert_eq!(state.capture().await.unwrap(), before);
         assert_eq!(state.latest_checkpoint().await.unwrap(), None);
         assert_eq!(
@@ -31784,6 +31965,14 @@ mod tests {
         }
     }
 
+    struct TestSchemaGeneration([u8; 32]);
+
+    unsafe impl SchemaGenerationIdentity for TestSchemaGeneration {
+        fn identity_digest(&self) -> [u8; 32] {
+            self.0
+        }
+    }
+
     struct TablesOnlyValidator {
         tables: Vec<String>,
         calls: usize,
@@ -31805,6 +31994,10 @@ mod tests {
             &self.tables
         }
 
+        fn schema_generation_identity(&self) -> Option<[u8; 32]> {
+            Some([13; 32])
+        }
+
         fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
             self.calls += 1;
             Ok(())
@@ -31820,6 +32013,10 @@ mod tests {
     impl TableActivationCandidateValidator for ObservingTableActivationValidator {
         fn tables(&self) -> &[String] {
             &self.tables
+        }
+
+        fn schema_generation_identity(&self) -> Option<[u8; 32]> {
+            Some([13; 32])
         }
 
         fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -31851,6 +32048,10 @@ mod tests {
     impl TableActivationCandidateValidator for RejectingValidator {
         fn tables(&self) -> &[String] {
             &self.tables
+        }
+
+        fn schema_generation_identity(&self) -> Option<[u8; 32]> {
+            Some([13; 32])
         }
 
         fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
