@@ -4195,7 +4195,7 @@ mod tests {
             root.path(),
             &["--git-dir", "remote.git", "symbolic-ref", "HEAD", "refs/heads/main"],
         );
-        git(root.path(), &["clone", remote_path, "updater"]);
+        git(root.path(), &["clone", "--branch", "main", remote_path, "updater"]);
         assert_eq!(git(&updater, &["rev-parse", "HEAD"]), initial);
         git(&updater, &["config", "user.email", "kieran@drewett.dev"]);
         git(&updater, &["config", "user.name", "kierandrewett"]);
