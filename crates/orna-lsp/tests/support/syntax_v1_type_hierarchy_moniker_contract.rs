@@ -33,7 +33,7 @@ pub fn request_data(provider_source: &str, caller_source: &str) -> Value {
         ),
         "clash_caller_declaration": position_at(
             caller_source,
-            after(caller_source, "pub type Clash", "pub type "),
+            after(caller_source, "pub protocol Clash", "pub protocol "),
         ),
         "document_alias_reference": position_at(
             provider_source,
