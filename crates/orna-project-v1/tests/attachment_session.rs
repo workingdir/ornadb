@@ -5252,7 +5252,7 @@ fn cloned_session_alias_reload_generations_remain_branch_local() {
 }
 
 #[test]
-fn failed_descendant_reload_keeps_cloned_alias_branches_atomic() {
+fn failed_descendant_reload_can_retry_from_unchanged_cloned_branch() {
     let package_source = include_str!("fixtures/attach-package.orna");
     let (shared_dir, shared_repository, _) = repository(&[("main.orna", package_source)]);
     let aliases = ["archive", "archive_copy", "archive_copy_archive"];
@@ -5270,6 +5270,14 @@ fn failed_descendant_reload_keeps_cloned_alias_branches_atomic() {
         "902",
         None,
         "atomic reload valid terminal after",
+    );
+    let terminal_retry = write_commit(
+        shared_dir.path(),
+        &[(
+            "main.orna",
+            include_str!("fixtures/attach-retry-terminal.orna"),
+        )],
+        "atomic reload retry terminal",
     );
     let terminal_invalid = write_commit(
         shared_dir.path(),
@@ -5295,6 +5303,14 @@ fn failed_descendant_reload_keeps_cloned_alias_branches_atomic() {
         "802",
         Some(&deep_valid_manifest),
         "atomic reload valid deep replacement",
+    );
+    let deep_retry_manifest = format!("{} {}\n", aliases[2], terminal_retry);
+    let deep_retry = write_package_snapshot(
+        shared_dir.path(),
+        package_source,
+        "804",
+        Some(&deep_retry_manifest),
+        "atomic reload deep replacement for retry",
     );
     let deep_invalid_manifest = format!("{} {}\n", aliases[2], terminal_invalid);
     let deep_invalid = write_package_snapshot(
@@ -5379,6 +5395,34 @@ fn failed_descendant_reload_keeps_cloned_alias_branches_atomic() {
         Err(AttachmentError::PinnedPackageInvalid)
     ));
 
+    let recovered_path = resolver
+        .resolve_nested_rebind_path(
+            &failing_branch,
+            &[
+                resolve_pin(aliases[0], &middle_failed),
+                resolve_pin(aliases[1], &deep_retry),
+            ],
+        )
+        .unwrap();
+    assert_eq!(recovered_path.retained_sessions().len(), 2);
+    assert_pin(
+        &recovered_path.retained_sessions()[0],
+        aliases[0],
+        &middle_before,
+    );
+    assert_pin(
+        &recovered_path.retained_sessions()[1],
+        aliases[1],
+        &deep_before,
+    );
+    assert_pin(recovered_path.final_session(), aliases[2], &terminal_retry);
+    assert_module_route(recovered_path.final_session(), "main.orna", "= 804");
+    assert_module_route(
+        recovered_path.final_session(),
+        "archive_copy_archive.orna",
+        "= 903",
+    );
+
     let valid_path = resolver
         .resolve_nested_rebind_path(
             &valid_branch,
@@ -5408,6 +5452,7 @@ fn failed_descendant_reload_keeps_cloned_alias_branches_atomic() {
         "archive_copy_archive.orna",
         "= 902",
     );
+    assert_pin(valid_path.final_session(), aliases[2], &terminal_after);
 
     for (session, snapshot) in [
         (&root, &middle_before),
