@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { exampleIndexForKey, exampleIndexForPath, isExample } from './example-feed';
+import {
+  exampleIndexForKey,
+  exampleIndexForPath,
+  exampleIndexForSearch,
+  isExample,
+  pushExampleSelection,
+} from './example-feed';
 
 describe('database example feed', () => {
   it('accepts only records with the name, path, and source fields used by the feed', () => {
@@ -25,6 +31,46 @@ describe('database example feed', () => {
     expect(exampleIndexForPath(examples, 'playground/Sample/arithmetic.orna')).toBe(1);
     expect(exampleIndexForPath(examples, 'playground/Sample/unknown.orna')).toBe(0);
     expect(exampleIndexForPath(examples, null)).toBe(0);
+  });
+
+  it('resolves a database example from the URL query and falls back for unknown paths', () => {
+    const examples = [
+      { path: 'playground/Sample/hello.orna' },
+      { path: 'playground/Sample/arithmetic.orna' },
+    ];
+    expect(exampleIndexForSearch(examples, '?example=playground%2FSample%2Farithmetic.orna')).toBe(1);
+    expect(exampleIndexForSearch(examples, '?example=playground%2FSample%2Fmissing.orna')).toBe(0);
+    expect(exampleIndexForSearch(examples, '?other=1')).toBe(0);
+  });
+
+  it('pushes a selected path while preserving other URL state and skips duplicate history', () => {
+    const state = { tab: 'editor' };
+    const calls: Array<[unknown, string, string | URL | null | undefined]> = [];
+    const history = {
+      state,
+      pushState: (nextState: unknown, title: string, url?: string | URL | null) => {
+        calls.push([nextState, title, url]);
+      },
+    };
+    const selectedPath = 'playground/Sample/arithmetic.orna';
+
+    expect(pushExampleSelection(
+      history,
+      'https://orna.test/playground/?theme=basic&mode=edit#source',
+      selectedPath,
+    )).toBe(true);
+    expect(calls).toEqual([[
+      state,
+      '',
+      '/playground/?theme=basic&mode=edit&example=playground%2FSample%2Farithmetic.orna#source',
+    ]]);
+
+    expect(pushExampleSelection(
+      history,
+      `https://orna.test/playground/?example=${encodeURIComponent(selectedPath)}#source`,
+      selectedPath,
+    )).toBe(false);
+    expect(calls).toHaveLength(1);
   });
 
   it('jumps to the first or last example and ignores other keys or an empty feed', () => {
