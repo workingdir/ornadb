@@ -1,0 +1,1 @@
+{ id: "asset-live-snapshot", path: "assets/app-live-snapshot.js", media_type: "text/javascript; charset=utf-8", content: "globalThis.ornaPlaygroundSnapshot = 1;" }
