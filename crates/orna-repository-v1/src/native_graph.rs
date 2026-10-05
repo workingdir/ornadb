@@ -6,13 +6,34 @@
 //! In particular, a raw OID or a caller-provided resolver is not a repository
 //! authority.
 
-use std::{collections::BTreeMap, fmt, ops::Range};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    fs::{self, File},
+    io::{Read, Write},
+    ops::Range,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+        Arc,
+    },
+};
 
 pub const REPOSITORY_FORMAT: u8 = 3;
 pub const NODE_DATA_LIMIT: usize = 65_536;
 pub const MAX_REFS: usize = 256;
 pub const MAX_GRAPH_HEIGHT: u8 = 64;
 pub const MAX_SIGNED_LENGTH: u64 = i64::MAX as u64;
+pub const MAX_RANGE_READ_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_FULL_VERIFY_OBJECTS: u64 = 1_000_000;
+pub const MAX_RANGE_GRAPH_OBJECTS: u64 = 2_048;
+pub const MAX_RANGE_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_FULL_METADATA_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_PACK_INDEX_FILES: usize = 2_048;
+pub const MAX_INDEXED_TREE_BYTES: u64 = NODE_DATA_LIMIT as u64;
+const MAX_PACK_INDEX_SCAN_BYTES: u64 = 1 << 40;
+const MAX_PACK_SET_SYNC_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// The two native Git object hash modes admitted by OGS-1.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -122,6 +143,8 @@ struct ContextIdentity([u8; 32]);
 /// root and schema generation; callers cannot create a context from raw OIDs.
 #[derive(Clone, Debug)]
 pub struct NativeGraphContext {
+    repository: crate::Repository,
+    repository_id: [u8; 32],
     identity: ContextIdentity,
     database_id: [u8; 16],
     owner_id: [u8; 16],
@@ -134,6 +157,8 @@ pub struct NativeGraphContext {
 impl NativeGraphContext {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue(
+        repository: crate::Repository,
+        repository_id: [u8; 32],
         identity: [u8; 32],
         database_id: [u8; 16],
         owner_id: [u8; 16],
@@ -149,6 +174,8 @@ impl NativeGraphContext {
             });
         }
         Ok(Self {
+            repository,
+            repository_id,
             identity: ContextIdentity(identity),
             database_id,
             owner_id,
@@ -179,6 +206,223 @@ impl NativeGraphContext {
         &self.schema_digest
     }
 
+    /// Creates a shared read budget and cancellation binding for this exact
+    /// repository owner.  Repository context, not a caller-supplied resolver,
+    /// owns construction of this scope.
+    pub(crate) fn issue_read_scope(
+        &self,
+        owner_id: [u8; 16],
+        cancelled: Arc<AtomicBool>,
+        byte_quota: u64,
+        max_single_read: u64,
+        max_objects: u64,
+        metadata_quota: u64,
+    ) -> Result<RepositoryReadScope, GraphError> {
+        if owner_id != self.owner_id
+            || byte_quota == 0
+            || byte_quota > MAX_SIGNED_LENGTH
+            || max_single_read == 0
+            || max_single_read > MAX_RANGE_READ_BYTES
+            || max_objects == 0
+            || max_objects > MAX_FULL_VERIFY_OBJECTS
+            || metadata_quota == 0
+            || metadata_quota > MAX_FULL_METADATA_BYTES
+        {
+            return Err(GraphError::InvalidReadScope);
+        }
+        Ok(RepositoryReadScope {
+            context: self.identity,
+            owner_id,
+            cancelled,
+            bytes_used: Arc::new(AtomicU64::new(0)),
+            objects_used: Arc::new(AtomicU64::new(0)),
+            metadata_used: Arc::new(AtomicU64::new(0)),
+            byte_quota,
+            max_single_read,
+            max_objects,
+            metadata_quota,
+        })
+    }
+
+    /// Admits a descriptor only when an owner-issued row contains that native
+    /// tree dependency and the descriptor bytes agree with the format-3 row
+    /// reference. The capability is then tied to this owner and snapshot.
+    pub fn admit_blob_reference(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        descriptor_oid: &NativeOid,
+        scope: &RepositoryReadScope,
+    ) -> Result<AdmittedBlobReference, GraphError> {
+        scope.authorize(self)?;
+        if row.version().database_id() != &self.database_id
+            || row.version().store_root() != &self.store_root
+            || row.version().schema().schema_digest() != &self.schema_digest
+            || descriptor_oid.algorithm() != self.algorithm
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+        let dependency_present = row.value().dependencies().iter().any(|dependency| {
+            dependency.kind() == NativeObjectKind::Tree && dependency.oid() == descriptor_oid
+        });
+        if !dependency_present {
+            return Err(GraphError::DescriptorNotInRow);
+        }
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let descriptor = self.read_blob_descriptor(descriptor_oid, scope, &mut objects)?;
+        self.admit_blob(descriptor)
+    }
+
+    /// Reads one bounded half-open byte range from the descriptor's native Git
+    /// graph. Returned bytes are unavailable until every intersecting chunk's
+    /// native Git ID, length and raw SHA-256 have been checked.
+    pub fn read_blob_range(
+        &self,
+        reference: &AdmittedBlobReference,
+        range: Range<u64>,
+        scope: &RepositoryReadScope,
+    ) -> Result<VerifiedBlobRange, GraphError> {
+        scope.authorize(self)?;
+        if !reference.matches_context(self)
+            || range.start > range.end
+            || range.end > reference.identity.length()
+        {
+            return Err(GraphError::InvalidRange);
+        }
+        let requested_len = range.end - range.start;
+        if requested_len > scope.max_single_read {
+            return Err(GraphError::ReadQuotaExceeded);
+        }
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let descriptor =
+            self.read_blob_descriptor(&reference.descriptor_oid, scope, &mut objects)?;
+        if descriptor.identity != reference.identity {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        let mut bytes = Vec::with_capacity(requested_len as usize);
+        let verification = if requested_len == 0 {
+            if descriptor.identity.length() == 0
+                && descriptor.identity.sha256() == crate::blob_store::digest_bytes(&[]).sha256()
+            {
+                RangeVerification::FullBlob
+            } else {
+                RangeVerification::ReturnedChunks
+            }
+        } else {
+            let root = descriptor
+                .byte_root
+                .as_ref()
+                .ok_or(GraphError::InvalidEmptyBlob)?;
+            self.read_index_range(
+                root,
+                descriptor.identity.length(),
+                None,
+                0,
+                &range,
+                scope,
+                &mut objects,
+                &mut bytes,
+            )?;
+            if bytes.len() as u64 != requested_len {
+                return Err(GraphError::InvalidByteIndex);
+            }
+            if range.start == 0 && range.end == descriptor.identity.length() {
+                if crate::blob_store::digest_bytes(&bytes) != descriptor.identity {
+                    return Err(GraphError::ContentIdentityMismatch);
+                }
+                RangeVerification::FullBlob
+            } else {
+                RangeVerification::ReturnedChunks
+            }
+        };
+        scope.check_cancelled()?;
+        let output =
+            VerifiedBlobRange::after_chunk_verification(reference, range, bytes, verification)?;
+        Ok(output)
+    }
+
+    /// Verifies, flushes, then returns an opaque private-ref-backed content
+    /// pin. A provisional private ref is installed first so concurrent Git GC
+    /// cannot collect the closure while verification is in progress.
+    pub fn protect_verified_blob(
+        &self,
+        reference: &AdmittedBlobReference,
+        scope: &RepositoryReadScope,
+    ) -> Result<ProtectedContentPin, GraphError> {
+        scope.authorize(self)?;
+        if !reference.matches_context(self) {
+            return Err(GraphError::ContextMismatch);
+        }
+        if reference.identity.length() > scope.byte_quota {
+            return Err(GraphError::ReadQuotaExceeded);
+        }
+        let pin_id = *crate::Uuid::new_v4().as_bytes();
+        let pin_hex = hex_encode(&pin_id);
+        let protected_ref = format!("refs/orna/pins/{pin_hex}");
+        let provisional_ref = format!("refs/orna/pins/pending/{pin_hex}");
+        if let Err(error) = self.create_protected_ref(&provisional_ref, &reference.descriptor_oid) {
+            let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
+            return Err(error);
+        }
+        let objects = match self.verify_full_blob(reference, scope) {
+            Ok(objects) => objects,
+            Err(error) => {
+                // If cleanup fails, keeping an orphaned private ref is safer
+                // than exposing unverified bytes to concurrent collection.
+                let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self
+            .sync_object_closure(&objects, scope)
+            .and_then(|()| scope.check_cancelled())
+        {
+            let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
+            return Err(error);
+        }
+        if let Err(error) =
+            self.promote_protected_ref(&provisional_ref, &protected_ref, &reference.descriptor_oid)
+        {
+            let _ = self.delete_protected_ref(&provisional_ref, &reference.descriptor_oid);
+            return Err(error);
+        }
+        // If syncing the promoted ref fails, leave it rooted. Returning no pin
+        // is safe; deleting a possibly durable root here could expose objects
+        // to concurrent GC. The unissued ref is a recoverable orphan.
+        self.sync_git_ref(&protected_ref)?;
+        ProtectedContentPin::issue_after_durable_ref(
+            self.repository_id,
+            self.database_id,
+            pin_id,
+            reference,
+            protected_ref,
+        )
+    }
+
+    /// Removes a private ref only with a PUB-3 receipt for this exact pin.
+    /// Dropping a pin handle alone never invokes this operation.
+    pub fn release_published_pin(
+        &self,
+        pin: ProtectedContentPin,
+        receipt: Pub3ReleaseReceipt,
+    ) -> Result<(), GraphError> {
+        if !receipt.authorizes(&pin) || pin.repository_id != self.repository_id {
+            return Err(GraphError::PinReceiptMismatch);
+        }
+        self.delete_protected_ref(&pin.protected_ref, &pin.descriptor_oid)
+    }
+
     /// Admits a Blob only from already-verified descriptor evidence in this
     /// exact owner and snapshot.  The evidence constructor is private to this
     /// module's future Git reader, so public OIDs cannot mint capabilities.
@@ -201,6 +445,939 @@ impl NativeGraphContext {
             identity: descriptor.identity,
         })
     }
+
+    fn read_blob_descriptor(
+        &self,
+        descriptor_oid: &NativeOid,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+    ) -> Result<VerifiedBlobDescriptor, GraphError> {
+        let node = self.read_native_node(descriptor_oid, scope, objects)?;
+        let NodeData::BlobDescriptor {
+            length,
+            raw_sha256,
+            byte_root,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::BlobDescriptor,
+                actual: node.kind(),
+            });
+        };
+        if length > MAX_SIGNED_LENGTH || (length == 0) != byte_root.is_none() {
+            return Err(GraphError::InvalidEmptyBlob);
+        }
+        let identity = crate::blob_store::ContentIdentity::new(length, raw_sha256)
+            .map_err(|_| GraphError::InvalidLength(length))?;
+        if length == 0 && identity.sha256() != crate::blob_store::digest_bytes(&[]).sha256() {
+            return Err(GraphError::InvalidEmptyBlob);
+        }
+        if let Some(root) = &byte_root {
+            if root.algorithm() != self.algorithm {
+                return Err(GraphError::InvalidOidWidth {
+                    expected: self.algorithm.width(),
+                    actual: root.as_bytes().len(),
+                });
+            }
+        }
+        Ok(VerifiedBlobDescriptor {
+            descriptor_oid: descriptor_oid.clone(),
+            identity,
+        })
+    }
+
+    fn read_native_node(
+        &self,
+        oid: &NativeOid,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+    ) -> Result<NodeData, GraphError> {
+        if oid.algorithm() != self.algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: self.algorithm.width(),
+                actual: oid.as_bytes().len(),
+            });
+        }
+        let raw_tree = self.read_git_object(
+            NativeObjectKind::Tree,
+            oid,
+            MAX_INDEXED_TREE_BYTES,
+            scope,
+            objects,
+        )?;
+        let entries = parse_git_tree(&raw_tree, self.algorithm, 2)?;
+        let mut data_oid = None;
+        let mut refs_oid = None;
+        for entry in entries {
+            match entry.name.as_slice() {
+                b"data" if entry.mode.as_slice() == b"100644" => data_oid = Some(entry.oid),
+                b"refs" if entry.mode.as_slice() == b"40000" => refs_oid = Some(entry.oid),
+                _ => return Err(GraphError::InvalidTreeEnvelope),
+            }
+        }
+        let data_oid = data_oid.ok_or(GraphError::MissingNodeData)?;
+        let data = self.read_git_object(
+            NativeObjectKind::Blob,
+            &data_oid,
+            NODE_DATA_LIMIT as u64,
+            scope,
+            objects,
+        )?;
+        let refs = if let Some(refs_oid) = refs_oid {
+            let raw_refs = self.read_git_object(
+                NativeObjectKind::Tree,
+                &refs_oid,
+                MAX_INDEXED_TREE_BYTES,
+                scope,
+                objects,
+            )?;
+            let entries = parse_git_tree(&raw_refs, self.algorithm, MAX_REFS)?;
+            let mut refs = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let oid_from_name = NativeOid::from_hex(
+                    self.algorithm,
+                    std::str::from_utf8(&entry.name).map_err(|_| GraphError::MalformedOid)?,
+                )?;
+                if oid_from_name != entry.oid {
+                    return Err(GraphError::MalformedReferenceName);
+                }
+                let kind = match entry.mode.as_slice() {
+                    b"100644" => NativeObjectKind::Blob,
+                    b"40000" => NativeObjectKind::Tree,
+                    _ => return Err(GraphError::WrongReferenceKind),
+                };
+                objects.edge()?;
+                refs.push(NativeRefEntry::new(oid_from_name, kind));
+            }
+            refs
+        } else {
+            Vec::new()
+        };
+        let envelope = NativeNodeEnvelope::new(data, refs);
+        validate_native_node(
+            &ValidatedRepositoryContext {
+                algorithm: self.algorithm,
+            },
+            &envelope,
+        )
+    }
+
+    fn read_index_range(
+        &self,
+        oid: &NativeOid,
+        expected_length: u64,
+        expected_height: Option<u8>,
+        base_offset: u64,
+        requested: &Range<u64>,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+        output: &mut Vec<u8>,
+    ) -> Result<u8, GraphError> {
+        scope.check_cancelled()?;
+        let node = self.read_native_node(oid, scope, objects)?;
+        let NodeData::ByteIndex {
+            height,
+            total_length,
+            entries,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::ByteIndex,
+                actual: node.kind(),
+            });
+        };
+        if total_length != expected_length
+            || expected_height.is_some_and(|expected| expected != height)
+        {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        let mut local = 0u64;
+        for entry in entries {
+            let child_start = base_offset
+                .checked_add(local)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            let child_end = child_start
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            local = local
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            let overlap_start = child_start.max(requested.start);
+            let overlap_end = child_end.min(requested.end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            if height == 0 {
+                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+                    return Err(GraphError::InvalidByteIndex);
+                }
+                let reservation = scope.reserve_payload(entry.span_length)?;
+                let chunk = self.read_git_object(
+                    NativeObjectKind::Blob,
+                    &entry.target,
+                    crate::blob_store::GEAR_MAXIMUM as u64,
+                    scope,
+                    objects,
+                )?;
+                if chunk.len() as u64 != entry.span_length
+                    || entry.chunk_sha256 != Some(crate::blob_store::digest_bytes(&chunk).sha256())
+                {
+                    return Err(GraphError::ChunkDigestMismatch);
+                }
+                let from = usize::try_from(overlap_start - child_start)
+                    .map_err(|_| GraphError::InvalidRange)?;
+                let to = usize::try_from(overlap_end - child_start)
+                    .map_err(|_| GraphError::InvalidRange)?;
+                output.extend_from_slice(chunk.get(from..to).ok_or(GraphError::InvalidRange)?);
+                reservation.commit(entry.span_length);
+            } else {
+                self.read_index_range(
+                    &entry.target,
+                    entry.span_length,
+                    Some(height - 1),
+                    child_start,
+                    requested,
+                    scope,
+                    objects,
+                    output,
+                )?;
+            }
+        }
+        if local != total_length {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        Ok(height)
+    }
+
+    fn verify_full_blob(
+        &self,
+        reference: &AdmittedBlobReference,
+        scope: &RepositoryReadScope,
+    ) -> Result<BTreeSet<NativeOid>, GraphError> {
+        scope.check_cancelled()?;
+        let mut objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let descriptor =
+            self.read_blob_descriptor(&reference.descriptor_oid, scope, &mut objects)?;
+        if descriptor.identity != reference.identity {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        if descriptor.identity.length() > scope.byte_quota {
+            return Err(GraphError::ReadQuotaExceeded);
+        }
+        let mut digest = crate::blob_store::ContentDigest::new();
+        if let Some(root) = descriptor.byte_root.as_ref() {
+            let height = self.walk_full_index(
+                root,
+                descriptor.identity.length(),
+                None,
+                scope,
+                &mut objects,
+                &mut digest,
+            )?;
+            if height > MAX_GRAPH_HEIGHT {
+                return Err(GraphError::HeightExceeded(height));
+            }
+        }
+        if digest.finish() != descriptor.identity {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        Ok(objects.oids)
+    }
+
+    fn walk_full_index(
+        &self,
+        oid: &NativeOid,
+        expected_length: u64,
+        expected_height: Option<u8>,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+        digest: &mut crate::blob_store::ContentDigest,
+    ) -> Result<u8, GraphError> {
+        scope.check_cancelled()?;
+        let node = self.read_native_node(oid, scope, objects)?;
+        let NodeData::ByteIndex {
+            height,
+            total_length,
+            entries,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::ByteIndex,
+                actual: node.kind(),
+            });
+        };
+        if total_length != expected_length
+            || expected_height.is_some_and(|expected| expected != height)
+        {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        let mut sum = 0u64;
+        for entry in entries {
+            scope.check_cancelled()?;
+            sum = sum
+                .checked_add(entry.span_length)
+                .ok_or(GraphError::InvalidByteIndex)?;
+            if height == 0 {
+                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+                    return Err(GraphError::InvalidByteIndex);
+                }
+                let reservation = scope.reserve_payload(entry.span_length)?;
+                let chunk = self.read_git_object(
+                    NativeObjectKind::Blob,
+                    &entry.target,
+                    crate::blob_store::GEAR_MAXIMUM as u64,
+                    scope,
+                    objects,
+                )?;
+                if chunk.len() as u64 != entry.span_length
+                    || entry.chunk_sha256 != Some(crate::blob_store::digest_bytes(&chunk).sha256())
+                {
+                    return Err(GraphError::ChunkDigestMismatch);
+                }
+                digest
+                    .update(&chunk)
+                    .map_err(|_| GraphError::InvalidLength(u64::MAX))?;
+                reservation.commit(entry.span_length);
+            } else {
+                self.walk_full_index(
+                    &entry.target,
+                    entry.span_length,
+                    Some(height - 1),
+                    scope,
+                    objects,
+                    digest,
+                )?;
+            }
+        }
+        if sum != total_length {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        Ok(height)
+    }
+
+    fn read_git_object(
+        &self,
+        kind: NativeObjectKind,
+        oid: &NativeOid,
+        maximum: u64,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+    ) -> Result<Vec<u8>, GraphError> {
+        scope.check_cancelled()?;
+        objects.visit(oid)?;
+        let actual_kind = self.git_object_kind(oid)?;
+        if actual_kind != kind {
+            return Err(GraphError::WrongObjectKind {
+                expected: kind,
+                actual: actual_kind,
+            });
+        }
+        let hex = oid.to_hex();
+        let size_output = self.git_output(&["cat-file", "-s", &hex])?;
+        let size = std::str::from_utf8(&size_output)
+            .map_err(|_| GraphError::GitObjectMalformed)?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| GraphError::GitObjectMalformed)?;
+        if size > maximum {
+            return Err(
+                if kind == NativeObjectKind::Blob
+                    && maximum == crate::blob_store::GEAR_MAXIMUM as u64
+                {
+                    GraphError::ChunkTooLarge(size)
+                } else {
+                    GraphError::NodeDataTooLarge(usize::try_from(size).unwrap_or(usize::MAX))
+                },
+            );
+        }
+        if maximum != crate::blob_store::GEAR_MAXIMUM as u64 {
+            objects.record_metadata(size)?;
+        }
+        let kind_name = match kind {
+            NativeObjectKind::Tree => "tree",
+            NativeObjectKind::Blob => "blob",
+        };
+        let mut child = self
+            .git_command()
+            .args(["cat-file", kind_name, &hex])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        let mut data = Vec::with_capacity(size as usize);
+        let mut stdout = child.stdout.take().ok_or(GraphError::GitCommandFailed)?;
+        let read_result = stdout
+            .by_ref()
+            .take(maximum.saturating_add(1))
+            .read_to_end(&mut data);
+        drop(stdout);
+        read_result.map_err(|_| GraphError::GitCommandFailed)?;
+        if data.len() as u64 > maximum {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(
+                if kind == NativeObjectKind::Blob
+                    && maximum == crate::blob_store::GEAR_MAXIMUM as u64
+                {
+                    GraphError::ChunkTooLarge(data.len() as u64)
+                } else {
+                    GraphError::NodeDataTooLarge(data.len())
+                },
+            );
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(GraphError::UnknownObjectAvailability);
+        }
+        if data.len() as u64 != size {
+            return Err(GraphError::GitObjectMalformed);
+        }
+        let hashed = self.git_hash_object(kind_name, &data)?;
+        scope.check_cancelled()?;
+        if hashed != *oid {
+            return Err(GraphError::GitObjectHashMismatch);
+        }
+        Ok(data)
+    }
+
+    fn git_object_kind(&self, oid: &NativeOid) -> Result<NativeObjectKind, GraphError> {
+        let hex = oid.to_hex();
+        let output = self.git_output(&["cat-file", "-t", &hex])?;
+        match output.as_slice() {
+            b"tree\n" => Ok(NativeObjectKind::Tree),
+            b"blob\n" => Ok(NativeObjectKind::Blob),
+            _ => Err(GraphError::UnsupportedGitObjectType),
+        }
+    }
+
+    fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, GraphError> {
+        let output = self
+            .git_command()
+            .args(args)
+            .output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(if args.first() == Some(&"cat-file") {
+                GraphError::UnknownObjectAvailability
+            } else {
+                GraphError::GitCommandFailed
+            });
+        }
+        Ok(output.stdout)
+    }
+
+    fn git_hash_object(&self, kind: &str, bytes: &[u8]) -> Result<NativeOid, GraphError> {
+        let mut child = self
+            .git_command()
+            .args(["hash-object", "-t", kind, "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        child
+            .stdin
+            .take()
+            .ok_or(GraphError::GitCommandFailed)?
+            .write_all(bytes)
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(GraphError::GitCommandFailed);
+        }
+        let hex = std::str::from_utf8(&output.stdout)
+            .map_err(|_| GraphError::GitObjectMalformed)?
+            .trim();
+        NativeOid::from_hex(self.algorithm, hex)
+    }
+
+    fn git_command(&self) -> Command {
+        let mut command = Command::new("git");
+        command
+            .current_dir(self.repository.worktree())
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        command
+    }
+
+    fn create_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
+        let zero = "0".repeat(self.algorithm.width() * 2);
+        self.git_output(&["update-ref", reference, &oid.to_hex(), &zero])?;
+        self.sync_git_ref(reference)
+    }
+
+    fn promote_protected_ref(
+        &self,
+        provisional: &str,
+        protected: &str,
+        oid: &NativeOid,
+    ) -> Result<(), GraphError> {
+        let zero = "0".repeat(self.algorithm.width() * 2);
+        let commands = format!(
+            "start\nupdate {protected} {} {zero}\ndelete {provisional} {}\nprepare\ncommit\n",
+            oid.to_hex(),
+            oid.to_hex()
+        );
+        let mut child = self
+            .git_command()
+            .args(["update-ref", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        child
+            .stdin
+            .take()
+            .ok_or(GraphError::GitCommandFailed)?
+            .write_all(commands.as_bytes())
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(GraphError::GitCommandFailed);
+        }
+        Ok(())
+    }
+
+    fn delete_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
+        self.git_output(&["update-ref", "-d", reference, &oid.to_hex()])?;
+        self.sync_ref_directories(reference)
+    }
+
+    fn sync_git_ref(&self, reference: &str) -> Result<(), GraphError> {
+        let output = self.git_output(&["rev-parse", "--git-path", reference])?;
+        let path = resolve_git_path(self.repository.worktree(), &output)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|_| GraphError::DurabilityFailed)?;
+        if !metadata.file_type().is_file() {
+            return Err(GraphError::DurabilityFailed);
+        }
+        File::open(&path)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| GraphError::DurabilityFailed)?;
+        self.sync_ref_directories(reference)
+    }
+
+    fn sync_ref_directories(&self, reference: &str) -> Result<(), GraphError> {
+        let common_dir_output = self.git_output(&["rev-parse", "--git-common-dir"])?;
+        let common_dir = resolve_git_path(self.repository.worktree(), &common_dir_output)?;
+        let common_dir = fs::canonicalize(common_dir).map_err(|_| GraphError::DurabilityFailed)?;
+        let ref_path_output = self.git_output(&["rev-parse", "--git-path", reference])?;
+        let ref_path = resolve_git_path(self.repository.worktree(), &ref_path_output)?;
+        let mut directory = ref_path
+            .parent()
+            .ok_or(GraphError::DurabilityFailed)?
+            .to_path_buf();
+        let directory = loop {
+            match fs::canonicalize(&directory) {
+                Ok(directory) => break directory,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if !directory.pop() {
+                        return Err(GraphError::DurabilityFailed);
+                    }
+                }
+                Err(_) => return Err(GraphError::DurabilityFailed),
+            }
+        };
+        if !directory.starts_with(&common_dir) {
+            return Err(GraphError::DurabilityFailed);
+        }
+        let mut current = directory;
+        loop {
+            sync_directory(&current)?;
+            if current == common_dir || !current.pop() {
+                break;
+            }
+        }
+        let packed_refs = common_dir.join("packed-refs");
+        match fs::symlink_metadata(&packed_refs) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(GraphError::DurabilityFailed);
+                }
+                File::open(&packed_refs)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| GraphError::DurabilityFailed)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(GraphError::DurabilityFailed),
+        }
+        Ok(())
+    }
+
+    fn sync_object_closure(
+        &self,
+        objects: &BTreeSet<NativeOid>,
+        scope: &RepositoryReadScope,
+    ) -> Result<(), GraphError> {
+        let objects_output = self.git_output(&["rev-parse", "--git-path", "objects"])?;
+        let objects_dir = resolve_git_path(self.repository.worktree(), &objects_output)?;
+        let pack_dir = objects_dir.join("pack");
+        let alternates = objects_dir.join("info").join("alternates");
+        match fs::symlink_metadata(&alternates) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() || metadata.len() != 0 {
+                    return Err(GraphError::ObjectDurabilityUnavailable);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(GraphError::ObjectDurabilityUnavailable),
+        }
+        let mut needs_pack_sync = false;
+        for oid in objects {
+            scope.check_cancelled()?;
+            let hex = oid.to_hex();
+            let loose = objects_dir.join(&hex[..2]).join(&hex[2..]);
+            match fs::symlink_metadata(&loose) {
+                Ok(metadata) => {
+                    if !metadata.file_type().is_file() {
+                        return Err(GraphError::DurabilityFailed);
+                    }
+                    File::open(&loose)
+                        .and_then(|file| file.sync_all())
+                        .map_err(|_| GraphError::DurabilityFailed)?;
+                    sync_directory(loose.parent().ok_or(GraphError::DurabilityFailed)?)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    needs_pack_sync = true;
+                }
+                Err(_) => return Err(GraphError::DurabilityFailed),
+            }
+        }
+        if needs_pack_sync {
+            sync_all_pack_files(&pack_dir)?;
+        }
+        sync_directory(&objects_dir)
+    }
+}
+
+/// Read authority minted by the repository owner for one graph context.
+/// Clones share cancellation and cumulative byte quota, so concurrent resolver
+/// reads cannot evade the owner's limits.
+#[derive(Clone, Debug)]
+pub struct RepositoryReadScope {
+    context: ContextIdentity,
+    owner_id: [u8; 16],
+    cancelled: Arc<AtomicBool>,
+    bytes_used: Arc<AtomicU64>,
+    objects_used: Arc<AtomicU64>,
+    metadata_used: Arc<AtomicU64>,
+    byte_quota: u64,
+    max_single_read: u64,
+    max_objects: u64,
+    metadata_quota: u64,
+}
+
+impl RepositoryReadScope {
+    fn authorize(&self, context: &NativeGraphContext) -> Result<(), GraphError> {
+        if self.context != context.identity || self.owner_id != context.owner_id {
+            return Err(GraphError::ContextMismatch);
+        }
+        self.check_cancelled()
+    }
+
+    fn check_cancelled(&self) -> Result<(), GraphError> {
+        if self.cancelled.load(AtomicOrdering::Acquire) {
+            Err(GraphError::ReadCancelled)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn reserve_payload(&self, bytes: u64) -> Result<PayloadReservation, GraphError> {
+        self.check_cancelled()?;
+        let mut used = self.bytes_used.load(AtomicOrdering::Relaxed);
+        loop {
+            let next = used
+                .checked_add(bytes)
+                .ok_or(GraphError::ReadQuotaExceeded)?;
+            if next > self.byte_quota {
+                return Err(GraphError::ReadQuotaExceeded);
+            }
+            match self.bytes_used.compare_exchange_weak(
+                used,
+                next,
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(PayloadReservation {
+                        used: Arc::clone(&self.bytes_used),
+                        reserved: bytes,
+                        settled: false,
+                    });
+                }
+                Err(actual) => used = actual,
+            }
+        }
+    }
+}
+
+struct PayloadReservation {
+    used: Arc<AtomicU64>,
+    reserved: u64,
+    settled: bool,
+}
+
+impl PayloadReservation {
+    fn commit(mut self, actual: u64) {
+        if actual < self.reserved {
+            self.used
+                .fetch_sub(self.reserved - actual, AtomicOrdering::AcqRel);
+        }
+        self.settled = true;
+    }
+}
+
+impl Drop for PayloadReservation {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.used.fetch_sub(self.reserved, AtomicOrdering::AcqRel);
+        }
+    }
+}
+
+struct ObjectBudget {
+    limit: u64,
+    scope_limit: u64,
+    edges: u64,
+    oids: BTreeSet<NativeOid>,
+    objects_used: Arc<AtomicU64>,
+    metadata_limit: u64,
+    metadata_used: Arc<AtomicU64>,
+}
+
+impl ObjectBudget {
+    fn new(
+        limit: u64,
+        scope_limit: u64,
+        objects_used: Arc<AtomicU64>,
+        metadata_limit: u64,
+        metadata_used: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            limit,
+            scope_limit,
+            edges: 0,
+            oids: BTreeSet::new(),
+            objects_used,
+            metadata_limit,
+            metadata_used,
+        }
+    }
+
+    fn visit(&mut self, oid: &NativeOid) -> Result<(), GraphError> {
+        if !self.oids.contains(oid) {
+            if self.oids.len() as u64 >= self.limit {
+                return Err(GraphError::InventoryQuotaExceeded);
+            }
+            reserve_atomic(&self.objects_used, 1, self.scope_limit)
+                .map_err(|_| GraphError::InventoryQuotaExceeded)?;
+            self.oids.insert(oid.clone());
+        }
+        Ok(())
+    }
+
+    fn record_metadata(&self, bytes: u64) -> Result<(), GraphError> {
+        reserve_atomic(&self.metadata_used, bytes, self.metadata_limit)
+            .map_err(|_| GraphError::MetadataQuotaExceeded)
+    }
+
+    fn edge(&mut self) -> Result<(), GraphError> {
+        self.edges = self
+            .edges
+            .checked_add(1)
+            .ok_or(GraphError::InventoryQuotaExceeded)?;
+        if self.edges > MAX_VERIFY_EDGES {
+            return Err(GraphError::InventoryQuotaExceeded);
+        }
+        Ok(())
+    }
+}
+
+fn reserve_atomic(counter: &AtomicU64, amount: u64, limit: u64) -> Result<(), ()> {
+    let mut current = counter.load(AtomicOrdering::Relaxed);
+    loop {
+        let next = current.checked_add(amount).ok_or(())?;
+        if next > limit {
+            return Err(());
+        }
+        match counter.compare_exchange_weak(
+            current,
+            next,
+            AtomicOrdering::AcqRel,
+            AtomicOrdering::Relaxed,
+        ) {
+            Ok(_) => return Ok(()),
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ParsedGitTreeEntry {
+    mode: Vec<u8>,
+    name: Vec<u8>,
+    oid: NativeOid,
+}
+
+const MAX_VERIFY_EDGES: u64 = 4_000_000;
+
+fn parse_git_tree(
+    bytes: &[u8],
+    algorithm: GitHashAlgorithm,
+    maximum_entries: usize,
+) -> Result<Vec<ParsedGitTreeEntry>, GraphError> {
+    let mut cursor = 0usize;
+    let mut entries = Vec::new();
+    while cursor < bytes.len() {
+        if entries.len() == maximum_entries {
+            return Err(GraphError::FanoutExceeded(entries.len() + 1));
+        }
+        let mode_end = bytes[cursor..]
+            .iter()
+            .position(|byte| *byte == b' ')
+            .map(|offset| cursor + offset)
+            .ok_or(GraphError::InvalidTreeEnvelope)?;
+        let mode = bytes[cursor..mode_end].to_vec();
+        cursor = mode_end + 1;
+        let name_end = bytes[cursor..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|offset| cursor + offset)
+            .ok_or(GraphError::InvalidTreeEnvelope)?;
+        if name_end == cursor {
+            return Err(GraphError::InvalidTreeEnvelope);
+        }
+        let name = bytes[cursor..name_end].to_vec();
+        cursor = name_end + 1;
+        let oid_end = cursor
+            .checked_add(algorithm.width())
+            .ok_or(GraphError::InvalidTreeEnvelope)?;
+        let oid = NativeOid::new(
+            algorithm,
+            bytes
+                .get(cursor..oid_end)
+                .ok_or(GraphError::InvalidTreeEnvelope)?,
+        )?;
+        cursor = oid_end;
+        entries.push(ParsedGitTreeEntry { mode, name, oid });
+    }
+    if entries
+        .windows(2)
+        .any(|pair| git_tree_cmp(&pair[0], &pair[1]) != std::cmp::Ordering::Less)
+    {
+        return Err(GraphError::InvalidTreeEnvelope);
+    }
+    Ok(entries)
+}
+
+fn git_tree_cmp(left: &ParsedGitTreeEntry, right: &ParsedGitTreeEntry) -> std::cmp::Ordering {
+    let left_directory = left.mode.as_slice() == b"40000";
+    let right_directory = right.mode.as_slice() == b"40000";
+    let mut left_name = left.name.as_slice();
+    let mut right_name = right.name.as_slice();
+    let left_suffix = if left_directory { b'/' } else { 0 };
+    let right_suffix = if right_directory { b'/' } else { 0 };
+    let common = left_name.len().min(right_name.len());
+    let order = left_name[..common].cmp(&right_name[..common]);
+    if order != std::cmp::Ordering::Equal {
+        return order;
+    }
+    left_name = &left_name[common..];
+    right_name = &right_name[common..];
+    match (left_name.first(), right_name.first()) {
+        (Some(left), Some(right)) => left.cmp(right),
+        (Some(left), None) => left.cmp(&right_suffix),
+        (None, Some(right)) => left_suffix.cmp(right),
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn resolve_git_path(worktree: &Path, output: &[u8]) -> Result<PathBuf, GraphError> {
+    let value = std::str::from_utf8(output)
+        .map_err(|_| GraphError::GitObjectMalformed)?
+        .trim();
+    let path = PathBuf::from(value);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        worktree.join(path)
+    })
+}
+
+fn sync_directory(path: &Path) -> Result<(), GraphError> {
+    File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| GraphError::DurabilityFailed)
+}
+
+fn sync_all_pack_files(pack_dir: &Path) -> Result<(), GraphError> {
+    let entries = fs::read_dir(pack_dir).map_err(|_| GraphError::ObjectDurabilityUnavailable)?;
+    let mut indexes = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|_| GraphError::ObjectDurabilityUnavailable)?
+            .path();
+        if path.extension().is_some_and(|extension| extension == "idx") {
+            indexes.push(path);
+            if indexes.len() > MAX_PACK_INDEX_FILES {
+                return Err(GraphError::ObjectDurabilityUnavailable);
+            }
+        }
+    }
+    if indexes.is_empty() {
+        return Err(GraphError::ObjectDurabilityUnavailable);
+    }
+    let mut total_bytes = 0u64;
+    for index in indexes {
+        let pack = index.with_extension("pack");
+        for path in [&index, &pack] {
+            let metadata =
+                fs::symlink_metadata(path).map_err(|_| GraphError::ObjectDurabilityUnavailable)?;
+            total_bytes = total_bytes
+                .checked_add(metadata.len())
+                .ok_or(GraphError::ObjectDurabilityUnavailable)?;
+            if !metadata.file_type().is_file()
+                || metadata.len() > MAX_PACK_INDEX_SCAN_BYTES
+                || total_bytes > MAX_PACK_SET_SYNC_BYTES
+            {
+                return Err(GraphError::ObjectDurabilityUnavailable);
+            }
+            File::open(path)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| GraphError::DurabilityFailed)?;
+        }
+    }
+    sync_directory(pack_dir)
 }
 
 /// Verified immutable descriptor evidence.  It is intentionally unconstructible
@@ -323,6 +1500,10 @@ pub struct ProtectedContentTransfer {
 }
 
 impl ProtectedContentTransfer {
+    pub const fn repository_id(&self) -> &[u8; 32] {
+        &self.repository_id
+    }
+
     pub const fn database_id(&self) -> &[u8; 16] {
         &self.database_id
     }
@@ -406,23 +1587,26 @@ impl ProtectedContentPin {
 pub struct Pub3ReleaseReceipt {
     repository_id: [u8; 32],
     pin_id: [u8; 16],
+    descriptor_oid: NativeOid,
     durable_root: NativeOid,
     journal_terminal: bool,
 }
 
 impl Pub3ReleaseReceipt {
-    fn issue_after_pub3(
+    pub(crate) fn issue_after_pub3(
         repository_id: [u8; 32],
         pin_id: [u8; 16],
+        descriptor_oid: NativeOid,
         durable_root: NativeOid,
         journal_terminal: bool,
     ) -> Result<Self, GraphError> {
-        if !journal_terminal {
+        if !journal_terminal || descriptor_oid.algorithm() != durable_root.algorithm() {
             return Err(GraphError::PublicationNotTerminal);
         }
         Ok(Self {
             repository_id,
             pin_id,
+            descriptor_oid,
             durable_root,
             journal_terminal,
         })
@@ -432,6 +1616,7 @@ impl Pub3ReleaseReceipt {
         self.journal_terminal
             && self.repository_id == pin.repository_id
             && self.pin_id == pin.pin_id
+            && self.descriptor_oid == pin.descriptor_oid
             && self.durable_root.algorithm() == pin.descriptor_oid.algorithm()
     }
 }
@@ -1017,6 +2202,29 @@ pub enum GraphError {
     InvalidByteIndex,
     InvalidRange,
     ContextMismatch,
+    InvalidReadScope,
+    DescriptorNotInRow,
+    ReadQuotaExceeded,
+    ReadCancelled,
+    ContentIdentityMismatch,
+    ChunkDigestMismatch,
+    WrongNodeKind {
+        expected: NodeKind,
+        actual: NodeKind,
+    },
+    InvalidTreeEnvelope,
+    MissingNodeData,
+    MalformedReferenceName,
+    GitObjectMalformed,
+    GitObjectHashMismatch,
+    ChunkTooLarge(u64),
+    GitCommandFailed,
+    ObjectUnavailable,
+    DurabilityFailed,
+    ObjectDurabilityUnavailable,
+    InventoryQuotaExceeded,
+    PinReceiptMismatch,
+    UnsupportedGitObjectType,
     InvalidProtectedRef,
     PublicationNotTerminal,
     DuplicateReference,
@@ -1053,6 +2261,51 @@ impl fmt::Display for GraphError {
             Self::InvalidByteIndex => f.write_str("invalid byte-index spans"),
             Self::InvalidRange => f.write_str("invalid or out-of-bounds content range"),
             Self::ContextMismatch => f.write_str("graph capability belongs to another context"),
+            Self::InvalidReadScope => f.write_str("invalid owner-bound graph read scope"),
+            Self::DescriptorNotInRow => {
+                f.write_str("Blob descriptor is not a dependency of the admitted row")
+            }
+            Self::ReadQuotaExceeded => f.write_str("graph read exceeds owner quota"),
+            Self::ReadCancelled => f.write_str("graph read was cancelled"),
+            Self::ContentIdentityMismatch => {
+                f.write_str("complete Blob length or SHA-256 does not match its descriptor")
+            }
+            Self::ChunkDigestMismatch => {
+                f.write_str("chunk bytes do not match native object, length or SHA-256")
+            }
+            Self::WrongNodeKind { expected, actual } => {
+                write!(
+                    f,
+                    "native graph node kind {actual:?}, expected {expected:?}"
+                )
+            }
+            Self::InvalidTreeEnvelope => {
+                f.write_str("native graph tree is not a canonical data/refs envelope")
+            }
+            Self::MissingNodeData => f.write_str("native graph tree has no data blob"),
+            Self::MalformedReferenceName => {
+                f.write_str("refs entry name does not match its native object ID")
+            }
+            Self::GitObjectMalformed => f.write_str("Git object has malformed size or encoding"),
+            Self::GitObjectHashMismatch => {
+                f.write_str("Git object bytes do not match their native ID")
+            }
+            Self::ChunkTooLarge(size) => write!(f, "chunk size {size} exceeds OGB-2 bound"),
+            Self::GitCommandFailed => f.write_str("required local Git command failed"),
+            Self::ObjectUnavailable => f.write_str("required native Git object is unavailable"),
+            Self::DurabilityFailed => f.write_str("native graph durability sync failed"),
+            Self::ObjectDurabilityUnavailable => {
+                f.write_str("object is not in a locally syncable Git object store")
+            }
+            Self::InventoryQuotaExceeded => {
+                f.write_str("native graph verification exceeded its object/edge quota")
+            }
+            Self::PinReceiptMismatch => {
+                f.write_str("PUB-3 release receipt does not authorize this pin")
+            }
+            Self::UnsupportedGitObjectType => {
+                f.write_str("Git commit/tag objects are not valid native graph dependencies")
+            }
             Self::InvalidProtectedRef => f.write_str("invalid protected-content Git ref"),
             Self::PublicationNotTerminal => {
                 f.write_str("publication journal has not reached its terminal state")
