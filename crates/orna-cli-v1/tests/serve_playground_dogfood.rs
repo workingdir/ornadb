@@ -1235,7 +1235,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .and_then(|(_, suffix)| suffix.split_once('"').map(|(value, _)| value))
         .expect("Git listing identifies its runtime database");
     let (session_bytes, mut socket, session_status) =
-        open_playground_presentation_session(base_url, port, database_id);
+        open_playground_presentation_session(&base_url, port, database_id);
 
     let watch_request = [0x31; 16];
     let watched = send_and_read_request(
@@ -1266,7 +1266,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     assert_eq!(initial_present, expected_run_events(&[]));
 
     let (second_session_bytes, mut second_socket, second_session_status) =
-        open_playground_presentation_session(base_url, port, database_id);
+        open_playground_presentation_session(&base_url, port, database_id);
     assert_ne!(session_bytes, second_session_bytes);
     let second_watch_request = [0x41; 16];
     let second_watched = send_and_read_request(
