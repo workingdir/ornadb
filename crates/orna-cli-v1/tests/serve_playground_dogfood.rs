@@ -27,6 +27,7 @@ const SAMPLE_ROW: &str = include_str!("fixtures/playground-sample.orna");
 const SAMPLE_ARITHMETIC: &str = include_str!("fixtures/playground-sample-arithmetic.orna");
 const SAMPLE_FUNCTIONS: &str = include_str!("fixtures/playground-sample-functions.orna");
 const SAMPLE_INCREMENT: &str = include_str!("fixtures/playground-sample-increment.orna");
+const SAMPLE_LIVE_REFRESH: &str = include_str!("fixtures/playground-sample-live-refresh.orna");
 const SECOND_SAMPLE: &str = include_str!("fixtures/playground-concurrent-eval.orna");
 const FOLLOWUP_SAMPLE: &str = include_str!("fixtures/playground-followup-eval.orna");
 const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
@@ -1478,6 +1479,104 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             ..
         } if present == updated_present
     ));
+
+    write_fixture_rows(
+        project.path(),
+        "Sample",
+        &[("live-refresh", SAMPLE_LIVE_REFRESH)],
+    );
+    let uncommitted_examples = curl(&format!("{base_url}/api/examples"), &[])
+        .expect("curl examples before committing the new Sample row");
+    assert_eq!(uncommitted_examples.status, 200);
+    let uncommitted_examples: JsonValue =
+        serde_json::from_str(&uncommitted_examples.body).expect("uncommitted examples JSON");
+    assert_eq!(
+        uncommitted_examples["revision"].as_str(),
+        Some(initial_examples_revision.as_str())
+    );
+    assert_eq!(
+        uncommitted_examples["examples"].as_array().map(Vec::len),
+        Some(4)
+    );
+    assert!(
+        uncommitted_examples["examples"]
+            .as_array()
+            .is_some_and(|examples| examples
+                .iter()
+                .all(|example| { example["path"] != "playground/Sample/live-refresh.orna" }))
+    );
+
+    git(
+        project.path(),
+        &["add", "playground/Sample/live-refresh.orna"],
+    );
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "add live playground Sample row",
+        ],
+    );
+    let added_examples = curl(&format!("{base_url}/api/examples"), &[])
+        .expect("curl examples after committing the new Sample row");
+    assert_eq!(added_examples.status, 200);
+    let added_examples: JsonValue =
+        serde_json::from_str(&added_examples.body).expect("updated examples JSON");
+    let added_revision = added_examples["revision"]
+        .as_str()
+        .expect("revision after Sample commit");
+    assert_ne!(added_revision, initial_examples_revision);
+    let added_examples = added_examples["examples"]
+        .as_array()
+        .expect("updated committed examples");
+    assert_eq!(added_examples.len(), 5);
+    let live_example = added_examples
+        .iter()
+        .find(|example| example["path"] == "playground/Sample/live-refresh.orna")
+        .expect("new Sample appears in the live catalog");
+    assert_eq!(live_example["name"], "Live refresh");
+    assert_eq!(live_example["source"], "40 + 2");
+
+    std::fs::remove_file(project.path().join("playground/Sample/live-refresh.orna"))
+        .expect("remove the live Sample fixture after its add proof");
+    git(project.path(), &["add", "-A", "playground/Sample"]);
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "remove live playground Sample row",
+        ],
+    );
+    let removed_examples = curl(&format!("{base_url}/api/examples"), &[])
+        .expect("curl examples after removing the Sample row");
+    assert_eq!(removed_examples.status, 200);
+    let removed_examples: JsonValue =
+        serde_json::from_str(&removed_examples.body).expect("removed examples JSON");
+    assert_ne!(removed_examples["revision"].as_str(), Some(added_revision));
+    let removed_examples = removed_examples["examples"]
+        .as_array()
+        .expect("catalog after Sample removal");
+    assert_eq!(removed_examples.len(), 4);
+    assert!(
+        removed_examples
+            .iter()
+            .all(|example| { example["path"] != "playground/Sample/live-refresh.orna" })
+    );
+    println!(
+        "live DB example catalog: uncommitted Sample hidden, committed Sample added at {added_revision}, then removed without restarting orna serve (exit 0)"
+    );
 
     println!(
         "curl GET / -> HTTP {} (exit 0): Git listing + playground link",

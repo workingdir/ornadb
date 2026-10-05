@@ -182,6 +182,7 @@ bf1adb7f512162ede4086a7ae2244589dfb991fc7b1914c7fa49eb5d3466b489  crates/orna-cl
 3c5685bf00064e8e4f0b85723ba3cd3454831eae9e9a04345e19cc06e2d59976  crates/orna-cli-v1/tests/fixtures/playground-sample-arithmetic.orna
 4ede7d0fb864b59ec85ccff4ed4ca2a1e2ec20560ba62b635cc412320affd855  crates/orna-cli-v1/tests/fixtures/playground-sample-functions.orna
 bfc61f809a32dd0e900b039df55d02e6ee740cb3aa5cc8505fd8b78dde6b8155  crates/orna-cli-v1/tests/fixtures/playground-sample-increment.orna
+ae25ce28db5f2776529cddf9cf332a384d5a8fcb2120c013bc22d0d759bef7ee  crates/orna-cli-v1/tests/fixtures/playground-sample-live-refresh.orna
 0e0ae4ceeb9672cebc7c42e81c30ecb5025c398d47a70e90cc93188fd72d366a  crates/orna-cli-v1/tests/fixtures/playground-sample-live-snapshot.orna
 91a3a34d79824d2de23ee12f80b2b6f061cd2ca3bdbc9834009e3d2c6aff3ef4  crates/orna-cli-v1/tests/fixtures/playground-sample.orna
 f412217fdd8c46eaf2f00dde64ab6847ed21e1ae6b0fcb0ac3b09e06562c09ea  crates/orna-cli-v1/tests/fixtures/playground-schema.orna
