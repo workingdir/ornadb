@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { Worker } from 'node:worker_threads';
 
 const baseUrl = process.argv[2]?.replace(/\/$/, '');
 assert.ok(baseUrl, 'pass the base URL of an active `orna serve` process');
@@ -23,7 +24,7 @@ globalThis.self ??= globalThis;
 const bindingSource = await bindingResponse.text();
 const bindingUrl = `data:text/javascript;base64,${Buffer.from(bindingSource).toString('base64')}`;
 const lsp = await import(bindingUrl);
-await lsp.default(await wasmResponse.arrayBuffer());
+await lsp.default({ module_or_path: await wasmResponse.arrayBuffer() });
 
 const source = [
   'use std.math.{clamp, increment};',
@@ -37,8 +38,8 @@ const source = [
   'pub fn bounded(value: Int, lower: Int, upper: Int): Int = clamp(value, lower, upper);',
   'pub fn qualified_bounded(value: Int, lower: Int, upper: Int): Int = std.math.clamp(value, lower, upper);',
 ].join('\n');
-function positionAt(offset) {
-  const prefix = source.slice(0, offset);
+function positionAt(offset, document = source) {
+  const prefix = document.slice(0, offset);
   const line = prefix.split('\n').length - 1;
   const lineStart = prefix.lastIndexOf('\n') + 1;
   return { line, character: [...prefix.slice(lineStart)].length };
@@ -169,8 +170,66 @@ const qualifiedHints = JSON.parse(lsp.inlay_hints(
 ));
 assert.deepEqual(qualifiedHints.map(({ label }) => label), ['value: ', 'lower: ', 'upper: ']);
 
+const importedSessionSource = [
+  'use std.math.{clamp};',
+  'pub fn imported(sample: Int, floor: Int, ceiling: Int): Int = clamp(sample, floor, ceiling);',
+].join('\n');
+const qualifiedSessionSource = [
+  'pub fn qualified(number: Int): Int =',
+  '    std.math.increment(number);',
+].join('\n');
+function runServedInlaySession(client, document) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./prove-served-inlay-session.mjs', import.meta.url), {
+      workerData: { baseUrl, client, document },
+    });
+    worker.once('message', (result) => {
+      if (result.error) reject(new Error(result.error));
+      else resolve(result);
+    });
+    worker.once('error', reject);
+    worker.once('exit', (code) => {
+      if (code !== 0) reject(new Error(`served inlay worker ${client} exited with ${code}`));
+    });
+  });
+}
+
+const [importedSession, qualifiedSession] = await Promise.all([
+  runServedInlaySession('imported', importedSessionSource),
+  runServedInlaySession('qualified', qualifiedSessionSource),
+]);
+assert.deepEqual(
+  importedSession.hints.map(({ label }) => label),
+  ['value: ', 'lower: ', 'upper: '],
+  'imported session should receive its own standard parameter hints',
+);
+assert.deepEqual(
+  qualifiedSession.hints.map(({ label }) => label),
+  ['value: '],
+  'qualified session should receive only its own increment parameter hint',
+);
+const importedCallStart = importedSessionSource.indexOf('clamp(sample, floor, ceiling)');
+const qualifiedCallStart = qualifiedSessionSource.indexOf('std.math.increment(number)');
+assert.notEqual(importedCallStart, -1);
+assert.notEqual(qualifiedCallStart, -1);
+assert.deepEqual(
+  importedSession.hints.map(({ position }) => position),
+  [
+    positionAt(importedCallStart + 'clamp('.length, importedSessionSource),
+    positionAt(importedCallStart + 'clamp(sample, '.length, importedSessionSource),
+    positionAt(importedCallStart + 'clamp(sample, floor, '.length, importedSessionSource),
+  ],
+  'imported hint positions should belong to the imported document',
+);
+assert.deepEqual(
+  qualifiedSession.hints.map(({ position }) => position),
+  [positionAt(qualifiedCallStart + 'std.math.increment('.length, qualifiedSessionSource)],
+  'qualified hint positions should belong to the qualified document',
+);
+
 console.log('served WASM completion order: increment, incremental; exact match preselected');
 console.log('served WASM hover: std.math.increment signature and documentation verified');
 console.log('served WASM signature help: std.math.clamp active upper parameter and hints verified');
 console.log('served WASM inlay hints: imported and qualified std calls plus inferred result type verified');
 console.log('served WASM definition/references: DB standard source, imported and qualified calls, and local shadowing verified');
+console.log('concurrent served WASM inlay sessions: independent labels and source positions verified');

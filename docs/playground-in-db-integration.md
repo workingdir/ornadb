@@ -84,9 +84,9 @@ The test initializes a temporary Orna Git database, commits crate-local
 `orna serve` process without a build directory, then uses curl to check the
 Git listing, database-resident shell, editor configuration, embeddable script,
 CSS/JavaScript and WebAssembly rows, committed examples, and live session. It
-commits new Route and Entry rows after startup and proves new URLs change from
-404 to an HTML page and a JavaScript asset with the checked media type, without
-restarting the server. It also checks DB-resident Theme/Layout CSS, an
+commits new Route and Entry rows after startup and proves their URLs change
+from 404 to an HTML page and a JavaScript asset with the checked media type,
+without restarting the server. It also checks DB-resident Theme/Layout CSS, an
 uncommitted style remaining invisible, the committed revision changing both
 styles, and the old revision continuing to serve both old styles. A WebSocket
 client follows the existing watch, fingerprinted Eval, and Resync exchange to
@@ -109,3 +109,7 @@ It verifies completion ranking, standard-library hover and signature help,
 imported and qualified standard-library inlay hints, definition and reference
 locations backed by the served standard source asset, and local shadowing from
 the served module.
+It also starts two independent Node workers that fetch the shell, LSP binding,
+and WebAssembly from `orna serve` concurrently. Each worker requests hints for
+a different standard-library source and checks its own labels and source
+positions, which catches cross-client response or document-state leakage.
