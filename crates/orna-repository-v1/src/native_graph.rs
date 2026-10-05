@@ -1806,12 +1806,15 @@ impl NodeKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrderedLeafEntry {
+    /// Canonical CBOR encoding of the logical key value.
     pub key: Vec<u8>,
-    pub value: NativeDependency,
+    /// Canonical CBOR encoding of the value (the ORP-1 `[key, value]` pair).
+    pub value: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrderedBranchEntry {
+    /// Canonical CBOR encoding of the inclusive logical maximum key.
     pub inclusive_max_key: Vec<u8>,
     pub child: NativeObjectId,
     pub row_count: u64,
@@ -1890,9 +1893,9 @@ impl NodeData {
                     NativeObjectKind::Tree,
                 ));
             }
-            Self::OrderedLeaf { entries, .. } => {
+            Self::OrderedLeaf { domain, entries } => {
                 for entry in entries {
-                    dependencies.push(entry.value.clone());
+                    dependencies.extend(leaf_value_dependencies(domain, &entry.value)?);
                 }
             }
             Self::OrderedBranch { entries, .. } => {
@@ -1952,10 +1955,22 @@ impl NodeData {
                 }
             }
         }
-        if dependencies.len() > MAX_REFS {
-            return Err(GraphError::FanoutExceeded(dependencies.len()));
+        let mut distinct = BTreeMap::new();
+        for dependency in dependencies {
+            if distinct
+                .insert(dependency.oid.clone(), dependency.kind)
+                .is_some_and(|previous| previous != dependency.kind)
+            {
+                return Err(GraphError::WrongReferenceKind);
+            }
         }
-        Ok(dependencies)
+        if distinct.len() > MAX_REFS {
+            return Err(GraphError::FanoutExceeded(distinct.len()));
+        }
+        Ok(distinct
+            .into_iter()
+            .map(|(oid, kind)| NativeDependency::new(oid, kind))
+            .collect())
     }
 
     pub fn encode_canonical(&self) -> Result<Vec<u8>, GraphError> {
@@ -1973,19 +1988,14 @@ impl NodeData {
                 array(&mut output, 4);
                 uint(&mut output, 1);
                 uint(&mut output, 1);
-                bytes(&mut output, domain);
+                output.extend_from_slice(domain);
                 array(&mut output, entries.len() as u64);
                 for entry in entries {
-                    array(&mut output, 3);
-                    bytes(&mut output, &entry.key);
-                    bytes(&mut output, entry.value.oid.as_bytes());
-                    uint(
-                        &mut output,
-                        match entry.value.kind {
-                            NativeObjectKind::Tree => 0,
-                            NativeObjectKind::Blob => 1,
-                        },
-                    );
+                    validate_canonical_value(&entry.key)?;
+                    validate_canonical_value(&entry.value)?;
+                    array(&mut output, 2);
+                    output.extend_from_slice(&entry.key);
+                    output.extend_from_slice(&entry.value);
                 }
             }
             Self::OrderedBranch {
@@ -1999,13 +2009,14 @@ impl NodeData {
                 array(&mut output, 5);
                 uint(&mut output, 1);
                 uint(&mut output, 2);
-                bytes(&mut output, domain);
+                output.extend_from_slice(domain);
                 uint(&mut output, u64::from(*height));
                 array(&mut output, entries.len() as u64);
                 for entry in entries {
                     check_length(entry.row_count)?;
+                    validate_canonical_value(&entry.inclusive_max_key)?;
                     array(&mut output, 3);
-                    bytes(&mut output, &entry.inclusive_max_key);
+                    output.extend_from_slice(&entry.inclusive_max_key);
                     bytes(&mut output, entry.child.as_bytes());
                     uint(&mut output, entry.row_count);
                 }
@@ -2273,6 +2284,120 @@ pub(crate) fn validate_native_node(
     Ok(data)
 }
 
+#[cfg(test)]
+mod persisted_orp_tests {
+    use super::*;
+    use crate::row_store::{RowValue, TypedKey};
+
+    fn rows_domain(relation: [u8; 16], schema: [u8; 32]) -> Vec<u8> {
+        let mut domain = vec![0x83, 0x64];
+        domain.extend_from_slice(b"rows");
+        bytes(&mut domain, &relation);
+        bytes(&mut domain, &schema);
+        domain
+    }
+
+    fn persisted_row_leaf(value: Vec<u8>) -> NodeData {
+        NodeData::OrderedLeaf {
+            domain: rows_domain([0x22; 16], [0x33; 32]),
+            entries: vec![OrderedLeafEntry {
+                key: vec![0x01],
+                value,
+            }],
+        }
+    }
+
+    #[test]
+    fn persisted_orp_row_leaf_decodes_and_rejects_malformed_or_unsupported_values() {
+        let algorithm = GitHashAlgorithm::Sha1;
+        let fields = vec![0x81, 0x01];
+        let node = persisted_row_leaf(fields.clone());
+        let envelope = NativeNodeEnvelope::from_node(&node).expect("canonical ORP leaf");
+        NodeData::decode_canonical(&envelope.data, algorithm)
+            .expect("canonical ORP node data round-trips");
+        let decoded = validate_native_node(&ValidatedRepositoryContext { algorithm }, &envelope)
+            .expect("persisted row leaf validates");
+        assert_eq!(decoded, node);
+
+        let NodeData::OrderedLeaf { entries, .. } = decoded else {
+            panic!("ordered row leaf expected");
+        };
+        assert_eq!(
+            TypedKey::decode_canonical(&entries[0].key).unwrap(),
+            TypedKey::UInt(1)
+        );
+        assert_eq!(
+            RowValue::decode_canonical_fields(entries[0].value.clone()).unwrap(),
+            RowValue::inline(fields, Vec::new()).unwrap()
+        );
+
+        let NodeData::OrderedLeaf { domain, .. } = &node else {
+            unreachable!();
+        };
+        let mut malformed = Vec::new();
+        array(&mut malformed, 4);
+        uint(&mut malformed, 1);
+        uint(&mut malformed, NodeKind::OrderedLeaf.number().into());
+        malformed.extend_from_slice(domain);
+        array(&mut malformed, 1);
+        array(&mut malformed, 2);
+        malformed.push(0x01);
+        malformed.extend_from_slice(&[0x81, 0x18, 0x01]);
+        assert!(matches!(
+            NodeData::decode_canonical(&malformed, algorithm),
+            Err(GraphError::NonCanonicalData)
+        ));
+
+        let descriptor_oid = NativeObjectId::new(algorithm, &[0x44; 20]).unwrap();
+        let mut blob_reference = Vec::new();
+        cbor_head(&mut blob_reference, 6, 60111);
+        array(&mut blob_reference, 5);
+        uint(&mut blob_reference, 1);
+        bytes(&mut blob_reference, &[0x55; 32]);
+        blob_reference.extend_from_slice(b"\x61x");
+        null(&mut blob_reference);
+        bytes(&mut blob_reference, descriptor_oid.as_bytes());
+        let mut blob_fields = vec![0x81];
+        blob_fields.extend_from_slice(&blob_reference);
+        let blob_node = persisted_row_leaf(blob_fields);
+        let mut blob_envelope = NativeNodeEnvelope::from_node(&blob_node).unwrap();
+        blob_envelope.refs[0] = NativeRefEntry::new(descriptor_oid, NativeObjectKind::Blob);
+        assert!(matches!(
+            validate_native_node(&ValidatedRepositoryContext { algorithm }, &blob_envelope),
+            Err(GraphError::WrongReferenceKind)
+        ));
+
+        let mut malformed_oid_value = Vec::new();
+        cbor_head(&mut malformed_oid_value, 6, 60111);
+        array(&mut malformed_oid_value, 5);
+        uint(&mut malformed_oid_value, 1);
+        bytes(&mut malformed_oid_value, &[0x55; 32]);
+        malformed_oid_value.extend_from_slice(b"\x61x");
+        null(&mut malformed_oid_value);
+        bytes(&mut malformed_oid_value, &[0x66; 19]);
+        let mut malformed_oid_fields = vec![0x81];
+        malformed_oid_fields.extend_from_slice(&malformed_oid_value);
+        assert!(matches!(
+            persisted_row_leaf(malformed_oid_fields).dependencies(),
+            Err(GraphError::InvalidOidWidth { .. })
+        ));
+
+        let overflow_oid = NativeObjectId::new(algorithm, &[0x77; 20]).unwrap();
+        let mut overflow_value = Vec::new();
+        cbor_head(&mut overflow_value, 6, 60113);
+        array(&mut overflow_value, 1);
+        bytes(&mut overflow_value, overflow_oid.as_bytes());
+        let overflow_node = persisted_row_leaf(overflow_value.clone());
+        let overflow_envelope = NativeNodeEnvelope::from_node(&overflow_node).unwrap();
+        validate_native_node(
+            &ValidatedRepositoryContext { algorithm },
+            &overflow_envelope,
+        )
+        .expect("OGS accepts a well-formed overflow edge");
+        assert!(RowValue::decode_canonical_fields(overflow_value).is_err());
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GraphError {
     InvalidOidWidth {
@@ -2450,8 +2575,240 @@ fn check_domain(domain: &[u8]) -> Result<(), GraphError> {
     if domain.is_empty() || domain.len() > 256 {
         Err(GraphError::InvalidDomain)
     } else {
-        Ok(())
+        match decode_canonical_cbor(domain)? {
+            CborValue::Array(values)
+                if values.len() >= 2 && matches!(values.first(), Some(CborValue::Text(_))) =>
+            {
+                Ok(())
+            }
+            _ => Err(GraphError::InvalidDomain),
+        }
     }
+}
+
+fn validate_canonical_value(bytes: &[u8]) -> Result<(), GraphError> {
+    decode_canonical_cbor(bytes).map(|_| ())
+}
+
+fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    value.encode(&mut bytes);
+    bytes
+}
+
+pub(crate) fn decode_canonical_cbor(bytes: &[u8]) -> Result<CborValue, GraphError> {
+    if bytes.len() > NODE_DATA_LIMIT {
+        return Err(GraphError::NodeDataTooLarge(bytes.len()));
+    }
+    let mut reader = CborReader::new(bytes);
+    let value = reader.value()?;
+    if !reader.is_finished() || canonical_value_bytes(&value) != bytes {
+        return Err(GraphError::NonCanonicalData);
+    }
+    Ok(value)
+}
+
+fn oid_from_width(bytes: &[u8]) -> Result<NativeObjectId, GraphError> {
+    let algorithm = match bytes.len() {
+        20 => GitHashAlgorithm::Sha1,
+        32 => GitHashAlgorithm::Sha256,
+        actual => {
+            return Err(GraphError::InvalidOidWidth {
+                expected: 20,
+                actual,
+            });
+        }
+    };
+    NativeObjectId::new(algorithm, bytes)
+}
+
+fn leaf_value_dependencies(
+    domain: &[u8],
+    value: &[u8],
+) -> Result<Vec<NativeDependency>, GraphError> {
+    let parsed = decode_canonical_cbor(value)?;
+    let mut dependencies = BTreeMap::<NativeObjectId, NativeObjectKind>::new();
+    match decode_canonical_cbor(domain)? {
+        CborValue::Array(mut domain_fields) => {
+            let domain_name = match domain_fields.drain(..).next() {
+                Some(CborValue::Text(name)) => name,
+                _ => return Err(GraphError::InvalidDomain),
+            };
+            match domain_name.as_str() {
+                "relations" => {
+                    if let CborValue::Array(fields) = decode_canonical_cbor(domain)? {
+                        if fields.len() != 2
+                            || !matches!(
+                                fields.get(1),
+                                Some(CborValue::Bytes(id)) if id.len() == 16
+                            )
+                        {
+                            return Err(GraphError::InvalidDomain);
+                        }
+                    }
+                    let CborValue::Array(fields) = parsed else {
+                        return Err(GraphError::NonCanonicalData);
+                    };
+                    if fields.len() != 4
+                        || !matches!(
+                            fields.get(3),
+                            Some(CborValue::Unsigned(count)) if *count <= MAX_SIGNED_LENGTH
+                        )
+                    {
+                        return Err(GraphError::NonCanonicalData);
+                    }
+                    for index in [0usize, 1] {
+                        let CborValue::Bytes(oid) =
+                            fields.get(index).ok_or(GraphError::NonCanonicalData)?
+                        else {
+                            return Err(GraphError::NonCanonicalData);
+                        };
+                        insert_leaf_dependency(
+                            &mut dependencies,
+                            oid_from_width(oid)?,
+                            NativeObjectKind::Tree,
+                        )?;
+                    }
+                    match fields.get(2).ok_or(GraphError::NonCanonicalData)? {
+                        CborValue::Null => {}
+                        CborValue::Bytes(oid) => insert_leaf_dependency(
+                            &mut dependencies,
+                            oid_from_width(oid)?,
+                            NativeObjectKind::Tree,
+                        )?,
+                        _ => return Err(GraphError::NonCanonicalData),
+                    }
+                }
+                "rows" => {
+                    if let CborValue::Array(fields) = decode_canonical_cbor(domain)? {
+                        if fields.len() != 3
+                            || !matches!(
+                                fields.get(1),
+                                Some(CborValue::Bytes(id)) if id.len() == 16
+                            )
+                            || !matches!(
+                                fields.get(2),
+                                Some(CborValue::Bytes(digest)) if digest.len() == 32
+                            )
+                        {
+                            return Err(GraphError::InvalidDomain);
+                        }
+                    }
+                    if !matches!(parsed, CborValue::Array(_) | CborValue::Tag(60113, _)) {
+                        return Err(GraphError::NonCanonicalData);
+                    }
+                    collect_row_dependencies(&parsed, &mut dependencies)?;
+                }
+                _ => collect_row_dependencies(&parsed, &mut dependencies)?,
+            }
+        }
+        _ => return Err(GraphError::InvalidDomain),
+    }
+    Ok(dependencies
+        .into_iter()
+        .map(|(oid, kind)| NativeDependency::new(oid, kind))
+        .collect())
+}
+
+pub(crate) fn row_fields_dependencies(value: &[u8]) -> Result<Vec<NativeDependency>, GraphError> {
+    let parsed = decode_canonical_cbor(value)?;
+    if !matches!(parsed, CborValue::Array(_)) {
+        return Err(GraphError::NonCanonicalData);
+    }
+    let mut dependencies = BTreeMap::new();
+    collect_row_dependencies(&parsed, &mut dependencies)?;
+    Ok(dependencies
+        .into_iter()
+        .map(|(oid, kind)| NativeDependency::new(oid, kind))
+        .collect())
+}
+
+fn collect_row_dependencies(
+    value: &CborValue,
+    dependencies: &mut BTreeMap<NativeObjectId, NativeObjectKind>,
+) -> Result<(), GraphError> {
+    match value {
+        CborValue::Tag(60111, payload) => {
+            let CborValue::Array(fields) = payload.as_ref() else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            if fields.len() != 5
+                || !matches!(
+                    fields.first(),
+                    Some(CborValue::Unsigned(length)) if *length <= MAX_SIGNED_LENGTH
+                )
+                || !matches!(
+                    fields.get(1),
+                    Some(CborValue::Bytes(digest)) if digest.len() == 32
+                )
+                || !matches!(fields.get(2), Some(CborValue::Text(_)))
+                || !matches!(fields.get(3), Some(CborValue::Null | CborValue::Text(_)))
+            {
+                return Err(GraphError::NonCanonicalData);
+            }
+            let CborValue::Bytes(oid_bytes) = fields.get(4).ok_or(GraphError::NonCanonicalData)?
+            else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            insert_leaf_dependency(
+                dependencies,
+                oid_from_width(oid_bytes)?,
+                NativeObjectKind::Tree,
+            )?;
+        }
+        CborValue::Tag(60113, payload) => {
+            let CborValue::Array(fields) = payload.as_ref() else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            if fields.len() != 1 {
+                return Err(GraphError::NonCanonicalData);
+            }
+            let CborValue::Bytes(oid_bytes) = fields.first().ok_or(GraphError::NonCanonicalData)?
+            else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            insert_leaf_dependency(
+                dependencies,
+                oid_from_width(oid_bytes)?,
+                NativeObjectKind::Tree,
+            )?;
+        }
+        CborValue::Tag(60110 | 60112, _) => return Err(GraphError::NonCanonicalData),
+        CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
+        CborValue::Array(values) => {
+            for value in values {
+                collect_row_dependencies(value, dependencies)?;
+            }
+        }
+        CborValue::Map(entries) => {
+            for (key, value) in entries {
+                collect_row_dependencies(key, dependencies)?;
+                collect_row_dependencies(value, dependencies)?;
+            }
+        }
+        CborValue::Unsigned(_)
+        | CborValue::Negative(_)
+        | CborValue::Bytes(_)
+        | CborValue::Text(_)
+        | CborValue::Bool(_)
+        | CborValue::Float64(_)
+        | CborValue::Null => {}
+    }
+    Ok(())
+}
+
+fn insert_leaf_dependency(
+    dependencies: &mut BTreeMap<NativeObjectId, NativeObjectKind>,
+    oid: NativeObjectId,
+    kind: NativeObjectKind,
+) -> Result<(), GraphError> {
+    if dependencies
+        .insert(oid, kind)
+        .is_some_and(|previous| previous != kind)
+    {
+        return Err(GraphError::WrongReferenceKind);
+    }
+    Ok(())
 }
 
 fn validate_byte_entries(
@@ -2480,11 +2837,56 @@ fn validate_byte_entries(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum CborValue {
+pub(crate) enum CborValue {
     Unsigned(u64),
+    Negative(u64),
     Bytes(Vec<u8>),
+    Text(String),
     Array(Vec<CborValue>),
+    Map(Vec<(CborValue, CborValue)>),
+    Tag(u64, Box<CborValue>),
+    Bool(bool),
+    Float64(u64),
     Null,
+}
+
+impl CborValue {
+    fn encode(&self, output: &mut Vec<u8>) {
+        match self {
+            Self::Unsigned(value) => uint(output, *value),
+            Self::Negative(value) => {
+                cbor_head(output, 1, *value);
+            }
+            Self::Bytes(value) => bytes(output, value),
+            Self::Text(value) => {
+                cbor_head(output, 3, value.len() as u64);
+                output.extend_from_slice(value.as_bytes());
+            }
+            Self::Array(values) => {
+                array(output, values.len() as u64);
+                for value in values {
+                    value.encode(output);
+                }
+            }
+            Self::Map(entries) => {
+                cbor_head(output, 5, entries.len() as u64);
+                for (key, value) in entries {
+                    key.encode(output);
+                    value.encode(output);
+                }
+            }
+            Self::Tag(tag, value) => {
+                cbor_head(output, 6, *tag);
+                value.encode(output);
+            }
+            Self::Bool(value) => output.push(if *value { 0xf5 } else { 0xf4 }),
+            Self::Float64(value) => {
+                output.push(0xfb);
+                output.extend_from_slice(&value.to_be_bytes());
+            }
+            Self::Null => null(output),
+        }
+    }
 }
 
 struct CborReader<'a> {
@@ -2509,9 +2911,19 @@ impl<'a> CborReader<'a> {
         self.cursor += 1;
         let major = head >> 5;
         let additional = head & 0x1f;
+        if major == 7 {
+            return match additional {
+                20 => Ok(CborValue::Bool(false)),
+                21 => Ok(CborValue::Bool(true)),
+                22 => Ok(CborValue::Null),
+                27 => Ok(CborValue::Float64(self.read_u64()?)),
+                _ => Err(GraphError::NonCanonicalData),
+            };
+        }
         let length = self.argument(additional)?;
         match major {
             0 => Ok(CborValue::Unsigned(length)),
+            1 if length <= i64::MAX as u64 => Ok(CborValue::Negative(length)),
             2 => {
                 let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
                 let end = self
@@ -2526,6 +2938,22 @@ impl<'a> CborReader<'a> {
                 self.cursor = end;
                 Ok(CborValue::Bytes(bytes))
             }
+            3 => {
+                let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
+                let end = self
+                    .cursor
+                    .checked_add(length)
+                    .ok_or(GraphError::NonCanonicalData)?;
+                let text = std::str::from_utf8(
+                    self.bytes
+                        .get(self.cursor..end)
+                        .ok_or(GraphError::NonCanonicalData)?,
+                )
+                .map_err(|_| GraphError::NonCanonicalData)?
+                .to_owned();
+                self.cursor = end;
+                Ok(CborValue::Text(text))
+            }
             4 => {
                 let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
                 if length > NODE_DATA_LIMIT {
@@ -2537,7 +2965,34 @@ impl<'a> CborReader<'a> {
                 }
                 Ok(CborValue::Array(values))
             }
-            7 if additional == 22 => Ok(CborValue::Null),
+            5 => {
+                let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
+                if length > NODE_DATA_LIMIT {
+                    return Err(GraphError::NodeDataTooLarge(length));
+                }
+                let mut entries = Vec::with_capacity(length);
+                let mut previous_key = None;
+                for _ in 0..length {
+                    let key_start = self.cursor;
+                    let key = self.value()?;
+                    let key_bytes = self.bytes[key_start..self.cursor].to_vec();
+                    if previous_key
+                        .as_ref()
+                        .is_some_and(|previous| previous >= &key_bytes)
+                    {
+                        return Err(GraphError::NonCanonicalData);
+                    }
+                    previous_key = Some(key_bytes);
+                    entries.push((key, self.value()?));
+                }
+                Ok(CborValue::Map(entries))
+            }
+            6 => {
+                if !matches!(length, 60110..=60113) {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                Ok(CborValue::Tag(length, Box::new(self.value()?)))
+            }
             _ => Err(GraphError::NonCanonicalData),
         }
     }
@@ -2601,6 +3056,28 @@ impl<'a> CborReader<'a> {
     }
 }
 
+fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
+    let prefix = major << 5;
+    match value {
+        0..=23 => output.push(prefix | value as u8),
+        24..=255 => {
+            output.extend_from_slice(&[prefix | 24, value as u8]);
+        }
+        256..=65_535 => {
+            output.push(prefix | 25);
+            output.extend_from_slice(&(value as u16).to_be_bytes());
+        }
+        65_536..=4_294_967_295 => {
+            output.push(prefix | 26);
+            output.extend_from_slice(&(value as u32).to_be_bytes());
+        }
+        _ => {
+            output.push(prefix | 27);
+            output.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+}
+
 fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData, GraphError> {
     let fields = array_fields(value)?;
     let version = unsigned(fields.first())?;
@@ -2613,26 +3090,22 @@ fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData
             relation_map: oid(bytes_field(fields.get(2))?, algorithm)?,
         }),
         NodeKind::OrderedLeaf => {
-            let domain = bytes_field(fields.get(2))?.to_vec();
+            let domain = canonical_value_bytes(fields.get(2).ok_or(GraphError::NonCanonicalData)?);
             check_domain(&domain)?;
             let entries =
                 array_fields(fields.get(3).cloned().ok_or(GraphError::NonCanonicalData)?)?
                     .into_iter()
                     .map(|value| {
                         let fields = array_fields(value)?;
-                        if fields.len() != 3 {
+                        if fields.len() != 2 {
                             return Err(GraphError::NonCanonicalData);
                         }
-                        let kind = match unsigned(fields.get(2))? {
-                            0 => NativeObjectKind::Tree,
-                            1 => NativeObjectKind::Blob,
-                            _ => return Err(GraphError::NonCanonicalData),
-                        };
                         Ok(OrderedLeafEntry {
-                            key: bytes_field(fields.first())?.to_vec(),
-                            value: NativeDependency::new(
-                                oid(bytes_field(fields.get(1))?, algorithm)?,
-                                kind,
+                            key: canonical_value_bytes(
+                                fields.first().ok_or(GraphError::NonCanonicalData)?,
+                            ),
+                            value: canonical_value_bytes(
+                                fields.get(1).ok_or(GraphError::NonCanonicalData)?,
                             ),
                         })
                     })
@@ -2640,7 +3113,7 @@ fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData
             Ok(NodeData::OrderedLeaf { domain, entries })
         }
         NodeKind::OrderedBranch => {
-            let domain = bytes_field(fields.get(2))?.to_vec();
+            let domain = canonical_value_bytes(fields.get(2).ok_or(GraphError::NonCanonicalData)?);
             check_domain(&domain)?;
             let height = bounded_height(unsigned(fields.get(3))?)?;
             let entries =
@@ -2654,7 +3127,9 @@ fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData
                         let row_count = unsigned(fields.get(2))?;
                         check_length(row_count)?;
                         Ok(OrderedBranchEntry {
-                            inclusive_max_key: bytes_field(fields.first())?.to_vec(),
+                            inclusive_max_key: canonical_value_bytes(
+                                fields.first().ok_or(GraphError::NonCanonicalData)?,
+                            ),
                             child: oid(bytes_field(fields.get(1))?, algorithm)?,
                             row_count,
                         })
