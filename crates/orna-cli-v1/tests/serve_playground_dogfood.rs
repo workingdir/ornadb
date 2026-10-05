@@ -22,6 +22,7 @@ use tungstenite::{
 const MAIN: &str = include_str!("fixtures/project-core-main.orna");
 const SAMPLE: &str = include_str!("fixtures/playground-example.orna");
 const SAMPLE_ROW: &str = include_str!("fixtures/playground-sample.orna");
+const LIVE_PROGRAM_ROW: &str = include_str!("fixtures/playground-sample-live.orna");
 const SAMPLE_ARITHMETIC: &str = include_str!("fixtures/playground-sample-arithmetic.orna");
 const SAMPLE_FUNCTIONS: &str = include_str!("fixtures/playground-sample-functions.orna");
 const SAMPLE_INCREMENT: &str = include_str!("fixtures/playground-sample-increment.orna");
@@ -857,6 +858,11 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .as_array()
         .expect("committed example catalog");
     assert_eq!(examples.len(), 4);
+    assert!(
+        examples
+            .iter()
+            .all(|example| { example["path"] != "playground/Sample/live-after-start.orna" })
+    );
     let arithmetic = examples
         .iter()
         .find(|example| example["path"] == "playground/Sample/arithmetic.orna")
@@ -892,6 +898,52 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     assert_eq!(record_page.status, 200);
     assert!(record_page.body.contains("Arithmetic"));
     assert!(record_page.body.contains("6 * 7"));
+
+    write_fixture_rows(
+        project.path(),
+        "Sample",
+        &[("live-after-start", LIVE_PROGRAM_ROW)],
+    );
+    git(
+        project.path(),
+        &["add", "playground/Sample/live-after-start.orna"],
+    );
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "add live playground program",
+        ],
+    );
+    let live_examples = curl(&format!("{base_url}/api/examples"), &[])
+        .expect("curl the live database program catalog");
+    assert_eq!(live_examples.status, 200);
+    let live_examples: JsonValue =
+        serde_json::from_str(&live_examples.body).expect("updated example catalog JSON");
+    let live_program = live_examples["examples"]
+        .as_array()
+        .expect("updated committed example catalog")
+        .iter()
+        .find(|example| example["path"] == "playground/Sample/live-after-start.orna")
+        .expect("program committed while orna serve was running");
+    assert_eq!(live_program["name"], "Live after startup");
+    assert_eq!(live_program["source"], "6 * 7");
+    let live_program_source = live_program["source"]
+        .as_str()
+        .expect("database-resident program source")
+        .to_owned();
+    assert_eq!(live_program_source, "6 * 7");
+    println!(
+        "live DB program catalog: /api/examples absent before commit, present afterward as {} (HTTP {}, exit 0)",
+        live_program["path"],
+        live_examples["examples"].as_array().unwrap().len()
+    );
 
     let database_id = listing
         .body
