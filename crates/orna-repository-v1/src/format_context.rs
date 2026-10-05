@@ -341,19 +341,18 @@ impl RepositoryFormatContext {
     ) -> Result<NativeGraphContext, FormatContextError> {
         self.require_format3()?;
         let database_id = self.require_database_id()?;
-        let schema = self.validate_schema_root()?;
+        self.validate_schema_root()?;
         let store = self.validate_store_root()?;
         let version = rows.version();
         if version.database_id() != database_id.as_bytes()
             || version.schema().database_id() != database_id.as_bytes()
             || version.store_root() != &store.oid
-            || version.schema().schema_oid() != &schema.oid
-            || version.schema().schema_digest() != &schema.digest
         {
             return Err(FormatContextError::RowMapMismatch);
         }
-        let algorithm = schema.oid.algorithm();
-        if store.oid.algorithm() != algorithm {
+        let schema_digest = *version.schema().schema_digest();
+        let algorithm = store.oid.algorithm();
+        if version.schema().schema_oid().algorithm() != algorithm {
             return Err(FormatContextError::GraphContextInvalid);
         }
         let repository_path = self
@@ -387,7 +386,7 @@ impl RepositoryFormatContext {
         identity_hash.update(owner_id);
         identity_hash.update(snapshot_id);
         identity_hash.update(store.oid.as_bytes());
-        identity_hash.update(schema.digest);
+        identity_hash.update(schema_digest);
         identity_hash.update(authority);
         let identity: [u8; 32] = identity_hash.finalize().into();
 
@@ -400,7 +399,7 @@ impl RepositoryFormatContext {
             snapshot_id,
             algorithm,
             store.oid,
-            schema.digest,
+            schema_digest,
             rows.clone(),
         )
         .map_err(|_| FormatContextError::GraphContextInvalid)
@@ -737,13 +736,19 @@ pub(super) fn parse_canonical_database(bytes: &[u8]) -> Result<DatabaseId, ()> {
 
 #[cfg(test)]
 mod graph_bridge_tests {
-    use std::{fs, path::Path, process::Command};
+    use std::{
+        fs,
+        io::Write,
+        path::Path,
+        process::{Command, Stdio},
+    };
 
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
     use crate::{
         Repository,
+        native_graph::{ByteIndexEntry, GitHashAlgorithm, NativeOid, NodeData},
         row_store::{RowMapSnapshot, RowMapVersion, SchemaGeneration},
     };
 
@@ -804,9 +809,129 @@ mod graph_bridge_tests {
             .expect("admit fixture format context")
     }
 
-    fn sealed_rows(context: &RepositoryFormatContext) -> RowMapSnapshot {
+    fn write_git_object(
+        directory: &Path,
+        algorithm: GitHashAlgorithm,
+        kind: &str,
+        bytes: &[u8],
+    ) -> NativeOid {
+        let mut child = Command::new("git")
+            .current_dir(directory)
+            .args(["hash-object", "-w", "-t", kind, "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn git hash-object");
+        child
+            .stdin
+            .take()
+            .expect("hash-object stdin")
+            .write_all(bytes)
+            .expect("write native object bytes");
+        let output = child.wait_with_output().expect("wait for hash-object");
+        assert!(
+            output.status.success(),
+            "git hash-object: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        NativeOid::from_hex(
+            algorithm,
+            std::str::from_utf8(&output.stdout)
+                .expect("hash-object OID is UTF-8")
+                .trim(),
+        )
+        .expect("valid native OID")
+    }
+
+    fn append_tree_entry(tree: &mut Vec<u8>, mode: &str, name: &str, oid: &NativeOid) {
+        tree.extend_from_slice(mode.as_bytes());
+        tree.push(b' ');
+        tree.extend_from_slice(name.as_bytes());
+        tree.push(0);
+        tree.extend_from_slice(oid.as_bytes());
+    }
+
+    fn write_native_node(
+        directory: &Path,
+        algorithm: GitHashAlgorithm,
+        node: &NodeData,
+    ) -> NativeOid {
+        let data_oid = write_git_object(
+            directory,
+            algorithm,
+            "blob",
+            &node.encode_canonical().expect("canonical node data"),
+        );
+        let mut dependencies = node.dependencies().expect("typed node dependencies");
+        dependencies.sort_by_key(|dependency| dependency.oid().to_hex());
+        let refs_oid = if dependencies.is_empty() {
+            None
+        } else {
+            let mut refs_tree = Vec::new();
+            for dependency in dependencies {
+                let mode = match dependency.kind() {
+                    crate::native_graph::NativeObjectKind::Blob => "100644",
+                    crate::native_graph::NativeObjectKind::Tree => "40000",
+                };
+                append_tree_entry(
+                    &mut refs_tree,
+                    mode,
+                    &dependency.oid().to_hex(),
+                    dependency.oid(),
+                );
+            }
+            Some(write_git_object(directory, algorithm, "tree", &refs_tree))
+        };
+
+        let mut envelope = Vec::new();
+        append_tree_entry(&mut envelope, "100644", "data", &data_oid);
+        if let Some(refs_oid) = refs_oid {
+            append_tree_entry(&mut envelope, "40000", "refs", &refs_oid);
+        }
+        write_git_object(directory, algorithm, "tree", &envelope)
+    }
+
+    fn schema_node(directory: &Path, context: &RepositoryFormatContext) -> (NativeOid, [u8; 32]) {
+        let algorithm = context
+            .validate_schema_root()
+            .expect("pinned source schema root")
+            .oid
+            .algorithm();
+        let schema_bytes = MAIN_SOURCE.as_bytes();
+        let schema_digest: [u8; 32] = Sha256::digest(schema_bytes).into();
+        let chunk_oid = write_git_object(directory, algorithm, "blob", schema_bytes);
+        let byte_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: schema_bytes.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: schema_bytes.len() as u64,
+                    target: chunk_oid,
+                    chunk_sha256: Some(schema_digest),
+                }],
+            },
+        );
+        let schema_oid = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::Schema {
+                encoded_length: schema_bytes.len() as u64,
+                schema_digest,
+                byte_root,
+            },
+        );
+        (schema_oid, schema_digest)
+    }
+
+    fn sealed_rows(
+        context: &RepositoryFormatContext,
+        schema_oid: &NativeOid,
+        schema_digest: [u8; 32],
+    ) -> RowMapSnapshot {
         let database_id = context.require_database_id().expect("database identity");
-        let schema = context.validate_schema_root().expect("pinned schema root");
         let store = context.validate_store_root().expect("pinned store root");
 
         let mut relation_hash = Sha256::new();
@@ -819,8 +944,8 @@ mod graph_bridge_tests {
         let schema_generation = SchemaGeneration::issue(
             *database_id.as_bytes(),
             relation_id,
-            schema.oid.clone(),
-            schema.digest,
+            schema_oid.clone(),
+            schema_digest,
             0,
         );
         let version = RowMapVersion::issue(
@@ -847,7 +972,8 @@ mod graph_bridge_tests {
         let directory = repository();
         let root = directory.path();
         let original = context(root);
-        let matching_rows = sealed_rows(&original);
+        let (schema_oid, schema_digest) = schema_node(root, &original);
+        let matching_rows = sealed_rows(&original, &schema_oid, schema_digest);
         let graph = original
             .open_native_graph(&matching_rows)
             .expect("matching sealed format-3 row snapshot admits graph");
@@ -860,7 +986,7 @@ mod graph_bridge_tests {
             .expect("write alternate database fixture");
         commit(root);
         let other_database_context = context(root);
-        let other_database_rows = sealed_rows(&other_database_context);
+        let other_database_rows = sealed_rows(&other_database_context, &schema_oid, schema_digest);
         assert!(matches!(
             original.open_native_graph(&other_database_rows),
             Err(super::FormatContextError::RowMapMismatch)
@@ -872,7 +998,7 @@ mod graph_bridge_tests {
             .expect("write different snapshot store root");
         commit(root);
         let other_snapshot_context = context(root);
-        let other_snapshot_rows = sealed_rows(&other_snapshot_context);
+        let other_snapshot_rows = sealed_rows(&other_snapshot_context, &schema_oid, schema_digest);
         assert!(matches!(
             original.open_native_graph(&other_snapshot_rows),
             Err(super::FormatContextError::RowMapMismatch)
