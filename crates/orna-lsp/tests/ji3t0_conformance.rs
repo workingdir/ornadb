@@ -27,6 +27,8 @@ mod syntax_v1_depth_contract;
 mod syntax_v1_diagnostics_document_links_contract;
 #[path = "support/syntax_v1_document_highlight_code_lens_contract.rs"]
 mod syntax_v1_document_highlight_code_lens_contract;
+#[path = "support/syntax_v1_document_symbol_contract.rs"]
+mod syntax_v1_document_symbol_contract;
 #[path = "support/syntax_v1_folding_selection_contract.rs"]
 mod syntax_v1_folding_selection_contract;
 #[path = "support/syntax_v1_type_hierarchy_moniker_contract.rs"]
@@ -473,6 +475,50 @@ fn protocol_definitions_match_editor_attachment_contract() {
         provider_uri,
         caller_uri,
         &evidence,
+        "protocol client",
+    );
+    client.shutdown();
+}
+
+#[test]
+fn protocol_document_symbols_match_editor_attachment_contract() {
+    let provider_uri = "file:///workspace/type-hierarchy-provider-v1.orna";
+    let caller_uri = "file:///workspace/type-hierarchy-caller-v1.orna";
+    let mut client = Client::spawn();
+    let initialized = initialize(&mut client);
+    assert_eq!(
+        initialized["capabilities"]["documentSymbolProvider"], true,
+        "document symbols must be advertised: {}",
+        initialized["capabilities"]["documentSymbolProvider"]
+    );
+    for (uri, source) in [
+        (provider_uri, TYPE_HIERARCHY_PROVIDER_SOURCE),
+        (caller_uri, TYPE_HIERARCHY_CALLER_SOURCE),
+    ] {
+        let diagnostics = open(&mut client, uri, source);
+        assert!(
+            diagnostics["diagnostics"].as_array().unwrap().is_empty(),
+            "{diagnostics}"
+        );
+    }
+
+    let document_symbols = |client: &mut Client, uri: &str| {
+        client.request(
+            "textDocument/documentSymbol",
+            json!({"textDocument":{"uri":uri}}),
+        )
+    };
+    let provider_symbols = document_symbols(&mut client, provider_uri);
+    let provider_symbols_repeat = document_symbols(&mut client, provider_uri);
+    let caller_symbols = document_symbols(&mut client, caller_uri);
+    let caller_symbols_repeat = document_symbols(&mut client, caller_uri);
+    syntax_v1_document_symbol_contract::assert_contract(
+        TYPE_HIERARCHY_PROVIDER_SOURCE,
+        TYPE_HIERARCHY_CALLER_SOURCE,
+        &provider_symbols,
+        &provider_symbols_repeat,
+        &caller_symbols,
+        &caller_symbols_repeat,
         "protocol client",
     );
     client.shutdown();
@@ -1249,6 +1295,18 @@ assert(vim.wait(5000, function()
   return false
 end, 10), "type-hierarchy caller fixture did not attach to orna-lsp")
 local type_hierarchy_caller_uri = vim.uri_from_bufnr(type_hierarchy_caller_bufnr)
+local document_symbols_provider = hierarchy_request("textDocument/documentSymbol", {
+  textDocument = { uri = type_hierarchy_provider_uri },
+}, type_hierarchy_provider_bufnr)
+local document_symbols_provider_repeat = hierarchy_request("textDocument/documentSymbol", {
+  textDocument = { uri = type_hierarchy_provider_uri },
+}, type_hierarchy_provider_bufnr)
+local document_symbols_caller = hierarchy_request("textDocument/documentSymbol", {
+  textDocument = { uri = type_hierarchy_caller_uri },
+}, type_hierarchy_caller_bufnr)
+local document_symbols_caller_repeat = hierarchy_request("textDocument/documentSymbol", {
+  textDocument = { uri = type_hierarchy_caller_uri },
+}, type_hierarchy_caller_bufnr)
 local type_document_item = hierarchy_request("textDocument/prepareTypeHierarchy", {
   textDocument = { uri = type_hierarchy_provider_uri },
   position = type_hierarchy_requests.document_declaration,
@@ -1437,6 +1495,10 @@ vim.fn.writefile({ vim.fn.json_encode({
   definition_ambiguous = definition_ambiguous,
   type_hierarchy_provider_uri = type_hierarchy_provider_uri,
   type_hierarchy_caller_uri = type_hierarchy_caller_uri,
+  document_symbols_provider = document_symbols_provider,
+  document_symbols_provider_repeat = document_symbols_provider_repeat,
+  document_symbols_caller = document_symbols_caller,
+  document_symbols_caller_repeat = document_symbols_caller_repeat,
   type_document_item = type_document_item,
   type_document_reference = type_document_reference,
   type_document_supertypes = type_document_supertypes,
@@ -1728,6 +1790,16 @@ vim.cmd("qa!")
         &hover_semantic_result,
         "Neovim",
     );
+    syntax_v1_document_symbol_contract::assert_contract(
+        TYPE_HIERARCHY_PROVIDER_SOURCE,
+        TYPE_HIERARCHY_CALLER_SOURCE,
+        &hover_semantic_result["document_symbols_provider"],
+        &hover_semantic_result["document_symbols_provider_repeat"],
+        &hover_semantic_result["document_symbols_caller"],
+        &hover_semantic_result["document_symbols_caller_repeat"],
+        "Neovim",
+    );
+    println!("NEOVIM_LSP_DOCUMENT_SYMBOLS=pass");
     syntax_v1_document_highlight_code_lens_contract::assert_document_highlights_contract(
         DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
         &hover_semantic_result["document_highlights"],
@@ -2513,6 +2585,26 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                   workspace-server (eglot-current-server))))
         (puthash "type_hierarchy_provider_uri" type-hierarchy-provider-uri workspace-evidence)
         (puthash "type_hierarchy_caller_uri" type-hierarchy-caller-uri workspace-evidence)
+        (puthash "document_symbols_provider"
+                 (jsonrpc-request
+                  workspace-server :textDocument/documentSymbol
+                  (list :textDocument (list :uri type-hierarchy-provider-uri)))
+                 workspace-evidence)
+        (puthash "document_symbols_provider_repeat"
+                 (jsonrpc-request
+                  workspace-server :textDocument/documentSymbol
+                  (list :textDocument (list :uri type-hierarchy-provider-uri)))
+                 workspace-evidence)
+        (puthash "document_symbols_caller"
+                 (jsonrpc-request
+                  workspace-server :textDocument/documentSymbol
+                  (list :textDocument (list :uri type-hierarchy-caller-uri)))
+                 workspace-evidence)
+        (puthash "document_symbols_caller_repeat"
+                 (jsonrpc-request
+                  workspace-server :textDocument/documentSymbol
+                  (list :textDocument (list :uri type-hierarchy-caller-uri)))
+                 workspace-evidence)
         (let* ((document-item-response
                 (orna-test-type-hierarchy-prepare
                  workspace-server type-hierarchy-provider-uri "document_declaration"))
@@ -2869,6 +2961,16 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         &hover_semantic_result,
         "Emacs Eglot",
     );
+    syntax_v1_document_symbol_contract::assert_contract(
+        TYPE_HIERARCHY_PROVIDER_SOURCE,
+        TYPE_HIERARCHY_CALLER_SOURCE,
+        &hover_semantic_result["document_symbols_provider"],
+        &hover_semantic_result["document_symbols_provider_repeat"],
+        &hover_semantic_result["document_symbols_caller"],
+        &hover_semantic_result["document_symbols_caller_repeat"],
+        "Emacs Eglot",
+    );
+    println!("EMACS_LSP_DOCUMENT_SYMBOLS=pass");
     syntax_v1_document_highlight_code_lens_contract::assert_document_highlights_contract(
         DOCUMENT_HIGHLIGHT_CODE_LENS_SOURCE,
         &hover_semantic_result["document_highlights"],
