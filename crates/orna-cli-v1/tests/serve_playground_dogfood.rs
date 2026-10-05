@@ -1480,118 +1480,6 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         } if present == updated_present
     ));
 
-    let before_add_examples = curl(&format!("{base_url}/api/examples"), &[])
-        .expect("curl the catalog before adding a new Sample row");
-    assert_eq!(before_add_examples.status, 200);
-    let before_add_examples: JsonValue = serde_json::from_str(&before_add_examples.body)
-        .expect("catalog before Sample addition JSON");
-    let before_add_revision = before_add_examples["revision"]
-        .as_str()
-        .expect("revision before Sample addition")
-        .to_owned();
-    assert_eq!(
-        before_add_examples["examples"].as_array().map(Vec::len),
-        Some(4)
-    );
-
-    write_fixture_rows(
-        project.path(),
-        "Sample",
-        &[("live-refresh", SAMPLE_LIVE_REFRESH)],
-    );
-    let uncommitted_examples = curl(&format!("{base_url}/api/examples"), &[])
-        .expect("curl examples before committing the new Sample row");
-    assert_eq!(uncommitted_examples.status, 200);
-    let uncommitted_examples: JsonValue =
-        serde_json::from_str(&uncommitted_examples.body).expect("uncommitted examples JSON");
-    assert_eq!(
-        uncommitted_examples["revision"].as_str(),
-        Some(before_add_revision.as_str())
-    );
-    assert_eq!(
-        uncommitted_examples["examples"].as_array().map(Vec::len),
-        Some(4)
-    );
-    assert!(
-        uncommitted_examples["examples"]
-            .as_array()
-            .is_some_and(|examples| examples
-                .iter()
-                .all(|example| { example["path"] != "playground/Sample/live-refresh.orna" }))
-    );
-
-    git(
-        project.path(),
-        &["add", "playground/Sample/live-refresh.orna"],
-    );
-    git(
-        project.path(),
-        &[
-            "-c",
-            "user.name=kierandrewett",
-            "-c",
-            "user.email=kieran@drewett.dev",
-            "commit",
-            "--quiet",
-            "-m",
-            "add live playground Sample row",
-        ],
-    );
-    let added_examples = curl(&format!("{base_url}/api/examples"), &[])
-        .expect("curl examples after committing the new Sample row");
-    assert_eq!(added_examples.status, 200);
-    let added_examples: JsonValue =
-        serde_json::from_str(&added_examples.body).expect("updated examples JSON");
-    let added_revision = added_examples["revision"]
-        .as_str()
-        .expect("revision after Sample commit");
-    assert_ne!(added_revision, before_add_revision);
-    let added_examples = added_examples["examples"]
-        .as_array()
-        .expect("updated committed examples");
-    assert_eq!(added_examples.len(), 5);
-    let live_example = added_examples
-        .iter()
-        .find(|example| example["path"] == "playground/Sample/live-refresh.orna")
-        .expect("new Sample appears in the live catalog");
-    assert_eq!(live_example["name"], "Live refresh");
-    assert_eq!(live_example["source"], "40 + 2");
-
-    std::fs::remove_file(project.path().join("playground/Sample/live-refresh.orna"))
-        .expect("remove the live Sample fixture after its add proof");
-    git(project.path(), &["add", "-A", "playground/Sample"]);
-    git(
-        project.path(),
-        &[
-            "-c",
-            "user.name=kierandrewett",
-            "-c",
-            "user.email=kieran@drewett.dev",
-            "commit",
-            "--quiet",
-            "-m",
-            "remove live playground Sample row",
-        ],
-    );
-    let removed_examples = curl(&format!("{base_url}/api/examples"), &[])
-        .expect("curl examples after removing the Sample row");
-    assert_eq!(removed_examples.status, 200);
-    let removed_examples: JsonValue =
-        serde_json::from_str(&removed_examples.body).expect("removed examples JSON");
-    assert_ne!(removed_examples["revision"].as_str(), Some(added_revision));
-    let removed_examples = removed_examples["examples"]
-        .as_array()
-        .expect("catalog after Sample removal");
-    assert_eq!(removed_examples.len(), 4);
-    assert!(
-        removed_examples
-            .iter()
-            .all(|example| { example["path"] != "playground/Sample/live-refresh.orna" })
-    );
-    println!(
-        "live DB example catalog: uncommitted Sample hidden, committed Sample added at {added_revision}, then removed without restarting orna serve (exit 0)"
-    );
-
     println!(
         "curl GET / -> HTTP {} (exit 0): Git listing + playground link",
         listing.status
@@ -1625,4 +1513,146 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     println!("WebSocket RESYNC -> Delta revision 0..1 (exit 0): both pipelined run events");
     println!("WebSocket RESYNC -> Delta revision 1..2 (exit 0): next run event applies");
     println!("WebSocket WATCH -> fresh Snapshot revision 0 (exit 0): matches applied delta");
+}
+
+#[test]
+fn orna_serve_refreshes_the_example_catalog_after_sample_commits() {
+    let project = tempfile::tempdir().expect("temporary Orna database");
+    let initialized = Command::new(BINARY)
+        .arg("init")
+        .current_dir(project.path())
+        .output()
+        .expect("initialize the test Orna database");
+    assert!(
+        initialized.status.success(),
+        "orna init exited with {}\n{}",
+        initialized.status,
+        String::from_utf8_lossy(&initialized.stderr),
+    );
+
+    std::fs::write(project.path().join("main.orna"), MAIN).expect("write project fixture");
+    std::fs::write(project.path().join("playground.orna"), PLAYGROUND_SCHEMA)
+        .expect("write Playground schema fixture");
+    write_fixture_rows(project.path(), "Sample", &[("hello", SAMPLE_ROW)]);
+    git(
+        project.path(),
+        &["add", "main.orna", "playground.orna", "playground/Sample"],
+    );
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "add initial example catalog fixture",
+        ],
+    );
+
+    let port = free_port();
+    let child = Command::new(BINARY)
+        .args(["serve", "--port", &port.to_string()])
+        .current_dir(project.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start orna serve");
+    let mut server = RunningServer(child);
+    let base_url = format!("http://127.0.0.1:{port}");
+    wait_until_serving(&mut server, &base_url);
+
+    let fetch_catalog = || {
+        let response = curl(&format!("{base_url}/api/examples"), &["--max-time", "15"])
+            .expect("curl committed database example catalog");
+        assert_eq!(response.status, 200);
+        serde_json::from_str::<JsonValue>(&response.body).expect("example catalog JSON")
+    };
+    let initial = fetch_catalog();
+    let initial_revision = initial["revision"]
+        .as_str()
+        .expect("initial committed catalog revision")
+        .to_owned();
+    assert_eq!(initial["examples"].as_array().map(Vec::len), Some(1));
+
+    write_fixture_rows(
+        project.path(),
+        "Sample",
+        &[("live-refresh", SAMPLE_LIVE_REFRESH)],
+    );
+    let uncommitted = fetch_catalog();
+    assert_eq!(
+        uncommitted["revision"].as_str(),
+        Some(initial_revision.as_str())
+    );
+    assert_eq!(uncommitted["examples"].as_array().map(Vec::len), Some(1));
+
+    git(
+        project.path(),
+        &["add", "playground/Sample/live-refresh.orna"],
+    );
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "add live playground Sample row",
+        ],
+    );
+    let added = fetch_catalog();
+    let added_revision = added["revision"]
+        .as_str()
+        .expect("revision after Sample commit");
+    assert_ne!(added_revision, initial_revision);
+    let added_examples = added["examples"].as_array().expect("added examples");
+    assert_eq!(added_examples.len(), 2);
+    let live_example = added_examples
+        .iter()
+        .find(|example| example["path"] == "playground/Sample/live-refresh.orna")
+        .expect("committed Sample appears in the live catalog");
+    assert_eq!(live_example["name"], "Live refresh");
+    assert_eq!(live_example["source"], "40 + 2");
+
+    std::fs::remove_file(project.path().join("playground/Sample/live-refresh.orna"))
+        .expect("remove live Sample fixture");
+    git(project.path(), &["add", "-A", "--", "playground/Sample"]);
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "remove live playground Sample row",
+        ],
+    );
+    let removed = fetch_catalog();
+    assert_ne!(removed["revision"].as_str(), Some(added_revision));
+    let removed_examples = removed["examples"].as_array().expect("removed examples");
+    assert_eq!(removed_examples.len(), 1);
+    assert!(
+        removed_examples
+            .iter()
+            .all(|example| example["path"] != "playground/Sample/live-refresh.orna")
+    );
+    assert!(
+        server
+            .0
+            .try_wait()
+            .expect("probe orna serve after example commits")
+            .is_none()
+    );
+    println!(
+        "GET /api/examples: uncommitted Sample hidden; committed Sample added then removed without restarting orna serve (HTTP 200, exit 0)"
+    );
 }
