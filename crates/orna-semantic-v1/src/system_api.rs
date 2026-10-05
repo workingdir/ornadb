@@ -543,7 +543,7 @@ impl SystemApi {
                         &enums,
                     )
                 });
-            if !valid_diagnostic(&descriptor.diagnostic)
+            if !valid_diagnostic(&descriptor.diagnostic, &failure_codes)
                 || !replacement_is_valid
                 || descriptor.replacement.as_deref() == Some(name.as_str())
                 || singletons.contains_key(&name)
@@ -1188,12 +1188,12 @@ fn valid_identifier(name: &str) -> bool {
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
-fn valid_diagnostic(name: &str) -> bool {
+fn valid_diagnostic(name: &str, failure_codes: &BTreeSet<String>) -> bool {
     (name.starts_with("ORNA")
         && name.chars().all(|character| {
             character.is_ascii_uppercase() || character.is_ascii_digit() || character == '-'
         }))
-        || valid_failure_code(name)
+        || failure_codes.contains(name)
 }
 
 fn valid_failure_code(name: &str) -> bool {
@@ -2855,6 +2855,24 @@ mod tests {
             PathResolution::Removed(RemovedName { replacement: None, diagnostic })
                 if diagnostic == "sys.version.incompatible"
         ));
+    }
+
+    #[test]
+    fn retired_sys_diagnostics_must_be_declared_failure_codes() {
+        let mut undeclared = document();
+        undeclared["removed_names"]["sys.runtime"]["diagnostic"] =
+            serde_json::Value::String("sys.unpublished.diagnostic".into());
+        assert_eq!(
+            SystemApi::from_json(&undeclared.to_string()),
+            Err(SystemApiError::InvalidRemovedName)
+        );
+
+        let final_authority = document();
+        assert_eq!(
+            final_authority["removed_names"]["sys.admin.set_storage_preference"]["diagnostic"],
+            serde_json::Value::String("sys.version.incompatible".into())
+        );
+        assert!(SystemApi::from_json(&final_authority.to_string()).is_ok());
     }
 
     #[test]
