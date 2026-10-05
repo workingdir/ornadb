@@ -55900,7 +55900,20 @@ fn nested_checkpoint_identity_survives_paired_rewind_checkpoint_chain_fold_hando
         },
     };
     let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
-    match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity#[test]
+    match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
+        F177FoldError::RestoreFold {
+            restore_fold_ordinal,
+            nested_checkpoint_identity,
+            source,
+        } => {
+            assert_eq!(restore_fold_ordinal, 0);
+            assert_eq!(nested_checkpoint_identity, outer_checkpoint_pair(3));
+            assert_eq!(source, expected_source);
+        }
+    }
+}
+
+#[test]
 fn nested_handoff_identity_survives_paired_checkpoint_rewind_fold_handoff_chains_f178() {
     let rewind_checkpoint_nested_handoff_rows = PAIRED_NESTED_HANDOFF_IDENTITIES_F172
         .split("\n\n")
@@ -56360,18 +56373,7 @@ fn nested_handoff_identity_survives_paired_checkpoint_rewind_fold_handoff_chains
         }
     }
 }
-_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
-        F177FoldError::RestoreFold {
-            restore_fold_ordinal,
-            nested_checkpoint_identity,
-            source,
-        } => {
-            assert_eq!(restore_fold_ordinal, 0);
-            assert_eq!(nested_checkpoint_identity, outer_checkpoint_pair(3));
-            assert_eq!(source, expected_source);
-        }
-    }
-}
+
 #[test]
 fn paired_rollback_identity_survives_sparse_segment_spill_chains_qjprx() {
     let rows = PAIRED_SEGMENT_SPILL_CHAINS_F80
