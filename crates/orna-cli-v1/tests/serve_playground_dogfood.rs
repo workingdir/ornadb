@@ -34,10 +34,10 @@ const PLAYGROUND_SCHEMA: &str = include_str!("fixtures/playground-schema.orna");
 const ASSET_INDEX: &str = include_str!("fixtures/playground-asset-index.orna");
 const ASSET_APP: &str = include_str!("fixtures/playground-asset-app.orna");
 const ASSET_STYLE: &str = include_str!("fixtures/playground-asset-style.orna");
-const PLAYGROUND_THEME: &str = include_str!("fixtures/playground-theme.orna");
-const PLAYGROUND_THEME_UPDATED: &str = include_str!("fixtures/playground-theme-updated.orna");
-const PLAYGROUND_LAYOUT: &str = include_str!("fixtures/playground-layout.orna");
-const PLAYGROUND_LAYOUT_UPDATED: &str = include_str!("fixtures/playground-layout-updated.orna");
+const PLAYGROUND_THEME: &str = ":root { --text: #202122; }";
+const PLAYGROUND_THEME_UPDATED: &str = ":root { --text: #111111; }";
+const PLAYGROUND_LAYOUT: &str = ".workspace { display: grid; } @media (max-width: 64rem) { .workspace { grid-template-columns: 1fr; } }";
+const PLAYGROUND_LAYOUT_UPDATED: &str = ".workspace { display: grid; grid-template-columns: 1fr 1fr; } @media (max-width: 64rem) { .workspace { grid-template-columns: 1fr; } }";
 const ASSET_PRESENTATION: &str = include_str!("fixtures/playground-asset-presentation.orna");
 const ASSET_HOME: &str = include_str!("fixtures/playground-asset-home.orna");
 const ASSET_PLAYGROUND: &str = include_str!("fixtures/playground-asset-playground.orna");
@@ -590,14 +590,12 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         ASSET_EMBED,
     )
     .expect("write committed embed entry fixture");
-    let themes = project.path().join("playground/Theme");
-    std::fs::create_dir_all(&themes).expect("create committed Theme rows");
-    std::fs::write(themes.join("wiki-basic.orna"), PLAYGROUND_THEME)
-        .expect("write committed Theme fixture");
-    let layouts = project.path().join("playground/Layout");
-    std::fs::create_dir_all(&layouts).expect("create committed Layout rows");
-    std::fs::write(layouts.join("responsive.orna"), PLAYGROUND_LAYOUT)
-        .expect("write committed Layout fixture");
+    let renderer_styles = project.path().join("playground/web-ui/src");
+    std::fs::create_dir_all(&renderer_styles).expect("create committed renderer style directory");
+    std::fs::write(renderer_styles.join("theme.css"), PLAYGROUND_THEME)
+        .expect("write committed renderer theme stylesheet");
+    std::fs::write(renderer_styles.join("layout.css"), PLAYGROUND_LAYOUT)
+        .expect("write committed renderer layout stylesheet");
     write_fixture_rows(project.path(), "Route", &ROUTES);
     write_fixture_rows(project.path(), "Entry", &ENTRIES);
     for (id, source) in [
@@ -649,8 +647,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             "playground/Asset",
             "playground/Route",
             "playground/Entry",
-            "playground/Theme",
-            "playground/Layout",
+            "playground/web-ui/src",
         ],
     );
     git(
@@ -923,10 +920,10 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         .as_str()
         .expect("committed route revision")
         .to_owned();
-    std::fs::write(themes.join("wiki-basic.orna"), PLAYGROUND_THEME_UPDATED)
-        .expect("write uncommitted Theme change");
-    std::fs::write(layouts.join("responsive.orna"), PLAYGROUND_LAYOUT_UPDATED)
-        .expect("write uncommitted Layout change");
+    std::fs::write(renderer_styles.join("theme.css"), PLAYGROUND_THEME_UPDATED)
+        .expect("write uncommitted renderer theme change");
+    std::fs::write(renderer_styles.join("layout.css"), PLAYGROUND_LAYOUT_UPDATED)
+        .expect("write uncommitted renderer layout change");
     let uncommitted_revision_response = curl(&format!("{base_url}/api/playground/revision"), &[])
         .expect("curl revision while style edits are uncommitted");
     let uncommitted_revision_json: JsonValue =
@@ -937,9 +934,9 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         Some(route_revision.as_str())
     );
     let uncommitted_theme = curl(&format!("{base_url}/playground/theme.css"), &[])
-        .expect("curl Theme while the changed row is uncommitted");
+        .expect("curl theme while the changed source is uncommitted");
     let uncommitted_layout = curl(&format!("{base_url}/playground/layout.css"), &[])
-        .expect("curl Layout while the changed row is uncommitted");
+        .expect("curl layout while the changed source is uncommitted");
     assert_eq!(uncommitted_theme.status, 200);
     assert_eq!(uncommitted_theme.body, ":root { --text: #202122; }");
     assert_eq!(uncommitted_layout.status, 200);
@@ -951,8 +948,8 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         project.path(),
         &[
             "add",
-            "playground/Theme/wiki-basic.orna",
-            "playground/Layout/responsive.orna",
+            "playground/web-ui/src/theme.css",
+            "playground/web-ui/src/layout.css",
         ],
     );
     git(
@@ -965,7 +962,7 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
             "commit",
             "--quiet",
             "-m",
-            "update playground Theme and Layout records",
+            "update renderer package styles",
         ],
     );
     let updated_revision_response = curl(&format!("{base_url}/api/playground/revision"), &[])
@@ -974,12 +971,12 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
         serde_json::from_str(&updated_revision_response.body).expect("updated revision JSON");
     let updated_revision = updated_revision_json["revision"]
         .as_str()
-        .expect("committed Theme and Layout revision");
+        .expect("committed renderer style revision");
     assert_ne!(updated_revision, route_revision);
     let updated_theme = curl(&format!("{base_url}/playground/theme.css"), &[])
-        .expect("curl committed updated Theme row");
+        .expect("curl committed renderer theme stylesheet");
     let updated_layout = curl(&format!("{base_url}/playground/layout.css"), &[])
-        .expect("curl committed updated Layout row");
+        .expect("curl committed renderer layout stylesheet");
     assert_eq!(updated_theme.status, 200);
     assert_eq!(updated_theme.body, ":root { --text: #111111; }");
     assert_eq!(updated_layout.status, 200);
