@@ -1,0 +1,14 @@
+pub fn outer(value: Int): Int {
+let total = value;TRAILING
+if total > 0 {
+total
+} else {
+0
+}
+}
+
+// 🧭 comment stays byte-for-byte, apart from its indentation.
+/*
+  block comment indentation and trailing spaces stayTRAILING
+*/
+pub fn compass(): Str = "keep  spaces";
