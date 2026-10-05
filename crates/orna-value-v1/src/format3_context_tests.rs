@@ -95,6 +95,41 @@ fn published_blob_vectors_use_explicit_profiles() {
 }
 
 #[test]
+fn ovb2_blob_encoder_preflights_sink_and_streams_public_encoding() {
+    let resolver = counting_resolver(b"abc");
+    let context =
+        test_context_with_quota(resolver.clone(), Format3Quota::new(2, 1_u64 << 62).unwrap());
+    let blob = Blob::from_reference_with_annotation(
+        context
+            .reference(
+                ContentIdentity::from_bytes(b"abc"),
+                NativeOid::from_bytes(&[0x7f; 20]).unwrap(),
+            )
+            .unwrap(),
+        "text/plain;charset=utf-8",
+        None,
+    )
+    .unwrap();
+    let expected =
+        hex_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6");
+
+    let mut undersized_output = Vec::new();
+    assert_eq!(
+        blob.encode_ovb2_to_writer(
+            &mut undersized_output,
+            u64::try_from(expected.len() - 1).unwrap(),
+        ),
+        Err(Error::QuotaExceeded)
+    );
+    assert!(undersized_output.is_empty());
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
+
+    assert_eq!(encode_ovb2(&blob).unwrap(), expected);
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(resolver.max_request.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn mime1_annotations_are_canonical_and_reject_known_suffix_mismatches() {
     assert_eq!(
         decode_typed::<Vec<u8>>(&hex_bytes("436a7067")).unwrap(),
