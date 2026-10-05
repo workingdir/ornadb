@@ -209,22 +209,42 @@ impl NativeGraphContext {
     fn validate_sealed_schema_node(&self) -> Result<(), GraphError> {
         let scope = self.open_read_scope()?;
         let mut objects = ObjectBudget::new(
-            MAX_RANGE_GRAPH_OBJECTS,
+            scope.max_objects,
             scope.max_objects,
             Arc::clone(&scope.objects_used),
-            MAX_RANGE_METADATA_BYTES,
+            scope.metadata_quota,
             Arc::clone(&scope.metadata_used),
         );
         let schema_oid = self.row_snapshot.version().schema().schema_oid();
         let node = self.read_native_node(schema_oid, &scope, &mut objects)?;
-        match node {
-            NodeData::Schema { schema_digest, .. } if schema_digest == self.schema_digest => Ok(()),
-            NodeData::Schema { .. } => Err(GraphError::ContentIdentityMismatch),
-            other => Err(GraphError::WrongNodeKind {
+        let NodeData::Schema {
+            encoded_length,
+            schema_digest,
+            byte_root,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
                 expected: NodeKind::Schema,
-                actual: other.kind(),
-            }),
+                actual: node.kind(),
+            });
+        };
+        if schema_digest != self.schema_digest {
+            return Err(GraphError::ContentIdentityMismatch);
         }
+        let mut digest = crate::blob_store::ContentDigest::new();
+        self.walk_full_index(
+            &byte_root,
+            encoded_length,
+            None,
+            &scope,
+            &mut objects,
+            &mut digest,
+        )?;
+        let actual = digest.finish();
+        if actual.length() != encoded_length || actual.sha256() != schema_digest {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        Ok(())
     }
 
     /// Opens the repository owner's fixed-budget read scope. Each range is

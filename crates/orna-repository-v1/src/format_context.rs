@@ -892,14 +892,13 @@ mod graph_bridge_tests {
         write_git_object(directory, algorithm, "tree", &envelope)
     }
 
-    fn schema_node(directory: &Path, context: &RepositoryFormatContext) -> (NativeOid, [u8; 32]) {
-        let algorithm = context
-            .validate_schema_root()
-            .expect("pinned source schema root")
-            .oid
-            .algorithm();
-        let schema_bytes = MAIN_SOURCE.as_bytes();
-        let schema_digest: [u8; 32] = Sha256::digest(schema_bytes).into();
+    fn schema_descriptor_node(
+        directory: &Path,
+        algorithm: GitHashAlgorithm,
+        schema_bytes: &[u8],
+        encoded_length: u64,
+        schema_digest: [u8; 32],
+    ) -> NativeOid {
         let chunk_oid = write_git_object(directory, algorithm, "blob", schema_bytes);
         let byte_root = write_native_node(
             directory,
@@ -918,10 +917,28 @@ mod graph_bridge_tests {
             directory,
             algorithm,
             &NodeData::Schema {
-                encoded_length: schema_bytes.len() as u64,
+                encoded_length,
                 schema_digest,
                 byte_root,
             },
+        );
+        schema_oid
+    }
+
+    fn schema_node(directory: &Path, context: &RepositoryFormatContext) -> (NativeOid, [u8; 32]) {
+        let algorithm = context
+            .validate_schema_root()
+            .expect("pinned source schema root")
+            .oid
+            .algorithm();
+        let schema_bytes = MAIN_SOURCE.as_bytes();
+        let schema_digest: [u8; 32] = Sha256::digest(schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            directory,
+            algorithm,
+            schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
         );
         (schema_oid, schema_digest)
     }
@@ -1002,6 +1019,63 @@ mod graph_bridge_tests {
         assert!(matches!(
             original.open_native_graph(&other_snapshot_rows),
             Err(super::FormatContextError::RowMapMismatch)
+        ));
+    }
+
+    #[test]
+    fn native_graph_bridge_rejects_tampered_schema_payload_length_and_digest() {
+        let directory = repository();
+        let root = directory.path();
+        let context = context(root);
+        let algorithm = context
+            .validate_schema_root()
+            .expect("pinned source schema root")
+            .oid
+            .algorithm();
+        let valid_bytes = MAIN_SOURCE.as_bytes();
+        let valid_digest: [u8; 32] = Sha256::digest(valid_bytes).into();
+
+        let mut tampered_bytes = valid_bytes.to_vec();
+        tampered_bytes[0] ^= 1;
+        let tampered_payload = schema_descriptor_node(
+            root,
+            algorithm,
+            &tampered_bytes,
+            valid_bytes.len() as u64,
+            valid_digest,
+        );
+        let rows = sealed_rows(&context, &tampered_payload, valid_digest);
+        assert!(matches!(
+            context.open_native_graph(&rows),
+            Err(super::FormatContextError::GraphContextInvalid)
+        ));
+
+        let wrong_length = schema_descriptor_node(
+            root,
+            algorithm,
+            valid_bytes,
+            valid_bytes.len() as u64 + 1,
+            valid_digest,
+        );
+        let rows = sealed_rows(&context, &wrong_length, valid_digest);
+        assert!(matches!(
+            context.open_native_graph(&rows),
+            Err(super::FormatContextError::GraphContextInvalid)
+        ));
+
+        let mut wrong_digest = valid_digest;
+        wrong_digest[0] ^= 1;
+        let descriptor_digest_mismatch = schema_descriptor_node(
+            root,
+            algorithm,
+            valid_bytes,
+            valid_bytes.len() as u64,
+            wrong_digest,
+        );
+        let rows = sealed_rows(&context, &descriptor_digest_mismatch, valid_digest);
+        assert!(matches!(
+            context.open_native_graph(&rows),
+            Err(super::FormatContextError::GraphContextInvalid)
         ));
     }
 }
