@@ -2226,6 +2226,59 @@ fn divergent_checkout_carries_nonconflicting_git_state() {
     );
 }
 
+fn create_format3_checkout_target(root: &Path, with_store_root: bool) {
+    git(root, &["switch", "-c", "format3-target"]);
+    fs::remove_file(root.join(".orna/format.orna")).unwrap();
+    fs::write(
+        root.join(".orna/database.orna"),
+        "{\n    repository_format: 3,\n    database_id: \"00000000-0000-4000-8000-000000000001\",\n}\n",
+    )
+    .unwrap();
+    if with_store_root {
+        fs::create_dir_all(root.join(".orna/store")).unwrap();
+        fs::write(root.join(".orna/store/root"), b"format-3 store root\n").unwrap();
+    }
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-m", "format-3 checkout target"]);
+    git(root, &["switch", "main"]);
+}
+
+#[test]
+fn divergent_checkout_rejects_format3_target_without_a_store_root() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    create_format3_checkout_target(root.path(), false);
+    let runtime = RuntimeGeneration::new(91);
+    let before = repo.cwd_generation(runtime).unwrap();
+    let plan = repo.plan_checkout("format3-target", runtime).unwrap();
+
+    assert!(matches!(
+        repo.execute_nonconflicting_git_checkout(&plan),
+        Err(orna_repository_v1::RepositoryError::CheckoutTargetInvalid)
+    ));
+    assert_eq!(repo.cwd_generation(runtime).unwrap(), before);
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+}
+
+#[test]
+fn divergent_checkout_accepts_a_format3_target_with_source_and_store_roots() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    create_format3_checkout_target(root.path(), true);
+    let runtime = RuntimeGeneration::new(92);
+    let plan = repo.plan_checkout("format3-target", runtime).unwrap();
+
+    repo.execute_nonconflicting_git_checkout(&plan).unwrap();
+
+    assert_eq!(repo.head().unwrap().as_ref(), Some(plan.target().commit()));
+    assert_eq!(
+        git(root.path(), &["branch", "--show-current"]),
+        "format3-target"
+    );
+    assert!(root.path().join(".orna/database.orna").is_file());
+    assert!(root.path().join(".orna/store/root").is_file());
+}
+
 #[test]
 fn divergent_checkout_logical_validation_rejection_fences_git_mutation() {
     let root = repository();
