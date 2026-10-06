@@ -1640,3 +1640,113 @@ fn orna_serve_hosts_playground_with_pending_evals_and_snapshot_correct_deltas() 
     println!("WebSocket WATCH -> fresh Snapshot revision 0 (exit 0): matches applied delta");
     println!("WebSocket EVAL exact source fetched from live /api/examples -> Result 42 (exit 0)");
 }
+
+#[test]
+fn orna_serve_refreshes_the_source_backed_devtools_table_list() {
+    let project = tempfile::tempdir().expect("temporary Orna database");
+    let mut initialize = Command::new(BINARY);
+    initialize.arg("init").current_dir(project.path());
+    let _ = run(&mut initialize, "initialize source-backed table project");
+
+    std::fs::write(
+        project.path().join("main.orna"),
+        "pub fn main(): Int = 42;\n",
+    )
+    .expect("write root module");
+    std::fs::write(
+        project.path().join("contacts.orna"),
+        "pub table Contact(id: Str) { name: Str, }\n",
+    )
+    .expect("write ordinary table declaration");
+    git(project.path(), &["add", "main.orna", "contacts.orna"]);
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "add source table",
+        ],
+    );
+
+    let port = free_port();
+    let child = Command::new(BINARY)
+        .args(["serve", "--port", &port.to_string()])
+        .current_dir(project.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start orna serve");
+    let mut server = RunningServer(child);
+    let base_url = format!("http://127.0.0.1:{port}");
+    wait_until_serving(&mut server, &base_url);
+
+    let root = curl(&format!("{base_url}/"), &[]).expect("fetch root devtools link");
+    assert_eq!(root.status, 200);
+    assert!(root.body.contains("/devtools/tables"));
+    assert!(root.body.contains("Run the selected Orna source"));
+
+    let initial = curl(&format!("{base_url}/devtools/tables"), &[])
+        .expect("fetch committed source table list");
+    assert_eq!(initial.status, 200);
+    assert_eq!(
+        response_header(&initial.headers, "content-type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert_eq!(
+        response_header(&initial.headers, "cache-control"),
+        Some("no-store")
+    );
+    assert!(initial.body.contains("Database tables"));
+    assert!(initial.body.contains("Contact"));
+    assert!(initial.body.contains("name"));
+    assert!(initial.body.contains("Refresh the committed table list"));
+    assert!(initial.body.contains("/blob/"));
+    assert!(!initial.body.contains("<script"));
+
+    std::fs::write(
+        project.path().join("inventory.orna"),
+        "pub table Item(id: Str) { label: Str, }\n",
+    )
+    .expect("write an uncommitted ordinary table declaration");
+    let uncommitted =
+        curl(&format!("{base_url}/devtools/tables"), &[]).expect("refresh before source commit");
+    assert_eq!(uncommitted.status, 200);
+    assert!(!uncommitted.body.contains("Item"));
+
+    git(project.path(), &["add", "inventory.orna"]);
+    git(
+        project.path(),
+        &[
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+            "commit",
+            "--quiet",
+            "-m",
+            "add another source table",
+        ],
+    );
+    let refreshed = curl(&format!("{base_url}/devtools/tables"), &[])
+        .expect("refresh committed source table list");
+    assert_eq!(refreshed.status, 200);
+    assert!(refreshed.body.contains("Contact"));
+    assert!(refreshed.body.contains("Item"));
+    assert!(refreshed.body.contains("label"));
+    assert_ne!(initial.body, refreshed.body);
+    assert!(
+        server
+            .0
+            .try_wait()
+            .expect("probe orna serve after source refresh")
+            .is_none()
+    );
+    println!(
+        "GET /devtools/tables: committed Contact listed, uncommitted Item hidden, and Item visible after commit + ordinary refresh (HTTP 200, no browser script)"
+    );
+}
