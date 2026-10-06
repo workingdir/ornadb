@@ -20,6 +20,7 @@ use std::{
     },
 };
 
+use orna_value_v1::MediaAnnotation;
 use sha2::{Digest, Sha256};
 
 pub const REPOSITORY_FORMAT: u8 = 3;
@@ -1196,6 +1197,20 @@ impl NativeGraphContext {
         &self,
         pin: ProtectedContentPin,
     ) -> Result<OrpBlobBinding, GraphError> {
+        self.accept_protected_blob_pin_with_annotation(pin, "application/octet-stream", None)
+    }
+
+    /// Accepts a graph-issued pin with its canonical MIME-1 annotation.
+    ///
+    /// Inputs must already be in canonical MIME-1 spelling; the repository
+    /// validates both the closed registry rules and the exact supplied
+    /// spelling before writing the ORP Blob value.
+    pub fn accept_protected_blob_pin_with_annotation(
+        &self,
+        pin: ProtectedContentPin,
+        media_type: &str,
+        suffix: Option<&str>,
+    ) -> Result<OrpBlobBinding, GraphError> {
         let expected_ref = format!("refs/orna/pins/{}", hex_encode(&pin.pin_id));
         if pin.context != self.identity
             || pin.repository_id != self.repository_id
@@ -1217,20 +1232,204 @@ impl NativeGraphContext {
             return Err(GraphError::InvalidProtectedRef);
         }
 
+        let annotation = MediaAnnotation::new(media_type, suffix)
+            .map_err(|_| GraphError::InvalidBlobAnnotation)?;
+        if annotation.media_type() != media_type || annotation.suffix() != suffix {
+            return Err(GraphError::InvalidBlobAnnotation);
+        }
+
         let encoded_value = canonical_value_bytes(&CborValue::Tag(
             60111,
             Box::new(CborValue::Array(vec![
                 CborValue::Unsigned(pin.identity.length()),
                 CborValue::Bytes(pin.identity.sha256().to_vec()),
-                CborValue::Text("application/octet-stream".to_owned()),
-                CborValue::Null,
+                CborValue::Text(annotation.media_type().to_owned()),
+                annotation
+                    .suffix()
+                    .map_or(CborValue::Null, |suffix| CborValue::Text(suffix.to_owned())),
                 CborValue::Bytes(pin.descriptor_oid.as_bytes().to_vec()),
             ])),
         ));
-        Ok(OrpBlobBinding {
-            encoded_value,
-            pin,
+        Ok(OrpBlobBinding { encoded_value, pin })
+    }
+
+    /// Prepares one graph-backed ORP row insertion. The transaction module
+    /// keeps the resulting root protected until its caller-owned durable
+    /// publication/runtime-intent callback returns.
+    pub(crate) fn prepare_protected_blob_row(
+        &self,
+        pin: ProtectedContentPin,
+        media_type: &str,
+        suffix: Option<&str>,
+        mutation: crate::publication_transaction::ProtectedBlobRowInsert,
+    ) -> Result<PreparedOrpGraphCandidate, GraphError> {
+        let binding = self.accept_protected_blob_pin_with_annotation(pin, media_type, suffix)?;
+        let version = self.row_snapshot.version();
+        let count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+        if count >= crate::row_store::MAX_PAGE_ENTRIES as u64 {
+            return Err(GraphError::CandidateRequiresBranchRewrite);
+        }
+
+        let scope = self.open_read_scope()?;
+        let mut objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let previous = self.read_native_node(version.primary_root(), &scope, &mut objects)?;
+        let domain = rows_domain_for_version(version);
+        let mut entries = match previous {
+            NodeData::OrderedLeaf {
+                domain: actual,
+                entries,
+            } => {
+                if actual != domain {
+                    return Err(GraphError::InvalidDomain);
+                }
+                if entries.len() as u64 != count {
+                    return Err(GraphError::InvalidCount(entries.len()));
+                }
+                entries
+            }
+            NodeData::OrderedBranch { .. } => {
+                return Err(GraphError::CandidateRequiresBranchRewrite);
+            }
+            other => {
+                return Err(GraphError::WrongNodeKind {
+                    expected: NodeKind::OrderedLeaf,
+                    actual: other.kind(),
+                });
+            }
+        };
+
+        let key = mutation.key().clone();
+        let encoded_key = key
+            .canonical_bytes()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let mut insertion_index = entries.len();
+        for (index, entry) in entries.iter().enumerate() {
+            let existing = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                .map_err(|_| GraphError::NonCanonicalData)?;
+            match existing.cmp(&key) {
+                std::cmp::Ordering::Equal => return Err(GraphError::DuplicateRowKey),
+                std::cmp::Ordering::Greater => {
+                    insertion_index = index;
+                    break;
+                }
+                std::cmp::Ordering::Less => {}
+            }
+        }
+
+        let mut encoded_row = Vec::new();
+        array(&mut encoded_row, 1);
+        encoded_row.extend_from_slice(binding.encoded_value());
+        entries.insert(
+            insertion_index,
+            OrderedLeafEntry {
+                key: encoded_key,
+                value: encoded_row,
+            },
+        );
+        let node = NodeData::OrderedLeaf {
+            domain: domain.clone(),
+            entries,
+        };
+        let NodeData::OrderedLeaf { entries, .. } = &node else {
+            unreachable!("constructed ordered leaf")
+        };
+        for (index, entry) in entries.iter().enumerate().take(entries.len().saturating_sub(1)) {
+            if index + 1 >= crate::row_store::MIN_PAGE_ENTRIES {
+                let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                if row_page_anchor(0, &entry_key)? {
+                    return Err(GraphError::CandidateRequiresBranchRewrite);
+                }
+            }
+        }
+        let mut written = BTreeSet::new();
+        let primary_root = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+        self.sync_object_closure(&written, &scope)?;
+
+        let provisional_ref = format!(
+            "refs/orna/pins/pending/row-{}",
+            hex_encode(crate::Uuid::new_v4().as_bytes())
+        );
+        let cleanup = PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            provisional_ref,
+            primary_root.clone(),
+        );
+        self.create_protected_ref(&cleanup.reference, &primary_root)?;
+        self.sync_git_ref(&cleanup.reference)?;
+
+        let candidate = OrpGraphCandidate {
+            context: self.identity,
+            database_id: *version.database_id(),
+            relation_id: *version.relation_id(),
+            schema_digest: *version.schema().schema_digest(),
+            previous_root: version.primary_root().clone(),
+            primary_root,
+            row_count: count + 1,
+            key,
+            content_identity: binding.content_identity(),
+            media_type: media_type.to_owned(),
+            suffix: suffix.map(str::to_owned),
+            transfer: binding.transfer_record(),
+        };
+        Ok(PreparedOrpGraphCandidate {
+            candidate,
+            _binding: binding,
+            _cleanup: cleanup,
         })
+    }
+
+    /// Looks up the inserted row's Blob metadata from an uncommitted or
+    /// successfully committed candidate. This follows ORP metadata only and
+    /// never reads the protected Blob payload.
+    pub fn lookup_candidate_blob_metadata(
+        &self,
+        candidate: &OrpGraphCandidate,
+        key: &crate::row_store::TypedKey,
+        scope: &RepositoryReadScope,
+    ) -> Result<Option<ProtectedBlobMetadata>, GraphError> {
+        scope.authorize(self)?;
+        if candidate.context != self.identity
+            || candidate.database_id != self.database_id
+            || candidate.relation_id != *self.row_snapshot.version().relation_id()
+            || candidate.schema_digest != *self.row_snapshot.version().schema().schema_digest()
+            || candidate.primary_root.algorithm() != self.algorithm
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+        if key != &candidate.key {
+            return Ok(None);
+        }
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let node = self.read_native_node(&candidate.primary_root, scope, &mut objects)?;
+        let NodeData::OrderedLeaf { domain, entries } = node else {
+            return Err(GraphError::CandidateRequiresBranchRewrite);
+        };
+        if domain != rows_domain_for_parts(&candidate.relation_id, &candidate.schema_digest)
+            || entries.len() as u64 != candidate.row_count
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+        for entry in entries {
+            let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                .map_err(|_| GraphError::NonCanonicalData)?;
+            if &entry_key == key {
+                return decode_candidate_blob_metadata(&entry.value, &candidate.transfer).map(Some);
+            }
+        }
+        Ok(None)
     }
 
     fn finish_protection(
@@ -2017,6 +2216,11 @@ impl RepositoryReadScope {
     pub(crate) fn objects_read_for_test(&self) -> u64 {
         self.objects_used.load(AtomicOrdering::Acquire)
     }
+
+    #[cfg(test)]
+    pub(crate) fn payload_bytes_read_for_test(&self) -> u64 {
+        self.bytes_used.load(AtomicOrdering::Acquire)
+    }
 }
 
 struct PayloadReservation {
@@ -2742,6 +2946,111 @@ impl OrpBlobBinding {
 
     pub fn into_pin(self) -> ProtectedContentPin {
         self.pin
+    }
+}
+
+/// ORP graph root prepared for the caller-owned durable publication commit.
+///
+/// The root remains a candidate until the shared callback succeeds. Its
+/// transfer record is the evidence that must be committed with that root and
+/// the runtime publication intent.
+#[derive(Clone, Debug)]
+pub struct OrpGraphCandidate {
+    context: ContextIdentity,
+    database_id: [u8; 16],
+    relation_id: [u8; 16],
+    schema_digest: [u8; 32],
+    previous_root: NativeOid,
+    primary_root: NativeOid,
+    row_count: u64,
+    key: crate::row_store::TypedKey,
+    content_identity: crate::ContentIdentity,
+    media_type: String,
+    suffix: Option<String>,
+    transfer: ProtectedContentTransfer,
+}
+
+impl OrpGraphCandidate {
+    pub fn database_id(&self) -> &[u8; 16] {
+        &self.database_id
+    }
+
+    pub fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub fn schema_digest(&self) -> &[u8; 32] {
+        &self.schema_digest
+    }
+
+    pub fn previous_root(&self) -> &NativeOid {
+        &self.previous_root
+    }
+
+    pub fn primary_root(&self) -> &NativeOid {
+        &self.primary_root
+    }
+
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    pub fn key(&self) -> &crate::row_store::TypedKey {
+        &self.key
+    }
+
+    pub const fn content_identity(&self) -> crate::ContentIdentity {
+        self.content_identity
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn suffix(&self) -> Option<&str> {
+        self.suffix.as_deref()
+    }
+
+    pub fn protected_content_transfer(&self) -> &ProtectedContentTransfer {
+        &self.transfer
+    }
+}
+
+/// Metadata returned by an ORP lookup of a protected Blob row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtectedBlobMetadata {
+    content_identity: crate::ContentIdentity,
+    media_type: String,
+    suffix: Option<String>,
+}
+
+impl ProtectedBlobMetadata {
+    pub const fn content_identity(&self) -> crate::ContentIdentity {
+        self.content_identity
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn suffix(&self) -> Option<&str> {
+        self.suffix.as_deref()
+    }
+}
+
+pub(crate) struct PreparedOrpGraphCandidate {
+    candidate: OrpGraphCandidate,
+    _binding: OrpBlobBinding,
+    _cleanup: PendingPrivateRefCleanup,
+}
+
+impl PreparedOrpGraphCandidate {
+    pub(crate) fn candidate(&self) -> &OrpGraphCandidate {
+        &self.candidate
+    }
+
+    pub(crate) fn into_candidate(self) -> OrpGraphCandidate {
+        self.candidate
     }
 }
 
@@ -4167,6 +4476,18 @@ fn collect_ordered_range_with(
 mod persisted_orp_tests {
     use super::*;
     use crate::row_store::{RowValue, TypedKey};
+    use std::future::Future;
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(output) => return output,
+                std::task::Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
 
     fn fixture_git_object(directory: &Path, kind: &str, content: &[u8]) -> NativeOid {
         let mut child = Command::new("git")
@@ -4268,6 +4589,13 @@ mod persisted_orp_tests {
         let database_id = [0x31; 16];
         let relation_id = [0x32; 16];
         let store_root = NativeOid::new(algorithm, [0x33; 20]).expect("store-root fixture ID");
+        let primary_root = fixture_git_node(
+            root,
+            &NodeData::OrderedLeaf {
+                domain: rows_domain(relation_id, schema_digest),
+                entries: Vec::new(),
+            },
+        );
         let schema_generation = crate::row_store::SchemaGeneration::issue(
             database_id,
             relation_id,
@@ -4280,7 +4608,7 @@ mod persisted_orp_tests {
             relation_id,
             store_root.clone(),
             schema_generation,
-            store_root.clone(),
+            primary_root,
             0,
             Some(0),
         )
@@ -4311,6 +4639,20 @@ mod persisted_orp_tests {
             .status()
             .expect("inspect fixture ref")
             .success()
+    }
+
+    fn pending_refs(directory: &Path) -> Vec<u8> {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args([
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/orna/pins/pending",
+            ])
+            .output()
+            .expect("list pending refs");
+        assert!(output.status.success());
+        output.stdout
     }
 
     fn rows_domain(relation: [u8; 16], schema: [u8; 32]) -> Vec<u8> {
@@ -4547,6 +4889,143 @@ mod persisted_orp_tests {
     }
 
     #[test]
+    fn publication_transaction_rejected_callback_or_pin_leaves_no_admitted_row() {
+        let (directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"candidate rejected by shared publication callback";
+        let captured = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture candidate payload");
+        let pin = graph
+            .protect_captured_blob(captured, &scope)
+            .expect("protect complete OGB-2 closure");
+        let key = TypedKey::Text("rejected".to_owned());
+        let result = block_on(crate::commit_protected_blob_row(
+            &graph,
+            pin,
+            "text/plain",
+            None,
+            crate::ProtectedBlobRowInsert::new(key.clone()),
+            move |candidate| async move {
+                assert_eq!(candidate.key(), &key);
+                Err::<(), _>("publication rejected")
+            },
+        ));
+        assert!(matches!(
+            result,
+            Err(crate::PublicationTransactionError::Commit(
+                "publication rejected"
+            ))
+        ));
+        assert!(pending_refs(directory.path()).is_empty());
+
+        let scope = graph.open_read_scope().expect("fresh owner read scope");
+        assert!(
+            graph
+                .lookup_row(&TypedKey::Text("rejected".to_owned()), &scope)
+                .expect("lookup baseline row map")
+                .is_none()
+        );
+
+        let captured = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture second candidate payload");
+        let mut pin = graph
+            .protect_captured_blob(captured, &scope)
+            .expect("protect second OGB-2 closure");
+        let mut invalid_descriptor = pin.descriptor_oid.as_bytes().to_vec();
+        invalid_descriptor[0] ^= 1;
+        pin.descriptor_oid = NativeOid::new(graph.algorithm, invalid_descriptor)
+            .expect("valid-width invalid descriptor");
+        let result = block_on(crate::commit_protected_blob_row(
+            &graph,
+            pin,
+            "text/plain",
+            None,
+            crate::ProtectedBlobRowInsert::new(TypedKey::Text("rejected-pin".to_owned())),
+            |_| {
+                panic!("invalid pin must not invoke the callback");
+                #[allow(unreachable_code)]
+                async {
+                    Ok::<(), &'static str>(())
+                }
+            },
+        ));
+        assert!(matches!(
+            result,
+            Err(crate::PublicationTransactionError::Graph(
+                GraphError::InvalidProtectedRef
+            ))
+        ));
+        assert!(pending_refs(directory.path()).is_empty());
+
+        let scope = graph.open_read_scope().expect("fresh owner read scope");
+        assert!(
+            graph
+                .lookup_row(&TypedKey::Text("rejected-pin".to_owned()), &scope)
+                .expect("lookup baseline row map")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
+        let (directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"metadata lookup must not hydrate this payload";
+        let captured = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture candidate payload");
+        let pin = graph
+            .protect_captured_blob(captured, &scope)
+            .expect("protect complete OGB-2 closure");
+        let identity = pin.content_identity();
+        let pin_id = *pin.pin_id();
+        let key = TypedKey::Text("blob-1".to_owned());
+        let callback_key = key.clone();
+        let reference = "refs/orna/test-publications/blob-1".to_owned();
+        let durable_reference = reference.clone();
+        let worktree = directory.path().to_path_buf();
+        let (candidate, receipt) = block_on(crate::commit_protected_blob_row(
+            &graph,
+            pin,
+            "text/plain",
+            None,
+            crate::ProtectedBlobRowInsert::new(key.clone()),
+            move |candidate| async move {
+                assert_eq!(candidate.key(), &callback_key);
+                assert_eq!(candidate.content_identity(), identity);
+                assert_eq!(candidate.protected_content_transfer().pin_id(), &pin_id);
+                let output = Command::new("git")
+                    .current_dir(&worktree)
+                    .args([
+                        "update-ref",
+                        &durable_reference,
+                        &candidate.primary_root().to_hex(),
+                    ])
+                    .output()
+                    .expect("persist candidate through caller commit callback");
+                assert!(output.status.success());
+                Ok::<_, &'static str>("committed")
+            },
+        ))
+        .expect("shared publication callback committed");
+        assert_eq!(receipt, "committed");
+        assert!(fixture_ref_exists(directory.path(), &reference));
+        assert!(pending_refs(directory.path()).is_empty());
+
+        let scope = graph.open_read_scope().expect("fresh owner read scope");
+        let metadata = graph
+            .lookup_candidate_blob_metadata(&candidate, &key, &scope)
+            .expect("metadata-only ORP lookup")
+            .expect("inserted row metadata");
+        assert_eq!(metadata.content_identity(), identity);
+        assert_eq!(metadata.media_type(), "text/plain");
+        assert_eq!(metadata.suffix(), None);
+        assert_eq!(scope.payload_bytes_read_for_test(), 0);
+    }
+
+    #[test]
     fn protected_pin_acceptance_rejects_a_tampered_descriptor() {
         let (_directory, graph) = capture_test_context();
         let scope = graph.open_read_scope().expect("owner read scope");
@@ -4652,6 +5131,9 @@ pub enum GraphError {
     InvalidEmptyBlob,
     InvalidByteIndex,
     InvalidRange,
+    InvalidBlobAnnotation,
+    DuplicateRowKey,
+    CandidateRequiresBranchRewrite,
     ContextMismatch,
     InvalidReadScope,
     DescriptorNotInRow,
@@ -4713,6 +5195,13 @@ impl fmt::Display for GraphError {
             Self::InvalidEmptyBlob => f.write_str("empty Blob descriptor has a byte root"),
             Self::InvalidByteIndex => f.write_str("invalid byte-index spans"),
             Self::InvalidRange => f.write_str("invalid or out-of-bounds content range"),
+            Self::InvalidBlobAnnotation => {
+                f.write_str("Blob MIME type or suffix is not canonical MIME-1")
+            }
+            Self::DuplicateRowKey => f.write_str("ORP row insertion key already exists"),
+            Self::CandidateRequiresBranchRewrite => {
+                f.write_str("ORP candidate requires a branch or page rewrite")
+            }
             Self::ContextMismatch => f.write_str("graph capability belongs to another context"),
             Self::InvalidReadScope => f.write_str("invalid owner-bound graph read scope"),
             Self::DescriptorNotInRow => {
@@ -5007,6 +5496,78 @@ struct VerifiedValueOverflow {
 
 fn rows_domain_for_version(version: &crate::row_store::RowMapVersion) -> Vec<u8> {
     rows_domain(version.relation_id(), version.schema().schema_digest())
+}
+
+fn rows_domain_for_parts(relation_id: &[u8; 16], schema_digest: &[u8; 32]) -> Vec<u8> {
+    rows_domain(relation_id, schema_digest)
+}
+
+fn row_page_anchor(height: u8, key: &crate::row_store::TypedKey) -> Result<bool, GraphError> {
+    let canonical = key
+        .canonical_bytes()
+        .map_err(|_| GraphError::NonCanonicalData)?;
+    let mut hasher = Sha256::new();
+    hasher.update(crate::row_store::ORP_DOMAIN);
+    hasher.update(u32::from(height).to_be_bytes());
+    hasher.update(canonical);
+    let digest = hasher.finalize();
+    Ok(digest[31] & ((1 << crate::row_store::ORP_ANCHOR_BITS) - 1) == 0)
+}
+
+fn decode_candidate_blob_metadata(
+    encoded_row: &[u8],
+    transfer: &ProtectedContentTransfer,
+) -> Result<ProtectedBlobMetadata, GraphError> {
+    let CborValue::Array(mut fields) = decode_canonical_cbor(encoded_row)? else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    if fields.len() != 1 {
+        return Err(GraphError::NonCanonicalData);
+    }
+    let CborValue::Tag(60111, payload) = fields.remove(0) else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let CborValue::Array(fields) = *payload else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    if fields.len() != 5 {
+        return Err(GraphError::NonCanonicalData);
+    }
+    let [
+        CborValue::Unsigned(length),
+        CborValue::Bytes(digest),
+        CborValue::Text(media_type),
+        suffix,
+        CborValue::Bytes(descriptor_oid),
+    ] = fields.as_slice()
+    else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    if !matches!(suffix, CborValue::Null | CborValue::Text(_)) {
+        return Err(GraphError::NonCanonicalData);
+    }
+    let expected_digest = transfer.content_identity().sha256();
+    if digest.len() != 32
+        || *length != transfer.content_identity().length()
+        || digest.as_slice() != expected_digest.as_slice()
+        || descriptor_oid.as_slice() != transfer.descriptor_oid().as_bytes()
+    {
+        return Err(GraphError::ContentIdentityMismatch);
+    }
+    let mut digest_bytes = [0; 32];
+    digest_bytes.copy_from_slice(digest);
+    let identity = crate::ContentIdentity::new(*length, digest_bytes)
+        .map_err(|_| GraphError::ContentIdentityMismatch)?;
+    let suffix = match suffix {
+        CborValue::Null => None,
+        CborValue::Text(suffix) => Some(suffix.clone()),
+        _ => unreachable!("suffix variant checked above"),
+    };
+    Ok(ProtectedBlobMetadata {
+        content_identity: identity,
+        media_type: media_type.clone(),
+        suffix,
+    })
 }
 
 fn overflow_tag_oid(
