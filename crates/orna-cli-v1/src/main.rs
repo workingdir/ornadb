@@ -2089,21 +2089,62 @@ fn run_pure_invocation(
 
 
 
-fn repl_session(endpoint: &Endpoint) -> Result<AdmittedReplSession, Diagnostic> {
-    let project_context = match endpoint {
-        Endpoint::ManagedLocal => orna_repository_v1::Repository::discover(".").is_ok(),
-        Endpoint::Path(_) => true,
+/// Runtime authority retained by one CLI REPL session.
+///
+/// Project loading and later snapshot selection share this opened repository;
+/// callers can also use it as the explicit injection point for repository
+/// capabilities without process-global state.
+struct ReplRuntime {
+    repository: Option<orna_repository_v1::Repository>,
+    session: AdmittedReplSession,
+}
+
+fn repl_runtime(
+    repository: Option<orna_repository_v1::Repository>,
+) -> Result<ReplRuntime, Diagnostic> {
+    let session = if let Some(repository) = &repository {
+        let project = orna_project_v1::ProjectLoader::default()
+            .load(repository)
+            .map_err(|_| {
+                Diagnostic::target(
+                    "E2100",
+                    "project source could not be loaded",
+                    "fix the project module graph and source boundaries, then run check again",
+                )
+            })?;
+        AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
+            .map_err(|error| repl_session_error(&error))?
+    } else {
+        // Preserve the core-only REPL when the current directory has no Git
+        // repository or the endpoint is not local.
+        AdmittedReplSession::new(Limits::default())
+    };
+    Ok(ReplRuntime {
+        repository,
+        session,
+    })
+}
+
+fn repl_session(endpoint: &Endpoint) -> Result<ReplRuntime, Diagnostic> {
+    let repository = match endpoint {
+        // The legacy implicit local REPL remains core-only when no worktree is
+        // present. Keep the successful discovery result as session authority.
+        Endpoint::ManagedLocal => orna_repository_v1::Repository::discover(".").ok(),
+        Endpoint::Path(path) => Some(
+            orna_repository_v1::Repository::discover(path).map_err(|_| {
+                Diagnostic::target(
+                    "E2100",
+                    "project Git worktree could not be discovered",
+                    "run the command inside a Git worktree or provide a local project path",
+                )
+            })?,
+        ),
         // Snapshot selectors are deliberately repository-backed. Keep a
         // non-local REPL core-only so the loader can reject `:at` uniformly as
         // ORNA-REPL-AT instead of failing before the command loop starts.
-        Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => false,
+        Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => None,
     };
-    if project_context {
-        let project = load_project_without_standard_rejection(endpoint)?;
-        return AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
-            .map_err(|error| repl_session_error(&error));
-    }
-    Ok(AdmittedReplSession::new(Limits::default()))
+    repl_runtime(repository)
 }
 
 fn repl_session_error(error: &ReplError) -> Diagnostic {
@@ -2135,13 +2176,12 @@ fn repl_session_error(error: &ReplError) -> Diagnostic {
 /// particular, it never checks out a commit or changes Git's index, worktree,
 /// HEAD, or refs.
 struct ReplSnapshotSessionLoader<'a> {
-    endpoint: &'a Endpoint,
+    repository: Option<&'a orna_repository_v1::Repository>,
 }
 
 impl ReplSnapshotSessionLoader<'_> {
-    fn repository(&self) -> Result<orna_repository_v1::Repository, ()> {
-        let path = local_project_path(self.endpoint).map_err(|_| ())?;
-        orna_repository_v1::Repository::discover(path).map_err(|_| ())
+    fn repository(&self) -> Result<&orna_repository_v1::Repository, ()> {
+        self.repository.ok_or(())
     }
 
     fn admit(project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
@@ -2160,15 +2200,16 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
     ) -> Result<AdmittedReplSession, Self::Error> {
         match target {
             repl::SnapshotTarget::Cwd => {
-                let project =
-                    load_project_without_standard_rejection(self.endpoint).map_err(|_| ())?;
+                let project = orna_project_v1::ProjectLoader::default()
+                    .load(self.repository()?)
+                    .map_err(|_| ())?;
                 Self::admit(&project)
             }
             repl::SnapshotTarget::Head => {
                 let repository = self.repository()?;
                 let commit = repository.head().map_err(|_| ())?.ok_or(())?;
                 let project = orna_project_v1::ProjectLoader::default()
-                    .load_committed_snapshot(&repository, &commit)
+                    .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
                 Self::admit(&project)
             }
@@ -2176,7 +2217,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let repository = self.repository()?;
                 let commit = repository.resolve_snapshot(&reference).map_err(|_| ())?;
                 let project = orna_project_v1::ProjectLoader::default()
-                    .load_committed_snapshot(&repository, &commit)
+                    .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
                 Self::admit(&project)
             }
@@ -2256,11 +2297,11 @@ fn run_repl(
             "use a local Git worktree until the Orna transport is available",
         ));
     }
-    let mut session = repl_session(endpoint)?;
+    let mut runtime = repl_session(endpoint)?;
     let color_enabled = color_mode.stdout_enabled();
     if let Some(source) = expression {
         return run_repl_submission(
-            &mut session,
+            &mut runtime.session,
             source,
             &mut io::stdout().lock(),
             color_enabled,
@@ -2268,11 +2309,13 @@ fn run_repl(
     }
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let loader = ReplSnapshotSessionLoader { endpoint };
+    let loader = ReplSnapshotSessionLoader {
+        repository: runtime.repository.as_ref(),
+    };
     repl::run_with_snapshot_loader_and_color(
         &mut BufReader::new(stdin.lock()),
         &mut stdout.lock(),
-        &mut session,
+        &mut runtime.session,
         &loader,
         color_enabled,
     )
@@ -2968,12 +3011,12 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let mut session = repl_session(&endpoint).expect("project session");
+        let mut runtime = repl_session(&endpoint).expect("project session");
         let mut input =
             b"use library;\nlet n: Int = 21;\nlibrary.hidden(n)\nlibrary.twice(n)\n:quit\n"
                 .as_slice();
         let mut output = Vec::new();
-        repl::run(&mut input, &mut output, &mut session).expect("scripted session");
+        repl::run(&mut input, &mut output, &mut runtime.session).expect("scripted session");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
             "> > > error[ORNA-S012-UNRESOLVED]: name could not be resolved\nhelp: declare the name or add the matching `use` import before using it\n> 42 : Int\n> "
@@ -2998,7 +3041,9 @@ mod tests {
         );
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
-        let error = repl_session(&endpoint).expect_err("uncaptured standard module");
+        let error = repl_session(&endpoint)
+            .err()
+            .expect("uncaptured standard module");
         assert_eq!(error.code, "ORNA-S010-IMPORT");
         assert_eq!(error.exit, Exit::Target);
         assert_eq!(error.title, "imported module is unavailable");
@@ -3010,7 +3055,7 @@ mod tests {
 
 
     #[test]
-    fn repl_snapshot_loader_reads_cwd_head_and_named_refs_without_git_mutation() {
+    fn repl_repository_authority_is_reused_for_cwd_head_and_named_refs_without_git_mutation() {
         let directory = tempfile::tempdir().expect("temporary project");
         assert!(
             std::process::Command::new("git")
@@ -3039,9 +3084,9 @@ mod tests {
             std::process::Command::new("git")
                 .args([
                     "-c",
-                    "user.email=orna@example.test",
+                    "user.email=kieran@drewett.dev",
                     "-c",
-                    "user.name=Orna Test",
+                    "user.name=kierandrewett",
                     "-c",
                     "commit.gpgsign=false",
                     "commit",
@@ -3074,8 +3119,14 @@ mod tests {
             .expect("Git status before snapshot reads");
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let runtime = repl_session(&endpoint).expect("project REPL runtime");
+        let repository = runtime
+            .repository
+            .as_ref()
+            .expect("opened project repository remains session authority");
+        assert_eq!(repository.worktree(), directory.path());
         let loader = ReplSnapshotSessionLoader {
-            endpoint: &endpoint,
+            repository: Some(repository),
         };
         for (target, expected) in [
             (repl::SnapshotTarget::Cwd, "7 : Int"),
@@ -3222,8 +3273,13 @@ mod tests {
         assert!(status.status.success());
 
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
+        let runtime = repl_session(&endpoint).expect("project REPL runtime");
+        let repository = runtime
+            .repository
+            .as_ref()
+            .expect("opened project repository remains session authority");
         let loader = ReplSnapshotSessionLoader {
-            endpoint: &endpoint,
+            repository: Some(repository),
         };
         let mut session = repl::SnapshotSessionLoader::load_snapshot(
             &loader,
@@ -3276,14 +3332,14 @@ mod tests {
     #[test]
     fn repl_snapshot_loader_rejects_non_local_endpoints_as_at_errors() {
         let endpoint = Endpoint::RemoteTls("orna://host/project".into());
+        let mut runtime = repl_session(&endpoint).expect("core-only remote REPL session");
         let loader = ReplSnapshotSessionLoader {
-            endpoint: &endpoint,
+            repository: runtime.repository.as_ref(),
         };
-        let mut session = repl_session(&endpoint).expect("core-only remote REPL session");
         let mut input = b":at HEAD\n:at snapshot\n:quit\n".as_slice();
         let mut output = Vec::new();
 
-        repl::run_with_snapshot_loader(&mut input, &mut output, &mut session, &loader)
+        repl::run_with_snapshot_loader(&mut input, &mut output, &mut runtime.session, &loader)
             .expect("REPL runs");
 
         assert_eq!(
@@ -3309,7 +3365,8 @@ mod tests {
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         assert_eq!(
             repl_session(&endpoint)
-                .expect_err("module source rejects status binding")
+                .err()
+                .expect("module source rejects status binding")
                 .code,
             "E2101"
         );
