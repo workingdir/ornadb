@@ -1714,8 +1714,9 @@ enum Value {
     Float(u64),
     String(String),
     Blob(Vec<u8>),
-    /// An OVB-2 annotated Blob retained independently from legacy byte strings.
-    AnnotatedBlob(ContextValue),
+    /// An OVB-2 annotated Blob retained as its already validated wire value,
+    /// independently from legacy byte strings.
+    AnnotatedBlob(Raw),
     Date(String),
     Uuid([u8; 16]),
     /// OVB's complete stored identity is retained, including its snapshot pin.
@@ -2041,7 +2042,7 @@ impl Value {
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
             Self::Blob(value) => Raw::Bytes(value),
-            Self::AnnotatedBlob(value) => value.into_raw(),
+            Self::AnnotatedBlob(value) => value,
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
             Self::Reference(value) => value.raw().clone(),
@@ -2286,10 +2287,11 @@ impl Value {
         match raw {
             Raw::Tag(OVB2_BLOB_TAG, _) => {
                 context.depth(depth)?;
-                let value = ContextValue::new(ValueFormat::Ovb2, raw.clone())
-                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                value.blob().map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                Ok(Self::AnnotatedBlob(value))
+                // The OVB-2 boundary validates the complete ContextValue
+                // before evaluator conversion. Retain that validated raw
+                // Blob directly so we do not clone, hydrate, and hash its
+                // payload a second time here.
+                Ok(Self::AnnotatedBlob(raw.clone()))
             }
             Raw::Array(values) => {
                 context.depth(depth)?;
@@ -2351,6 +2353,15 @@ impl Value {
             Raw::Tag(60019, boxed) => {
                 context.depth(depth)?;
                 Self::range_from_raw(boxed, context, depth)
+            }
+            Raw::Tag(37 | 60000 | 60001 | 60002 | 60005 | 60007 | 60010 | 60014, _) => {
+                let value =
+                    CanonicalValue::new(raw.clone()).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Self::from_canonical(&value, context, depth)
+            }
+            Raw::Tag(_, _) => {
+                context.depth(depth)?;
+                Err(error("ORNA-EVAL-UNSUPPORTED"))
             }
             _ => {
                 let value =

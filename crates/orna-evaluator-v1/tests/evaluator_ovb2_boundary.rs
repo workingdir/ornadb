@@ -58,3 +58,25 @@ fn legacy_ovb1_evaluator_still_treats_blob_bytes_as_bytes() {
         value
     );
 }
+
+#[test]
+fn ovb2_relation_payload_is_rejected_as_unsupported() {
+    let object_id = |byte| Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])));
+    let relation = ContextValue::new(
+        ValueFormat::Ovb2,
+        Raw::Tag(
+            60021,
+            Box::new(Raw::Array(vec![
+                object_id(1),
+                object_id(2),
+                Raw::Int(7.into()),
+            ])),
+        ),
+    )
+    .expect("valid relation context value");
+    let environment = BTreeMap::from([("relation".to_owned(), relation)]);
+
+    let failure = evaluate_expression_ovb2("relation", &environment, Limits::default())
+        .expect_err("relation payload is outside the evaluator value subset");
+    assert_eq!(failure.code(), "ORNA-EVAL-UNSUPPORTED");
+}
