@@ -1459,6 +1459,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "orna-foundation-v1",
  "orna-syntax-v1",
+ "orna-value-v1",
  "parquet",
  "rustix 0.38.44",
  "sha2 0.11.0",
