@@ -253,9 +253,14 @@ impl PendingPrivateRefCleanup {
     }
 
     fn cleanup(&mut self) -> Result<(), GraphError> {
+        self.cleanup_with_identity().map_err(|(_, error)| error)
+    }
+
+    fn cleanup_with_identity(&mut self) -> Result<(), (String, GraphError)> {
         if self.armed {
             self.owner
-                .delete_protected_ref(&self.reference, &self.oid)?;
+                .delete_protected_ref(&self.reference, &self.oid)
+                .map_err(|error| (self.reference.clone(), error))?;
             self.armed = false;
         }
         Ok(())
@@ -1267,12 +1272,12 @@ impl NativeGraphContext {
     ) -> Result<PreparedOrpGraphCandidate, ProtectedBlobRowPreparationError> {
         let protected_pin_ref = pin.protected_ref.clone();
         let protected_pin_oid = pin.descriptor_oid.clone();
-        let protected_pin_ref_for_error = protected_pin_ref.clone();
         let mut pin_cleanup = Some(PendingPrivateRefCleanup::new(
             Arc::clone(&self.private_ref_owner),
             protected_pin_ref,
             protected_pin_oid,
         ));
+        let mut candidate_cleanup = None;
         let preparation = (|| -> Result<PreparedOrpGraphCandidate, GraphError> {
             let binding =
                 self.accept_protected_blob_pin_with_annotation(pin, media_type, suffix)?;
@@ -1372,11 +1377,14 @@ impl NativeGraphContext {
                 "refs/orna/pins/pending/row-{}",
                 hex_encode(crate::Uuid::new_v4().as_bytes())
             );
-            let cleanup = PendingPrivateRefCleanup::new(
+            candidate_cleanup = Some(PendingPrivateRefCleanup::new(
                 Arc::clone(&self.private_ref_owner),
                 provisional_ref,
                 primary_root.clone(),
-            );
+            ));
+            let cleanup = candidate_cleanup
+                .as_ref()
+                .expect("candidate cleanup remains armed during preparation");
             self.create_protected_ref(&cleanup.reference, &primary_root)?;
             self.sync_git_ref(&cleanup.reference)?;
 
@@ -1397,7 +1405,9 @@ impl NativeGraphContext {
             Ok(PreparedOrpGraphCandidate {
                 candidate,
                 _binding: binding,
-                _cleanup: cleanup,
+                _cleanup: candidate_cleanup
+                    .take()
+                    .expect("candidate cleanup remains armed after preparation"),
                 pin_cleanup: pin_cleanup
                     .take()
                     .expect("protected pin cleanup remains armed during preparation"),
@@ -1406,18 +1416,27 @@ impl NativeGraphContext {
 
         match preparation {
             Ok(prepared) => Ok(prepared),
-            Err(graph) => match pin_cleanup
-                .as_mut()
-                .expect("failed preparation retains protected pin cleanup")
-                .cleanup()
-            {
-                Ok(()) => Err(ProtectedBlobRowPreparationError::Graph(graph)),
-                Err(cleanup) => Err(ProtectedBlobRowPreparationError::Cleanup {
-                    graph,
-                    cleanup,
-                    protected_ref: protected_pin_ref_for_error,
-                }),
-            },
+            Err(graph) => {
+                let mut cleanup_failures = Vec::new();
+                if let Some(candidate_cleanup) = candidate_cleanup.as_mut() {
+                    if let Err(failure) = candidate_cleanup.cleanup_with_identity() {
+                        cleanup_failures.push(failure);
+                    }
+                }
+                if let Some(pin_cleanup) = pin_cleanup.as_mut() {
+                    if let Err(failure) = pin_cleanup.cleanup_with_identity() {
+                        cleanup_failures.push(failure);
+                    }
+                }
+                if cleanup_failures.is_empty() {
+                    Err(ProtectedBlobRowPreparationError::Graph(graph))
+                } else {
+                    Err(ProtectedBlobRowPreparationError::Cleanup {
+                        graph,
+                        cleanup: cleanup_failures,
+                    })
+                }
+            }
         }
     }
 
@@ -3086,8 +3105,7 @@ pub(crate) enum ProtectedBlobRowPreparationError {
     Graph(GraphError),
     Cleanup {
         graph: GraphError,
-        cleanup: GraphError,
-        protected_ref: String,
+        cleanup: Vec<(String, GraphError)>,
     },
 }
 
@@ -3096,12 +3114,21 @@ impl PreparedOrpGraphCandidate {
         &self.candidate
     }
 
-    pub(crate) fn cleanup_rejected_callback(mut self) -> Result<(), GraphError> {
-        let candidate_cleanup = self._cleanup.cleanup();
-        let pin_cleanup = self.pin_cleanup.cleanup();
-        candidate_cleanup?;
-        pin_cleanup?;
-        Ok(())
+    pub(crate) fn cleanup_rejected_callback(
+        mut self,
+    ) -> Result<(), Vec<(String, GraphError)>> {
+        let mut cleanup_failures = Vec::new();
+        if let Err(failure) = self._cleanup.cleanup_with_identity() {
+            cleanup_failures.push(failure);
+        }
+        if let Err(failure) = self.pin_cleanup.cleanup_with_identity() {
+            cleanup_failures.push(failure);
+        }
+        if cleanup_failures.is_empty() {
+            Ok(())
+        } else {
+            Err(cleanup_failures)
+        }
     }
 
     pub(crate) fn into_candidate(mut self) -> OrpGraphCandidate {
@@ -5015,9 +5042,10 @@ mod persisted_orp_tests {
             result,
             Err(crate::PublicationTransactionError::GraphCleanup {
                 graph: GraphError::InvalidProtectedRef,
-                protected_ref,
-                ..
-            }) if protected_ref == invalid_pin_ref
+                cleanup,
+            }) if cleanup.iter().any(|(reference, error)| {
+                reference == &invalid_pin_ref && error == &GraphError::GitCommandFailed
+            })
         ));
         assert!(fixture_ref_exists(directory.path(), &invalid_pin_ref));
         assert!(pending_refs(directory.path()).is_empty());
@@ -5029,6 +5057,75 @@ mod persisted_orp_tests {
                 .expect("lookup baseline row map")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn publication_transaction_reports_both_failed_rejected_callback_cleanups() {
+        let (directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"failed cleanup refs remain recoverable by identity";
+        let captured = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture candidate payload");
+        let pin = graph
+            .protect_captured_blob(captured, &scope)
+            .expect("protect complete OGB-2 closure");
+        let pin_ref = pin.protected_ref.clone();
+        let callback_pin_ref = pin_ref.clone();
+        let worktree = directory.path().to_path_buf();
+        let result = block_on(crate::commit_protected_blob_row(
+            &graph,
+            pin,
+            "text/plain",
+            None,
+            crate::ProtectedBlobRowInsert::new(TypedKey::Text("rejected-cleanup".to_owned())),
+            move |_| async move {
+                let output = Command::new("git")
+                    .current_dir(&worktree)
+                    .args([
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        "refs/orna/pins/pending",
+                    ])
+                    .output()
+                    .expect("list provisional row refs");
+                assert!(output.status.success());
+                let candidate_ref = std::str::from_utf8(&output.stdout)
+                    .expect("ref names are UTF-8")
+                    .lines()
+                    .find(|reference| reference.contains("/row-"))
+                    .expect("prepared candidate ref")
+                    .to_owned();
+
+                for reference in [&candidate_ref, &callback_pin_ref] {
+                    let output = Command::new("git")
+                        .current_dir(&worktree)
+                        .args(["update-ref", reference, "HEAD"])
+                        .output()
+                        .expect("replace cleanup ref target");
+                    assert!(output.status.success());
+                }
+                Err::<(), _>("publication rejected after ref replacement")
+            },
+        ));
+
+        let cleanup = match result {
+            Err(crate::PublicationTransactionError::CommitCleanup { commit, cleanup }) => {
+                assert_eq!(commit, "publication rejected after ref replacement");
+                cleanup
+            }
+            other => panic!("expected aggregate cleanup error, got {other:?}"),
+        };
+        assert_eq!(cleanup.len(), 2);
+        assert!(cleanup.iter().all(|(_, error)| *error == GraphError::GitCommandFailed));
+        assert!(cleanup.iter().any(|(reference, _)| reference == &pin_ref));
+        let candidate_ref = cleanup
+            .iter()
+            .map(|(reference, _)| reference)
+            .find(|reference| reference.contains("/pending/row-"))
+            .expect("candidate cleanup identity");
+        assert!(fixture_ref_exists(directory.path(), &pin_ref));
+        assert!(fixture_ref_exists(directory.path(), candidate_ref));
     }
 
     #[test]
