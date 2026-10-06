@@ -60,23 +60,26 @@ fn legacy_ovb1_evaluator_still_treats_blob_bytes_as_bytes() {
 }
 
 #[test]
-fn ovb2_relation_payload_is_rejected_as_unsupported() {
-    let object_id = |byte| Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])));
+fn ovb2_finite_relation_is_rejected_before_ovb1_validation() {
+    let row = annotated_blob_value(b"relation row");
     let relation = ContextValue::new(
         ValueFormat::Ovb2,
         Raw::Tag(
-            60021,
+            60027,
             Box::new(Raw::Array(vec![
-                object_id(1),
-                object_id(2),
-                Raw::Int(7.into()),
+                Raw::Bool(true),
+                Raw::Array(vec![row.raw().clone()]),
             ])),
         ),
     )
-    .expect("valid relation context value");
+    .expect("valid OVB-2 finite Relation containing an annotated Blob row");
+    assert!(
+        CanonicalValue::new(relation.raw().clone()).is_err(),
+        "the OVB-1 validator must reject this OVB-2-only Relation payload"
+    );
     let environment = BTreeMap::from([("relation".to_owned(), relation)]);
 
     let failure = evaluate_expression_ovb2("relation", &environment, Limits::default())
-        .expect_err("relation payload is outside the evaluator value subset");
+        .expect_err("finite Relation is outside the evaluator value subset");
     assert_eq!(failure.code(), "ORNA-EVAL-UNSUPPORTED");
 }
