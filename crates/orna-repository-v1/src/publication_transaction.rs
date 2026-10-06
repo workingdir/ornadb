@@ -36,13 +36,12 @@ pub enum PublicationTransactionError<E> {
     Graph(GraphError),
     GraphCleanup {
         graph: GraphError,
-        cleanup: GraphError,
-        protected_ref: String,
+        cleanup: Vec<(String, GraphError)>,
     },
     Commit(E),
     CommitCleanup {
         commit: E,
-        cleanup: GraphError,
+        cleanup: Vec<(String, GraphError)>,
     },
 }
 
@@ -84,12 +83,10 @@ where
         Err(crate::native_graph::ProtectedBlobRowPreparationError::Cleanup {
             graph,
             cleanup,
-            protected_ref,
         }) => {
             return Err(PublicationTransactionError::GraphCleanup {
                 graph,
                 cleanup,
-                protected_ref,
             });
         }
     };
