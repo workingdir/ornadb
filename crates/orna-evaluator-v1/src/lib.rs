@@ -1,8 +1,10 @@
 //! A deliberately small, deterministic Orna 1.0 expression evaluator.
 //!
-//! The public boundary admits and returns only OVB-1 canonical values. It has
-//! no I/O, external mutation, clock, random, module-loading, or host-call
-//! capability.
+//! The legacy public boundary admits and returns OVB-1 canonical values. The
+//! separate [`evaluate_expression_ovb2`] boundary admits and returns OVB-2
+//! context values, preserving annotated Blobs without changing OVB-1 APIs.
+//! The evaluator has no I/O, external mutation, clock, random, module-loading,
+//! or host-call capability.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -21,8 +23,8 @@ use orna_syntax_v1::{
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::{
-    CANONICAL_NAN_BITS, ErrorValue as CanonicalErrorValue, Raw, domain_digest, float_max,
-    float_min, float_ordinary_eq, float_total_cmp,
+    CANONICAL_NAN_BITS, ContextValue, ErrorValue as CanonicalErrorValue, OVB2_BLOB_TAG, Raw,
+    ValueFormat, domain_digest, float_max, float_min, float_ordinary_eq, float_total_cmp,
 };
 use serde::{
     Deserialize,
@@ -916,6 +918,46 @@ pub fn evaluate_expression(
     evaluate_expression_with_functions(source, environment, &Functions::new(), limits)
 }
 
+/// Evaluate one expression using OVB-2 context values at the boundary.
+///
+/// Every environment value must carry the OVB-2 profile. Annotated Blobs are
+/// retained as typed values while evaluating and are returned with their MIME
+/// type and suffix intact. This is an additive boundary; the OVB-1
+/// [`Environment`] and [`evaluate_expression`] APIs remain unchanged.
+pub fn evaluate_expression_ovb2(
+    source: &str,
+    environment: &BTreeMap<String, ContextValue>,
+    limits: Limits,
+) -> Result<ContextValue, EvaluationError> {
+    check_limits(source, limits)?;
+    let parsed = parse_expression(source);
+    if !parsed.is_ok() {
+        return Err(error("ORNA-EVAL-PARSE"));
+    }
+    validate_limits(limits)?;
+    let functions = Functions::new();
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: None,
+        namespace: None,
+        transfer: None,
+        cancellation: None,
+    };
+    let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
+    let value = context.evaluate(&parsed.value, &mut scope, 0)?;
+    if context.transfer.is_some() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    ContextValue::new(ValueFormat::Ovb2, value.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
+}
+
 /// Evaluate source against explicit values and pure functions, checking source
 /// limits before parsing. No module or host lookup is performed.
 pub fn evaluate_expression_with_functions(
@@ -1672,6 +1714,8 @@ enum Value {
     Float(u64),
     String(String),
     Blob(Vec<u8>),
+    /// An OVB-2 annotated Blob retained independently from legacy byte strings.
+    AnnotatedBlob(ContextValue),
     Date(String),
     Uuid([u8; 16]),
     /// OVB's complete stored identity is retained, including its snapshot pin.
@@ -1997,6 +2041,7 @@ impl Value {
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
             Self::Blob(value) => Raw::Bytes(value),
+            Self::AnnotatedBlob(value) => value.into_raw(),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
             Self::Reference(value) => value.raw().clone(),
@@ -2238,8 +2283,81 @@ impl Value {
         }
     }
     fn from_raw(raw: &Raw, context: &mut Context, depth: usize) -> Result<Self, EvaluationError> {
-        let value = CanonicalValue::new(raw.clone()).map_err(|_| error("ORNA-EVAL-VALUE"))?;
-        Self::from_canonical(&value, context, depth)
+        match raw {
+            Raw::Tag(OVB2_BLOB_TAG, _) => {
+                context.depth(depth)?;
+                let value = ContextValue::new(ValueFormat::Ovb2, raw.clone())
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                value.blob().map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Ok(Self::AnnotatedBlob(value))
+            }
+            Raw::Array(values) => {
+                context.depth(depth)?;
+                context.items(values.len())?;
+                values
+                    .iter()
+                    .map(|value| Self::from_raw(value, context, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Self::List)
+            }
+            Raw::Map(values) => {
+                context.depth(depth)?;
+                context.items(values.len())?;
+                let mut record = BTreeMap::new();
+                for (key, value) in values {
+                    let Raw::Text(key) = key else {
+                        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                    };
+                    if !key.nfc().eq(key.chars()) {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    context.string(key.clone())?;
+                    if record
+                        .insert(key.clone(), Self::from_raw(value, context, depth + 1)?)
+                        .is_some()
+                    {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                }
+                Ok(Self::Record(record))
+            }
+            Raw::Tag(60015, boxed) => {
+                context.depth(depth)?;
+                let Raw::Array(values) = boxed.as_ref() else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                if values.is_empty() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                context.items(values.len())?;
+                values
+                    .iter()
+                    .map(|value| Self::from_raw(value, context, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Self::Tuple)
+            }
+            Raw::Tag(60008, boxed) => {
+                context.depth(depth)?;
+                Self::enum_from_raw(boxed, context, depth)
+            }
+            Raw::Tag(60009, boxed) => {
+                context.depth(depth)?;
+                Self::nominal_record_from_raw(boxed, context, depth)
+            }
+            Raw::Tag(60013, boxed) => {
+                context.depth(depth)?;
+                Self::option_from_raw(boxed, context, depth)
+            }
+            Raw::Tag(60019, boxed) => {
+                context.depth(depth)?;
+                Self::range_from_raw(boxed, context, depth)
+            }
+            _ => {
+                let value =
+                    CanonicalValue::new(raw.clone()).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Self::from_canonical(&value, context, depth)
+            }
+        }
     }
     fn decimal_from_raw(raw: &Raw, context: &mut Context) -> Result<Self, EvaluationError> {
         let Raw::Array(parts) = raw else {
@@ -2429,6 +2547,31 @@ impl Scope {
         context: &mut Context,
     ) -> Result<Self, EvaluationError> {
         Self::from_environment_with_nominals(environment, &NominalDefinitions::new(), context)
+    }
+
+    fn from_ovb2_environment(
+        environment: &BTreeMap<String, ContextValue>,
+        context: &mut Context,
+    ) -> Result<Self, EvaluationError> {
+        context.items(environment.len())?;
+        let mut values = BTreeMap::new();
+        for (name, value) in environment {
+            if name.len() > context.limits.max_string_bytes {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            if value.format() != ValueFormat::Ovb2 {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            let value = Value::from_raw(value.raw(), context, 0)?;
+            values.insert(name.clone(), value);
+        }
+        Ok(Self(
+            values,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+            BTreeSet::new(),
+        ))
     }
 
     fn from_environment_with_nominals(
@@ -10588,6 +10731,7 @@ fn write_json_value(
         Value::Unit
         | Value::Money { .. }
         | Value::Blob(_)
+        | Value::AnnotatedBlob(_)
         | Value::Date(_)
         | Value::Uuid(_)
         | Value::Reference(_)
@@ -10715,6 +10859,7 @@ fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationEr
         Value::Option(None) => "null".to_owned(),
         Value::Option(Some(value)) => format!("Some({})", encode_orna_value(value, depth + 1)?),
         Value::Blob(value) => encode_orna_string(&encode_base64(value)),
+        Value::AnnotatedBlob(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         Value::Date(value) => format!("date{}", encode_orna_string(value)),
         Value::Instant { .. } | Value::Duration { .. } | Value::Money { .. } => {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
