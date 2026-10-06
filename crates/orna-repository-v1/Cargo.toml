@@ -12,6 +12,7 @@ ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"
 fs2 = "0.4.3"
 libc = "0.2.180"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
+orna-value-v1 = { path = "../orna-value-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
 sha2 = "0.11.0"
