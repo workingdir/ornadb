@@ -1301,21 +1301,37 @@ impl MediaAnnotation {
     }
 
     fn with_mime1(media_type: &str, suffix: Option<&str>) -> Result<Self> {
-        let media_type = normalize_media_type(media_type)?;
+        let canonical_media_type = normalize_media_type(media_type)?;
+        if canonical_media_type != media_type {
+            return Err(Error::NonCanonical);
+        }
+        let media_type = canonical_media_type;
         let (preferred, compatible) =
             media_suffixes(media_type.split(';').next().unwrap_or(&media_type));
-        let suffix = suffix.map(|value| value.to_ascii_lowercase());
-        if let Some(value) = &suffix {
-            if value.len() > 32 || !valid_suffix(value) {
+        let suffix = if let Some(value) = suffix {
+            if value.len() > 32 {
                 return Err(Error::InvalidSuffix);
             }
-            if !compatible.is_empty() && !compatible.contains(&value.as_str()) {
+            let lowercase = value.to_ascii_lowercase();
+            if value != lowercase && valid_suffix(&lowercase) {
+                return Err(Error::NonCanonical);
+            }
+            if !valid_suffix(value) {
+                return Err(Error::InvalidSuffix);
+            }
+            if value == preferred {
+                return Err(Error::NonCanonical);
+            }
+            if !compatible.is_empty() && !compatible.contains(&value) {
                 return Err(Error::IncompatibleSuffix);
             }
-        }
+            Some(value.to_owned())
+        } else {
+            None
+        };
         Ok(Self {
             media_type,
-            suffix: suffix.filter(|value| value != preferred),
+            suffix,
         })
     }
 

@@ -166,7 +166,7 @@ fn ovb2_blob_encoder_preflights_sink_and_streams_public_encoding() {
 }
 
 #[test]
-fn mime1_annotations_are_canonical_and_reject_known_suffix_mismatches() {
+fn mime1_annotations_reject_noncanonical_and_unsafe_inputs() {
     assert_eq!(
         decode_typed::<Vec<u8>>(&hex_bytes("436a7067")).unwrap(),
         b"jpg"
@@ -180,19 +180,31 @@ fn mime1_annotations_are_canonical_and_reject_known_suffix_mismatches() {
         MediaAnnotation::new("text/plain", Some("../txt")),
         Err(Error::InvalidSuffix)
     );
+    assert_eq!(
+        MediaAnnotation::new("text/plain", Some("txt")),
+        Err(Error::NonCanonical)
+    );
 
-    let normalized = Blob::from_bytes_with_annotation(
+    assert_eq!(
+        Blob::from_bytes_with_annotation(
+            b"module".to_vec(),
+            "Application/JavaScript;CHARSET=\"UTF-8\"",
+            Some("MJS"),
+        ),
+        Err(Error::NonCanonical)
+    );
+    let canonical = Blob::from_bytes_with_annotation(
         b"module".to_vec(),
-        "Application/JavaScript;CHARSET=\"UTF-8\"",
-        Some("MJS"),
+        "text/javascript;charset=utf-8",
+        Some("mjs"),
     )
     .unwrap();
-    assert_eq!(normalized.media_type(), "text/javascript;charset=utf-8");
-    assert_eq!(normalized.suffix(), Some("mjs"));
-    assert_eq!(normalized.annotation().selected_suffix(), "mjs");
+    assert_eq!(canonical.media_type(), "text/javascript;charset=utf-8");
+    assert_eq!(canonical.suffix(), Some("mjs"));
+    assert_eq!(canonical.annotation().selected_suffix(), "mjs");
     assert_eq!(
-        decode_ovb2(&encode_ovb2(&normalized).unwrap()).unwrap(),
-        normalized
+        decode_ovb2(&encode_ovb2(&canonical).unwrap()).unwrap(),
+        canonical
     );
 
     assert_eq!(
@@ -213,10 +225,8 @@ fn mime1_annotations_are_canonical_and_reject_known_suffix_mismatches() {
         Err(Error::IncompatibleSuffix)
     );
     assert_eq!(
-        Blob::from_bytes_with_annotation(b"text".to_vec(), "text/plain", Some("TXT"))
-            .unwrap()
-            .suffix(),
-        None
+        Blob::from_bytes_with_annotation(b"text".to_vec(), "text/plain", Some("TXT")),
+        Err(Error::NonCanonical)
     );
     assert_eq!(
         Blob::from_bytes_with_annotation(b"opaque".to_vec(), "application/x-private", Some("data"))
@@ -227,14 +237,31 @@ fn mime1_annotations_are_canonical_and_reject_known_suffix_mismatches() {
     );
 
     let identity = ContentIdentity::from_bytes(b"abc");
-    let context = test_context(counting_resolver(b"abc"));
+    let resolver = counting_resolver(b"abc");
+    let context = test_context(resolver.clone());
     let reference = context
         .reference(identity, NativeOid::from_bytes(&[7; 20]).unwrap())
         .unwrap();
     assert_eq!(
-        Blob::from_reference_with_annotation(reference, "image/jpeg", Some("png")),
+        Blob::from_reference_with_annotation(reference.clone(), "image/jpeg", Some("png")),
         Err(Error::IncompatibleSuffix)
     );
+    assert_eq!(
+        Blob::from_reference_with_annotation(reference.clone(), "Audio/MPEG", None),
+        Err(Error::NonCanonical)
+    );
+    assert_eq!(
+        Blob::from_reference_with_annotation(reference.clone(), "audio/mpeg", Some("MP3")),
+        Err(Error::NonCanonical)
+    );
+    let blob = Blob::from_reference_with_annotation(reference, "audio/mpeg", None).unwrap();
+    let annotated = blob.annotate("audio/mpeg", Some("mp2")).unwrap();
+    assert_eq!(blob.content_identity(), annotated.content_identity());
+    assert!(blob.same_content(&annotated).unwrap());
+    assert!(!blob.value_eq(&annotated).unwrap());
+    assert_ne!(encode_rov3(&blob).unwrap(), encode_rov3(&annotated).unwrap());
+    assert_ne!(encode_sov3(&blob).unwrap(), encode_sov3(&annotated).unwrap());
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
     assert_eq!(
         Blob::from_semantic_commitment_in_context(identity, &context, "image/jpeg", Some("png")),
         Err(Error::IncompatibleSuffix)
