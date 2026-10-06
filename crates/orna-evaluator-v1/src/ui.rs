@@ -226,6 +226,7 @@ fn ui_value_type_name(value: &Value) -> String {
         Value::Float(_) => "std.float".into(),
         Value::String(_) => "std.text".into(),
         Value::Blob(_) => "std.binary_large_object".into(),
+        Value::AnnotatedBlob(_) => "std.binary_large_object".into(),
         Value::Date(_) => "std.date".into(),
         Value::Uuid(_) => "std.uuid".into(),
         Value::Reference(_) => "std.reference".into(),
