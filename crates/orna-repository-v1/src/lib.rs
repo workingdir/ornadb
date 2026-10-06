@@ -31,6 +31,7 @@ mod blob_store;
 mod compact;
 mod init;
 mod native_graph;
+mod publication_transaction;
 mod row_store;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -54,10 +55,14 @@ pub use init::{
 };
 pub use native_graph::{
     AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError, NativeGraphContext,
-    NativeObjectKind, NativeOid, ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt,
-    RangeVerification, RepositoryReadScope, VerifiedBlobRange,
+    NativeObjectKind, NativeOid, OrpBlobBinding, OrpGraphCandidate, ProtectedBlobMetadata,
+    ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification,
+    RepositoryReadScope, VerifiedBlobRange,
 };
-pub use row_store::{AdmittedRow, RowMapSnapshot};
+pub use publication_transaction::{
+    ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
+};
+pub use row_store::{AdmittedRow, RowMapSnapshot, TypedKey};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
 /// A verified native Git commit ID. It is intentionally Git-local: the
