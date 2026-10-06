@@ -57,8 +57,10 @@ impl<E> From<GraphError> for PublicationTransactionError<E> {
 /// The callback receives the ORP graph candidate and its protected-content
 /// transfer evidence together. It must make the candidate root durable and
 /// record the transfer/runtime intent in its existing shared commit boundary
-/// before returning `Ok`. A rejected callback removes both provisional roots
-/// and returns no candidate, so no row is admitted by this API.
+/// before returning `Ok`. A rejected callback attempts to remove both
+/// provisional roots and returns no candidate, so no row is admitted by this
+/// API. If cleanup fails, the returned error includes the failed ref identities
+/// and cleanup errors so any surviving roots can be identified.
 ///
 /// The repository keeps the candidate root protected through the callback.
 /// The callback can therefore construct and publish its normal Git commit
