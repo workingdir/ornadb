@@ -252,11 +252,13 @@ impl PendingPrivateRefCleanup {
         }
     }
 
-    fn cleanup(&mut self) {
+    fn cleanup(&mut self) -> Result<(), GraphError> {
         if self.armed {
-            let _ = self.owner.delete_protected_ref(&self.reference, &self.oid);
+            self.owner
+                .delete_protected_ref(&self.reference, &self.oid)?;
             self.armed = false;
         }
+        Ok(())
     }
 
     fn disarm(&mut self) {
@@ -266,7 +268,7 @@ impl PendingPrivateRefCleanup {
 
 impl Drop for PendingPrivateRefCleanup {
     fn drop(&mut self) {
-        self.cleanup();
+        let _ = self.cleanup();
     }
 }
 
@@ -1262,127 +1264,161 @@ impl NativeGraphContext {
         media_type: &str,
         suffix: Option<&str>,
         mutation: crate::publication_transaction::ProtectedBlobRowInsert,
-    ) -> Result<PreparedOrpGraphCandidate, GraphError> {
-        let binding = self.accept_protected_blob_pin_with_annotation(pin, media_type, suffix)?;
-        let version = self.row_snapshot.version();
-        let count = version.row_count().ok_or(GraphError::ContextMismatch)?;
-        if count >= crate::row_store::MAX_PAGE_ENTRIES as u64 {
-            return Err(GraphError::CandidateRequiresBranchRewrite);
-        }
-
-        let scope = self.open_read_scope()?;
-        let mut objects = ObjectBudget::new(
-            scope.max_objects,
-            scope.max_objects,
-            Arc::clone(&scope.objects_used),
-            scope.metadata_quota,
-            Arc::clone(&scope.metadata_used),
-        );
-        let previous = self.read_native_node(version.primary_root(), &scope, &mut objects)?;
-        let domain = rows_domain_for_version(version);
-        let mut entries = match previous {
-            NodeData::OrderedLeaf {
-                domain: actual,
-                entries,
-            } => {
-                if actual != domain {
-                    return Err(GraphError::InvalidDomain);
-                }
-                if entries.len() as u64 != count {
-                    return Err(GraphError::InvalidCount(entries.len()));
-                }
-                entries
-            }
-            NodeData::OrderedBranch { .. } => {
+    ) -> Result<PreparedOrpGraphCandidate, ProtectedBlobRowPreparationError> {
+        let protected_pin_ref = pin.protected_ref.clone();
+        let protected_pin_oid = pin.descriptor_oid.clone();
+        let protected_pin_ref_for_error = protected_pin_ref.clone();
+        let mut pin_cleanup = Some(PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            protected_pin_ref,
+            protected_pin_oid,
+        ));
+        let preparation = (|| -> Result<PreparedOrpGraphCandidate, GraphError> {
+            let binding =
+                self.accept_protected_blob_pin_with_annotation(pin, media_type, suffix)?;
+            let version = self.row_snapshot.version();
+            let count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+            if count >= crate::row_store::MAX_PAGE_ENTRIES as u64 {
                 return Err(GraphError::CandidateRequiresBranchRewrite);
             }
-            other => {
-                return Err(GraphError::WrongNodeKind {
-                    expected: NodeKind::OrderedLeaf,
-                    actual: other.kind(),
-                });
-            }
-        };
 
-        let key = mutation.key().clone();
-        let encoded_key = key
-            .canonical_bytes()
-            .map_err(|_| GraphError::NonCanonicalData)?;
-        let mut insertion_index = entries.len();
-        for (index, entry) in entries.iter().enumerate() {
-            let existing = crate::row_store::TypedKey::decode_canonical(&entry.key)
-                .map_err(|_| GraphError::NonCanonicalData)?;
-            match existing.cmp(&key) {
-                std::cmp::Ordering::Equal => return Err(GraphError::DuplicateRowKey),
-                std::cmp::Ordering::Greater => {
-                    insertion_index = index;
-                    break;
+            let scope = self.open_read_scope()?;
+            let mut objects = ObjectBudget::new(
+                scope.max_objects,
+                scope.max_objects,
+                Arc::clone(&scope.objects_used),
+                scope.metadata_quota,
+                Arc::clone(&scope.metadata_used),
+            );
+            let previous = self.read_native_node(version.primary_root(), &scope, &mut objects)?;
+            let domain = rows_domain_for_version(version);
+            let mut entries = match previous {
+                NodeData::OrderedLeaf {
+                    domain: actual,
+                    entries,
+                } => {
+                    if actual != domain {
+                        return Err(GraphError::InvalidDomain);
+                    }
+                    if entries.len() as u64 != count {
+                        return Err(GraphError::InvalidCount(entries.len()));
+                    }
+                    entries
                 }
-                std::cmp::Ordering::Less => {}
-            }
-        }
-
-        let mut encoded_row = Vec::new();
-        array(&mut encoded_row, 1);
-        encoded_row.extend_from_slice(binding.encoded_value());
-        entries.insert(
-            insertion_index,
-            OrderedLeafEntry {
-                key: encoded_key,
-                value: encoded_row,
-            },
-        );
-        let node = NodeData::OrderedLeaf {
-            domain: domain.clone(),
-            entries,
-        };
-        let NodeData::OrderedLeaf { entries, .. } = &node else {
-            unreachable!("constructed ordered leaf")
-        };
-        for (index, entry) in entries.iter().enumerate().take(entries.len().saturating_sub(1)) {
-            if index + 1 >= crate::row_store::MIN_PAGE_ENTRIES {
-                let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                if row_page_anchor(0, &entry_key)? {
+                NodeData::OrderedBranch { .. } => {
                     return Err(GraphError::CandidateRequiresBranchRewrite);
                 }
+                other => {
+                    return Err(GraphError::WrongNodeKind {
+                        expected: NodeKind::OrderedLeaf,
+                        actual: other.kind(),
+                    });
+                }
+            };
+
+            let key = mutation.key().clone();
+            let encoded_key = key
+                .canonical_bytes()
+                .map_err(|_| GraphError::NonCanonicalData)?;
+            let mut insertion_index = entries.len();
+            for (index, entry) in entries.iter().enumerate() {
+                let existing = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                match existing.cmp(&key) {
+                    std::cmp::Ordering::Equal => return Err(GraphError::DuplicateRowKey),
+                    std::cmp::Ordering::Greater => {
+                        insertion_index = index;
+                        break;
+                    }
+                    std::cmp::Ordering::Less => {}
+                }
             }
+
+            let mut encoded_row = Vec::new();
+            array(&mut encoded_row, 1);
+            encoded_row.extend_from_slice(binding.encoded_value());
+            entries.insert(
+                insertion_index,
+                OrderedLeafEntry {
+                    key: encoded_key,
+                    value: encoded_row,
+                },
+            );
+            let node = NodeData::OrderedLeaf {
+                domain: domain.clone(),
+                entries,
+            };
+            let NodeData::OrderedLeaf { entries, .. } = &node else {
+                unreachable!("constructed ordered leaf")
+            };
+            for (index, entry) in entries
+                .iter()
+                .enumerate()
+                .take(entries.len().saturating_sub(1))
+            {
+                if index + 1 >= crate::row_store::MIN_PAGE_ENTRIES {
+                    let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                        .map_err(|_| GraphError::NonCanonicalData)?;
+                    if row_page_anchor(0, &entry_key)? {
+                        return Err(GraphError::CandidateRequiresBranchRewrite);
+                    }
+                }
+            }
+            let mut written = BTreeSet::new();
+            let primary_root = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+            self.sync_object_closure(&written, &scope)?;
+
+            let provisional_ref = format!(
+                "refs/orna/pins/pending/row-{}",
+                hex_encode(crate::Uuid::new_v4().as_bytes())
+            );
+            let cleanup = PendingPrivateRefCleanup::new(
+                Arc::clone(&self.private_ref_owner),
+                provisional_ref,
+                primary_root.clone(),
+            );
+            self.create_protected_ref(&cleanup.reference, &primary_root)?;
+            self.sync_git_ref(&cleanup.reference)?;
+
+            let candidate = OrpGraphCandidate {
+                context: self.identity,
+                database_id: *version.database_id(),
+                relation_id: *version.relation_id(),
+                schema_digest: *version.schema().schema_digest(),
+                previous_root: version.primary_root().clone(),
+                primary_root,
+                row_count: count + 1,
+                key,
+                content_identity: binding.content_identity(),
+                media_type: media_type.to_owned(),
+                suffix: suffix.map(str::to_owned),
+                transfer: binding.transfer_record(),
+            };
+            Ok(PreparedOrpGraphCandidate {
+                candidate,
+                _binding: binding,
+                _cleanup: cleanup,
+                pin_cleanup: pin_cleanup
+                    .take()
+                    .expect("protected pin cleanup remains armed during preparation"),
+            })
+        })();
+
+        match preparation {
+            Ok(prepared) => Ok(prepared),
+            Err(graph) => match pin_cleanup
+                .as_mut()
+                .expect("failed preparation retains protected pin cleanup")
+                .cleanup()
+            {
+                Ok(()) => Err(ProtectedBlobRowPreparationError::Graph(graph)),
+                Err(cleanup) => Err(ProtectedBlobRowPreparationError::Cleanup {
+                    graph,
+                    cleanup,
+                    protected_ref: protected_pin_ref_for_error,
+                }),
+            },
         }
-        let mut written = BTreeSet::new();
-        let primary_root = self.write_capture_node(&node, &mut written, scope.max_objects)?;
-        self.sync_object_closure(&written, &scope)?;
-
-        let provisional_ref = format!(
-            "refs/orna/pins/pending/row-{}",
-            hex_encode(crate::Uuid::new_v4().as_bytes())
-        );
-        let cleanup = PendingPrivateRefCleanup::new(
-            Arc::clone(&self.private_ref_owner),
-            provisional_ref,
-            primary_root.clone(),
-        );
-        self.create_protected_ref(&cleanup.reference, &primary_root)?;
-        self.sync_git_ref(&cleanup.reference)?;
-
-        let candidate = OrpGraphCandidate {
-            context: self.identity,
-            database_id: *version.database_id(),
-            relation_id: *version.relation_id(),
-            schema_digest: *version.schema().schema_digest(),
-            previous_root: version.primary_root().clone(),
-            primary_root,
-            row_count: count + 1,
-            key,
-            content_identity: binding.content_identity(),
-            media_type: media_type.to_owned(),
-            suffix: suffix.map(str::to_owned),
-            transfer: binding.transfer_record(),
-        };
-        Ok(PreparedOrpGraphCandidate {
-            candidate,
-            _binding: binding,
-            _cleanup: cleanup,
-        })
     }
 
     /// Looks up the inserted row's Blob metadata from an uncommitted or
@@ -3042,6 +3078,17 @@ pub(crate) struct PreparedOrpGraphCandidate {
     candidate: OrpGraphCandidate,
     _binding: OrpBlobBinding,
     _cleanup: PendingPrivateRefCleanup,
+    pin_cleanup: PendingPrivateRefCleanup,
+}
+
+#[derive(Debug)]
+pub(crate) enum ProtectedBlobRowPreparationError {
+    Graph(GraphError),
+    Cleanup {
+        graph: GraphError,
+        cleanup: GraphError,
+        protected_ref: String,
+    },
 }
 
 impl PreparedOrpGraphCandidate {
@@ -3049,7 +3096,16 @@ impl PreparedOrpGraphCandidate {
         &self.candidate
     }
 
-    pub(crate) fn into_candidate(self) -> OrpGraphCandidate {
+    pub(crate) fn cleanup_rejected_callback(mut self) -> Result<(), GraphError> {
+        let candidate_cleanup = self._cleanup.cleanup();
+        let pin_cleanup = self.pin_cleanup.cleanup();
+        candidate_cleanup?;
+        pin_cleanup?;
+        Ok(())
+    }
+
+    pub(crate) fn into_candidate(mut self) -> OrpGraphCandidate {
+        self.pin_cleanup.disarm();
         self.candidate
     }
 }
@@ -4899,6 +4955,8 @@ mod persisted_orp_tests {
         let pin = graph
             .protect_captured_blob(captured, &scope)
             .expect("protect complete OGB-2 closure");
+        let original_pin_ref = pin.protected_ref.clone();
+        assert!(fixture_ref_exists(directory.path(), &original_pin_ref));
         let key = TypedKey::Text("rejected".to_owned());
         let result = block_on(crate::commit_protected_blob_row(
             &graph,
@@ -4918,6 +4976,7 @@ mod persisted_orp_tests {
             ))
         ));
         assert!(pending_refs(directory.path()).is_empty());
+        assert!(!fixture_ref_exists(directory.path(), &original_pin_ref));
 
         let scope = graph.open_read_scope().expect("fresh owner read scope");
         assert!(
@@ -4933,6 +4992,7 @@ mod persisted_orp_tests {
         let mut pin = graph
             .protect_captured_blob(captured, &scope)
             .expect("protect second OGB-2 closure");
+        let invalid_pin_ref = pin.protected_ref.clone();
         let mut invalid_descriptor = pin.descriptor_oid.as_bytes().to_vec();
         invalid_descriptor[0] ^= 1;
         pin.descriptor_oid = NativeOid::new(graph.algorithm, invalid_descriptor)
@@ -4953,10 +5013,13 @@ mod persisted_orp_tests {
         ));
         assert!(matches!(
             result,
-            Err(crate::PublicationTransactionError::Graph(
-                GraphError::InvalidProtectedRef
-            ))
+            Err(crate::PublicationTransactionError::GraphCleanup {
+                graph: GraphError::InvalidProtectedRef,
+                protected_ref,
+                ..
+            }) if protected_ref == invalid_pin_ref
         ));
+        assert!(fixture_ref_exists(directory.path(), &invalid_pin_ref));
         assert!(pending_refs(directory.path()).is_empty());
 
         let scope = graph.open_read_scope().expect("fresh owner read scope");
