@@ -196,6 +196,31 @@ fn repl_status_and_last_result_bindings_remain_session_local_and_redacted() {
 }
 
 #[test]
+fn repl_repository_authority_absence_keeps_the_legacy_core_session() {
+    let directory = tempfile::tempdir().expect("directory without a repository");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .arg("repl")
+        .current_dir(directory.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Orna REPL process");
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(b"40 + 2\n:quit\n")
+        .expect("write core-only expression");
+    let output = child.wait_with_output().expect("wait for Orna REPL");
+
+    assert_eq!(output.status.code(), Some(0), "{:?}", output.stderr);
+    assert_eq!(output.stdout.as_slice(), b"> 42 : Int\n> ");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn repl_effect_preview_rejects_the_effect_and_preserves_last_value() {
     let directory = project();
     let output = run_repl(directory.path(), REPL_EFFECT);
