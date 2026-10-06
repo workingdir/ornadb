@@ -34,7 +34,16 @@ impl ProtectedBlobRowInsert {
 #[derive(Debug)]
 pub enum PublicationTransactionError<E> {
     Graph(GraphError),
+    GraphCleanup {
+        graph: GraphError,
+        cleanup: GraphError,
+        protected_ref: String,
+    },
     Commit(E),
+    CommitCleanup {
+        commit: E,
+        cleanup: GraphError,
+    },
 }
 
 impl<E> From<GraphError> for PublicationTransactionError<E> {
@@ -49,8 +58,8 @@ impl<E> From<GraphError> for PublicationTransactionError<E> {
 /// The callback receives the ORP graph candidate and its protected-content
 /// transfer evidence together. It must make the candidate root durable and
 /// record the transfer/runtime intent in its existing shared commit boundary
-/// before returning `Ok`. A rejected callback drops the provisional graph
-/// root and returns no candidate, so no row is admitted by this API.
+/// before returning `Ok`. A rejected callback removes both provisional roots
+/// and returns no candidate, so no row is admitted by this API.
 ///
 /// The repository keeps the candidate root protected through the callback.
 /// The callback can therefore construct and publish its normal Git commit
@@ -67,11 +76,31 @@ where
     F: FnOnce(OrpGraphCandidate) -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
-    let prepared = graph
-        .prepare_protected_blob_row(pin, media_type, suffix, mutation)
-        .map_err(PublicationTransactionError::Graph)?;
-    let receipt = commit(prepared.candidate().clone())
-        .await
-        .map_err(PublicationTransactionError::Commit)?;
+    let prepared = match graph.prepare_protected_blob_row(pin, media_type, suffix, mutation) {
+        Ok(prepared) => prepared,
+        Err(crate::native_graph::ProtectedBlobRowPreparationError::Graph(graph)) => {
+            return Err(PublicationTransactionError::Graph(graph));
+        }
+        Err(crate::native_graph::ProtectedBlobRowPreparationError::Cleanup {
+            graph,
+            cleanup,
+            protected_ref,
+        }) => {
+            return Err(PublicationTransactionError::GraphCleanup {
+                graph,
+                cleanup,
+                protected_ref,
+            });
+        }
+    };
+    let receipt = match commit(prepared.candidate().clone()).await {
+        Ok(receipt) => receipt,
+        Err(commit) => {
+            return match prepared.cleanup_rejected_callback() {
+                Ok(()) => Err(PublicationTransactionError::Commit(commit)),
+                Err(cleanup) => Err(PublicationTransactionError::CommitCleanup { commit, cleanup }),
+            };
+        }
+    };
     Ok((prepared.into_candidate(), receipt))
 }
