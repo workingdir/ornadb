@@ -175,10 +175,7 @@ impl VfsRepositoryCache {
         F: FnOnce(ActivationCandidate<S>) -> Fut,
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
-        if !Arc::ptr_eq(
-            &target.cache_epoch.generation,
-            &self.epoch.generation,
-        ) {
+        if !Arc::ptr_eq(&target.cache_epoch.generation, &self.epoch.generation) {
             return Err(TemporaryRenameError::WrongRepositoryScope);
         }
         target.rename_over(scratch, activate).await
@@ -965,9 +962,9 @@ mod tests {
         )
         .await
         {
-            Ok(next_capture) => Ok(ActivationDecision::Accepted(SnapshotPin::capture(Arc::new(
-                next_capture,
-            )))),
+            Ok(next_capture) => Ok(ActivationDecision::Accepted(SnapshotPin::capture(
+                Arc::new(next_capture),
+            ))),
             Err(TableActivationError::ValidationFailed(diagnostic)) => {
                 Ok(ActivationDecision::Rejected(diagnostic))
             }
@@ -1331,10 +1328,8 @@ mod tests {
         ));
         let target = runtime.manage_vfs_file(image).await.unwrap();
         let old_handle = target.open_read().await;
-        let directory = SnapshotReaddirCursor::new(
-            SnapshotPin::capture(Arc::clone(&initial_capture)),
-            0_u64,
-        );
+        let directory =
+            SnapshotReaddirCursor::new(SnapshotPin::capture(Arc::clone(&initial_capture)), 0_u64);
         assert!(old_handle.projection_is_current().await.unwrap());
         assert!(directory.projection_is_current().await.unwrap());
 
@@ -1391,12 +1386,12 @@ mod tests {
         assert!(!old_handle.projection_is_current().await.unwrap());
         assert!(!directory.projection_is_current().await.unwrap());
         assert!(handle.projection_is_current().await.unwrap());
-        assert_eq!(handle.read_at(0, accepted_bytes.len()), accepted_bytes.as_bytes());
         assert_eq!(
-            runtime
-                .committed_table_row("books", &[0x51])
-                .await
-                .unwrap(),
+            handle.read_at(0, accepted_bytes.len()),
+            accepted_bytes.as_bytes()
+        );
+        assert_eq!(
+            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
             Some(accepted_bytes.as_bytes().to_vec())
         );
 
@@ -1421,7 +1416,10 @@ mod tests {
             .unwrap();
         assert!(matches!(rejected, TemporaryRenameOutcome::Rejected { .. }));
         assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
-        assert_eq!(target.open_read().await.read_at(0, accepted_bytes.len()), accepted_bytes.as_bytes());
+        assert_eq!(
+            target.open_read().await.read_at(0, accepted_bytes.len()),
+            accepted_bytes.as_bytes()
+        );
         assert_eq!(
             rejected_save
                 .retained_invalid_draft()
@@ -1431,10 +1429,7 @@ mod tests {
             rejected_bytes.as_bytes()
         );
         assert_eq!(
-            runtime
-                .committed_table_row("books", &[0x52])
-                .await
-                .unwrap(),
+            runtime.committed_table_row("books", &[0x52]).await.unwrap(),
             None
         );
     }
