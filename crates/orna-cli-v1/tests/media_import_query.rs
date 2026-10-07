@@ -44,7 +44,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         .unwrap();
     let writer = state.acquire_lease([0x63; 16]).await.unwrap();
     let capability = capture_capability(&repository, relation_id);
-    let mut filesystem = FilesystemProvider::with_limits(1024, 16).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(source.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
