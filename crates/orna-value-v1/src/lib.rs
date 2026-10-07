@@ -21,6 +21,9 @@ use num_traits::{Signed, ToPrimitive, Zero};
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+mod blob_role;
+pub use blob_role::{BlobRole, MediaFamily};
+
 #[cfg(test)]
 #[path = "format3_context_tests.rs"]
 mod format3_context_tests;
@@ -59,6 +62,7 @@ pub enum Error {
     InvalidRange,
     MissingDescriptor,
     InvalidContext,
+    RoleMismatch,
     OwnerExpired,
     Cancelled,
     QuotaExceeded,
