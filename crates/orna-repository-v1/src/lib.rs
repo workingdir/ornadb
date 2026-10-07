@@ -57,7 +57,7 @@ pub use native_graph::{
     AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError, NativeGraphContext,
     NativeObjectKind, NativeOid, OrpBlobBinding, OrpGraphCandidate, ProtectedBlobMetadata,
     ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification,
-    RepositoryReadScope, VerifiedBlobRange,
+    RepositoryCaptureCapability, RepositoryReadScope, VerifiedBlobRange,
 };
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
