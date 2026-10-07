@@ -29,8 +29,8 @@ fn sys_compatibility_info_schema_matches_the_published_contract() {
     assert_eq!(compatibility["invariants"], serde_json::json!([]));
 
     let coordinates = ArtifactCompatibilityCoordinates::new(
-        "1.0.0",
-        "1.0",
+        document["language_version"].as_str().unwrap(),
+        document["sys_version"].as_str().unwrap(),
         "OVB-1",
         "1",
         "1",
@@ -38,8 +38,8 @@ fn sys_compatibility_info_schema_matches_the_published_contract() {
         vec!["orna.present.v1".into()],
     )
     .expect("valid compatibility coordinates");
-    assert_eq!(coordinates.language_version(), "1.0.0");
-    assert_eq!(coordinates.sys_version(), "1.0");
+    assert_eq!(coordinates.language_version(), "1.1.0");
+    assert_eq!(coordinates.sys_version(), "1.1");
     assert_eq!(coordinates.canonical_orna_codec_version(), "OVB-1");
     assert_eq!(coordinates.repository_layout_version(), "1");
     assert_eq!(coordinates.storage_manifest_version(), "1");
