@@ -1,13 +1,13 @@
 {
   "counts": {
     "enums": 44,
-    "failure_codes": 49,
-    "functions": 67,
+    "failure_codes": 67,
+    "functions": 82,
     "opaque_identifiers": 21,
     "reference_aliases": 78,
     "relations": 78,
     "singletons": 4,
-    "value_types": 35
+    "value_types": 37
   },
   "enums": {
     "sys.AssertionOwnerKind": [
@@ -359,71 +359,80 @@
     ]
   },
   "failure_codes": [
-    "sys.version.incompatible",
-    "sys.context.repl_unavailable",
-    "sys.object.not_found",
-    "sys.object.ambiguous",
-    "sys.object.wrong_kind",
-    "sys.snapshot.not_found",
-    "sys.snapshot.incomplete",
-    "sys.source.unavailable",
-    "sys.source.redacted",
-    "sys.handle.foreign_runtime",
-    "sys.handle.expired",
-    "sys.invoke.argument_missing",
-    "sys.invoke.argument_unknown",
-    "sys.invoke.argument_type",
-    "sys.invoke.return_type",
-    "sys.invoke.effect_unavailable",
-    "sys.invoke.idempotency_mismatch",
-    "sys.invoke.await_timeout",
-    "sys.invoke.not_callable",
-    "sys.invoke.revision_unavailable",
-    "sys.checkpoint.not_found",
-    "sys.checkpoint.conflict",
-    "sys.checkpoint.not_replayable",
-    "sys.failure.state_conflict",
-    "sys.failure.skip_unsupported",
-    "sys.admin.read_only",
-    "sys.admin.busy",
     "sys.admin.assertion_failed",
+    "sys.admin.busy",
     "sys.admin.missing_object",
+    "sys.admin.read_only",
     "sys.admin.verification_failed",
-    "sys.storage.corrupt",
-    "sys.storage.unavailable",
-    "sys.storage.unrepresentable_key",
-    "sys.storage.rewrite_conflict",
-    "sys.redaction.denied",
-    "sys.invoke.snapshot_mismatch",
-    "sys.invoke.transaction_mode",
-    "sys.git.unborn_head",
-    "sys.git.uncommitted_snapshot",
-    "sys.git.dirty_conflict",
-    "sys.git.stale_plan",
-    "sys.failure.stale_version",
-    "sys.snapshot.expired",
-    "sys.git.invalid_ref",
-    "sys.git.branch_exists",
-    "sys.git.nothing_to_commit",
+    "sys.blob.bounds",
+    "sys.blob.collision",
+    "sys.blob.corrupt",
+    "sys.blob.incompatible_suffix",
     "sys.blob.invalid_media_type",
     "sys.blob.invalid_suffix",
-    "sys.blob.incompatible_suffix"
+    "sys.blob.length_mismatch",
+    "sys.blob.limit",
+    "sys.blob.reference_context",
+    "sys.blob.source_changed",
+    "sys.blob.source_denied",
+    "sys.blob.unavailable",
+    "sys.blob.writer_state",
+    "sys.checkpoint.conflict",
+    "sys.checkpoint.not_found",
+    "sys.checkpoint.not_replayable",
+    "sys.codec.unsupported_value_profile",
+    "sys.context.repl_unavailable",
+    "sys.failure.skip_unsupported",
+    "sys.failure.stale_version",
+    "sys.failure.state_conflict",
+    "sys.format.unsupported",
+    "sys.git.branch_exists",
+    "sys.git.dirty_conflict",
+    "sys.git.invalid_ref",
+    "sys.git.nothing_to_commit",
+    "sys.git.stale_plan",
+    "sys.git.stale_review",
+    "sys.git.unborn_head",
+    "sys.git.uncommitted_snapshot",
+    "sys.handle.expired",
+    "sys.handle.foreign_runtime",
+    "sys.invoke.argument_missing",
+    "sys.invoke.argument_type",
+    "sys.invoke.argument_unknown",
+    "sys.invoke.await_timeout",
+    "sys.invoke.effect_unavailable",
+    "sys.invoke.idempotency_mismatch",
+    "sys.invoke.not_callable",
+    "sys.invoke.return_type",
+    "sys.invoke.revision_unavailable",
+    "sys.invoke.snapshot_mismatch",
+    "sys.invoke.transaction_mode",
+    "sys.object.ambiguous",
+    "sys.object.not_found",
+    "sys.object.wrong_kind",
+    "sys.redaction.denied",
+    "sys.snapshot.expired",
+    "sys.snapshot.incomplete",
+    "sys.snapshot.not_found",
+    "sys.source.redacted",
+    "sys.source.unavailable",
+    "sys.storage.corrupt",
+    "sys.storage.rewrite_conflict",
+    "sys.storage.unavailable",
+    "sys.storage.unrepresentable_key",
+    "sys.version.incompatible",
+    "sys.vfs.draft_retained",
+    "sys.vfs.invalid_document",
+    "sys.vfs.name_collision",
+    "sys.vfs.stale_edit",
+    "sys.vfs.unsupported"
   ],
   "functions": [
     {
-      "documentation": "Reports the public type identity, nominal metadata, and registered codec/protocol facts for `value`. The result is descriptive metadata only: it does not expose private payload bytes, evaluate the value, or grant permissions to use it.",
       "effect": "read",
       "name": "sys.meta",
       "purpose": "Return safe static/nominal/codec/protocol metadata for a value.",
       "signature": "fn sys.meta<T>(value: T): sys.ValueMetadata<T>"
-    },
-    {
-      "contract": "annotated-blob-format-3",
-      "effect": "read",
-      "name": "sys.blob.annotate",
-      "purpose": "Return the same immutable bytes with MIME-1-validated canonical annotations.",
-      "signature": "fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob",
-      "since": "1.1.0"
     },
     {
       "effect": "read",
@@ -432,10 +441,9 @@
       "signature": "fn sys.object(id: sys.ObjectId, at: sys.SnapshotRef = sys.current.snapshot): sys.ObjectRef"
     },
     {
-      "documentation": "Resolves a name using the language's ordinary import and visibility rules. `at` pins the lookup to a snapshot; `from` supplies the module whose imports and visibility are applied. Lookup is descriptive and never invokes the resolved object.",
       "effect": "read",
       "name": "sys.resolve",
-      "purpose": "Resolve a visible semantic name using ordinary import rules at a selected snapshot.",
+      "purpose": "Resolve a semantic name with ordinary visibility/import rules.",
       "signature": "fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef"
     },
     {
@@ -445,10 +453,9 @@
       "signature": "fn sys.resolve_function(name: Str, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.FunctionRef"
     },
     {
-      "documentation": "Returns the structured description associated with an already resolved object reference, including its kind-specific fields and snapshot context. Use this after `sys.resolve` when a client needs machine-readable details; it does not execute the object.",
       "effect": "read",
       "name": "sys.describe",
-      "purpose": "Return structured, snapshot-aware details for an already resolved object.",
+      "purpose": "Return structured object description.",
       "signature": "fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription"
     },
     {
@@ -560,10 +567,9 @@
       "signature": "fn sys.explain(function: sys.FunctionRef): sys.Plan"
     },
     {
-      "documentation": "Expands a diagnostic into its structured cause, related locations, and stable machine-readable explanation fields. The explanation preserves the diagnostic's identity and does not rewrite or suppress the original diagnostic.",
       "effect": "read",
       "name": "sys.explain(Diagnostic)",
-      "purpose": "Return the structured causes and related locations for a diagnostic.",
+      "purpose": "Return structured causal explanation.",
       "signature": "fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"
     },
     {
@@ -740,22 +746,8 @@
       "contract": "administrative-state-transitions",
       "effect": "admin",
       "name": "sys.admin.compact",
-      "purpose": "Rewrite physical segments atomically.",
+      "purpose": "Maintain/repack the current indexed profile without logical mutation or selecting a row mode.",
       "signature": "fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult"
-    },
-    {
-      "contract": "administrative-state-transitions",
-      "effect": "admin",
-      "name": "sys.admin.set_storage_preference",
-      "purpose": "Set future automatic placement preference without rewriting existing rows.",
-      "signature": "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage"
-    },
-    {
-      "contract": "administrative-state-transitions",
-      "effect": "admin",
-      "name": "sys.admin.rewrite_storage",
-      "purpose": "Atomically rewrite physical placement while preserving logical rows.",
-      "signature": "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult"
     },
     {
       "contract": "administrative-state-transitions",
@@ -871,6 +863,150 @@
       "name": "sys.admin.plan_checkout(Str)",
       "purpose": "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
       "signature": "fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "read",
+      "name": "sys.blob.length",
+      "purpose": "Return the exact byte count without hydrating payloads.",
+      "signature": "fn sys.blob.length(value: Blob): Int",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "read",
+      "name": "sys.blob.digest",
+      "purpose": "Return the raw-content SHA-256 commitment, independent of layout; not a full-verification claim.",
+      "signature": "fn sys.blob.digest(value: Blob): Digest",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "read",
+      "name": "sys.blob.read",
+      "purpose": "Return bounded raw-byte slice with octet-stream/null annotation; no media decoding.",
+      "signature": "fn sys.blob.read(value: Blob, offset: Int, length: Int): Blob",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "read",
+      "name": "sys.blob.verify",
+      "purpose": "Incrementally verify the complete content and its native dependency structure.",
+      "signature": "fn sys.blob.verify(value: Blob): Unit",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "read",
+      "name": "sys.blob.from_bytes",
+      "purpose": "Construct at most 8 MiB of bytes from integers in 0..255. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.",
+      "signature": "fn sys.blob.from_bytes(values: [Int]): Blob",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "read",
+      "name": "sys.blob.to_bytes",
+      "purpose": "Explicit bounded materialisation of at most 8 MiB.",
+      "signature": "fn sys.blob.to_bytes(value: Blob): [Int]",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "invoke",
+      "name": "sys.blob.begin",
+      "purpose": "Begin an owned capture with a checked total bound.",
+      "signature": "fn sys.blob.begin(expected_length: Int? = null, max_bytes: Int): sys.BlobWriter",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "invoke",
+      "name": "sys.blob.append",
+      "purpose": "Append at most 8 MiB in order; enforce the total bound before acceptance.",
+      "signature": "fn sys.blob.append(writer: sys.BlobWriter, part: Blob): Unit",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "invoke",
+      "name": "sys.blob.finish",
+      "purpose": "Seal, verify and protect the captured value without implicitly inserting a row. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.",
+      "signature": "fn sys.blob.finish(writer: sys.BlobWriter): Blob",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "invoke",
+      "name": "sys.blob.abort",
+      "purpose": "Abort unfinished capture; never delete a returned value.",
+      "signature": "fn sys.blob.abort(writer: sys.BlobWriter): Unit",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "invoke",
+      "name": "sys.blob.capture_file",
+      "purpose": "Capture an authorised regular file using the shared Blob writer and protection boundary. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.",
+      "signature": "fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "blob-value-and-storage",
+      "effect": "read",
+      "name": "sys.blob.resource",
+      "purpose": "Read a safe package-relative resource in the caller module's admitted source snapshot. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.",
+      "signature": "fn sys.blob.resource(path: Str): Blob",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "administrative-state-transitions",
+      "effect": "read",
+      "name": "sys.admin.review_commit",
+      "purpose": "Validate and bind the exact staged candidate without changing index, branch or user data.",
+      "signature": "fn sys.admin.review_commit(): sys.CommitReview",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "administrative-state-transitions",
+      "effect": "admin",
+      "name": "sys.admin.commit_reviewed",
+      "purpose": "Revalidate a reviewed candidate at protected publication and commit exactly that candidate.",
+      "signature": "fn sys.admin.commit_reviewed(review: sys.CommitReview, message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "annotated-blob-format-3",
+      "effect": "read",
+      "name": "sys.blob.media_type",
+      "purpose": "Read canonical declared MIME without payload hydration.",
+      "signature": "fn sys.blob.media_type(value: Blob): Str",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "annotated-blob-format-3",
+      "effect": "read",
+      "name": "sys.blob.suffix",
+      "purpose": "Read the canonical optional suffix hint without payload hydration.",
+      "signature": "fn sys.blob.suffix(value: Blob): Str?",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "annotated-blob-format-3",
+      "effect": "read",
+      "name": "sys.blob.annotate",
+      "purpose": "Return the same immutable bytes with MIME-1-validated canonical annotations.",
+      "signature": "fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob",
+      "since": "1.1.0"
+    },
+    {
+      "contract": "annotated-blob-format-3",
+      "effect": "read",
+      "name": "sys.blob.same_content",
+      "purpose": "Exact content-only equality under admitted-witness/collision rules; may stream bytes and fail unavailable.",
+      "signature": "fn sys.blob.same_content(left: Blob, right: Blob): Bool",
+      "since": "1.1.0"
     }
   ],
   "language_version": "1.1.0",
@@ -4525,6 +4661,10 @@
       "availability": "local-durable",
       "fields": [
         {
+          "name": "root",
+          "type": "sys.GitOid?"
+        },
+        {
           "name": "reference",
           "type": "sys.StorageRef"
         },
@@ -4595,6 +4735,10 @@
         {
           "name": "verification",
           "type": "sys.VerificationStatus"
+        },
+        {
+          "name": "schema_digest",
+          "type": "Digest"
         }
       ],
       "grouped_handle": "sys.storage.objects",
@@ -5323,66 +5467,6 @@
   "title": "Orna portable sys API",
   "value_types": [
     {
-      "fields": [],
-      "invariants": [
-        "preserves the row natural key and resolution context",
-        "does not grant authority",
-        "live references are runtime-generation-bound"
-      ],
-      "kind": "opaque-generic",
-      "name": "sys.RowRef<T>",
-      "purpose": "Snapshot/runtime-pinned reference to one canonical system-relation row.",
-      "type_parameters": [
-        "T"
-      ]
-    },
-    {
-      "fields": [
-        {
-          "name": "type",
-          "type": "sys.TypeRef"
-        },
-        {
-          "name": "redacted",
-          "type": "Bool"
-        },
-        {
-          "name": "canonical_digest",
-          "type": "Digest?"
-        }
-      ],
-      "invariants": [
-        "is not a dynamic Any fallback",
-        "retains the exact originating static type",
-        "cannot be implicitly unboxed or converted"
-      ],
-      "kind": "opaque",
-      "name": "sys.Value",
-      "purpose": "Explicit existential envelope for a value crossing a reflective system boundary.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "compressed_target_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "max_file_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "max_pending_age_seconds",
-          "type": "Int"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.PublicationPolicy",
-      "purpose": "Effective durable publication limits reported by the runtime.",
-      "type_parameters": []
-    },
-    {
       "fields": [
         {
           "name": "name",
@@ -5419,33 +5503,585 @@
     {
       "fields": [
         {
-          "name": "static_type",
-          "type": "sys.TypeRef"
+          "name": "file",
+          "type": "sys.FileRef"
         },
         {
-          "name": "nominal_type",
-          "type": "sys.TypeRef?"
+          "name": "span",
+          "type": "sys.SourceSpan"
         },
         {
-          "name": "protocols",
-          "type": "Relation<sys.Protocol>"
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
         },
         {
-          "name": "codecs",
-          "type": "[Str]"
+          "name": "commit",
+          "type": "sys.CommitRef?"
         },
         {
-          "name": "redacted",
+          "name": "author",
+          "type": "sys.PersonIdentity?"
+        },
+        {
+          "name": "authored_at",
+          "type": "Instant?"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectRef?"
+        },
+        {
+          "name": "semantic",
           "type": "Bool"
         }
       ],
       "invariants": [],
-      "kind": "record-generic",
-      "name": "sys.ValueMetadata<T>",
-      "purpose": "Safe type, protocol and codec metadata for a value without private-field disclosure.",
-      "type_parameters": [
-        "T"
-      ]
+      "kind": "record",
+      "name": "sys.Attribution",
+      "purpose": "Source or semantic blame attribution for one exact target range.",
+      "type_parameters": []
+    },
+    {
+      "fields": [],
+      "invariants": [
+        "states are open, finished, aborted",
+        "a handle is not a stored Blob or a portable reference",
+        "declared total and per-call limits are enforced before mutation",
+        "finish protects and returns immutable content; no user row or branch is implicitly created"
+      ],
+      "kind": "opaque",
+      "name": "sys.BlobWriter",
+      "purpose": "Nonserialisable owner/runtime-bound incremental Blob capture.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "requested",
+          "type": "Bool"
+        },
+        {
+          "name": "reason",
+          "type": "Str?"
+        },
+        {
+          "name": "requested_at",
+          "type": "Instant?"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.CancellationView",
+      "purpose": "Immutable activation-local cancellation observation.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "kind",
+          "type": "sys.ChangeTargetKind"
+        },
+        {
+          "name": "object",
+          "type": "sys.ObjectId?"
+        },
+        {
+          "name": "file",
+          "type": "sys.FileId?"
+        },
+        {
+          "name": "table",
+          "type": "sys.ObjectId?"
+        },
+        {
+          "name": "row_key",
+          "type": "sys.Value?"
+        }
+      ],
+      "invariants": [
+        "object: only object is present; file: only file is present; row: only table and row_key are present",
+        "row_key retains a non-secret key type and canonical value",
+        "equality includes kind and all populated identity fields"
+      ],
+      "kind": "record",
+      "name": "sys.ChangeTarget",
+      "purpose": "Discriminated identity of one changed semantic object, source file or table row.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "token",
+          "type": "Digest"
+        },
+        {
+          "name": "target",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "target_branch",
+          "type": "Str?"
+        },
+        {
+          "name": "base_head",
+          "type": "sys.GitOid?"
+        },
+        {
+          "name": "cwd",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "index_digest",
+          "type": "Digest"
+        },
+        {
+          "name": "worktree_digest",
+          "type": "Digest"
+        },
+        {
+          "name": "pending_generation",
+          "type": "Int"
+        },
+        {
+          "name": "would_discard",
+          "type": "[sys.ChangeTarget]"
+        },
+        {
+          "name": "active_consumers",
+          "type": "[sys.ConsumerIdentity]"
+        },
+        {
+          "name": "conflicts",
+          "type": "[sys.Diagnostic]"
+        }
+      ],
+      "invariants": [
+        "token is a domain-separated digest of all plan inputs in canonical order",
+        "the plan performs no mutation",
+        "force is not permission to accept a stale token"
+      ],
+      "kind": "record",
+      "name": "sys.CheckoutPlan",
+      "purpose": "Read-only preview bound to the exact target and local worktree state.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "consumer_identity",
+          "type": "sys.ConsumerIdentity"
+        },
+        {
+          "name": "source_identity",
+          "type": "Str"
+        },
+        {
+          "name": "partition",
+          "type": "Str?"
+        },
+        {
+          "name": "base",
+          "type": "sys.CheckpointPosition?"
+        },
+        {
+          "name": "left",
+          "type": "sys.CheckpointPosition?"
+        },
+        {
+          "name": "right",
+          "type": "sys.CheckpointPosition?"
+        },
+        {
+          "name": "left_snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "right_snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "reason",
+          "type": "Str"
+        }
+      ],
+      "invariants": [
+        "reason is divergent_position, incompatible_format, or delete_update",
+        "opaque positions are never numerically ordered"
+      ],
+      "kind": "record",
+      "name": "sys.CheckpointConflict",
+      "purpose": "A three-way merge conflict between incomparable or divergent checkpoint positions.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "format",
+          "type": "Str"
+        },
+        {
+          "name": "digest",
+          "type": "Digest"
+        }
+      ],
+      "invariants": [
+        "payload is not generically orderable",
+        "equality includes format and canonical payload",
+        "provider APIs own construction and comparison beyond equality"
+      ],
+      "kind": "opaque",
+      "name": "sys.CheckpointPosition",
+      "purpose": "Provider-specific replay position with portable equality and canonical encoding.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "token",
+          "type": "Digest"
+        },
+        {
+          "name": "head",
+          "type": "sys.GitOid?"
+        },
+        {
+          "name": "head_ref",
+          "type": "Str?"
+        },
+        {
+          "name": "index_tree",
+          "type": "sys.GitOid"
+        },
+        {
+          "name": "index_digest",
+          "type": "Digest"
+        },
+        {
+          "name": "worktree_digest",
+          "type": "Digest"
+        },
+        {
+          "name": "cwd",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "pending_generation",
+          "type": "Int"
+        }
+      ],
+      "invariants": [
+        "all fields and the exact format coordinate enter the review token",
+        "supplying the record does not grant administrative authority",
+        "an altered or stale review fails before ref visibility"
+      ],
+      "kind": "record",
+      "name": "sys.CommitReview",
+      "purpose": "Non-authorising, state-bound review of the exact staged Git candidate.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "tables",
+          "type": "[sys.TableRef]"
+        },
+        {
+          "name": "input_segments",
+          "type": "[sys.SegmentRef]"
+        },
+        {
+          "name": "output_segments",
+          "type": "[sys.SegmentRef]"
+        },
+        {
+          "name": "rows",
+          "type": "Int"
+        },
+        {
+          "name": "bytes_before",
+          "type": "Int"
+        },
+        {
+          "name": "bytes_after",
+          "type": "Int"
+        },
+        {
+          "name": "generation",
+          "type": "Int"
+        },
+        {
+          "name": "semantic_changes",
+          "type": "Int"
+        }
+      ],
+      "invariants": [
+        "semantic_changes is zero"
+      ],
+      "kind": "record",
+      "name": "sys.CompactionResult",
+      "purpose": "Result of an atomic physical segment compaction.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "language_version",
+          "type": "Str"
+        },
+        {
+          "name": "sys_version",
+          "type": "Str"
+        },
+        {
+          "name": "canonical_orna_codec_version",
+          "type": "Str"
+        },
+        {
+          "name": "repository_layout_version",
+          "type": "Str"
+        },
+        {
+          "name": "storage_manifest_version",
+          "type": "Str"
+        },
+        {
+          "name": "presentation_protocol_version",
+          "type": "Str"
+        },
+        {
+          "name": "supported_profiles",
+          "type": "[Str]"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.CompatibilityInfo",
+      "purpose": "Compatibility tuple embedded in builds and artifacts.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "transaction",
+          "type": "sys.TransactionRef?"
+        },
+        {
+          "name": "invocation",
+          "type": "sys.InvocationRef?"
+        },
+        {
+          "name": "run",
+          "type": "sys.RunRef?"
+        },
+        {
+          "name": "session",
+          "type": "sys.SessionRef?"
+        },
+        {
+          "name": "client",
+          "type": "sys.ClientRef?"
+        },
+        {
+          "name": "logical_cwd",
+          "type": "Path"
+        },
+        {
+          "name": "locale",
+          "type": "Locale"
+        },
+        {
+          "name": "timezone",
+          "type": "TimeZone"
+        },
+        {
+          "name": "trace",
+          "type": "sys.TraceRef?"
+        },
+        {
+          "name": "cancellation",
+          "type": "sys.CancellationView"
+        },
+        {
+          "name": "present_context",
+          "type": "PresentContext"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.CurrentContext",
+      "purpose": "Immutable context of the current activation exposed by sys.current.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "id",
+          "type": "sys.DatabaseId"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "root",
+          "type": "Path"
+        },
+        {
+          "name": "root_module",
+          "type": "sys.ModuleRef"
+        },
+        {
+          "name": "cwd",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "head",
+          "type": "sys.SnapshotRef?"
+        },
+        {
+          "name": "branch",
+          "type": "sys.BranchRef?"
+        },
+        {
+          "name": "writable",
+          "type": "Bool"
+        },
+        {
+          "name": "attached_as",
+          "type": "Str?"
+        },
+        {
+          "name": "repository_layout_version",
+          "type": "Str"
+        },
+        {
+          "name": "storage_manifest_version",
+          "type": "Str"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.DatabaseView",
+      "purpose": "Current attached database/worktree descriptor exposed by sys.database.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "span",
+          "type": "sys.SourceSpan"
+        },
+        {
+          "name": "message",
+          "type": "Str"
+        },
+        {
+          "name": "primary",
+          "type": "Bool"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.DiagnosticLabel",
+      "purpose": "One source label attached to a structured diagnostic.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "diagnostic",
+          "type": "sys.Diagnostic"
+        },
+        {
+          "name": "summary",
+          "type": "Str"
+        },
+        {
+          "name": "causes",
+          "type": "[sys.Diagnostic]"
+        },
+        {
+          "name": "suggestions",
+          "type": "[Str]"
+        },
+        {
+          "name": "related_objects",
+          "type": "[sys.ObjectRef]"
+        },
+        {
+          "name": "plan",
+          "type": "sys.PlanRef?"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.Explanation",
+      "purpose": "Structured causal explanation of a diagnostic.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "owner",
+          "type": "sys.ObjectRef"
+        },
+        {
+          "name": "definition",
+          "type": "sys.DefinitionRef"
+        },
+        {
+          "name": "span",
+          "type": "sys.SourceSpan"
+        },
+        {
+          "name": "semantic_hash",
+          "type": "Digest"
+        }
+      ],
+      "invariants": [],
+      "kind": "opaque",
+      "name": "sys.ExpressionRef",
+      "purpose": "Snapshot-pinned reference to a resolved expression in a definition.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "tables",
+          "type": "[sys.TableRef]"
+        },
+        {
+          "name": "rows",
+          "type": "Int"
+        },
+        {
+          "name": "segments",
+          "type": "[sys.SegmentRef]"
+        },
+        {
+          "name": "bytes",
+          "type": "Int"
+        },
+        {
+          "name": "generation",
+          "type": "Int"
+        },
+        {
+          "name": "semantic_changes",
+          "type": "Int"
+        }
+      ],
+      "invariants": [
+        "semantic_changes is zero"
+      ],
+      "kind": "record",
+      "name": "sys.FlushResult",
+      "purpose": "Result of sealing durable pending rows without a logical data change.",
+      "type_parameters": []
     },
     {
       "fields": [
@@ -5525,215 +6161,6 @@
     {
       "fields": [
         {
-          "name": "owner",
-          "type": "sys.ObjectRef"
-        },
-        {
-          "name": "definition",
-          "type": "sys.DefinitionRef"
-        },
-        {
-          "name": "span",
-          "type": "sys.SourceSpan"
-        },
-        {
-          "name": "semantic_hash",
-          "type": "Digest"
-        }
-      ],
-      "invariants": [],
-      "kind": "opaque",
-      "name": "sys.ExpressionRef",
-      "purpose": "Snapshot-pinned reference to a resolved expression in a definition.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "file",
-          "type": "sys.FileRef"
-        },
-        {
-          "name": "start_byte",
-          "type": "Int"
-        },
-        {
-          "name": "end_byte",
-          "type": "Int"
-        },
-        {
-          "name": "start_line",
-          "type": "Int"
-        },
-        {
-          "name": "start_column",
-          "type": "Int"
-        },
-        {
-          "name": "end_line",
-          "type": "Int"
-        },
-        {
-          "name": "end_column",
-          "type": "Int"
-        }
-      ],
-      "invariants": [
-        "0 <= start_byte <= end_byte",
-        "line and column values are one-based"
-      ],
-      "kind": "record",
-      "name": "sys.SourceSpan",
-      "purpose": "Half-open canonical UTF-8 source range with one-based human coordinates.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "generated",
-          "type": "sys.SourceSpan"
-        },
-        {
-          "name": "original",
-          "type": "sys.SourceSpan?"
-        },
-        {
-          "name": "original_name",
-          "type": "Str?"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.SourceMapEntry",
-      "purpose": "Mapping from a generated span to an authored span and optional original name.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "span",
-          "type": "sys.SourceSpan"
-        },
-        {
-          "name": "message",
-          "type": "Str"
-        },
-        {
-          "name": "primary",
-          "type": "Bool"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.DiagnosticLabel",
-      "purpose": "One source label attached to a structured diagnostic.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "file",
-          "type": "sys.FileRef"
-        },
-        {
-          "name": "snapshot",
-          "type": "sys.SnapshotRef"
-        },
-        {
-          "name": "text",
-          "type": "Str?"
-        },
-        {
-          "name": "exact_hash",
-          "type": "Digest"
-        },
-        {
-          "name": "encoding",
-          "type": "Str"
-        },
-        {
-          "name": "generated",
-          "type": "Bool"
-        },
-        {
-          "name": "maps",
-          "type": "Relation<sys.SourceMapEntry>"
-        },
-        {
-          "name": "unavailable_reason",
-          "type": "Str?"
-        }
-      ],
-      "invariants": [
-        "text and unavailable_reason are not both absent",
-        "text hashes to exact_hash after canonical decoding"
-      ],
-      "kind": "record",
-      "name": "sys.SourceDocument",
-      "purpose": "Exact retained source plus source maps and explicit unavailability state.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "file",
-          "type": "sys.FileRef"
-        },
-        {
-          "name": "span",
-          "type": "sys.SourceSpan"
-        },
-        {
-          "name": "snapshot",
-          "type": "sys.SnapshotRef"
-        },
-        {
-          "name": "commit",
-          "type": "sys.CommitRef?"
-        },
-        {
-          "name": "author",
-          "type": "sys.PersonIdentity?"
-        },
-        {
-          "name": "authored_at",
-          "type": "Instant?"
-        },
-        {
-          "name": "object",
-          "type": "sys.ObjectRef?"
-        },
-        {
-          "name": "semantic",
-          "type": "Bool"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.Attribution",
-      "purpose": "Source or semantic blame attribution for one exact target range.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "name",
-          "type": "Str"
-        },
-        {
-          "name": "email",
-          "type": "Str?"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.PersonIdentity",
-      "purpose": "Git-compatible authored identity without signing or authorization semantics.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
           "name": "object",
           "type": "sys.ObjectRef"
         },
@@ -5775,93 +6202,156 @@
     {
       "fields": [
         {
-          "name": "diagnostic",
-          "type": "sys.Diagnostic"
-        },
-        {
-          "name": "summary",
+          "name": "name",
           "type": "Str"
         },
         {
-          "name": "causes",
-          "type": "[sys.Diagnostic]"
-        },
-        {
-          "name": "suggestions",
-          "type": "[Str]"
-        },
-        {
-          "name": "related_objects",
-          "type": "[sys.ObjectRef]"
-        },
-        {
-          "name": "plan",
-          "type": "sys.PlanRef?"
+          "name": "email",
+          "type": "Str?"
         }
       ],
       "invariants": [],
       "kind": "record",
-      "name": "sys.Explanation",
-      "purpose": "Structured causal explanation of a diagnostic.",
+      "name": "sys.PersonIdentity",
+      "purpose": "Git-compatible authored identity without signing or authorization semantics.",
       "type_parameters": []
     },
     {
       "fields": [
         {
-          "name": "format",
+          "name": "type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "renderer",
+          "type": "Str?"
+        },
+        {
+          "name": "mode",
           "type": "Str"
         },
         {
-          "name": "digest",
-          "type": "Digest"
+          "name": "formatter",
+          "type": "sys.FunctionRef?"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.PresentationOverride",
+      "purpose": "Session-local presentation selection for one type.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "compressed_target_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "max_file_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "max_pending_age_seconds",
+          "type": "Int"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.PublicationPolicy",
+      "purpose": "Effective durable publication limits reported by the runtime.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "session",
+          "type": "sys.SessionRef"
+        },
+        {
+          "name": "renderer",
+          "type": "Str"
+        },
+        {
+          "name": "width",
+          "type": "Int?"
+        },
+        {
+          "name": "height",
+          "type": "Int?"
+        },
+        {
+          "name": "locale",
+          "type": "Locale"
+        },
+        {
+          "name": "timezone",
+          "type": "TimeZone"
+        },
+        {
+          "name": "presentation_overrides",
+          "type": "Relation<sys.PresentationOverride>"
+        },
+        {
+          "name": "watched_expressions",
+          "type": "Relation<sys.Watch>"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.ReplView",
+      "purpose": "Interactive session presentation and watch state exposed by sys.repl.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "table",
+          "type": "sys.TableRef"
+        },
+        {
+          "name": "key",
+          "type": "sys.Value"
+        },
+        {
+          "name": "base",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "left",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "right",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "reason",
+          "type": "Str"
         }
       ],
       "invariants": [
-        "payload is not generically orderable",
-        "equality includes format and canonical payload",
-        "provider APIs own construction and comparison beyond equality"
+        "absence means no row, not a row with null fields",
+        "reason is update_update, delete_update, key_collision, or assertion_failure"
       ],
-      "kind": "opaque",
-      "name": "sys.CheckpointPosition",
-      "purpose": "Provider-specific replay position with portable equality and canonical encoding.",
+      "kind": "record",
+      "name": "sys.RowConflict",
+      "purpose": "A three-way merge conflict at one stable table identity and primary key.",
       "type_parameters": []
     },
     {
-      "fields": [
-        {
-          "name": "language_version",
-          "type": "Str"
-        },
-        {
-          "name": "sys_version",
-          "type": "Str"
-        },
-        {
-          "name": "canonical_orna_codec_version",
-          "type": "Str"
-        },
-        {
-          "name": "repository_layout_version",
-          "type": "Str"
-        },
-        {
-          "name": "storage_manifest_version",
-          "type": "Str"
-        },
-        {
-          "name": "presentation_protocol_version",
-          "type": "Str"
-        },
-        {
-          "name": "supported_profiles",
-          "type": "[Str]"
-        }
+      "fields": [],
+      "invariants": [
+        "preserves the row natural key and resolution context",
+        "does not grant authority",
+        "live references are runtime-generation-bound"
       ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.CompatibilityInfo",
-      "purpose": "Compatibility tuple embedded in builds and artifacts.",
-      "type_parameters": []
+      "kind": "opaque-generic",
+      "name": "sys.RowRef<T>",
+      "purpose": "Snapshot/runtime-pinned reference to one canonical system-relation row.",
+      "type_parameters": [
+        "T"
+      ]
     },
     {
       "fields": [
@@ -5934,345 +6424,6 @@
       "kind": "record",
       "name": "sys.RuntimeInfo",
       "purpose": "Exact language, sys, storage, presentation and implementation coordinates for the current runtime.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "tables",
-          "type": "[sys.TableRef]"
-        },
-        {
-          "name": "rows",
-          "type": "Int"
-        },
-        {
-          "name": "segments",
-          "type": "[sys.SegmentRef]"
-        },
-        {
-          "name": "bytes",
-          "type": "Int"
-        },
-        {
-          "name": "generation",
-          "type": "Int"
-        },
-        {
-          "name": "semantic_changes",
-          "type": "Int"
-        }
-      ],
-      "invariants": [
-        "semantic_changes is zero"
-      ],
-      "kind": "record",
-      "name": "sys.FlushResult",
-      "purpose": "Result of sealing durable pending rows without a logical data change.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "tables",
-          "type": "[sys.TableRef]"
-        },
-        {
-          "name": "input_segments",
-          "type": "[sys.SegmentRef]"
-        },
-        {
-          "name": "output_segments",
-          "type": "[sys.SegmentRef]"
-        },
-        {
-          "name": "rows",
-          "type": "Int"
-        },
-        {
-          "name": "bytes_before",
-          "type": "Int"
-        },
-        {
-          "name": "bytes_after",
-          "type": "Int"
-        },
-        {
-          "name": "generation",
-          "type": "Int"
-        },
-        {
-          "name": "semantic_changes",
-          "type": "Int"
-        }
-      ],
-      "invariants": [
-        "semantic_changes is zero"
-      ],
-      "kind": "record",
-      "name": "sys.CompactionResult",
-      "purpose": "Result of an atomic physical segment compaction.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "table",
-          "type": "sys.TableRef"
-        },
-        {
-          "name": "from",
-          "type": "sys.StorageProfile"
-        },
-        {
-          "name": "to",
-          "type": "sys.StorageProfile"
-        },
-        {
-          "name": "rows",
-          "type": "Int"
-        },
-        {
-          "name": "previous_generation",
-          "type": "Int"
-        },
-        {
-          "name": "generation",
-          "type": "Int"
-        },
-        {
-          "name": "semantic_diff",
-          "type": "Relation<sys.DiffEntry>"
-        }
-      ],
-      "invariants": [
-        "semantic_diff is empty",
-        "generation is published only after complete verification"
-      ],
-      "kind": "record",
-      "name": "sys.StorageRewriteResult",
-      "purpose": "Result of a generation-CAS rewrite between editable and compact physical representations.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "scope",
-          "type": "sys.VerifyScope"
-        },
-        {
-          "name": "status",
-          "type": "sys.VerificationStatus"
-        },
-        {
-          "name": "started",
-          "type": "Instant"
-        },
-        {
-          "name": "ended",
-          "type": "Instant"
-        },
-        {
-          "name": "checked",
-          "type": "sys.Value"
-        },
-        {
-          "name": "diagnostics",
-          "type": "Relation<sys.Diagnostic>"
-        }
-      ],
-      "invariants": [
-        "invalid has at least one error/fatal diagnostic",
-        "valid has no error/fatal diagnostic"
-      ],
-      "kind": "record",
-      "name": "sys.VerificationReport",
-      "purpose": "Structured integrity-verification outcome.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "requested",
-          "type": "Bool"
-        },
-        {
-          "name": "reason",
-          "type": "Str?"
-        },
-        {
-          "name": "requested_at",
-          "type": "Instant?"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.CancellationView",
-      "purpose": "Immutable activation-local cancellation observation.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "type",
-          "type": "sys.TypeRef"
-        },
-        {
-          "name": "renderer",
-          "type": "Str?"
-        },
-        {
-          "name": "mode",
-          "type": "Str"
-        },
-        {
-          "name": "formatter",
-          "type": "sys.FunctionRef?"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.PresentationOverride",
-      "purpose": "Session-local presentation selection for one type.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "expression",
-          "type": "sys.ExpressionRef"
-        },
-        {
-          "name": "label",
-          "type": "Str?"
-        },
-        {
-          "name": "last_value",
-          "type": "sys.Value?"
-        },
-        {
-          "name": "last_diagnostic",
-          "type": "sys.Diagnostic?"
-        },
-        {
-          "name": "updated",
-          "type": "Instant?"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.Watch",
-      "purpose": "REPL watch expression and its most recent safe observation.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "id",
-          "type": "sys.DatabaseId"
-        },
-        {
-          "name": "name",
-          "type": "Str"
-        },
-        {
-          "name": "root",
-          "type": "Path"
-        },
-        {
-          "name": "root_module",
-          "type": "sys.ModuleRef"
-        },
-        {
-          "name": "cwd",
-          "type": "sys.SnapshotRef"
-        },
-        {
-          "name": "head",
-          "type": "sys.SnapshotRef?"
-        },
-        {
-          "name": "branch",
-          "type": "sys.BranchRef?"
-        },
-        {
-          "name": "writable",
-          "type": "Bool"
-        },
-        {
-          "name": "attached_as",
-          "type": "Str?"
-        },
-        {
-          "name": "repository_layout_version",
-          "type": "Str"
-        },
-        {
-          "name": "storage_manifest_version",
-          "type": "Str"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.DatabaseView",
-      "purpose": "Current attached database/worktree descriptor exposed by sys.database.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "snapshot",
-          "type": "sys.SnapshotRef"
-        },
-        {
-          "name": "transaction",
-          "type": "sys.TransactionRef?"
-        },
-        {
-          "name": "invocation",
-          "type": "sys.InvocationRef?"
-        },
-        {
-          "name": "run",
-          "type": "sys.RunRef?"
-        },
-        {
-          "name": "session",
-          "type": "sys.SessionRef?"
-        },
-        {
-          "name": "client",
-          "type": "sys.ClientRef?"
-        },
-        {
-          "name": "logical_cwd",
-          "type": "Path"
-        },
-        {
-          "name": "locale",
-          "type": "Locale"
-        },
-        {
-          "name": "timezone",
-          "type": "TimeZone"
-        },
-        {
-          "name": "trace",
-          "type": "sys.TraceRef?"
-        },
-        {
-          "name": "cancellation",
-          "type": "sys.CancellationView"
-        },
-        {
-          "name": "present_context",
-          "type": "PresentContext"
-        }
-      ],
-      "invariants": [],
-      "kind": "record",
-      "name": "sys.CurrentContext",
-      "purpose": "Immutable context of the current activation exposed by sys.current.",
       "type_parameters": []
     },
     {
@@ -6387,123 +6538,106 @@
     {
       "fields": [
         {
-          "name": "session",
-          "type": "sys.SessionRef"
+          "name": "file",
+          "type": "sys.FileRef"
         },
         {
-          "name": "renderer",
+          "name": "snapshot",
+          "type": "sys.SnapshotRef"
+        },
+        {
+          "name": "text",
+          "type": "Str?"
+        },
+        {
+          "name": "exact_hash",
+          "type": "Digest"
+        },
+        {
+          "name": "encoding",
           "type": "Str"
         },
         {
-          "name": "width",
-          "type": "Int?"
+          "name": "generated",
+          "type": "Bool"
         },
         {
-          "name": "height",
-          "type": "Int?"
+          "name": "maps",
+          "type": "Relation<sys.SourceMapEntry>"
         },
         {
-          "name": "locale",
-          "type": "Locale"
+          "name": "unavailable_reason",
+          "type": "Str?"
+        }
+      ],
+      "invariants": [
+        "text and unavailable_reason are not both absent",
+        "text hashes to exact_hash after canonical decoding"
+      ],
+      "kind": "record",
+      "name": "sys.SourceDocument",
+      "purpose": "Exact retained source plus source maps and explicit unavailability state.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "generated",
+          "type": "sys.SourceSpan"
         },
         {
-          "name": "timezone",
-          "type": "TimeZone"
+          "name": "original",
+          "type": "sys.SourceSpan?"
         },
         {
-          "name": "presentation_overrides",
-          "type": "Relation<sys.PresentationOverride>"
-        },
-        {
-          "name": "watched_expressions",
-          "type": "Relation<sys.Watch>"
+          "name": "original_name",
+          "type": "Str?"
         }
       ],
       "invariants": [],
       "kind": "record",
-      "name": "sys.ReplView",
-      "purpose": "Interactive session presentation and watch state exposed by sys.repl.",
+      "name": "sys.SourceMapEntry",
+      "purpose": "Mapping from a generated span to an authored span and optional original name.",
       "type_parameters": []
     },
     {
       "fields": [
-        {
-          "name": "kind",
-          "type": "sys.ChangeTargetKind"
-        },
-        {
-          "name": "object",
-          "type": "sys.ObjectId?"
-        },
         {
           "name": "file",
-          "type": "sys.FileId?"
+          "type": "sys.FileRef"
         },
         {
-          "name": "table",
-          "type": "sys.ObjectId?"
+          "name": "start_byte",
+          "type": "Int"
         },
         {
-          "name": "row_key",
-          "type": "sys.Value?"
+          "name": "end_byte",
+          "type": "Int"
+        },
+        {
+          "name": "start_line",
+          "type": "Int"
+        },
+        {
+          "name": "start_column",
+          "type": "Int"
+        },
+        {
+          "name": "end_line",
+          "type": "Int"
+        },
+        {
+          "name": "end_column",
+          "type": "Int"
         }
       ],
       "invariants": [
-        "object: only object is present; file: only file is present; row: only table and row_key are present",
-        "row_key retains a non-secret key type and canonical value",
-        "equality includes kind and all populated identity fields"
+        "0 <= start_byte <= end_byte",
+        "line and column values are one-based"
       ],
       "kind": "record",
-      "name": "sys.ChangeTarget",
-      "purpose": "Discriminated identity of one changed semantic object, source file or table row.",
-      "type_parameters": []
-    },
-    {
-      "fields": [
-        {
-          "name": "consumer_identity",
-          "type": "sys.ConsumerIdentity"
-        },
-        {
-          "name": "source_identity",
-          "type": "Str"
-        },
-        {
-          "name": "partition",
-          "type": "Str?"
-        },
-        {
-          "name": "base",
-          "type": "sys.CheckpointPosition?"
-        },
-        {
-          "name": "left",
-          "type": "sys.CheckpointPosition?"
-        },
-        {
-          "name": "right",
-          "type": "sys.CheckpointPosition?"
-        },
-        {
-          "name": "left_snapshot",
-          "type": "sys.SnapshotRef"
-        },
-        {
-          "name": "right_snapshot",
-          "type": "sys.SnapshotRef"
-        },
-        {
-          "name": "reason",
-          "type": "Str"
-        }
-      ],
-      "invariants": [
-        "reason is divergent_position, incompatible_format, or delete_update",
-        "opaque positions are never numerically ordered"
-      ],
-      "kind": "record",
-      "name": "sys.CheckpointConflict",
-      "purpose": "A three-way merge conflict between incomparable or divergent checkpoint positions.",
+      "name": "sys.SourceSpan",
+      "purpose": "Half-open canonical UTF-8 source range with one-based human coordinates.",
       "type_parameters": []
     },
     {
@@ -6513,90 +6647,158 @@
           "type": "sys.TableRef"
         },
         {
-          "name": "key",
-          "type": "sys.Value"
+          "name": "from",
+          "type": "sys.StorageProfile"
         },
         {
-          "name": "base",
-          "type": "sys.Value?"
+          "name": "to",
+          "type": "sys.StorageProfile"
         },
         {
-          "name": "left",
-          "type": "sys.Value?"
+          "name": "rows",
+          "type": "Int"
         },
         {
-          "name": "right",
-          "type": "sys.Value?"
+          "name": "previous_generation",
+          "type": "Int"
         },
         {
-          "name": "reason",
-          "type": "Str"
+          "name": "generation",
+          "type": "Int"
+        },
+        {
+          "name": "semantic_diff",
+          "type": "Relation<sys.DiffEntry>"
         }
       ],
       "invariants": [
-        "absence means no row, not a row with null fields",
-        "reason is update_update, delete_update, key_collision, or assertion_failure"
+        "semantic_diff is empty",
+        "generation is published only after complete verification"
       ],
       "kind": "record",
-      "name": "sys.RowConflict",
-      "purpose": "A three-way merge conflict at one stable table identity and primary key.",
+      "name": "sys.StorageRewriteResult",
+      "purpose": "Result of a generation-CAS rewrite between editable and compact physical representations.",
       "type_parameters": []
     },
     {
       "fields": [
         {
-          "name": "token",
-          "type": "Digest"
+          "name": "type",
+          "type": "sys.TypeRef"
         },
         {
-          "name": "target",
-          "type": "sys.SnapshotRef"
+          "name": "redacted",
+          "type": "Bool"
         },
         {
-          "name": "target_branch",
-          "type": "Str?"
-        },
-        {
-          "name": "base_head",
-          "type": "sys.GitOid?"
-        },
-        {
-          "name": "cwd",
-          "type": "sys.SnapshotRef"
-        },
-        {
-          "name": "index_digest",
-          "type": "Digest"
-        },
-        {
-          "name": "worktree_digest",
-          "type": "Digest"
-        },
-        {
-          "name": "pending_generation",
-          "type": "Int"
-        },
-        {
-          "name": "would_discard",
-          "type": "[sys.ChangeTarget]"
-        },
-        {
-          "name": "active_consumers",
-          "type": "[sys.ConsumerIdentity]"
-        },
-        {
-          "name": "conflicts",
-          "type": "[sys.Diagnostic]"
+          "name": "canonical_digest",
+          "type": "Digest?"
         }
       ],
       "invariants": [
-        "token is a domain-separated digest of all plan inputs in canonical order",
-        "the plan performs no mutation",
-        "force is not permission to accept a stale token"
+        "is not a dynamic Any fallback",
+        "retains the exact originating static type",
+        "cannot be implicitly unboxed or converted"
+      ],
+      "kind": "opaque",
+      "name": "sys.Value",
+      "purpose": "Explicit existential envelope for a value crossing a reflective system boundary.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "static_type",
+          "type": "sys.TypeRef"
+        },
+        {
+          "name": "nominal_type",
+          "type": "sys.TypeRef?"
+        },
+        {
+          "name": "protocols",
+          "type": "Relation<sys.Protocol>"
+        },
+        {
+          "name": "codecs",
+          "type": "[Str]"
+        },
+        {
+          "name": "redacted",
+          "type": "Bool"
+        }
+      ],
+      "invariants": [],
+      "kind": "record-generic",
+      "name": "sys.ValueMetadata<T>",
+      "purpose": "Safe type, protocol and codec metadata for a value without private-field disclosure.",
+      "type_parameters": [
+        "T"
+      ]
+    },
+    {
+      "fields": [
+        {
+          "name": "scope",
+          "type": "sys.VerifyScope"
+        },
+        {
+          "name": "status",
+          "type": "sys.VerificationStatus"
+        },
+        {
+          "name": "started",
+          "type": "Instant"
+        },
+        {
+          "name": "ended",
+          "type": "Instant"
+        },
+        {
+          "name": "checked",
+          "type": "sys.Value"
+        },
+        {
+          "name": "diagnostics",
+          "type": "Relation<sys.Diagnostic>"
+        }
+      ],
+      "invariants": [
+        "invalid has at least one error/fatal diagnostic",
+        "valid has no error/fatal diagnostic"
       ],
       "kind": "record",
-      "name": "sys.CheckoutPlan",
-      "purpose": "Read-only preview bound to the exact target and local worktree state.",
+      "name": "sys.VerificationReport",
+      "purpose": "Structured integrity-verification outcome.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "expression",
+          "type": "sys.ExpressionRef"
+        },
+        {
+          "name": "label",
+          "type": "Str?"
+        },
+        {
+          "name": "last_value",
+          "type": "sys.Value?"
+        },
+        {
+          "name": "last_diagnostic",
+          "type": "sys.Diagnostic?"
+        },
+        {
+          "name": "updated",
+          "type": "Instant?"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.Watch",
+      "purpose": "REPL watch expression and its most recent safe observation.",
       "type_parameters": []
     }
   ]
