@@ -5920,5 +5920,6 @@ b48369756a137544a9d3888f17ad10a97e7a2010618ec084a5b8b3b603844095  crates/orna-tr
 773216efb8a81c9b55597be0711cca35f9dd0c5df5880ec1e93ed991abf5a7c7  crates/orna-value-v1/src/fixtures/reference/tests/path-vectors.json
 1facde5fb2faae65d5ff121811d14c826647086a504dcbd0de3ccb1a3b0e1b2a  crates/orna-value-v1/src/fixtures/reference/tests/snapshot-vectors.json
 b48369756a137544a9d3888f17ad10a97e7a2010618ec084a5b8b3b603844095  crates/orna-value-v1/src/fixtures/reference/tests/value-vectors.json
+3eef68f03fdc30a0743384484a2a9b2137b5e15a7805b2e344afff0fa691d9de  crates/orna-value-v1/tests/fixtures/blob-role-dispatch.orna
 cd36ebb657d074e7093e5e50c002fdee04cb65c9b726da6c072698d793e36441  crates/orna-value-v1/tests/fixtures/error-trace-secret.orna
 953db2cefdcc80db9f15250c696afba8defd1458875a8262019bbf1d8465a3df  crates/orna-value-v1/tests/fixtures/secret-surface.orna
