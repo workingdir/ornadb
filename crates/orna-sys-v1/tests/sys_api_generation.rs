@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use orna_sys_v1::{
     SystemEffect, SYSTEM_FUNCTION_DESCRIPTORS, system_api_json, system_api_schema_json,
     system_function_descriptor,
@@ -9,29 +11,48 @@ use serde_json::Value;
 #[allow(dead_code)]
 mod build_support;
 
-const SYS_API_1_1_SHA256: &str = "7752f42450cc7cf3c651adcf34ec07288efb3f17de0e895e85a0575fc4c1dcf1";
+const SYS_API_V1_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
 
-fn assert_canonical_object_key_order(value: &Value) {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                assert_canonical_object_key_order(item);
-            }
-        }
-        Value::Object(object) => {
-            let keys = object.keys().collect::<Vec<_>>();
-            assert!(
-                keys.windows(2).all(|pair| pair[0] < pair[1]),
-                "JSON object members must be lexicographically ordered: {keys:?}"
-            );
-            for child in object.values() {
-                assert_canonical_object_key_order(child);
-            }
-        }
-        _ => {}
-    }
+#[test]
+fn package_metadata_identifies_the_final_catalogue_contract() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "1.1.0");
+    assert_eq!(
+        env!("CARGO_PKG_DESCRIPTION"),
+        "Final Orna 1.1.0 portable sys catalogue and bounded pre-effect admission"
+    );
+}
+
+#[test]
+fn native_projection_validates_frozen_authority_without_self_declaring_normativity() {
+    let native_inventory: Value =
+        serde_json::from_str(include_str!("../src/system_api_inventory.json"))
+            .expect("native sys inventory is JSON");
+    assert!(
+        native_inventory.get("source_of_truth").is_none(),
+        "native inventory must not declare itself normative"
+    );
+
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let collector = build_support::collect_rust_sources(&source_root)
+        .expect("annotated implementation methods form a valid registry");
+    let registry = collector
+        .type_graph
+        .clone()
+        .expect("annotated implementation registry owns its type graph");
+    let schema = collector
+        .schema
+        .clone()
+        .expect("annotated implementation registry owns its schema contract");
+    let generated = build_support::generate_sys_artifacts(&collector.functions, registry, &schema)
+        .expect("native metadata projects the frozen authority");
+
+    assert_eq!(
+        generated.api_json,
+        build_support::FINAL_API_AUTHORITY_JSON,
+        "normative API bytes come from the frozen authority"
+    );
 }
 
 #[test]
@@ -39,52 +60,8 @@ fn published_artifact_is_the_deterministic_registry_projection() {
     let generated = system_api_json();
     let digest = format!("{:x}", Sha256::digest(generated.as_bytes()));
     assert_eq!(
-        digest, SYS_API_1_1_SHA256,
-        "the on-demand api/sys.json export matches the reviewed generated 1.1 artifact"
-    );
-    let api: Value = serde_json::from_str(&generated).expect("generated API JSON");
-    assert_eq!(api["language_version"], "1.1.0");
-    assert_eq!(api["sys_version"], "1.1");
-    assert_eq!(
-        api["status"],
-        "Final 1.1.0 specification contract; engine execution not claimed"
-    );
-}
-
-#[test]
-fn publication_versions_and_status_are_owned_by_the_rust_generator_template() {
-    let inventory: Value = serde_json::from_str(include_str!("../src/system_api_inventory.json"))
-        .expect("registry-owned system API type graph");
-    let generated: Value =
-        serde_json::from_str(&orna_sys_v1::system_api_json()).expect("generated sys API JSON");
-    let functions = generated["functions"]
-        .as_array()
-        .expect("generated API functions")
-        .clone();
-
-    for field in ["language_version", "sys_version", "status"] {
-        assert!(
-            inventory.get(field).is_none(),
-            "registry inventory cannot hand-author generator-owned `{field}`"
-        );
-        let mut forged_inventory = inventory.clone();
-        forged_inventory[field] = serde_json::json!("hand-authored value");
-        assert!(
-            build_support::generate_system_api_document(
-                forged_inventory,
-                functions.clone()
-            )
-            .unwrap_err()
-            .contains(&format!("generator-owned `{field}`")),
-            "generator rejects hand-authored `{field}`"
-        );
-    }
-
-    assert_eq!(generated["language_version"], "1.1.0");
-    assert_eq!(generated["sys_version"], "1.1");
-    assert_eq!(
-        generated["status"],
-        "Final 1.1.0 specification contract; engine execution not claimed"
+        digest, SYS_API_V1_SHA256,
+        "the on-demand api/sys.json export matches the reviewed final 1.1 artifact"
     );
 }
 
@@ -110,11 +87,10 @@ fn published_json_schema_covers_the_generated_artifact_and_closed_type_graph() {
     assert_eq!(property_names, required_names);
     build_support::validate_published_schema_shape(&api, &schema)
         .expect("published schema exactly covers generated artifact fields");
-    assert_canonical_object_key_order(&api);
     assert_eq!(
-        build_support::canonical_pretty_json(&api).expect("canonical artifact serialization"),
-        system_api_json().trim_end(),
-        "the generator must emit stable canonical member order"
+        system_api_json(),
+        build_support::FINAL_API_AUTHORITY_JSON,
+        "the generated API uses the frozen authority bytes"
     );
     build_support::validate_api_document(&api)
         .expect("generated API type graph is closed and shape-valid");
@@ -138,6 +114,7 @@ fn every_portable_function_has_the_collected_runtime_descriptor() {
         assert_eq!(descriptor.effect, effect, "effect for {name}");
         assert_eq!(descriptor.signature, function["signature"], "signature for {name}");
         assert_eq!(descriptor.purpose, function["purpose"], "purpose for {name}");
+        assert_eq!(descriptor.since, function["since"].as_str(), "since for {name}");
         assert_eq!(
             descriptor.documentation,
             function["documentation"].as_str(),
