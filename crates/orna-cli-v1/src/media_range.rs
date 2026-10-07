@@ -81,6 +81,54 @@ pub fn resolve_range(header: Option<&str>, length: u64) -> RangeOutcome {
     }
 }
 
+/// HTTP method of an explicit media request. `HEAD` carries the same status
+/// and headers as `GET` but never a body (RFC 9110 section 9.3.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MediaMethod {
+    Get,
+    Head,
+}
+
+/// Status, headers and body decision for one explicit media response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MediaResponsePlan {
+    pub status: u16,
+    /// Value for the `Content-Range` header, when the status carries one.
+    /// `bytes */length` accompanies `416` (RFC 9110 section 15.5.17).
+    pub content_range: Option<String>,
+    /// Value for the `Content-Length` header: the bytes this response carries.
+    pub content_length: u64,
+    /// Whether the response includes the selected bytes.
+    pub send_body: bool,
+}
+
+/// Plans the response for `method` and an optional `Range` header against a
+/// representation of `length` bytes.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn plan_media_response(method: MediaMethod, range: Option<&str>, length: u64) -> MediaResponsePlan {
+    let send_body = method == MediaMethod::Get;
+    match resolve_range(range, length) {
+        RangeOutcome::Full => MediaResponsePlan {
+            status: 200,
+            content_range: None,
+            content_length: length,
+            send_body,
+        },
+        RangeOutcome::Partial { start, end } => MediaResponsePlan {
+            status: 206,
+            content_range: Some(format!("bytes {start}-{end}/{length}")),
+            content_length: end - start + 1,
+            send_body,
+        },
+        RangeOutcome::Unsatisfiable => MediaResponsePlan {
+            status: 416,
+            content_range: Some(format!("bytes */{length}")),
+            content_length: 0,
+            send_body: false,
+        },
+    }
+}
+
 fn parse_digits(text: &str) -> Option<u64> {
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -146,5 +194,53 @@ mod tests {
         assert_eq!(resolve_range(Some("bytes=0-1,4-5"), 10), RangeOutcome::Full);
         assert_eq!(resolve_range(Some("bytes=a-b"), 10), RangeOutcome::Full);
         assert_eq!(resolve_range(Some("bytes=-"), 10), RangeOutcome::Full);
+    }
+
+    #[test]
+    fn full_get_and_head_share_headers_but_only_get_sends_body() {
+        assert_eq!(
+            plan_media_response(MediaMethod::Get, None, 10),
+            MediaResponsePlan {
+                status: 200,
+                content_range: None,
+                content_length: 10,
+                send_body: true,
+            }
+        );
+        let head = plan_media_response(MediaMethod::Head, None, 10);
+        assert_eq!(head.status, 200);
+        assert_eq!(head.content_length, 10);
+        assert!(!head.send_body);
+    }
+
+    #[test]
+    fn partial_response_carries_content_range_and_span_length() {
+        assert_eq!(
+            plan_media_response(MediaMethod::Get, Some("bytes=2-5"), 10),
+            MediaResponsePlan {
+                status: 206,
+                content_range: Some("bytes 2-5/10".to_owned()),
+                content_length: 4,
+                send_body: true,
+            }
+        );
+        let head = plan_media_response(MediaMethod::Head, Some("bytes=-3"), 10);
+        assert_eq!(head.status, 206);
+        assert_eq!(head.content_range.as_deref(), Some("bytes 7-9/10"));
+        assert_eq!(head.content_length, 3);
+        assert!(!head.send_body);
+    }
+
+    #[test]
+    fn unsatisfiable_range_is_416_with_no_body_and_unsatisfied_content_range() {
+        assert_eq!(
+            plan_media_response(MediaMethod::Get, Some("bytes=10-"), 10),
+            MediaResponsePlan {
+                status: 416,
+                content_range: Some("bytes */10".to_owned()),
+                content_length: 0,
+                send_body: false,
+            }
+        );
     }
 }
