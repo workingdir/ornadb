@@ -23,6 +23,12 @@ const PROVIDER_FUNCTION_REFERENCE_EDGE_FIXTURE: &str =
 const PROVIDER_CANCEL_EDGE_FIXTURE: &str = include_str!("fixtures/provider-cancel-edges.json");
 const PROVIDER_METADATA_EDGE_FIXTURE: &str = include_str!("fixtures/provider-metadata-edges.json");
 
+#[path = "../src/abi_version.rs"]
+#[allow(dead_code)]
+mod abi_version;
+#[path = "../src/host_registry_model.rs"]
+#[allow(dead_code)]
+mod host_registry_model;
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
 mod build_host;
