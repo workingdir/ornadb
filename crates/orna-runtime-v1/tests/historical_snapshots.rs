@@ -7052,7 +7052,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 )
                 .expect("valid terminal fixture-backed closure edge tail"),
             );
-        } else if generation == 1128 || generation == 1130 || generation == 1133 || generation == 1136 {
+        } else if generation == 1128 || generation == 1133 || generation == 1136 {
             let mut extension_mutation_id = mutation_id;
             extension_mutation_id[0] = 1;
             mutations.push(
