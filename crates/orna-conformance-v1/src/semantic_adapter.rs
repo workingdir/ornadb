@@ -2227,7 +2227,9 @@ impl DurableTransactionalEvaluator {
         }
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
+        let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -2240,7 +2242,9 @@ impl DurableTransactionalEvaluator {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context,
+                cwd_generation: &cwd_generation,
                 mutations: &mutations,
+                content_pins: &mut [],
                 next_digest,
                 validator: &mut validator,
                 faults: &NoFault,
@@ -2423,7 +2427,9 @@ impl DurableTransactionalEvaluator {
         }
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
+        let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -2478,12 +2484,14 @@ impl DurableTransactionalEvaluator {
     /// never synthesizes rollback proof.
     pub async fn execute_running_table_request_with_success_terminal(
         &self,
+        repository: &Repository,
         state: &RuntimeState,
         continuation: RunningTableRequestContinuation,
         unit: &SourceUnit,
         success_terminal: TerminalOutcome,
     ) -> RunningTableRequestDisposition {
         self.execute_running_table_request_with_success_terminal_with_faults(
+            repository,
             state,
             continuation,
             unit,
@@ -2496,6 +2504,7 @@ impl DurableTransactionalEvaluator {
     #[allow(clippy::too_many_arguments)]
     async fn execute_running_table_request_with_success_terminal_with_faults(
         &self,
+        repository: &Repository,
         state: &RuntimeState,
         continuation: RunningTableRequestContinuation,
         unit: &SourceUnit,
@@ -2584,7 +2593,13 @@ impl DurableTransactionalEvaluator {
             continuation.context().capture().generation_digest(),
             &mutations,
         );
+        let cwd_generation =
+            match activation_cwd_generation(repository, continuation.context()) {
+                Ok(generation) => generation,
+                Err(error) => return RunningTableRequestDisposition::Fenced(error),
+            };
         let mut validator = TransactionalTableCandidateValidator::new(
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -2848,6 +2863,7 @@ impl DurableTransactionalEvaluator {
             .await;
         }
         self.execute_admitted_project_request(
+            target.repository,
             &state,
             lease,
             request,
@@ -3597,7 +3613,9 @@ impl DurableTransactionalEvaluator {
         }
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
+        let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -3610,7 +3628,9 @@ impl DurableTransactionalEvaluator {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context,
+                cwd_generation: &cwd_generation,
                 mutations: &mutations,
+                content_pins: &mut [],
                 next_digest,
                 validator: &mut validator,
                 faults: &NoFault,
@@ -3631,6 +3651,7 @@ impl DurableTransactionalEvaluator {
     }
     async fn execute_admitted_project_request(
         &self,
+        repository: &Repository,
         state: &RuntimeState,
         lease: WriterLease,
         request: RequestIdentity,
@@ -3713,7 +3734,9 @@ impl DurableTransactionalEvaluator {
         }
         let next_digest =
             durable_activation_digest(context.capture().generation_digest(), &mutations);
+        let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -4241,7 +4264,22 @@ impl EffectHandler for ActivationRelationEffectHandler<'_, '_> {
         Ok(Some(RelationPage { rows, next }))
     }
 }
+/// Binds a candidate validator to the repository CWD generation observed for
+/// the activation capture. The runtime compares this value again at commit, so
+/// CWD drift after capture fails closed before any candidate mutation.
+fn activation_cwd_generation(
+    repository: &Repository,
+    context: &orna_runtime_v1::RuntimeActivationContext,
+) -> Result<orna_repository_v1::CwdGeneration, RuntimeError> {
+    let runtime = u64::try_from(context.capture().generation())
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    repository
+        .cwd_generation(orna_repository_v1::RuntimeGeneration::new(runtime))
+        .map_err(|_| RuntimeError::InvalidTableMutation)
+}
+
 struct TransactionalTableCandidateValidator {
+    cwd_generation: orna_repository_v1::CwdGeneration,
     table_assertions: TableAssertions,
     module_assertions: ModuleAssertions,
     functions: Functions,
@@ -4251,6 +4289,7 @@ struct TransactionalTableCandidateValidator {
 
 impl TransactionalTableCandidateValidator {
     fn new(
+        cwd_generation: orna_repository_v1::CwdGeneration,
         functions: &Functions,
         key_fields: &TableKeys,
         float_fields: &TableFloatFields,
@@ -4269,6 +4308,7 @@ impl TransactionalTableCandidateValidator {
             tables.extend(assertion.dependencies.iter().cloned());
         }
         Self {
+            cwd_generation,
             table_assertions: table_assertions.clone(),
             module_assertions: module_assertions.clone(),
             functions: lower_relation_bindings(functions, key_fields, float_fields, table_fields),
@@ -4281,6 +4321,10 @@ impl TransactionalTableCandidateValidator {
 impl TableActivationCandidateValidator for TransactionalTableCandidateValidator {
     fn tables(&self) -> &[String] {
         &self.tables
+    }
+
+    fn cwd_generation(&self) -> &orna_repository_v1::CwdGeneration {
+        &self.cwd_generation
     }
 
     fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -11062,6 +11106,7 @@ mod durable_tests {
         let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
         let read_only = evaluator
             .execute_running_table_request_with_success_terminal(
+                &repository,
                 &state,
                 continuation.clone(),
                 &source(""),
@@ -11084,6 +11129,7 @@ mod durable_tests {
 
         let outcome = evaluator
             .execute_running_table_request_with_success_terminal(
+                &repository,
                 &state,
                 continuation.clone(),
                 &instant_source(
@@ -11138,6 +11184,7 @@ mod durable_tests {
         assert!(matches!(
             evaluator
                 .execute_running_table_request_with_success_terminal(
+                    &repository,
                     &state,
                     continuation,
                     &source(r#"Note.insert({ id: 18, text: "must not run" });"#),
@@ -11180,6 +11227,7 @@ mod durable_tests {
         assert!(matches!(
             evaluator
                 .execute_running_table_request_with_success_terminal(
+                    &repository,
                     &state,
                     continuation.clone(),
                     &source("unknown()"),
@@ -11207,6 +11255,7 @@ mod durable_tests {
         assert!(matches!(
             evaluator
                 .execute_running_table_request_with_success_terminal(
+                    &repository,
                     &state,
                     continuation,
                     &source(r#"Note.insert({ id: 24, text: "must not run" });"#),
@@ -11268,6 +11317,7 @@ mod durable_tests {
         assert!(matches!(
             evaluator
                 .execute_running_table_request_with_success_terminal_with_faults(
+                    &repository,
                     &state,
                     continuation,
                     &source(r#"Note.insert({ id: 23, text: "faulted" });"#),
@@ -11417,6 +11467,7 @@ mod durable_tests {
         assert!(matches!(
             evaluator
                 .execute_running_table_request_with_success_terminal(
+                    &repository,
                     &state,
                     continuation.clone(),
                     &source("unknown()"),
@@ -11444,6 +11495,7 @@ mod durable_tests {
         assert!(matches!(
             evaluator
                 .execute_running_table_request_with_success_terminal(
+                    &foreign_repository,
                     &foreign,
                     continuation.clone(),
                     &source(r#"Note.insert({ id: 19, text: "foreign" });"#),
@@ -11487,6 +11539,7 @@ mod durable_tests {
         assert!(matches!(
             evaluator
                 .execute_running_table_request_with_success_terminal(
+                    &repository,
                     &state,
                     continuation,
                     &source(r#"Note.insert({ id: 19, text: "stale" });"#),
