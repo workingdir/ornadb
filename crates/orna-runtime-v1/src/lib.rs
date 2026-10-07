@@ -55,7 +55,8 @@ use uuid::Uuid;
 
 mod activation;
 pub use activation::{
-    ActivationError, ActivationWork, run_table_activation, with_activation_scope,
+    ActivationError, ActivationWork, run_admitted_table_activation, run_table_activation,
+    with_activation_scope,
     with_terminal_admin_effect,
 };
 mod checkpoint_bootstrap;
@@ -949,6 +950,13 @@ impl TableMutation {
     #[must_use]
     pub const fn table_object_id(&self) -> Option<TableObjectId> {
         self.table_object_id
+    }
+
+    /// Returns the durable `table_row` key for this mutation. Identity-bearing
+    /// rows are addressed by their committed identity, so a source rename keeps
+    /// reading and writing the same rows.
+    fn storage_table(&self) -> String {
+        table_storage_key(&self.table, self.table_object_id)
     }
 
     /// Carries committed source table identity through the runtime mutation
@@ -2929,6 +2937,12 @@ pub trait StreamTableCandidateValidator {
     /// Table relations required to validate this delivery.
     fn tables(&self) -> &[String];
 
+    /// Committed identities the candidate relations were admitted under.
+    /// Name-only validators keep the default empty map.
+    fn table_object_ids(&self) -> BTreeMap<String, TableObjectId> {
+        BTreeMap::new()
+    }
+
     /// Returns a safe failure diagnostic when the candidate cannot commit.
     fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
 }
@@ -2940,6 +2954,12 @@ pub trait StreamTableCandidateValidator {
 pub trait TableActivationCandidateValidator {
     /// Table relations required to validate this activation.
     fn tables(&self) -> &[String];
+
+    /// Committed identities the candidate relations were admitted under.
+    /// Name-only validators keep the default empty map.
+    fn table_object_ids(&self) -> BTreeMap<String, TableObjectId> {
+        BTreeMap::new()
+    }
 
     /// Returns a safe failure diagnostic when the candidate cannot commit.
     fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
@@ -6023,11 +6043,12 @@ impl RuntimeState {
             if table_rows.contains_key(*table) {
                 continue;
             }
+            let storage = table_storage_key(table, table_object_ids.get(*table).copied());
             let mut rows = transaction
                 .query(
                     "SELECT row_key, row_value FROM table_row
                      WHERE table_id = ?1 ORDER BY row_key",
-                    params![*table],
+                    params![storage],
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -6162,7 +6183,7 @@ impl RuntimeState {
             .map_err(TableActivationError::Runtime)?;
         validate_id(writer.owner_id).map_err(TableActivationError::Runtime)?;
         validate_mutations(&encoded, next_digest).map_err(TableActivationError::Runtime)?;
-        validate_table_candidate_scope(mutations, validator.tables())
+        validate_table_candidate_scope(mutations, validator.tables(), &validator.table_object_ids())
             .map_err(TableActivationError::Runtime)?;
         let transaction = self
             .connection
@@ -6185,7 +6206,7 @@ impl RuntimeState {
                 .await
                 .map_err(TableActivationError::Runtime)?;
         }
-        let rows = table_rows_tx(&transaction, validator.tables())
+        let rows = table_rows_tx(&transaction, validator.tables(), &validator.table_object_ids())
             .await
             .map_err(TableActivationError::Runtime)?;
         validator
@@ -6465,7 +6486,11 @@ impl RuntimeState {
             validate_mutations(&encoded, next_digest)?;
         }
         if let Some(validator) = &mut validator {
-            validate_table_candidate_scope(mutations, validator.tables())?;
+            validate_table_candidate_scope(
+                mutations,
+                validator.tables(),
+                &validator.table_object_ids(),
+            )?;
         }
         let current_capture = capture_tx(&transaction).await?;
         if &current_capture != context.capture() {
@@ -6522,7 +6547,13 @@ impl RuntimeState {
             return Err(request_activation_rollback(transaction, error).await?);
         }
         if let Some(validator) = validator {
-            let rows = match table_rows_tx(&transaction, validator.tables()).await {
+            let rows = match table_rows_tx(
+                &transaction,
+                validator.tables(),
+                &validator.table_object_ids(),
+            )
+            .await
+            {
                 Ok(rows) => rows,
                 Err(error) => return Err(request_activation_rollback(transaction, error).await?),
             };
@@ -6826,7 +6857,28 @@ impl RuntimeState {
         snapshot: &HistoricalSnapshot,
         table: &str,
     ) -> Result<HistoricalTableRows, RuntimeError> {
+        self.read_storage_table_at(snapshot, table, None).await
+    }
+
+    /// Reads an admitted relation at an immutable checkpoint pin by its
+    /// committed identity, so the rows match the live relation after a rename.
+    pub async fn read_admitted_table_at(
+        &self,
+        snapshot: &HistoricalSnapshot,
+        identity: &RuntimeTableIdentity,
+    ) -> Result<HistoricalTableRows, RuntimeError> {
+        self.read_storage_table_at(snapshot, identity.table(), Some(identity.object_id()))
+            .await
+    }
+
+    async fn read_storage_table_at(
+        &self,
+        snapshot: &HistoricalSnapshot,
+        table: &str,
+        object_id: Option<TableObjectId>,
+    ) -> Result<HistoricalTableRows, RuntimeError> {
         validate_table_name(table)?;
+        let storage = table_storage_key(table, object_id);
         let transaction = self
             .connection
             .transaction()
@@ -6917,7 +6969,10 @@ impl RuntimeState {
                          AND newer.mutation_sequence > history.mutation_sequence
                    )
                  ORDER BY history.row_key",
-                params![table, i64::try_from(mutation_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?],
+                params![
+                    storage,
+                    i64::try_from(mutation_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?
+                ],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -9706,7 +9761,7 @@ impl RuntimeState {
         validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
         validate_stream_mutations(&encoded, next_digest)
             .map_err(StreamTableDeliveryError::Runtime)?;
-        validate_table_candidate_scope(mutations, validator.tables())
+        validate_table_candidate_scope(mutations, validator.tables(), &validator.table_object_ids())
             .map_err(StreamTableDeliveryError::Runtime)?;
         let tx = self
             .connection
@@ -9752,7 +9807,7 @@ impl RuntimeState {
         let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
-        let rows = table_rows_tx(&tx, validator.tables())
+        let rows = table_rows_tx(&tx, validator.tables(), &validator.table_object_ids())
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
         validator
@@ -9935,7 +9990,7 @@ impl RuntimeState {
         validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
         validate_stream_mutations(&encoded, next_digest)
             .map_err(StreamTableDeliveryError::Runtime)?;
-        validate_table_candidate_scope(mutations, validator.tables())
+        validate_table_candidate_scope(mutations, validator.tables(), &validator.table_object_ids())
             .map_err(StreamTableDeliveryError::Runtime)?;
         let tx = self
             .connection
@@ -9994,7 +10049,7 @@ impl RuntimeState {
         let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
-        let rows = table_rows_tx(&tx, validator.tables())
+        let rows = table_rows_tx(&tx, validator.tables(), &validator.table_object_ids())
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
         validator
@@ -17577,6 +17632,35 @@ fn validate_table_identity(table: &str, key: &[u8]) -> Result<(), RuntimeError> 
     Ok(())
 }
 
+/// Maps a table name plus its optional committed identity to the `table_row`
+/// key. Name-only tables keep their legacy key; identity-bearing tables use a
+/// prefix that no source name can produce, because names never contain `:`.
+fn table_storage_key(name: &str, object_id: Option<TableObjectId>) -> String {
+    match object_id {
+        Some(object_id) => {
+            let hex: String = object_id.bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("oid:{hex}")
+        }
+        None => name.to_owned(),
+    }
+}
+
+/// Rejects a mutation whose identity disagrees with the identity its
+/// activation snapshot or candidate validator was admitted under. Without this
+/// check a write could land under a key the admitted reader never observes.
+fn validate_mutation_identities(
+    mutations: &[TableMutation],
+    admitted: &BTreeMap<String, TableObjectId>,
+) -> Result<(), RuntimeError> {
+    if mutations
+        .iter()
+        .any(|mutation| mutation.table_object_id() != admitted.get(mutation.table()).copied())
+    {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    Ok(())
+}
+
 fn validate_table_name(table: &str) -> Result<(), RuntimeError> {
     if table.is_empty() || table.len() > MAX_TABLE_MUTATION_BYTES || table.contains('\0') {
         return Err(RuntimeError::InvalidTableMutation);
@@ -17845,11 +17929,12 @@ async fn apply_table_mutation_tx(
     connection: &Connection,
     mutation: &TableMutation,
 ) -> Result<(), RuntimeError> {
+    let storage_table = mutation.storage_table();
     if let Some(new_key) = mutation.rekey_to() {
         let mut rows = connection
             .query(
                 "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
-                params![mutation.table().to_owned(), mutation.key().to_vec()],
+                params![storage_table.clone(), mutation.key().to_vec()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -17864,7 +17949,7 @@ async fn apply_table_mutation_tx(
         let mut rows = connection
             .query(
                 "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
-                params![mutation.table().to_owned(), new_key.to_vec()],
+                params![storage_table.clone(), new_key.to_vec()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -17883,7 +17968,7 @@ async fn apply_table_mutation_tx(
         connection
             .execute(
                 "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
-                params![mutation.table().to_owned(), mutation.key().to_vec()],
+                params![storage_table.clone(), mutation.key().to_vec()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -17892,7 +17977,7 @@ async fn apply_table_mutation_tx(
                 "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
-                    mutation.table().to_owned(),
+                    storage_table.clone(),
                     new_key.to_vec(),
                     value.to_vec(),
                     digest.to_vec()
@@ -17907,7 +17992,7 @@ async fn apply_table_mutation_tx(
         let mut rows = connection
             .query(
                 "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
-                params![mutation.table().to_owned(), mutation.key().to_vec()],
+                params![storage_table.clone(), mutation.key().to_vec()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -17925,7 +18010,7 @@ async fn apply_table_mutation_tx(
                 "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
-                    mutation.table().to_owned(),
+                    storage_table.clone(),
                     mutation.key().to_vec(),
                     value.to_vec(),
                     digest.to_vec()
@@ -17946,7 +18031,7 @@ async fn apply_table_mutation_tx(
                        row_value = excluded.row_value,
                        row_digest = excluded.row_digest",
                     params![
-                        mutation.table.clone(),
+                        storage_table.clone(),
                         mutation.key.clone(),
                         value.clone(),
                         digest.to_vec()
@@ -17961,7 +18046,7 @@ async fn apply_table_mutation_tx(
                     "SELECT 1 FROM table_row
                      WHERE table_id = ?1 AND row_key = ?2
                      LIMIT 1",
-                    params![mutation.table.clone(), mutation.key.clone()],
+                    params![storage_table.clone(), mutation.key.clone()],
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -17976,7 +18061,7 @@ async fn apply_table_mutation_tx(
             connection
                 .execute(
                     "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
-                    params![mutation.table.clone(), mutation.key.clone()],
+                    params![storage_table.clone(), mutation.key.clone()],
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -17988,6 +18073,7 @@ async fn apply_table_mutation_tx(
 async fn table_rows_tx(
     connection: &Connection,
     tables: &[String],
+    table_object_ids: &BTreeMap<String, TableObjectId>,
 ) -> Result<RuntimeTableRows, RuntimeError> {
     let mut result = BTreeMap::new();
     for table in tables {
@@ -17995,11 +18081,12 @@ async fn table_rows_tx(
         if result.contains_key(table) {
             continue;
         }
+        let storage = table_storage_key(table, table_object_ids.get(table).copied());
         let mut query = connection
             .query(
                 "SELECT row_key, row_value FROM table_row
                  WHERE table_id = ?1 ORDER BY row_key",
-                params![table.clone()],
+                params![storage],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -18022,6 +18109,7 @@ async fn table_rows_tx(
 fn validate_table_candidate_scope(
     mutations: &[TableMutation],
     tables: &[String],
+    table_object_ids: &BTreeMap<String, TableObjectId>,
 ) -> Result<(), RuntimeError> {
     if mutations
         .iter()
@@ -18029,7 +18117,7 @@ fn validate_table_candidate_scope(
     {
         return Err(RuntimeError::RecoveryInvalid);
     }
-    Ok(())
+    validate_mutation_identities(mutations, table_object_ids)
 }
 
 async fn append_mutations_tx(
@@ -18091,8 +18179,12 @@ async fn append_mutations_with_catalogue_tx(
                 .get(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         );
+        // Every table-mutation encoding, including identity-bearing v4, must
+        // enter history so `as_of` reads the same rows the live relation holds.
         if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION\0")
             || mutation.payload.starts_with(b"ORNA-TABLE-MUTATION-2\0")
+            || mutation.payload.starts_with(b"ORNA-TABLE-MUTATION-3\0")
+            || mutation.payload.starts_with(b"ORNA-TABLE-MUTATION-4\0")
         {
             let table_mutation = TableMutation::decode(mutation)?;
             let sequence = sequence.ok_or(RuntimeError::RecoveryInvalid)?;
@@ -18102,7 +18194,7 @@ async fn append_mutations_with_catalogue_tx(
                         "INSERT INTO runtime_table_history
                          (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
                          VALUES (?1, ?2, ?3, NULL, NULL, 1)",
-                        params![sequence, table_mutation.table().to_owned(), table_mutation.key()],
+                        params![sequence, table_mutation.storage_table(), table_mutation.key()],
                     )
                     .await
                     .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -18116,7 +18208,7 @@ async fn append_mutations_with_catalogue_tx(
                          VALUES (?1, ?2, ?3, ?4, ?5, 0)",
                         params![
                             sequence,
-                            table_mutation.table().to_owned(),
+                            table_mutation.storage_table(),
                             new_key,
                             value,
                             Sha256::digest(value).to_vec()
@@ -18140,7 +18232,7 @@ async fn append_mutations_with_catalogue_tx(
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![
                             sequence,
-                            table_mutation.table().to_owned(),
+                            table_mutation.storage_table(),
                             table_mutation.key().to_vec(),
                             value,
                             row_digest,
@@ -29247,6 +29339,167 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(renamed_snapshot.table_object_id("Memo"), Some(object_id));
+    }
+
+    #[tokio::test]
+    async fn admitted_activation_keeps_rows_under_identity_across_rename() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let object_id = TableObjectId::new([0x91; 16]);
+
+        run_admitted_table_activation(
+            &state,
+            lease,
+            &[RuntimeTableIdentity::new("books", object_id).unwrap()],
+            &NoFault,
+            |snapshot| {
+                assert!(snapshot.table_rows()["books"].is_empty());
+                let insert = TableMutation::new(id(5), "books", vec![1], Some(vec![9]))
+                    .unwrap()
+                    .with_table_object_id(object_id);
+                async move { Ok::<_, ()>(ActivationWork::new(vec![insert], digest(6), ())) }
+            },
+        )
+        .await
+        .unwrap();
+
+        // The source renamed the table. The same committed identity must read the
+        // same rows, and a write under the new name must update them in place.
+        run_admitted_table_activation(
+            &state,
+            lease,
+            &[RuntimeTableIdentity::new("Memo", object_id).unwrap()],
+            &NoFault,
+            |snapshot| {
+                assert_eq!(snapshot.table_rows()["Memo"], vec![(vec![1], vec![9])]);
+                let update = TableMutation::new(id(7), "Memo", vec![1], Some(vec![8]))
+                    .unwrap()
+                    .with_table_object_id(object_id);
+                async move { Ok::<_, ()>(ActivationWork::new(vec![update], digest(8), ())) }
+            },
+        )
+        .await
+        .unwrap();
+
+        let books = [RuntimeTableIdentity::new("books", object_id).unwrap()];
+        let after = state.begin_admitted_table_activation(&books).await.unwrap();
+        assert_eq!(after.table_rows()["books"], vec![(vec![1], vec![8])]);
+        assert_eq!(after.table_object_id("books"), Some(object_id));
+
+        // Historical pins read the same identity-addressed rows as the live relation.
+        let memo = RuntimeTableIdentity::new("Memo", object_id).unwrap();
+        let first_generation = state.select_historical_snapshot(1).await.unwrap();
+        let rows = state
+            .read_admitted_table_at(&first_generation, &memo)
+            .await
+            .unwrap();
+        assert_eq!(rows.rows(), &[(vec![1], vec![9])]);
+        let latest = state.select_historical_snapshot(2).await.unwrap();
+        let rows = state.read_admitted_table_at(&latest, &memo).await.unwrap();
+        assert_eq!(rows.rows(), &[(vec![1], vec![8])]);
+    }
+
+    #[tokio::test]
+    async fn admitted_activation_publishes_no_row_when_commit_or_evaluation_fails() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let object_id = TableObjectId::new([0x92; 16]);
+        let identity = [RuntimeTableIdentity::new("books", object_id).unwrap()];
+
+        // A failure after the row write but before the transaction commits must
+        // roll the row back: nothing is acknowledged and the next read is empty.
+        let failed_commit = run_admitted_table_activation(
+            &state,
+            lease,
+            &identity,
+            &Fail(FaultPoint::AfterMutation),
+            |_snapshot| {
+                let insert = TableMutation::new(id(5), "books", vec![1], Some(vec![9]))
+                    .unwrap()
+                    .with_table_object_id(object_id);
+                async move { Ok::<_, ()>(ActivationWork::new(vec![insert], digest(6), ())) }
+            },
+        )
+        .await;
+        assert!(matches!(
+            failed_commit,
+            Err(ActivationError::Runtime(RuntimeError::FaultInjected(
+                FaultPoint::AfterMutation
+            )))
+        ));
+
+        // An evaluator error never reaches the commit boundary at all.
+        let failed_evaluation = run_admitted_table_activation(
+            &state,
+            lease,
+            &identity,
+            &NoFault,
+            |_snapshot| {
+                let insert = TableMutation::new(id(7), "books", vec![2], Some(vec![9]))
+                    .unwrap()
+                    .with_table_object_id(object_id);
+                async move {
+                    let _staged = ActivationWork::new(vec![insert], digest(8), ());
+                    Err::<ActivationWork<()>, _>("evaluator rejected")
+                }
+            },
+        )
+        .await;
+        assert!(matches!(failed_evaluation, Err(ActivationError::Evaluator(_))));
+
+        let visible = state.begin_admitted_table_activation(&identity).await.unwrap();
+        assert!(visible.table_rows()["books"].is_empty());
+    }
+
+    #[tokio::test]
+    async fn admitted_activation_rejects_writes_that_disagree_with_admitted_identity() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let admitted = TableObjectId::new([0x93; 16]);
+        let other = TableObjectId::new([0x94; 16]);
+        let identity = [RuntimeTableIdentity::new("books", admitted).unwrap()];
+
+        let wrong_identity = run_admitted_table_activation(
+            &state,
+            lease,
+            &identity,
+            &NoFault,
+            |_snapshot| {
+                let insert = TableMutation::new(id(5), "books", vec![1], Some(vec![9]))
+                    .unwrap()
+                    .with_table_object_id(other);
+                async move { Ok::<_, ()>(ActivationWork::new(vec![insert], digest(6), ())) }
+            },
+        )
+        .await;
+        assert!(matches!(
+            wrong_identity,
+            Err(ActivationError::Runtime(RuntimeError::InvalidTableMutation))
+        ));
+
+        // A name-only write to an identity-addressed table would land under a key
+        // the admitted reader never observes, so it is refused as well.
+        let name_only = run_admitted_table_activation(
+            &state,
+            lease,
+            &identity,
+            &NoFault,
+            |_snapshot| {
+                let insert = TableMutation::new(id(7), "books", vec![1], Some(vec![9])).unwrap();
+                async move { Ok::<_, ()>(ActivationWork::new(vec![insert], digest(8), ())) }
+            },
+        )
+        .await;
+        assert!(matches!(
+            name_only,
+            Err(ActivationError::Runtime(RuntimeError::InvalidTableMutation))
+        ));
+
+        let visible = state.begin_admitted_table_activation(&identity).await.unwrap();
+        assert!(visible.table_rows()["books"].is_empty());
     }
 
     #[tokio::test]
