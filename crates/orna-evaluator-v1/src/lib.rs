@@ -907,6 +907,86 @@ pub trait EffectHandler {
     ) -> Result<(), EvaluationError> {
         Err(error("ORNA-EVAL-UNSUPPORTED"))
     }
+
+    #[doc(hidden)]
+    fn is_ovb2_binding(&self) -> bool {
+        false
+    }
+
+    #[doc(hidden)]
+    fn ovb2_binding(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
+        None
+    }
+}
+
+/// Executes a native effect with values carried in the OVB-2 profile.
+///
+/// This binding is deliberately separate from [`EffectHandler`]: OVB-1
+/// callers continue to receive canonical values, while profile-aware native
+/// bindings can retain OVB-2 values such as MIME-1 annotated Blobs at both
+/// sides of the dispatch boundary.
+pub trait Ovb2EffectHandler {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+    ) -> Result<Option<ContextValue>, EvaluationError>;
+
+    /// Handle an effect while sharing the activation's step budget.
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        _budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle(callee, arguments)
+    }
+
+    /// Handle a native operation resolved by its admitted system identity.
+    fn handle_registered_with_budget(
+        &mut self,
+        _operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle_with_budget(callee, arguments, budget)
+    }
+
+    /// Handle a registered operation while retaining the live cancellation
+    /// request for host operations that can stop promptly.
+    fn handle_registered_with_cancellation_and_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle_registered_with_budget(operation, callee, arguments, budget)
+    }
+}
+
+struct Ovb2EffectHandlerAdapter<'a> {
+    handler: &'a mut dyn Ovb2EffectHandler,
+}
+
+impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
+    fn handle(
+        &mut self,
+        _callee: &Expr,
+        _arguments: &[CanonicalValue],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        Err(error("ORNA-EVAL-UNSUPPORTED"))
+    }
+
+    fn is_ovb2_binding(&self) -> bool {
+        true
+    }
+
+    fn ovb2_binding(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
+        Some(self.handler)
+    }
 }
 
 /// Evaluate one expression using [`parse_expression`].
@@ -929,6 +1009,46 @@ pub fn evaluate_expression_ovb2(
     environment: &BTreeMap<String, ContextValue>,
     limits: Limits,
 ) -> Result<ContextValue, EvaluationError> {
+    evaluate_expression_ovb2_with_optional_effects(source, environment, limits, None, None)
+}
+
+/// Evaluate one expression using OVB-2 values and a profile-aware native
+/// effect binding. Effect arguments and results retain the OVB-2 profile,
+/// including MIME-1 annotations on Blob values.
+pub fn evaluate_expression_ovb2_with_effects(
+    source: &str,
+    environment: &BTreeMap<String, ContextValue>,
+    limits: Limits,
+    effects: &mut dyn Ovb2EffectHandler,
+) -> Result<ContextValue, EvaluationError> {
+    evaluate_expression_ovb2_with_optional_effects(source, environment, limits, Some(effects), None)
+}
+
+/// OVB-2 expression evaluation with native effects and an optional live
+/// cancellation request.
+pub fn evaluate_expression_ovb2_with_effects_and_cancellation(
+    source: &str,
+    environment: &BTreeMap<String, ContextValue>,
+    limits: Limits,
+    effects: &mut dyn Ovb2EffectHandler,
+    cancellation: Option<&CancellationToken>,
+) -> Result<ContextValue, EvaluationError> {
+    evaluate_expression_ovb2_with_optional_effects(
+        source,
+        environment,
+        limits,
+        Some(effects),
+        cancellation,
+    )
+}
+
+fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
+    source: &str,
+    environment: &BTreeMap<String, ContextValue>,
+    limits: Limits,
+    effects: Option<&'effects mut dyn Ovb2EffectHandler>,
+    cancellation: Option<&'functions CancellationToken>,
+) -> Result<ContextValue, EvaluationError> {
     check_limits(source, limits)?;
     let parsed = parse_expression(source);
     if !parsed.is_ok() {
@@ -936,6 +1056,10 @@ pub fn evaluate_expression_ovb2(
     }
     validate_limits(limits)?;
     let functions = Functions::new();
+    let mut effects_adapter = effects.map(|handler| Ovb2EffectHandlerAdapter { handler });
+    let effects = effects_adapter
+        .as_mut()
+        .map(|adapter| adapter as &mut dyn EffectHandler);
     let mut context = Context {
         limits,
         steps: 0,
@@ -945,10 +1069,10 @@ pub fn evaluate_expression_ovb2(
         repl_bindings: false,
         restrict_function_names: false,
         reject_unhandled_field_calls: false,
-        effects: None,
+        effects,
         namespace: None,
         transfer: None,
-        cancellation: None,
+        cancellation,
     };
     let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
@@ -2808,12 +2932,33 @@ fn run_task_callbacks(
 }
 
 impl Context<'_, '_> {
+    fn has_ovb2_effects(&self) -> bool {
+        self.effects
+            .as_deref()
+            .is_some_and(EffectHandler::is_ovb2_binding)
+    }
+
+    fn ovb2_effects(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
+        self.effects.as_deref_mut()?.ovb2_binding()
+    }
+
     fn effect_value(&mut self, value: &CanonicalValue) -> Result<Value, EvaluationError> {
         // Effect results cross a canonical boundary. Apply the depth limit to
         // the returned value's own structure from its root, independently of
         // the source call stack. Otherwise a handler can commit an effect and
         // result decoding can then fail only because that caller was deep.
         Value::from_canonical(value, self, 0)
+    }
+
+    fn ovb2_effect_value(&mut self, value: &ContextValue) -> Result<Value, EvaluationError> {
+        if value.format() != ValueFormat::Ovb2 {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        Value::from_raw(value.raw(), self, 0)
+    }
+
+    fn ovb2_context_value(value: Value) -> Result<ContextValue, EvaluationError> {
+        ContextValue::new(ValueFormat::Ovb2, value.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
     }
 
     fn step(&mut self) -> Result<(), EvaluationError> {
@@ -5777,18 +5922,33 @@ impl Context<'_, '_> {
             }
             let remaining = self.limits.max_steps.saturating_sub(self.steps);
             let mut budget = StepBudget::new(remaining);
-            let result = self
-                .effects
-                .as_deref_mut()
-                .expect("checked effect handler")
-                .handle_with_budget(callee, &[], &mut budget);
-            let debited = remaining - budget.remaining();
-            self.steps = self
-                .steps
-                .checked_add(debited)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            if let Some(value) = result? {
-                return self.effect_value(&value);
+            if self.has_ovb2_effects() {
+                let result = self
+                    .ovb2_effects()
+                    .expect("checked OVB-2 effect handler")
+                    .handle_with_budget(callee, &[], &mut budget);
+                let debited = remaining - budget.remaining();
+                self.steps = self
+                    .steps
+                    .checked_add(debited)
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                if let Some(value) = result? {
+                    return self.ovb2_effect_value(&value);
+                }
+            } else {
+                let result = self
+                    .effects
+                    .as_deref_mut()
+                    .expect("checked effect handler")
+                    .handle_with_budget(callee, &[], &mut budget);
+                let debited = remaining - budget.remaining();
+                self.steps = self
+                    .steps
+                    .checked_add(debited)
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                if let Some(value) = result? {
+                    return self.effect_value(&value);
+                }
             }
         }
         // `uuid7()` is an activation-scoped intrinsic. Like `now()`, it is
@@ -5805,18 +5965,33 @@ impl Context<'_, '_> {
             }
             let remaining = self.limits.max_steps.saturating_sub(self.steps);
             let mut budget = StepBudget::new(remaining);
-            let result = self
-                .effects
-                .as_deref_mut()
-                .expect("checked effect handler")
-                .handle_with_budget(callee, &[], &mut budget);
-            let debited = remaining - budget.remaining();
-            self.steps = self
-                .steps
-                .checked_add(debited)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            if let Some(value) = result? {
-                return self.effect_value(&value);
+            if self.has_ovb2_effects() {
+                let result = self
+                    .ovb2_effects()
+                    .expect("checked OVB-2 effect handler")
+                    .handle_with_budget(callee, &[], &mut budget);
+                let debited = remaining - budget.remaining();
+                self.steps = self
+                    .steps
+                    .checked_add(debited)
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                if let Some(value) = result? {
+                    return self.ovb2_effect_value(&value);
+                }
+            } else {
+                let result = self
+                    .effects
+                    .as_deref_mut()
+                    .expect("checked effect handler")
+                    .handle_with_budget(callee, &[], &mut budget);
+                let debited = remaining - budget.remaining();
+                self.steps = self
+                    .steps
+                    .checked_add(debited)
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                if let Some(value) = result? {
+                    return self.effect_value(&value);
+                }
             }
         }
         if matches!(callee, Expr::Name { text, .. } if text == "error")
@@ -5933,33 +6108,69 @@ impl Context<'_, '_> {
                 }
                 ordered
             };
-            let values = ordered_arguments
-                .iter()
-                .map(|argument| {
-                    self.evaluate(&argument.value, scope, depth + 1)?
-                        .canonical()
-                })
-                .collect::<Result<Vec<_>, EvaluationError>>()?;
-            let remaining = self.limits.max_steps.saturating_sub(self.steps);
-            let mut budget = StepBudget::new(remaining);
-            let result = self
-                .effects
-                .as_deref_mut()
-                .expect("host effects were checked above")
-                .handle_registered_with_cancellation_and_budget(
-                    operation_name,
-                    callee,
-                    &values,
-                    &mut budget,
-                    self.cancellation,
-                );
-            let debited = remaining - budget.remaining();
-            self.steps = self
-                .steps
-                .checked_add(debited)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            if let Some(value) = result? {
-                return self.effect_value(&value);
+            if self.has_ovb2_effects() {
+                let values = ordered_arguments
+                    .iter()
+                    .map(|argument| {
+                        Self::ovb2_context_value(self.evaluate(
+                            &argument.value,
+                            scope,
+                            depth + 1,
+                        )?)
+                    })
+                    .collect::<Result<Vec<_>, EvaluationError>>()?;
+                let remaining = self.limits.max_steps.saturating_sub(self.steps);
+                let mut budget = StepBudget::new(remaining);
+                let cancellation = self.cancellation;
+                let result = self
+                    .ovb2_effects()
+                    .expect("checked OVB-2 effect handler")
+                    .handle_registered_with_cancellation_and_budget(
+                        operation_name,
+                        callee,
+                        &values,
+                        &mut budget,
+                        cancellation,
+                    );
+                let debited = remaining - budget.remaining();
+                self.steps = self
+                    .steps
+                    .checked_add(debited)
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                if let Some(value) = result? {
+                    return self.ovb2_effect_value(&value);
+                }
+            } else {
+                // Keep the legacy conversion and dispatch order intact for
+                // every existing EffectHandler caller.
+                let values = ordered_arguments
+                    .iter()
+                    .map(|argument| {
+                        self.evaluate(&argument.value, scope, depth + 1)?
+                            .canonical()
+                    })
+                    .collect::<Result<Vec<_>, EvaluationError>>()?;
+                let remaining = self.limits.max_steps.saturating_sub(self.steps);
+                let mut budget = StepBudget::new(remaining);
+                let result = self
+                    .effects
+                    .as_deref_mut()
+                    .expect("host effects were checked above")
+                    .handle_registered_with_cancellation_and_budget(
+                        operation_name,
+                        callee,
+                        &values,
+                        &mut budget,
+                        self.cancellation,
+                    );
+                let debited = remaining - budget.remaining();
+                self.steps = self
+                    .steps
+                    .checked_add(debited)
+                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                if let Some(value) = result? {
+                    return self.effect_value(&value);
+                }
             }
         }
         let source_export_available =
@@ -6113,25 +6324,46 @@ impl Context<'_, '_> {
                         return Ok(Value::Null);
                     }
                 }
-                let values = values
-                    .into_iter()
-                    .map(Value::canonical)
-                    .collect::<Result<Vec<_>, _>>()?;
-                let remaining = self.limits.max_steps.saturating_sub(self.steps);
-                let mut budget = StepBudget::new(remaining);
-                let result = self
-                    .effects
-                    .as_deref_mut()
-                    .expect("checked effect handler")
-                    .handle_with_budget(callee, &values, &mut budget);
-                let debited = remaining - budget.remaining();
-                self.steps = self
-                    .steps
-                    .checked_add(debited)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                let handled = result?;
-                if let Some(value) = handled {
-                    return self.effect_value(&value);
+                if self.has_ovb2_effects() {
+                    let values = values
+                        .into_iter()
+                        .map(Self::ovb2_context_value)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let remaining = self.limits.max_steps.saturating_sub(self.steps);
+                    let mut budget = StepBudget::new(remaining);
+                    let result = self
+                        .ovb2_effects()
+                        .expect("checked OVB-2 effect handler")
+                        .handle_with_budget(callee, &values, &mut budget);
+                    let debited = remaining - budget.remaining();
+                    self.steps = self
+                        .steps
+                        .checked_add(debited)
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    if let Some(value) = result? {
+                        return self.ovb2_effect_value(&value);
+                    }
+                } else {
+                    let values = values
+                        .into_iter()
+                        .map(Value::canonical)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let remaining = self.limits.max_steps.saturating_sub(self.steps);
+                    let mut budget = StepBudget::new(remaining);
+                    let result = self
+                        .effects
+                        .as_deref_mut()
+                        .expect("checked effect handler")
+                        .handle_with_budget(callee, &values, &mut budget);
+                    let debited = remaining - budget.remaining();
+                    self.steps = self
+                        .steps
+                        .checked_add(debited)
+                        .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                    let handled = result?;
+                    if let Some(value) = handled {
+                        return self.effect_value(&value);
+                    }
                 }
             }
             if self.reject_unhandled_field_calls
@@ -8170,30 +8402,57 @@ impl Context<'_, '_> {
 
     fn random_entropy(&mut self, callee: &Expr, count: usize) -> Result<Vec<u8>, EvaluationError> {
         let expected_count = count;
-        let count = CanonicalValue::new(Raw::Int(BigInt::from(count)))
-            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-        let arguments = [count];
         let remaining = self.limits.max_steps.saturating_sub(self.steps);
         let mut budget = StepBudget::new(remaining);
         let cancellation = self.cancellation;
-        let result = self
-            .effects
-            .as_deref_mut()
-            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
-            .handle_registered_with_cancellation_and_budget(
-                "std.random.entropy",
-                callee,
-                &arguments,
-                &mut budget,
-                cancellation,
-            );
-        let debited = remaining - budget.remaining();
-        self.steps = self
-            .steps
-            .checked_add(debited)
-            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-        let value = result?.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
-        let Raw::Bytes(bytes) = value.raw() else {
+        let value_raw = if self.has_ovb2_effects() {
+            let arguments = [Self::ovb2_context_value(Value::Int(BigInt::from(count)))?];
+            let result = self
+                .ovb2_effects()
+                .expect("checked OVB-2 effect handler")
+                .handle_registered_with_cancellation_and_budget(
+                    "std.random.entropy",
+                    callee,
+                    &arguments,
+                    &mut budget,
+                    cancellation,
+                );
+            let debited = remaining - budget.remaining();
+            self.steps = self
+                .steps
+                .checked_add(debited)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            let value = result?.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+            if value.format() != ValueFormat::Ovb2 {
+                return Err(error("ORNA-EVAL-VALUE"));
+            }
+            value.raw().clone()
+        } else {
+            let count = CanonicalValue::new(Raw::Int(BigInt::from(count)))
+                .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+            let arguments = [count];
+            let result = self
+                .effects
+                .as_deref_mut()
+                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+                .handle_registered_with_cancellation_and_budget(
+                    "std.random.entropy",
+                    callee,
+                    &arguments,
+                    &mut budget,
+                    cancellation,
+                );
+            let debited = remaining - budget.remaining();
+            self.steps = self
+                .steps
+                .checked_add(debited)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            result?
+                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
+                .raw()
+                .clone()
+        };
+        let Raw::Bytes(bytes) = value_raw else {
             return Err(error("ORNA-EVAL-TYPE"));
         };
         if bytes.len() != expected_count {
