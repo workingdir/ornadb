@@ -11,7 +11,9 @@
 
 use std::{collections::BTreeSet, sync::LazyLock};
 
-use super::{SystemEffect, SystemFunctionDescriptor, system_function_descriptor};
+use super::{
+    SystemEffect, SystemFunctionDescriptor, system_function_descriptor,
+};
 use orna_sys_macros::ornasys;
 
 const GENERATED_SYSTEM_API: &str = include_str!(concat!(env!("OUT_DIR"), "/api_sys.json"));
@@ -81,6 +83,8 @@ pub static SYSTEM_FUNCTION_DESCRIPTORS: LazyLock<Vec<SystemFunctionDescriptor>> 
             #[serde(borrow)]
             purpose: &'a str,
             #[serde(borrow)]
+            since: Option<&'a str>,
+            #[serde(borrow)]
             documentation: Option<&'a str>,
             #[serde(borrow)]
             contract: Option<&'a str>,
@@ -108,6 +112,7 @@ pub static SYSTEM_FUNCTION_DESCRIPTORS: LazyLock<Vec<SystemFunctionDescriptor>> 
                     effect,
                     signature: function.signature,
                     purpose: function.purpose,
+                    since: function.since,
                     documentation: function.documentation,
                     contract: function.contract,
                     preconditions: function.preconditions,
@@ -154,7 +159,7 @@ pub struct SystemApiFunctionBindings;
 
 impl SystemApiFunctionBindings {
     #[ornasys(
-        function = r###"{"documentation":"Reports the public type identity, nominal metadata, and registered codec/protocol facts for `value`. The result is descriptive metadata only: it does not expose private payload bytes, evaluate the value, or grant permissions to use it.","effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
+        function = r###"{"effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
         role = "langitem.sys.meta@1.0",
         type_graph = "system_api_inventory.json",
         schema = "system_api_schema.json"
@@ -182,7 +187,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"documentation":"Resolves a name using the language's ordinary import and visibility rules. `at` pins the lookup to a snapshot; `from` supplies the module whose imports and visibility are applied. Lookup is descriptive and never invokes the resolved object.","effect":"read","name":"sys.resolve","purpose":"Resolve a visible semantic name using ordinary import rules at a selected snapshot.","signature":"fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef"}"###
+        function = r###"{"effect":"read","name":"sys.resolve","purpose":"Resolve a semantic name with ordinary visibility/import rules.","signature":"fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef"}"###
     )]
     pub fn sys_resolve(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.resolve")
@@ -198,7 +203,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"documentation":"Returns the structured description associated with an already resolved object reference, including its kind-specific fields and snapshot context. Use this after `sys.resolve` when a client needs machine-readable details; it does not execute the object.","effect":"read","name":"sys.describe","purpose":"Return structured, snapshot-aware details for an already resolved object.","signature":"fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription"}"###
+        function = r###"{"effect":"read","name":"sys.describe","purpose":"Return structured object description.","signature":"fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription"}"###
     )]
     pub fn sys_describe(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.describe")
@@ -352,7 +357,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"documentation":"Expands a diagnostic into its structured cause, related locations, and stable machine-readable explanation fields. The explanation preserves the diagnostic's identity and does not rewrite or suppress the original diagnostic.","effect":"read","name":"sys.explain(Diagnostic)","purpose":"Return the structured causes and related locations for a diagnostic.","signature":"fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"}"###,
+        function = r###"{"effect":"read","name":"sys.explain(Diagnostic)","purpose":"Return structured causal explanation.","signature":"fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"}"###,
         role = "langitem.sys.explain@1.0"
     )]
     pub fn sys_explain_diagnostic(&self) -> &'static SystemFunctionDescriptor {
@@ -551,7 +556,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.compact","purpose":"Rewrite physical segments atomically.","signature":"fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult"}"###
+        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.compact","purpose":"Maintain/repack the current indexed profile without logical mutation or selecting a row mode.","signature":"fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult"}"###
     )]
     pub fn sys_admin_compact(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.compact")
@@ -559,19 +564,19 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.set_storage_preference","purpose":"Set future automatic placement preference without rewriting existing rows.","signature":"fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage"}"###
+        function = r###"{"contexts":["format-1","format-2"],"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.set_storage_preference","purpose":"Set future automatic placement preference without rewriting existing rows.","signature":"fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage"}"###
     )]
-    pub fn sys_admin_set_storage_preference(&self) -> &'static SystemFunctionDescriptor {
-        system_function_descriptor("sys.admin.set_storage_preference")
-            .expect("annotated system API function has a descriptor")
+    #[allow(dead_code)] // Historical metadata is retained; public access is dispatch-only.
+    fn sys_admin_set_storage_preference(&self) -> &'static SystemFunctionDescriptor {
+        panic!("legacy descriptor is selected through system_callable_for with an explicit historical context")
     }
 
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.rewrite_storage","purpose":"Atomically rewrite physical placement while preserving logical rows.","signature":"fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult"}"###
+        function = r###"{"contexts":["format-1","format-2"],"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.rewrite_storage","purpose":"Atomically rewrite physical placement while preserving logical rows.","signature":"fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult"}"###
     )]
-    pub fn sys_admin_rewrite_storage(&self) -> &'static SystemFunctionDescriptor {
-        system_function_descriptor("sys.admin.rewrite_storage")
-            .expect("annotated system API function has a descriptor")
+    #[allow(dead_code)] // Historical metadata is retained; public access is dispatch-only.
+    fn sys_admin_rewrite_storage(&self) -> &'static SystemFunctionDescriptor {
+        panic!("legacy descriptor is selected through system_callable_for with an explicit historical context")
     }
 
     #[ornasys(
@@ -699,6 +704,150 @@ impl SystemApiFunctionBindings {
     )]
     pub fn sys_admin_plan_checkout_str(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(Str)")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.length","purpose":"Return the exact byte count without hydrating payloads.","since":"1.1.0","signature":"fn sys.blob.length(value: Blob): Int"}"###
+    )]
+    pub fn sys_blob_length(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.length")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.digest","purpose":"Return the raw-content SHA-256 commitment, independent of layout; not a full-verification claim.","since":"1.1.0","signature":"fn sys.blob.digest(value: Blob): Digest"}"###
+    )]
+    pub fn sys_blob_digest(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.digest")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.read","purpose":"Return bounded raw-byte slice with octet-stream/null annotation; no media decoding.","since":"1.1.0","signature":"fn sys.blob.read(value: Blob, offset: Int, length: Int): Blob"}"###
+    )]
+    pub fn sys_blob_read(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.read")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.verify","purpose":"Incrementally verify the complete content and its native dependency structure.","since":"1.1.0","signature":"fn sys.blob.verify(value: Blob): Unit"}"###
+    )]
+    pub fn sys_blob_verify(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.verify")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.from_bytes","purpose":"Construct at most 8 MiB of bytes from integers in 0..255. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.from_bytes(values: [Int]): Blob"}"###
+    )]
+    pub fn sys_blob_from_bytes(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.from_bytes")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.to_bytes","purpose":"Explicit bounded materialisation of at most 8 MiB.","since":"1.1.0","signature":"fn sys.blob.to_bytes(value: Blob): [Int]"}"###
+    )]
+    pub fn sys_blob_to_bytes(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.to_bytes")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.begin","purpose":"Begin an owned capture with a checked total bound.","since":"1.1.0","signature":"fn sys.blob.begin(expected_length: Int? = null, max_bytes: Int): sys.BlobWriter"}"###
+    )]
+    pub fn sys_blob_begin(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.begin")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.append","purpose":"Append at most 8 MiB in order; enforce the total bound before acceptance.","since":"1.1.0","signature":"fn sys.blob.append(writer: sys.BlobWriter, part: Blob): Unit"}"###
+    )]
+    pub fn sys_blob_append(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.append")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.finish","purpose":"Seal, verify and protect the captured value without implicitly inserting a row. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.finish(writer: sys.BlobWriter): Blob"}"###
+    )]
+    pub fn sys_blob_finish(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.finish")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.abort","purpose":"Abort unfinished capture; never delete a returned value.","since":"1.1.0","signature":"fn sys.blob.abort(writer: sys.BlobWriter): Unit"}"###
+    )]
+    pub fn sys_blob_abort(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.abort")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.capture_file","purpose":"Capture an authorised regular file using the shared Blob writer and protection boundary. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob"}"###
+    )]
+    pub fn sys_blob_capture_file(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.capture_file")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.resource","purpose":"Read a safe package-relative resource in the caller module's admitted source snapshot. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.resource(path: Str): Blob"}"###
+    )]
+    pub fn sys_blob_resource(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.resource")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"administrative-state-transitions","effect":"read","name":"sys.admin.review_commit","purpose":"Validate and bind the exact staged candidate without changing index, branch or user data.","since":"1.1.0","signature":"fn sys.admin.review_commit(): sys.CommitReview"}"###
+    )]
+    pub fn sys_admin_review_commit(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.admin.review_commit")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.commit_reviewed","purpose":"Revalidate a reviewed candidate at protected publication and commit exactly that candidate.","since":"1.1.0","signature":"fn sys.admin.commit_reviewed(review: sys.CommitReview, message: Str, author: sys.PersonIdentity? = null): sys.CommitRef"}"###
+    )]
+    pub fn sys_admin_commit_reviewed(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.admin.commit_reviewed")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.media_type","purpose":"Read canonical declared MIME without payload hydration.","since":"1.1.0","signature":"fn sys.blob.media_type(value: Blob): Str"}"###
+    )]
+    pub fn sys_blob_media_type(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.media_type")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.suffix","purpose":"Read the canonical optional suffix hint without payload hydration.","since":"1.1.0","signature":"fn sys.blob.suffix(value: Blob): Str?"}"###
+    )]
+    pub fn sys_blob_suffix(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.suffix")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.annotate","purpose":"Return the same immutable bytes with MIME-1-validated canonical annotations.","since":"1.1.0","signature":"fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob"}"###
+    )]
+    pub fn sys_blob_annotate(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.annotate")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
+        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.same_content","purpose":"Exact content-only equality under admitted-witness/collision rules; may stream bytes and fail unavailable.","since":"1.1.0","signature":"fn sys.blob.same_content(left: Blob, right: Blob): Bool"}"###
+    )]
+    pub fn sys_blob_same_content(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.same_content")
             .expect("annotated system API function has a descriptor")
     }
 }
