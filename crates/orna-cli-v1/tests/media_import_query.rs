@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::{Repository, RepositoryCaptureCapability};
+use orna_repository_v1::{KeyRange, Repository, RepositoryCaptureCapability, TypedKey};
 use orna_runtime_v1::{
     RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
@@ -84,7 +84,46 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         assert_eq!(row.sha256, <[u8; 32]>::from(Sha256::digest(&bytes)));
     }
 
+    assert_song_revision_history(&repository, &directory, relation_id);
+
     drop(directory);
+}
+
+/// Lists the committed song row's revisions through the OGS-1 walk. Only
+/// commit headers and tree listings are read; no blob is opened or pinned.
+fn assert_song_revision_history(
+    repository: &Repository,
+    directory: &TempDir,
+    relation_id: [u8; 16],
+) {
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let rows = graph
+        .range_rows(&KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+    let song = rows
+        .iter()
+        .find(|row| {
+            row.key() == &TypedKey::Bytes(b"song".to_vec())
+                || row.key() == &TypedKey::Text("song".to_owned())
+        })
+        .expect("the song row is committed");
+
+    let revisions = graph.list_row_revisions(song, 64, &scope).unwrap();
+    let head = git_output(directory.path(), &["rev-parse", "HEAD"], None);
+    let head = String::from_utf8(head).unwrap().trim().to_owned();
+    // Store install plus one commit per imported row, newest first.
+    assert!(revisions.len() >= 3, "history lists every reachable commit");
+    assert_eq!(revisions[0].commit().to_hex(), head);
+    assert!(revisions[0].present(), "the head revision carries the song");
+    assert!(
+        !revisions.last().unwrap().present(),
+        "the oldest revision predates the import"
+    );
+    let newest = graph.list_row_revisions(song, 1, &scope).unwrap();
+    assert_eq!(newest, revisions[..1]);
 }
 
 /// Captures one file through `sys.blob.capture_file` and commits its row in an

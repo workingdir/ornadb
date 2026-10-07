@@ -943,6 +943,52 @@ impl NativeGraphContext {
         Ok(snapshots)
     }
 
+    /// Lists up to `max_commits` revisions of one admitted row, newest first.
+    /// Each revision reports whether the row's descriptor tree is reachable
+    /// from that revision's root tree. The walk reads commit headers and tree
+    /// objects only (`ls-tree` never opens blob contents), so no payload is
+    /// materialized and no blob pin is taken.
+    pub fn list_row_revisions(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        max_commits: usize,
+        scope: &RepositoryReadScope,
+    ) -> Result<Vec<RowRevision>, GraphError> {
+        scope.authorize(self)?;
+        if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
+            return Err(GraphError::ContextMismatch);
+        }
+        let descriptors: Vec<NativeObjectId> = row
+            .value()
+            .dependencies()
+            .iter()
+            .filter(|dependency| dependency.kind() == NativeObjectKind::Tree)
+            .map(|dependency| dependency.oid().clone())
+            .collect();
+        if descriptors.is_empty() {
+            return Err(GraphError::DescriptorNotInRow);
+        }
+        let snapshots = self.list_revision_snapshots(max_commits)?;
+        let mut revisions = Vec::with_capacity(snapshots.len());
+        for snapshot in snapshots {
+            let tree = snapshot.tree().to_hex();
+            let listing = self.git_output(&["ls-tree", "-r", "-t", "--full-tree", &tree])?;
+            let text = std::str::from_utf8(&listing).map_err(|_| GraphError::GitObjectMalformed)?;
+            // Each entry is `<mode> SP <type> SP <oid> TAB <path>`.
+            let present = text
+                .lines()
+                .filter_map(|line| line.split_once('\t'))
+                .filter_map(|(meta, _)| meta.split(' ').nth(2))
+                .any(|object| descriptors.iter().any(|oid| oid.to_hex() == object));
+            revisions.push(RowRevision {
+                commit: snapshot.commit().clone(),
+                tree: snapshot.tree().clone(),
+                present,
+            });
+        }
+        Ok(revisions)
+    }
+
     pub const fn database_id(&self) -> &[u8; 16] {
         &self.database_id
     }
@@ -2912,6 +2958,30 @@ impl RevisionSnapshot {
 
     pub const fn tree(&self) -> &NativeOid {
         &self.tree
+    }
+}
+
+/// One reachable commit of a row's history, as listed by
+/// [`NativeGraphContext::list_row_revisions`]. `present` is true when the
+/// row's descriptor tree is reachable from the commit's root tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowRevision {
+    commit: NativeOid,
+    tree: NativeOid,
+    present: bool,
+}
+
+impl RowRevision {
+    pub const fn commit(&self) -> &NativeOid {
+        &self.commit
+    }
+
+    pub const fn tree(&self) -> &NativeOid {
+        &self.tree
+    }
+
+    pub const fn present(&self) -> bool {
+        self.present
     }
 }
 
