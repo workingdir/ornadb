@@ -690,7 +690,7 @@ fn parse_database_record(bytes: &[u8]) -> Result<DatabaseRecord, FormatContextEr
     Ok(DatabaseRecord::Format3(database_id))
 }
 
-fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextError> {
+pub(super) fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextError> {
     let source = std::str::from_utf8(bytes).map_err(|_| FormatContextError::MetadataInvalid)?;
     let line = source
         .strip_suffix('\n')
