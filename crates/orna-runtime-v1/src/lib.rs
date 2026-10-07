@@ -35,8 +35,8 @@ use orna_foundation_v1::{
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
 use orna_repository_v1::{
     CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, ContentIdentity,
-    GitCommitRef, GitHashAlgorithm, NativeOid, ProtectedContentPin, ProtectedContentTransfer,
-    Repository,
+    GitCommitRef, GitHashAlgorithm, NativeOid, OrpBlobBinding, ProtectedContentPin,
+    ProtectedContentTransfer, Repository,
 };
 use orna_stream_v1::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
@@ -640,6 +640,17 @@ pub struct ProtectedContentTransferEvidence {
     identity: ContentIdentity,
 }
 
+#[derive(Clone, Debug)]
+struct PendingContentPin(Arc<ProtectedContentPin>);
+
+impl PartialEq for PendingContentPin {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.transfer_record() == other.0.transfer_record()
+    }
+}
+
+impl Eq for PendingContentPin {}
+
 impl ProtectedContentTransferEvidence {
     fn from_transfer(transfer: &ProtectedContentTransfer) -> Self {
         Self {
@@ -845,6 +856,7 @@ pub struct TableMutation {
     insert_only: bool,
     protected_content: Vec<ProtectedContentTransferEvidence>,
     protected_content_from_pins: bool,
+    protected_pin_holds: Vec<PendingContentPin>,
 }
 
 impl TableMutation {
@@ -866,6 +878,7 @@ impl TableMutation {
             insert_only: false,
             protected_content: Vec::new(),
             protected_content_from_pins: false,
+            protected_pin_holds: Vec::new(),
         })
     }
 
@@ -889,6 +902,7 @@ impl TableMutation {
             insert_only: true,
             protected_content: Vec::new(),
             protected_content_from_pins: false,
+            protected_pin_holds: Vec::new(),
         })
     }
 
@@ -918,6 +932,7 @@ impl TableMutation {
             insert_only: false,
             protected_content: Vec::new(),
             protected_content_from_pins: false,
+            protected_pin_holds: Vec::new(),
         })
     }
 
@@ -987,6 +1002,37 @@ impl TableMutation {
         }
         self.protected_content.push(transfer);
         self.protected_content_from_pins = true;
+        Ok(self)
+    }
+
+    /// Replaces this row value with the accepted canonical ORP Blob and
+    /// retains its native pin through the caller's transaction and retries.
+    /// The transfer evidence and descriptor-bearing row value are created
+    /// from the same graph-issued binding.
+    pub fn with_orp_blob_binding(
+        mut self,
+        binding: OrpBlobBinding,
+    ) -> Result<Self, RuntimeError> {
+        if (!self.protected_content_from_pins && !self.protected_content.is_empty())
+            || self.protected_content.len() >= MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let value = binding.encoded_value().to_vec();
+        let pin = binding.into_pin();
+        let transfer = ProtectedContentTransferEvidence::from_transfer(&pin.transfer_record());
+        if transfer.pin_id() == &[0; 16]
+            || self
+                .protected_content
+                .iter()
+                .any(|existing| existing.pin_id() == transfer.pin_id())
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        self.value = Some(value);
+        self.protected_content.push(transfer);
+        self.protected_content_from_pins = true;
+        self.protected_pin_holds.push(PendingContentPin(Arc::new(pin)));
         Ok(self)
     }
 
@@ -6035,9 +6081,19 @@ impl RuntimeState {
         if mutations.is_empty() {
             return Err(RuntimeError::EmptyMutationBatch);
         }
+        let mut protected_pin_ids = BTreeSet::new();
+        if mutations
+            .iter()
+            .flat_map(TableMutation::protected_content_transfers)
+            .any(|transfer| !protected_pin_ids.insert(*transfer.pin_id()))
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
         let encoded = mutations
             .iter()
-            .map(TableMutation::runtime_mutation)
+            .map(|mutation| {
+                mutation.runtime_mutation_with_protected_content(&context.capture().database_id())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         validate_mutations(&encoded, next_digest)?;
         let tx = self
@@ -6389,9 +6445,19 @@ impl RuntimeState {
         if mutations.is_empty() && admission.is_none() {
             return Err(RuntimeError::EmptyMutationBatch.into());
         }
+        let mut protected_pin_ids = BTreeSet::new();
+        if mutations
+            .iter()
+            .flat_map(TableMutation::protected_content_transfers)
+            .any(|transfer| !protected_pin_ids.insert(*transfer.pin_id()))
+        {
+            return Err(RuntimeError::InvalidTableMutation.into());
+        }
         let mut encoded = mutations
             .iter()
-            .map(TableMutation::runtime_mutation)
+            .map(|mutation| {
+                mutation.runtime_mutation_with_protected_content(&context.capture().database_id())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         if admission.is_some() {
             validate_stream_mutations(&encoded, next_digest)?;
