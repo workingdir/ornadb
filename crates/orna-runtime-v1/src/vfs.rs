@@ -638,6 +638,71 @@ impl<S> ManagedFile<S> {
             Ok(FsyncOutcome::Unchanged(_)) => Err(TemporaryRenameError::NoCandidate),
         }
     }
+
+    /// Opens a private EDIT-1 draft over this destination's current image. The
+    /// draft commits only through [`ManagedFile::commit_draft_with`].
+    pub async fn open_draft(self: &Arc<Self>, max_file_bytes: usize) -> EditDraft<S> {
+        let baseline = Arc::clone(&self.state.lock().await.image);
+        EditDraft::open(baseline, max_file_bytes)
+    }
+
+    /// Commits a direct draft over this destination through the same validated
+    /// activation boundary as a temp rename. A draft whose baseline is no longer
+    /// this destination's image returns `Stale` without calling activation.
+    /// An accepted revision replaces the image seen by new opens and invalidates
+    /// every older projection in this repository scope.
+    pub async fn commit_draft_with<F, Fut, E>(
+        self: &Arc<Self>,
+        draft: &EditDraft<S>,
+        activate: F,
+    ) -> Result<TemporaryRenameOutcome<S>, TemporaryRenameError<E>>
+    where
+        S: Send + Sync + 'static,
+        F: FnOnce(ActivationCandidate<S>) -> Fut,
+        Fut: Future<Output = Result<ActivationDecision<S>, E>>,
+    {
+        let mut destination = self.state.lock().await;
+        let based_on_current = {
+            let draft_state = draft.state.lock().await;
+            Arc::ptr_eq(&destination.image, &draft_state.baseline)
+        };
+        if !based_on_current {
+            return Ok(TemporaryRenameOutcome::Stale {
+                diagnostic: SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Transient,
+                },
+            });
+        }
+        let mut cache_generation = self.cache_epoch.generation.lock().await;
+        let next_generation = cache_generation
+            .checked_add(1)
+            .ok_or(TemporaryRenameError::GenerationExhausted)?;
+
+        match draft.fsync_with(activate).await {
+            Err(error) => Err(TemporaryRenameError::Activation(error)),
+            Ok(FsyncOutcome::Rejected(diagnostic)) => {
+                Ok(TemporaryRenameOutcome::Rejected { diagnostic })
+            }
+            Ok(FsyncOutcome::Accepted(handle)) => {
+                let image = Arc::new(VfsFileSnapshot::with_projection(
+                    &handle.image,
+                    CacheProjection {
+                        epoch: self.cache_epoch.clone(),
+                        generation: next_generation,
+                    },
+                ));
+                draft.rebase_accepted(Arc::clone(&image)).await;
+                destination.image = Arc::clone(&image);
+                *cache_generation = next_generation;
+                Ok(TemporaryRenameOutcome::Applied {
+                    generation: next_generation,
+                    handle: SnapshotReadHandle::open(image),
+                })
+            }
+            Ok(FsyncOutcome::Unchanged(_)) => Err(TemporaryRenameError::NoCandidate),
+        }
+    }
 }
 
 struct TemporarySaveState<S> {
@@ -749,6 +814,12 @@ impl<S> EditDraft<S> {
 
     pub async fn baseline(&self) -> SnapshotReadHandle<S> {
         SnapshotReadHandle::open(Arc::clone(&self.state.lock().await.baseline))
+    }
+
+    /// Re-anchors an accepted draft on the projected image its destination now
+    /// holds, so the next commit's CAS compares against the live image.
+    async fn rebase_accepted(&self, image: Arc<VfsFileSnapshot<S>>) {
+        self.state.lock().await.baseline = image;
     }
 
     /// Applies a positional write, zero-filling any gap in the private copy.
@@ -985,6 +1056,124 @@ mod tests {
             code: DiagnosticCode::TableAssertionFalse,
             class: DiagnosticClass::Permanent,
         }
+    }
+
+    #[tokio::test]
+    async fn direct_draft_commit_publishes_through_destination_and_rejects_stale_drafts() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(
+            RuntimeState::open_path(
+                &temp.path().join("state.db"),
+                RuntimeIdentity {
+                    database_id: [0x11; 16],
+                    repository_id: [0x22; 16],
+                },
+                [0x33; 32],
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let writer = runtime.acquire_lease([0x44; 16]).await.unwrap();
+
+        let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
+        let accepted_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let rejected_bytes = include_str!("../tests/fixtures/case_closure_edge_tail_sixty.orna");
+
+        let initial_capture = Arc::new(runtime.capture().await.unwrap());
+        let image = Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::clone(&initial_capture)),
+            Arc::<[u8]>::from(baseline.as_bytes()),
+        ));
+        let target = runtime.manage_vfs_file(image).await.unwrap();
+        let old_handle = target.open_read().await;
+        assert!(old_handle.projection_is_current().await.unwrap());
+
+        let draft = target.open_draft(1 << 20).await;
+        let stale_draft = target.open_draft(1 << 20).await;
+
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
+        let accepted_runtime = Arc::clone(&runtime);
+        let accepted = target
+            .commit_draft_with(&draft, move |candidate| {
+                activate_runtime_candidate(
+                    accepted_runtime,
+                    writer,
+                    candidate,
+                    vec![0x51],
+                    [0x61; 16],
+                    true,
+                )
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Applied { generation, handle } = accepted else {
+            panic!("validated direct draft commit should be accepted");
+        };
+        assert_eq!(generation, 1);
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
+        assert!(!old_handle.projection_is_current().await.unwrap());
+        assert!(handle.projection_is_current().await.unwrap());
+        assert_eq!(
+            target.open_read().await.read_at(0, accepted_bytes.len()),
+            accepted_bytes.as_bytes()
+        );
+        assert_eq!(
+            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
+            Some(accepted_bytes.as_bytes().to_vec())
+        );
+
+        // A draft opened before the accepted commit cannot publish over it.
+        let stale_calls = Arc::new(AtomicUsize::new(0));
+        let stale_calls_by_route = Arc::clone(&stale_calls);
+        stale_draft.truncate(0).await.unwrap();
+        stale_draft
+            .write_at(0, rejected_bytes.as_bytes())
+            .await
+            .unwrap();
+        let stale = target
+            .commit_draft_with(&stale_draft, move |_| async move {
+                stale_calls_by_route.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(stale, TemporaryRenameOutcome::Stale { .. }));
+        assert_eq!(stale_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
+
+        // A validation rejection leaves the destination image and generation alone.
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, rejected_bytes.as_bytes()).await.unwrap();
+        let rejected_runtime = Arc::clone(&runtime);
+        let rejected_commit = target
+            .commit_draft_with(&draft, move |candidate| {
+                activate_runtime_candidate(
+                    rejected_runtime,
+                    writer,
+                    candidate,
+                    vec![0x52],
+                    [0x62; 16],
+                    false,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            rejected_commit,
+            TemporaryRenameOutcome::Rejected { .. }
+        ));
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
+        assert_eq!(
+            target.open_read().await.read_at(0, accepted_bytes.len()),
+            accepted_bytes.as_bytes()
+        );
+        assert!(draft.retained_invalid_draft().await.is_some());
+        assert_eq!(
+            runtime.committed_table_row("books", &[0x52]).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
