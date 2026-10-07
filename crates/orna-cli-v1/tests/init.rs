@@ -179,7 +179,10 @@ fn init_directory_creates_a_git_repository_and_persists_one_uuid_identity() {
         bytes(&target.join("main.orna")).is_empty(),
         "new main source is empty"
     );
-    assert!(target.join(FORMAT).is_file(), "format record exists");
+    assert!(
+        !target.join(FORMAT).exists(),
+        "format-3 metadata has no sidecar"
+    );
     assert!(target.join(DATABASE).is_file(), "database record exists");
     assert!(
         is_uuid_v4_record(&bytes(&target.join(DATABASE))),
@@ -261,7 +264,7 @@ fn malformed_or_partial_metadata_fails_without_changing_repository_state() {
         let root_marker = fixture.path().join(".orna/root-marker");
         fs::write(&root_marker, b"root marker bytes").expect("metadata root marker written");
 
-        let before_format = bytes(&format);
+        let before_format = (!partial).then(|| bytes(&format));
         let before_database = (!partial).then(|| bytes(&database));
         let before_source = bytes(&fixture.path().join("main.orna"));
         let before_index = bytes(&fixture.path().join(".git/index"));
@@ -275,7 +278,15 @@ fn malformed_or_partial_metadata_fails_without_changing_repository_state() {
             "error[ORNA-REPO-INIT-006]"
         };
         assert_failure(&output, fixture.path(), code);
-        assert_eq!(bytes(&format), before_format, "format bytes are unchanged");
+        if partial {
+            assert!(!format.exists(), "absent format sidecar remains absent");
+        } else {
+            assert_eq!(
+                bytes(&format),
+                before_format.expect("malformed fixture has format bytes"),
+                "format bytes are unchanged"
+            );
+        }
         if partial {
             assert!(
                 !database.exists(),
@@ -390,9 +401,12 @@ fn successful_reinitialization_preserves_git_and_metadata_state() {
 
     let before_head = git(fixture.path(), &["rev-parse", "HEAD"]).stdout;
     let before_index = bytes(&fixture.path().join(".git/index"));
-    let before_format = bytes(&fixture.path().join(FORMAT));
     let before_database = bytes(&fixture.path().join(DATABASE));
     let before_source = bytes(&fixture.path().join("main.orna"));
+    assert!(
+        !fixture.path().join(FORMAT).exists(),
+        "format-3 metadata has no sidecar"
+    );
 
     let output = run_init(fixture.path(), None);
     assert_success(&output, fixture.path());
@@ -406,10 +420,9 @@ fn successful_reinitialization_preserves_git_and_metadata_state() {
         before_index,
         "Git index bytes are unchanged"
     );
-    assert_eq!(
-        bytes(&fixture.path().join(FORMAT)),
-        before_format,
-        "format bytes are unchanged"
+    assert!(
+        !fixture.path().join(FORMAT).exists(),
+        "format-3 reinitialization keeps the sidecar absent"
     );
     assert_eq!(
         bytes(&fixture.path().join(DATABASE)),

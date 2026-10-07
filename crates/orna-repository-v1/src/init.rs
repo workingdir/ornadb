@@ -317,8 +317,16 @@ fn inspect_metadata_unlocked(
             let database_id = parse_database(&database)?;
             Ok(Some(RepositoryMetadata { database_id }))
         }
-        (Some(_), Some(_)) => Err(RepositoryInitError::MetadataUnsupported),
-        (_, None) => Err(RepositoryInitError::MetadataIncomplete),
+        (Some(format), Some(_)) => match format_context::parse_legacy_format(&format) {
+            Ok(
+                format_context::RepositoryFormat::Legacy1
+                | format_context::RepositoryFormat::Legacy2,
+            ) => Err(RepositoryInitError::MetadataUnsupported),
+            Ok(format_context::RepositoryFormat::Format3) | Err(_) => {
+                Err(RepositoryInitError::MetadataMalformed)
+            }
+        },
+        (Some(_), None) => Err(RepositoryInitError::MetadataIncomplete),
     }
 }
 
