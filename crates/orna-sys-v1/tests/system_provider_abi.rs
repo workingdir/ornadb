@@ -39,6 +39,18 @@ const SHARED_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.provider_failed",
 ];
 
+/// Failure codes that `sys.blob.annotate` declares under the shared `sys.blob`
+/// family (source/34-system-reference.md, `sys.blob.annotate`) rather than under
+/// the operation name, so the namespace rule below cannot derive them.
+const FAMILY_FAILURES: [(&str, [&str; 3]); 1] = [(
+    "sys.blob.annotate",
+    [
+        "sys.blob.invalid_media_type",
+        "sys.blob.invalid_suffix",
+        "sys.blob.incompatible_suffix",
+    ],
+)];
+
 fn bind_type_parameter(ty: &AbiType, parameter: &str, witness: &AbiType) -> AbiType {
     match ty {
         AbiType::Named(name) if name == parameter => witness.clone(),
@@ -1263,6 +1275,22 @@ fn every_dispatch_operation_matches_its_published_failure_vocabulary() {
             })
             .cloned()
             .collect::<BTreeSet<_>>();
+        let family_failures = FAMILY_FAILURES
+            .iter()
+            .find(|(operation, _)| *operation == operation_id)
+            .map_or_else(BTreeSet::new, |(_, codes)| {
+                codes.iter().map(|code| code.to_string()).collect::<BTreeSet<_>>()
+            });
+        for code in &family_failures {
+            assert!(
+                declared_failures.contains(code),
+                "family failure `{code}` for `{operation_id}` is absent from the published failure_codes"
+            );
+        }
+        let expected_failures = expected_failures
+            .into_iter()
+            .chain(family_failures)
+            .collect::<BTreeSet<_>>();
         let registered_failures = contract
             .failures
             .iter()
@@ -1971,8 +1999,8 @@ fn provider_default_edges_require_materialized_dispatch_arguments() {
         defaulted_operations += 1;
     }
 
-    assert_eq!(defaulted_operations, 6);
-    assert_eq!(defaulted_parameters, 14);
+    assert_eq!(defaulted_operations, 7);
+    assert_eq!(defaulted_parameters, 15);
     assert_eq!(omitted_direct_rejections, defaulted_operations);
     assert_eq!(omitted_registry_rejections, defaulted_operations);
     assert_eq!(materialized_direct_routes, defaulted_operations);
@@ -2194,8 +2222,8 @@ fn provider_optional_argument_edges_match_schema_and_dispatch_diagnostics() {
         optional_operations += 1;
     }
 
-    assert_eq!(optional_operations, 6);
-    assert_eq!(optional_parameters, 10);
+    assert_eq!(optional_operations, 7);
+    assert_eq!(optional_parameters, 11);
     assert_eq!(generated_binding_cases, optional_operations);
     assert_eq!(null_direct_routes, optional_operations);
     assert_eq!(null_registry_routes, optional_operations);
