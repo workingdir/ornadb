@@ -236,7 +236,13 @@ fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, S
                 .iter()
                 .filter_map(Value::as_str)
                 .filter(|code| {
-                    (name == "sys.blob.annotate" && code.starts_with("sys.blob."))
+                    (name == "sys.blob.annotate"
+                        && matches!(
+                            *code,
+                            "sys.blob.incompatible_suffix"
+                                | "sys.blob.invalid_media_type"
+                                | "sys.blob.invalid_suffix"
+                        ))
                         || *code == operation_namespace
                         || code
                             .strip_prefix(operation_namespace)
