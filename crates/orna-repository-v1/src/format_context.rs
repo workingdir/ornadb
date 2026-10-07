@@ -1579,5 +1579,41 @@ mod graph_bridge_tests {
             verified.verification(),
             crate::native_graph::RangeVerification::FullBlob
         );
+
+        let resolved = admitted_graph
+            .resolve_row_node(&row, &descriptor_oid, &read_scope)
+            .expect("resolve the descriptor named by the committed row");
+        assert!(matches!(
+            resolved,
+            NodeData::BlobDescriptor { length, .. } if length == identity.length()
+        ));
+        assert!(matches!(
+            admitted_graph.resolve_row_node(&row, &store_root, &read_scope),
+            Err(crate::native_graph::GraphError::DescriptorNotInRow)
+        ));
+
+        // Ranges that start, end, or straddle the GEAR_MAXIMUM boundary must
+        // return exactly the matching payload bytes, whatever chunk cuts the
+        // Gear chunker chose inside the blob.
+        let maximum = crate::blob_store::GEAR_MAXIMUM as u64;
+        let length = identity.length();
+        for range in [
+            0..1,
+            maximum - 1..maximum + 1,
+            maximum..2 * maximum,
+            length - 1..length,
+            5..length - 5,
+            7..7,
+        ] {
+            let range_scope = admitted_graph.open_read_scope().unwrap();
+            let read = admitted_graph
+                .read_blob_range(&reference, range.clone(), &range_scope)
+                .unwrap_or_else(|error| panic!("range {range:?} failed: {error:?}"));
+            assert_eq!(
+                read.bytes(),
+                &payload[range.start as usize..range.end as usize],
+                "range {range:?} returned the wrong bytes"
+            );
+        }
     }
 }
