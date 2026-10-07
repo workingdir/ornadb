@@ -905,6 +905,44 @@ impl NativeGraphContext {
         &self.store_root
     }
 
+    /// Lists up to `max_commits` commits reachable from `HEAD`, newest first,
+    /// each paired with its root tree snapshot. Only commit headers and tree
+    /// object kinds are read; no blob or OGB-2 chunk is opened, so history can
+    /// be listed without materializing content.
+    pub fn list_revision_snapshots(
+        &self,
+        max_commits: usize,
+    ) -> Result<Vec<RevisionSnapshot>, GraphError> {
+        if max_commits > MAX_REVISION_WALK {
+            return Err(GraphError::InventoryQuotaExceeded);
+        }
+        if max_commits == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = format!("--max-count={max_commits}");
+        let output = self.git_output(&["log", "--format=%H %T", &limit, "HEAD"])?;
+        let text = std::str::from_utf8(&output).map_err(|_| GraphError::GitObjectMalformed)?;
+        let mut snapshots = Vec::new();
+        for line in text.lines() {
+            let mut fields = line.split(' ');
+            let (Some(commit), Some(tree), None) = (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(GraphError::GitObjectMalformed);
+            };
+            let commit = NativeOid::from_hex(self.algorithm, commit)?;
+            let tree = NativeOid::from_hex(self.algorithm, tree)?;
+            let actual = self.git_object_kind(&tree)?;
+            if actual != NativeObjectKind::Tree {
+                return Err(GraphError::WrongObjectKind {
+                    expected: NativeObjectKind::Tree,
+                    actual,
+                });
+            }
+            snapshots.push(RevisionSnapshot { commit, tree });
+        }
+        Ok(snapshots)
+    }
+
     pub const fn database_id(&self) -> &[u8; 16] {
         &self.database_id
     }
@@ -2858,6 +2896,27 @@ pub(crate) struct VerifiedBlobDescriptor {
     identity: crate::blob_store::ContentIdentity,
     byte_root: Option<NativeOid>,
 }
+
+/// One reachable commit and its root tree snapshot, as listed by
+/// [`NativeGraphContext::list_revision_snapshots`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevisionSnapshot {
+    commit: NativeOid,
+    tree: NativeOid,
+}
+
+impl RevisionSnapshot {
+    pub const fn commit(&self) -> &NativeOid {
+        &self.commit
+    }
+
+    pub const fn tree(&self) -> &NativeOid {
+        &self.tree
+    }
+}
+
+/// Upper bound on commits one revision walk may list.
+const MAX_REVISION_WALK: usize = 4096;
 
 /// Opaque authority to one admitted descriptor, tied to one repository owner
 /// and immutable snapshot.  It cannot be reconstructed from an OID or digest.
