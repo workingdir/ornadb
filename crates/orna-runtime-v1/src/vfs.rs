@@ -1433,6 +1433,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_projection_observes_committed_write_exactly_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(
+            RuntimeState::open_path(
+                &temp.path().join("state.db"),
+                RuntimeIdentity {
+                    database_id: [0x11; 16],
+                    repository_id: [0x22; 16],
+                },
+                [0x33; 32],
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let writer = runtime.acquire_lease([0x44; 16]).await.unwrap();
+
+        let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
+        let accepted_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let rejected_bytes = include_str!("../tests/fixtures/case_closure_edge_tail_sixty.orna");
+
+        let initial_capture = Arc::new(runtime.capture().await.unwrap());
+        let image = Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::clone(&initial_capture)),
+            Arc::<[u8]>::from(baseline.as_bytes()),
+        ));
+        let target = runtime.manage_vfs_file(image).await.unwrap();
+        let before_write = target.open_read().await;
+        let activations = Arc::new(AtomicUsize::new(0));
+
+        // One draft commit: one activation, one generation, one committed row.
+        let draft = target.open_draft(1 << 20).await;
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
+        let draft_calls = Arc::clone(&activations);
+        let draft_runtime = Arc::clone(&runtime);
+        let committed = target
+            .commit_draft_with(&draft, move |candidate| {
+                draft_calls.fetch_add(1, Ordering::SeqCst);
+                activate_runtime_candidate(
+                    draft_runtime,
+                    writer,
+                    candidate,
+                    vec![0x51],
+                    [0x61; 16],
+                    true,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            committed,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(activations.load(Ordering::SeqCst), 1);
+
+        // Every fresh projection observes the write, current and with the bytes.
+        for _ in 0..2 {
+            let fresh = target.open_read().await;
+            assert_eq!(fresh.projection_is_current().await, Some(true));
+            assert_eq!(fresh.len() as usize, accepted_bytes.len());
+            assert_eq!(
+                fresh.read_at(0, accepted_bytes.len()),
+                accepted_bytes.as_bytes()
+            );
+        }
+        assert!(!before_write.projection_is_current().await.unwrap());
+
+        // Re-syncing the committed draft is a no-op: no second activation and
+        // no generation bump.
+        let retry_calls = Arc::clone(&activations);
+        let retry = target
+            .commit_draft_with(&draft, move |_| async move {
+                retry_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
+            })
+            .await;
+        assert!(matches!(retry, Err(TemporaryRenameError::NoCandidate)));
+        assert_eq!(activations.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
+
+        // A temp-file rename applied twice activates once and returns the same
+        // generation and handle the first time did.
+        let save = target.begin_temporary_replacement(1 << 20).await;
+        save.write_at(0, rejected_bytes.as_bytes()).await.unwrap();
+        let rename_calls = Arc::clone(&activations);
+        let rename_runtime = Arc::clone(&runtime);
+        let first = runtime
+            .rename_vfs_temporary_over(&target, &save, move |candidate| {
+                rename_calls.fetch_add(1, Ordering::SeqCst);
+                activate_runtime_candidate(
+                    rename_runtime,
+                    writer,
+                    candidate,
+                    vec![0x51],
+                    [0x62; 16],
+                    true,
+                )
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Applied {
+            generation: first_generation,
+            handle: first_handle,
+        } = first
+        else {
+            panic!("validated temp rename should be accepted");
+        };
+        assert_eq!(first_generation, 2);
+        assert_eq!(activations.load(Ordering::SeqCst), 2);
+
+        let second_calls = Arc::clone(&activations);
+        let second = runtime
+            .rename_vfs_temporary_over(&target, &save, move |candidate| {
+                second_calls.fetch_add(1, Ordering::SeqCst);
+                activate_runtime_candidate(
+                    Arc::clone(&runtime),
+                    writer,
+                    candidate,
+                    vec![0x51],
+                    [0x63; 16],
+                    true,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            second,
+            TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(activations.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 2);
+
+        assert!(first_handle.projection_is_current().await.unwrap());
+        let latest = target.open_read().await;
+        assert_eq!(latest.projection_is_current().await, Some(true));
+        assert_eq!(
+            latest.read_at(0, rejected_bytes.len()),
+            rejected_bytes.as_bytes()
+        );
+        assert_eq!(
+            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
+            Some(rejected_bytes.as_bytes().to_vec())
+        );
+    }
+
+    #[tokio::test]
     async fn open_read_keeps_its_captured_image_and_directory_pin() {
         let image = fixture_image();
         let handle = SnapshotReadHandle::open(Arc::clone(&image));
