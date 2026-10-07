@@ -9,7 +9,7 @@ use serde_json::Value;
 #[allow(dead_code)]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "ce59a945835ec9a5b7af56d9760b1cea810a480e642fee53ceabdd618ba08747";
+const SYS_API_V1_SHA256: &str = "7752f42450cc7cf3c651adcf34ec07288efb3f17de0e895e85a0575fc4c1dcf1";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
 
