@@ -293,6 +293,46 @@ pub struct NativeGraphContext {
     cancelled: Arc<AtomicBool>,
 }
 
+/// Shared owner-issued graph and read-scope authority for one Blob capture
+/// pipeline. Clones share the graph owner and the scope's cumulative quotas.
+#[derive(Clone, Debug)]
+pub struct RepositoryCaptureCapability {
+    graph: Arc<NativeGraphContext>,
+    scope: RepositoryReadScope,
+}
+
+impl PartialEq for RepositoryCaptureCapability {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.graph, &other.graph)
+            && Arc::ptr_eq(&self.scope.bytes_used, &other.scope.bytes_used)
+    }
+}
+
+impl Eq for RepositoryCaptureCapability {}
+
+impl RepositoryCaptureCapability {
+    /// Joins a graph with the read scope issued by that exact graph owner.
+    pub fn new(
+        graph: Arc<NativeGraphContext>,
+        scope: RepositoryReadScope,
+    ) -> Result<Self, GraphError> {
+        scope.authorize(&graph)?;
+        Ok(Self { graph, scope })
+    }
+
+    /// Streams a source into the graph's existing OGB-2 writer. The resulting
+    /// provisional candidate is private until a repository row owner accepts
+    /// it; dropping it releases its pending private ref.
+    pub fn capture_blob_candidate<R: Read>(
+        &self,
+        source: R,
+        max_bytes: u64,
+    ) -> Result<CapturedBlobCandidate, GraphError> {
+        self.graph
+            .capture_blob_candidate(source, max_bytes, &self.scope)
+    }
+}
+
 impl NativeGraphContext {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue(
@@ -4968,6 +5008,23 @@ mod persisted_orp_tests {
             crate::blob_store::digest_bytes(payload)
         );
         assert!(fixture_ref_exists(directory.path(), pin.protected_ref()));
+        assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn shared_capture_capability_uses_the_issued_graph_scope_and_writer() {
+        let (directory, graph) = capture_test_context();
+        let graph = Arc::new(graph);
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let capability = RepositoryCaptureCapability::new(Arc::clone(&graph), scope.clone())
+            .expect("matching graph and owner scope");
+        let payload = b"shared capability streams into the owned writer";
+        let candidate = capability
+            .capture_blob_candidate(&payload[..], payload.len() as u64)
+            .expect("capture through the shared repository capability");
+        let pending_ref = format!("refs/orna/pins/pending/{}", hex_encode(&candidate.pin_id));
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
+        drop(candidate);
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
     }
 
