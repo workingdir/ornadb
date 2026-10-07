@@ -3,7 +3,7 @@ use std::future::Future;
 
 use super::{
     CatalogueAdmission, FaultInjector, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot,
-    TableMutation, WriterLease,
+    RuntimeTableIdentity, TableMutation, WriterLease, validate_mutation_identities,
 };
 
 tokio::task_local! {
@@ -144,6 +144,15 @@ impl<E> From<RuntimeError> for ActivationError<E> {
     }
 }
 
+/// Which committed relations an activation snapshot reads. Name-only reads
+/// address rows by source name; admitted reads address them by committed
+/// identity so a rename keeps the same relation.
+#[derive(Clone, Copy)]
+enum ActivationTables<'a> {
+    Named(&'a [&'a str]),
+    Admitted(&'a [RuntimeTableIdentity]),
+}
+
 /// Runs one table activation against a single immutable admission snapshot.
 ///
 /// Source execution supplies the evaluator and stages typed writes in
@@ -154,6 +163,51 @@ pub async fn run_table_activation<T, E, F, Fut>(
     state: &RuntimeState,
     lease: WriterLease,
     tables: &[&str],
+    faults: &dyn FaultInjector,
+    evaluator: F,
+) -> Result<T, ActivationError<E>>
+where
+    F: FnOnce(&RuntimeTableActivationSnapshot) -> Fut,
+    Fut: Future<Output = Result<ActivationWork<T>, E>>,
+{
+    run_scoped_table_activation(
+        state,
+        lease,
+        ActivationTables::Named(tables),
+        faults,
+        evaluator,
+    )
+    .await
+}
+
+/// Runs one table activation whose relations are admitted by committed source
+/// identity. Staged writes must carry the same identities the snapshot read
+/// under; a disagreeing write fails closed before any row is published.
+pub async fn run_admitted_table_activation<T, E, F, Fut>(
+    state: &RuntimeState,
+    lease: WriterLease,
+    tables: &[RuntimeTableIdentity],
+    faults: &dyn FaultInjector,
+    evaluator: F,
+) -> Result<T, ActivationError<E>>
+where
+    F: FnOnce(&RuntimeTableActivationSnapshot) -> Fut,
+    Fut: Future<Output = Result<ActivationWork<T>, E>>,
+{
+    run_scoped_table_activation(
+        state,
+        lease,
+        ActivationTables::Admitted(tables),
+        faults,
+        evaluator,
+    )
+    .await
+}
+
+async fn run_scoped_table_activation<T, E, F, Fut>(
+    state: &RuntimeState,
+    lease: WriterLease,
+    tables: ActivationTables<'_>,
     faults: &dyn FaultInjector,
     evaluator: F,
 ) -> Result<T, ActivationError<E>>
@@ -180,7 +234,7 @@ where
 async fn run_table_activation_inner<T, E, F, Fut>(
     state: &RuntimeState,
     lease: WriterLease,
-    tables: &[&str],
+    tables: ActivationTables<'_>,
     faults: &dyn FaultInjector,
     evaluator: F,
 ) -> Result<T, ActivationError<E>>
@@ -199,10 +253,13 @@ where
         return Err(ActivationError::Runtime(RuntimeError::OwnerLost));
     }
 
-    let snapshot = state
-        .begin_table_activation(tables)
-        .await
-        .map_err(ActivationError::Runtime)?;
+    let snapshot = match tables {
+        ActivationTables::Named(names) => state.begin_table_activation(names).await,
+        ActivationTables::Admitted(identities) => {
+            state.begin_admitted_table_activation(identities).await
+        }
+    }
+    .map_err(ActivationError::Runtime)?;
     let work = evaluator(&snapshot)
         .await
         .map_err(ActivationError::Evaluator)?;
@@ -212,6 +269,8 @@ where
         result,
         catalogue_admission,
     } = work;
+    validate_mutation_identities(&mutations, snapshot.table_object_ids())
+        .map_err(ActivationError::Runtime)?;
     match catalogue_admission {
         Some(admission) => {
             state
