@@ -780,6 +780,53 @@ fn publication_text_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
 const MAX_TABLE_MUTATION_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION: usize = 4_096;
 
+/// Stable semantic identity for a table, supplied by committed source
+/// metadata. It is independent of the table's current source name and schema.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TableObjectId([u8; 16]);
+
+impl TableObjectId {
+    #[must_use]
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+/// A table name paired with its committed stable identity for one runtime
+/// activation. The name selects the requested relation in this runtime API;
+/// `object_id` remains its semantic identity across source renames.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeTableIdentity {
+    table: String,
+    object_id: TableObjectId,
+}
+
+impl RuntimeTableIdentity {
+    pub fn new(
+        table: impl Into<String>,
+        object_id: TableObjectId,
+    ) -> Result<Self, RuntimeError> {
+        let table = table.into();
+        validate_table_name(&table)?;
+        Ok(Self { table, object_id })
+    }
+
+    #[must_use]
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    #[must_use]
+    pub const fn object_id(&self) -> TableObjectId {
+        self.object_id
+    }
+}
+
 /// A schema-independent durable table change.
 ///
 /// This is the first typed boundary between table execution and the durable
@@ -791,6 +838,7 @@ const MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION: usize = 4_096;
 pub struct TableMutation {
     id: [u8; 16],
     table: String,
+    table_object_id: Option<TableObjectId>,
     key: Vec<u8>,
     value: Option<Vec<u8>>,
     rekey_to: Option<Vec<u8>>,
@@ -811,6 +859,7 @@ impl TableMutation {
         Ok(Self {
             id,
             table,
+            table_object_id: None,
             key,
             value,
             rekey_to: None,
@@ -833,6 +882,7 @@ impl TableMutation {
         Ok(Self {
             id,
             table,
+            table_object_id: None,
             key,
             value: Some(value),
             rekey_to: None,
@@ -861,6 +911,7 @@ impl TableMutation {
         Ok(Self {
             id,
             table,
+            table_object_id: None,
             key: old_key,
             value: Some(replacement),
             rekey_to: Some(new_key),
@@ -876,6 +927,21 @@ impl TableMutation {
 
     pub fn table(&self) -> &str {
         &self.table
+    }
+
+    /// Returns the committed semantic table identity when source admission
+    /// supplied one. Legacy name-only table admission returns `None`.
+    #[must_use]
+    pub const fn table_object_id(&self) -> Option<TableObjectId> {
+        self.table_object_id
+    }
+
+    /// Carries committed source table identity through the runtime mutation
+    /// boundary. The caller owns provenance; this runtime never derives an ID.
+    #[must_use]
+    pub fn with_table_object_id(mut self, object_id: TableObjectId) -> Self {
+        self.table_object_id = Some(object_id);
+        self
     }
 
     pub fn key(&self) -> &[u8] {
@@ -943,6 +1009,11 @@ impl TableMutation {
         }
         let (mut cursor, version) = if mutation
             .payload
+            .starts_with(b"ORNA-TABLE-MUTATION-4\0")
+        {
+            (b"ORNA-TABLE-MUTATION-4\0".len(), 4_u8)
+        } else if mutation
+            .payload
             .starts_with(b"ORNA-TABLE-MUTATION-3\0")
         {
             (b"ORNA-TABLE-MUTATION-3\0".len(), 3_u8)
@@ -959,6 +1030,19 @@ impl TableMutation {
         let table =
             String::from_utf8(read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec())
                 .map_err(|_| RuntimeError::InvalidTableMutation)?;
+        let table_object_id = if version == 4 {
+            let end = cursor
+                .checked_add(16)
+                .filter(|end| *end <= mutation.payload.len())
+                .ok_or(RuntimeError::InvalidTableMutation)?;
+            let bytes = mutation.payload[cursor..end]
+                .try_into()
+                .map_err(|_| RuntimeError::InvalidTableMutation)?;
+            cursor = end;
+            Some(TableObjectId::new(bytes))
+        } else {
+            None
+        };
         let key = read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec();
         let operation = if version >= 2 {
             Some(
@@ -992,10 +1076,10 @@ impl TableMutation {
             }
             _ => return Err(RuntimeError::InvalidTableMutation),
         };
-        let protected_content = if version == 3 {
-            decode_protected_content_transfers(&mutation.payload, &mut cursor)?
-        } else {
-            Vec::new()
+        let protected_content = match version {
+            3 => decode_protected_content_transfers(&mutation.payload, &mut cursor, false)?,
+            4 => decode_protected_content_transfers(&mutation.payload, &mut cursor, true)?,
+            _ => Vec::new(),
         };
         if cursor != mutation.payload.len() {
             return Err(RuntimeError::InvalidTableMutation);
@@ -1018,6 +1102,7 @@ impl TableMutation {
             (None, None) => Self::new(mutation.id, table, key, value),
             _ => Err(RuntimeError::InvalidTableMutation),
         }?;
+        decoded.table_object_id = table_object_id;
         if protected_content.len() > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
             || (!protected_content.is_empty() && decoded.value.is_none())
             || protected_content.iter().enumerate().any(|(index, transfer)| {
@@ -1039,7 +1124,9 @@ impl TableMutation {
         if !self.protected_content.is_empty() {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        let payload = if self.rekey_to.is_some() || self.insert_only {
+        let payload = if self.table_object_id.is_some() {
+            encode_v4_table_mutation(self)?
+        } else if self.rekey_to.is_some() || self.insert_only {
             encode_v2_table_mutation(self)?
         } else {
             encode_table_mutation(self)?
@@ -1075,7 +1162,11 @@ impl TableMutation {
         {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        let payload = encode_v3_table_mutation(self)?;
+        let payload = if self.table_object_id.is_some() {
+            encode_v4_table_mutation(self)?
+        } else {
+            encode_v3_table_mutation(self)?
+        };
         Ok(Mutation {
             id: self.id,
             digest: Sha256::digest(&payload).into(),
@@ -2341,6 +2432,7 @@ pub type RuntimeTableRows = BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>;
 pub struct RuntimeTableActivationSnapshot {
     context: RuntimeActivationContext,
     table_rows: RuntimeTableRows,
+    table_object_ids: BTreeMap<String, TableObjectId>,
 }
 
 impl RuntimeTableActivationSnapshot {
@@ -2350,6 +2442,19 @@ impl RuntimeTableActivationSnapshot {
 
     pub fn table_rows(&self) -> &RuntimeTableRows {
         &self.table_rows
+    }
+
+    /// Returns the committed semantic identity admitted for `table`, if this
+    /// activation used the identity-aware table admission API.
+    #[must_use]
+    pub fn table_object_id(&self, table: &str) -> Option<TableObjectId> {
+        self.table_object_ids.get(table).copied()
+    }
+
+    /// All committed semantic identities captured for this activation.
+    #[must_use]
+    pub fn table_object_ids(&self) -> &BTreeMap<String, TableObjectId> {
+        &self.table_object_ids
     }
 
     /// Starts a query session over this activation's captured table rows.
@@ -5823,6 +5928,38 @@ impl RuntimeState {
         &self,
         tables: &[&str],
     ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
+        self.begin_table_activation_inner(tables, BTreeMap::new())
+            .await
+    }
+
+    /// Captures an activation with stable table identities supplied by
+    /// committed source metadata. Duplicate names or identities fail closed.
+    pub async fn begin_admitted_table_activation(
+        &self,
+        tables: &[RuntimeTableIdentity],
+    ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
+        let mut names = Vec::with_capacity(tables.len());
+        let mut table_object_ids = BTreeMap::new();
+        let mut unique_object_ids = BTreeSet::new();
+        for table in tables {
+            if !unique_object_ids.insert(table.object_id)
+                || table_object_ids
+                    .insert(table.table.clone(), table.object_id)
+                    .is_some()
+            {
+                return Err(RuntimeError::InvalidTableMutation);
+            }
+            names.push(table.table.as_str());
+        }
+        self.begin_table_activation_inner(&names, table_object_ids)
+            .await
+    }
+
+    async fn begin_table_activation_inner(
+        &self,
+        tables: &[&str],
+        table_object_ids: BTreeMap<String, TableObjectId>,
+    ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
         for table in tables {
             validate_table_name(table)?;
         }
@@ -5868,6 +6005,7 @@ impl RuntimeState {
         Ok(RuntimeTableActivationSnapshot {
             context,
             table_rows,
+            table_object_ids,
         })
     }
 
@@ -17484,14 +17622,70 @@ fn encode_v3_table_mutation(mutation: &TableMutation) -> Result<Vec<u8>, Runtime
     Ok(payload)
 }
 
+fn encode_v4_table_mutation(mutation: &TableMutation) -> Result<Vec<u8>, RuntimeError> {
+    if mutation.protected_content.len() > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
+        || (!mutation.protected_content.is_empty() && mutation.value.is_none())
+    {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"ORNA-TABLE-MUTATION-4\0");
+    append_length_prefixed(&mut payload, mutation.table().as_bytes())?;
+    payload.extend_from_slice(
+        &mutation
+            .table_object_id
+            .ok_or(RuntimeError::InvalidTableMutation)?
+            .bytes(),
+    );
+    append_length_prefixed(&mut payload, mutation.key())?;
+    if let Some(new_key) = mutation.rekey_to() {
+        payload.push(2);
+        append_length_prefixed(&mut payload, new_key)?;
+    } else if mutation.is_insert() {
+        payload.push(1);
+    } else {
+        payload.push(0);
+    }
+    match mutation.value() {
+        Some(value) => {
+            payload.push(1);
+            append_length_prefixed(&mut payload, value)?;
+        }
+        None => payload.push(0),
+    }
+    payload.extend_from_slice(
+        &u32::try_from(mutation.protected_content.len())
+            .map_err(|_| RuntimeError::InvalidTableMutation)?
+            .to_be_bytes(),
+    );
+    for transfer in &mutation.protected_content {
+        payload.extend_from_slice(transfer.repository_id());
+        payload.extend_from_slice(transfer.database_id());
+        payload.extend_from_slice(transfer.pin_id());
+        payload.push(match transfer.descriptor_oid().algorithm() {
+            GitHashAlgorithm::Sha1 => 1,
+            GitHashAlgorithm::Sha256 => 2,
+        });
+        let identity = transfer.content_identity();
+        payload.extend_from_slice(&identity.length().to_be_bytes());
+        payload.extend_from_slice(&identity.sha256());
+        payload.extend_from_slice(transfer.descriptor_oid().as_bytes());
+    }
+    if payload.len() > MAX_TABLE_MUTATION_BYTES {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    Ok(payload)
+}
+
 fn decode_protected_content_transfers(
     payload: &[u8],
     cursor: &mut usize,
+    allow_empty: bool,
 ) -> Result<Vec<ProtectedContentTransferEvidence>, RuntimeError> {
     let count_bytes = take_fixed::<4>(payload, cursor)?;
     let count = usize::try_from(u32::from_be_bytes(count_bytes))
         .map_err(|_| RuntimeError::InvalidTableMutation)?;
-    if count == 0 || count > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION {
+    if (!allow_empty && count == 0) || count > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION {
         return Err(RuntimeError::InvalidTableMutation);
     }
     let mut transfers = Vec::with_capacity(count);
@@ -19167,6 +19361,33 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn table_object_identity_roundtrips_through_runtime_mutation_codec() {
+        let object_id = TableObjectId::new([0x81; 16]);
+        let mutation = TableMutation::insert(id(5), "books", vec![1], vec![9])
+            .unwrap()
+            .with_table_object_id(object_id);
+        let encoded = mutation.runtime_mutation().unwrap();
+        assert!(encoded.payload.starts_with(b"ORNA-TABLE-MUTATION-4\0"));
+        assert_eq!(
+            TableMutation::decode(&encoded)
+                .unwrap()
+                .table_object_id(),
+            Some(object_id)
+        );
+
+        let legacy = TableMutation::insert(id(6), "books", vec![2], vec![10]).unwrap();
+        let legacy_encoded = legacy.runtime_mutation().unwrap();
+        assert!(legacy_encoded
+            .payload
+            .starts_with(b"ORNA-TABLE-MUTATION-2\0"));
+        let legacy_decoded = TableMutation::decode(&legacy_encoded).unwrap();
+        assert_eq!(legacy_decoded.table_object_id(), None);
+        assert_eq!(legacy_decoded.table(), legacy.table());
+        assert_eq!(legacy_decoded.key(), legacy.key());
+        assert_eq!(legacy_decoded.value(), legacy.value());
+    }
+
     fn request(session: u8, request: u8) -> RequestIdentity {
         RequestIdentity {
             session_id: id(session),
@@ -28922,6 +29143,44 @@ mod tests {
                 (vec![3], vec![11]),
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn committed_table_identity_survives_runtime_activation_and_name_change() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let object_id = TableObjectId::new([0x82; 16]);
+        let context = state.begin_activation().await.unwrap();
+        let mutation = TableMutation::insert(id(5), "books", vec![1], vec![9])
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, &context, &[mutation], digest(6), &NoFault)
+            .await
+            .unwrap();
+
+        let retained = state.pending().await.unwrap();
+        assert_eq!(
+            TableMutation::decode(retained.last().expect("committed mutation is retained"))
+                .unwrap()
+                .table_object_id(),
+            Some(object_id)
+        );
+
+        let current = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let snapshot = state
+            .begin_admitted_table_activation(&[current])
+            .await
+            .unwrap();
+        assert_eq!(snapshot.table_object_id("books"), Some(object_id));
+
+        let renamed = RuntimeTableIdentity::new("Memo", object_id).unwrap();
+        let renamed_snapshot = state
+            .begin_admitted_table_activation(&[renamed])
+            .await
+            .unwrap();
+        assert_eq!(renamed_snapshot.table_object_id("Memo"), Some(object_id));
     }
 
     #[tokio::test]
