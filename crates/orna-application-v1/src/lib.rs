@@ -2216,7 +2216,20 @@ impl ApplicationLiveAdapter {
             })
     }
 
+    /// Creates a REPL session bound to the database and repository identity the
+    /// executable host pinned on this adapter, so every session the live path
+    /// hands out carries the same authority scope as its runtime.
     fn new_repl_session(&self) -> Result<AdmittedReplSession, LiveError> {
+        let session = self.new_unscoped_repl_session()?;
+        Ok(match self.runtime_identity {
+            Some((database, repository)) => session.with_repository_scope(
+                orna_evaluator_v1::RepositoryScope::new(database, repository),
+            ),
+            None => session,
+        })
+    }
+
+    fn new_unscoped_repl_session(&self) -> Result<AdmittedReplSession, LiveError> {
         if let Some(project) = &self.project {
             return AdmittedReplSession::from_loaded_project(
                 project,
