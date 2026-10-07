@@ -5,8 +5,6 @@
 //! format-3 validation path already admitted (`MimeRegistry::annotation`), so
 //! it never hydrates or reads Blob content.
 
-use std::collections::BTreeMap;
-
 use crate::{Blob, ContextValue, Error, MediaAnnotation, Result};
 
 /// Top-level MIME family of a canonical media type.
@@ -108,6 +106,7 @@ impl ContextValue {
 mod tests {
     use super::*;
     use crate::ValueFormat;
+    use std::collections::BTreeMap;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/blob-role-dispatch.orna");
 
