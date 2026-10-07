@@ -46,7 +46,7 @@ mod ui;
 mod unicode_16_case_properties;
 
 #[cfg(feature = "project-repl")]
-pub use admitted_repl::{AdmittedReplSession, ReplError};
+pub use admitted_repl::{AdmittedReplSession, RepositoryScope, ReplError};
 pub use cancellation::CancellationToken;
 use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
