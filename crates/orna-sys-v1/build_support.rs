@@ -9,6 +9,11 @@ use syn::{
     Expr, ForeignItem, ImplItem, ItemFn, Lit, TraitItem,
     visit::{self, Visit},
 };
+
+const GENERATED_API_LANGUAGE_VERSION: &str = "1.1.0";
+const GENERATED_API_SYS_VERSION: &str = "1.1";
+const GENERATED_API_STATUS: &str =
+    "Final 1.1.0 specification contract; engine execution not claimed";
 #[derive(Clone, Debug)]
 pub struct Function {
     #[allow(dead_code)] // Read by collector proofs; not needed while emitting API JSON.
@@ -96,12 +101,14 @@ pub fn generate_sys_artifacts(
         .iter()
         .map(|function| function.metadata.clone())
         .collect::<Vec<_>>();
+    let published_schema = generated_api_schema(schema)?;
     let api = generate_system_api_document(registry, function_metadata)?;
-    validate_published_schema_shape(&api, schema)?;
+    validate_published_schema_shape(&api, &published_schema)?;
     let mut api_json = canonical_pretty_json(&api).map_err(|error| error.to_string())?;
     api_json.push('\n');
 
-    let mut schema_json = canonical_pretty_json(schema).map_err(|error| error.to_string())?;
+    let mut schema_json =
+        canonical_pretty_json(&published_schema).map_err(|error| error.to_string())?;
     schema_json.push('\n');
 
     let provider_abi = generate_provider_abi(functions, &api)?;
@@ -128,6 +135,27 @@ pub fn generate_sys_artifacts(
     })
 }
 
+/// Apply the generator-owned publication coordinates to the schema projection.
+/// The source schema defines shape; these version/status values come from the
+/// Rust generator template shared with the emitted API document.
+fn generated_api_schema(source: &Value) -> Result<Value, String> {
+    let mut schema = source.clone();
+    for (field, value) in [
+        ("language_version", GENERATED_API_LANGUAGE_VERSION),
+        ("sys_version", GENERATED_API_SYS_VERSION),
+        ("status", GENERATED_API_STATUS),
+    ] {
+        let property = schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .and_then(|properties| properties.get_mut(field))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("published sys schema must define `{field}` as an object"))?;
+        property.insert("const".to_owned(), Value::String(value.to_owned()));
+    }
+    Ok(schema)
+}
+
 fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, String> {
     let declared_failures = api["failure_codes"]
         .as_array()
@@ -143,7 +171,8 @@ fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, S
                 .iter()
                 .filter_map(Value::as_str)
                 .filter(|code| {
-                    *code == operation_namespace
+                    (name == "sys.blob.annotate" && code.starts_with("sys.blob."))
+                        || *code == operation_namespace
                         || code
                             .strip_prefix(operation_namespace)
                             .is_some_and(|tail| tail.starts_with('.'))
@@ -282,6 +311,25 @@ pub fn generate_system_api_document(
             "system API registry inventory must omit generated functions and counts".to_owned(),
         );
     }
+    for generated_field in ["language_version", "sys_version", "status"] {
+        if object.contains_key(generated_field) {
+            return Err(format!(
+                "system API registry inventory must omit generator-owned `{generated_field}`"
+            ));
+        }
+    }
+    object.insert(
+        "language_version".to_owned(),
+        Value::String(GENERATED_API_LANGUAGE_VERSION.to_owned()),
+    );
+    object.insert(
+        "sys_version".to_owned(),
+        Value::String(GENERATED_API_SYS_VERSION.to_owned()),
+    );
+    object.insert(
+        "status".to_owned(),
+        Value::String(GENERATED_API_STATUS.to_owned()),
+    );
     object.insert("functions".to_owned(), Value::Array(functions));
 
     let mut counts = serde_json::Map::new();
@@ -731,12 +779,13 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
     // These are the fields consumed by semantic SystemApi. Rejecting unknown
     // keys catches annotation typos that serde would otherwise silently drop.
     const REQUIRED: [&str; 4] = ["name", "effect", "signature", "purpose"];
-    const OPTIONAL: [&str; 5] = [
+    const OPTIONAL: [&str; 6] = [
         "contract",
         "preconditions",
         "ownership",
         "snapshot_rule",
         "documentation",
+        "since",
     ];
 
     for field in REQUIRED {
@@ -791,7 +840,7 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
         return Err(format!("unknown system API effect `{effect}`"));
     }
 
-    let requires_contract = name.starts_with("sys.admin.");
+    let requires_contract = name.starts_with("sys.admin.") || name.starts_with("sys.blob.");
     let requires_preconditions = FUNCTIONS_WITH_PRECONDITIONS.contains(&name);
     let requires_ownership = matches!(name, "sys.start(Value)" | "sys.start<T>");
     let requires_snapshot_rule = matches!(

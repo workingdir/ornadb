@@ -23,8 +23,9 @@ use orna_syntax_v1::{
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::{
-    CANONICAL_NAN_BITS, ContextValue, ErrorValue as CanonicalErrorValue, OVB2_BLOB_TAG, Raw,
-    ValueFormat, domain_digest, float_max, float_min, float_ordinary_eq, float_total_cmp,
+    CANONICAL_NAN_BITS, ContextValue, Error as ValueError, ErrorValue as CanonicalErrorValue,
+    OVB2_BLOB_TAG, Raw, ValueFormat, domain_digest, float_max, float_min, float_ordinary_eq,
+    float_total_cmp,
 };
 use serde::{
     Deserialize,
@@ -5864,6 +5865,126 @@ impl Context<'_, '_> {
         })
     }
 
+    fn call_sys_blob_annotate(
+        &mut self,
+        arguments: &[orna_syntax_v1::Argument],
+        input: Option<Value>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        const OPERATION: &str = "sys.blob.annotate";
+        let table = orna_sys_v1::system_dispatch_table();
+        let contract = table
+            .operation(OPERATION)
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        let parameters = &contract.signature.parameters;
+        if parameters.len() != 3
+            || parameters[0].name != "value"
+            || parameters[1].name != "media_type"
+            || parameters[2].name != "suffix"
+            || parameters[2].default.as_deref() != Some("null")
+        {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+
+        let mut supplied = (0..parameters.len()).map(|_| None).collect::<Vec<_>>();
+        let has_input = input.is_some();
+        if let Some(input) = input {
+            supplied[0] = Some(input);
+        }
+        let positional = arguments.iter().all(|argument| argument.name.is_none());
+        if positional {
+            let offset = usize::from(has_input);
+            if arguments.len() > parameters.len().saturating_sub(offset) {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+            for (position, argument) in arguments.iter().enumerate() {
+                let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                supplied[offset + position] = Some(value);
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
+            }
+        } else {
+            for argument in arguments {
+                let Some(name) = argument.name.as_deref() else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                let Some(position) = parameters
+                    .iter()
+                    .position(|parameter| parameter.name == name)
+                else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                if supplied[position].is_some() {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                supplied[position] = Some(value);
+                if self.transfer.is_some() {
+                    return Ok(Value::Null);
+                }
+            }
+        }
+        let mut values = Vec::with_capacity(parameters.len());
+        for (position, parameter) in parameters.iter().enumerate() {
+            let value = match supplied[position].take() {
+                Some(value) => value,
+                None if parameter.default.as_deref() == Some("null") => Value::Null,
+                None => return Err(error("ORNA-EVAL-ARGUMENT")),
+            };
+            values.push(value);
+        }
+
+        let [Value::AnnotatedBlob(raw), Value::String(media_type), suffix] = values.as_slice()
+        else {
+            return Err(if matches!(values.first(), Some(Value::Blob(_))) {
+                error("ORNA-EVAL-UNSUPPORTED")
+            } else {
+                error("ORNA-EVAL-TYPE")
+            });
+        };
+        let suffix = match suffix {
+            Value::Null | Value::Option(None) => None,
+            Value::String(value) => Some(value.as_str()),
+            Value::Option(Some(value)) => match value.as_ref() {
+                Value::String(value) => Some(value.as_str()),
+                _ => return Err(error("ORNA-EVAL-TYPE")),
+            },
+            _ => return Err(error("ORNA-EVAL-TYPE")),
+        };
+        let blob = ContextValue::new(ValueFormat::Ovb2, raw.clone())
+            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+        let annotated = match blob.with_blob_annotation(media_type, suffix) {
+            Ok(value) => Ok(value),
+            Err(ValueError::InvalidMediaType) => {
+                Err(orna_sys_v1::FailureCode::new("sys.blob.invalid_media_type")
+                    .expect("registered MIME failure code is valid"))
+            }
+            Err(ValueError::InvalidSuffix) => {
+                Err(orna_sys_v1::FailureCode::new("sys.blob.invalid_suffix")
+                    .expect("registered MIME failure code is valid"))
+            }
+            Err(ValueError::IncompatibleSuffix) => Err(orna_sys_v1::FailureCode::new(
+                "sys.blob.incompatible_suffix",
+            )
+            .expect("registered MIME failure code is valid")),
+            Err(_) => return Err(error("ORNA-EVAL-VALUE")),
+        };
+        let result = table
+            .dispatch(OPERATION, |_| Ok(()), |_| annotated)
+            .map_err(|_| error("ORNA-EVAL-UNSUPPORTED"))?;
+        match result {
+            orna_sys_v1::SystemDispatchResult::Returned(value) => {
+                Ok(Value::AnnotatedBlob(value.into_raw()))
+            }
+            orna_sys_v1::SystemDispatchResult::Failed(code) => Err(EvaluationError::redacted(
+                SafeText::new(code.as_str().to_owned())
+                    .expect("generated system failure code is safe"),
+            )),
+        }
+    }
+
     fn call(
         &mut self,
         callee: &Expr,
@@ -6076,6 +6197,18 @@ impl Context<'_, '_> {
         let root_collection =
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
+        let source_function_name = function_name(callee);
+        let sys_blob_annotate_resolved = resolved_function.as_deref() == Some("sys.blob.annotate")
+            || (resolved_function.is_none()
+                && source_function_name.as_deref() == Some("sys.blob.annotate")
+                && !scope.0.contains_key("sys"));
+        if sys_blob_annotate_resolved
+            && orna_sys_v1::system_dispatch_table()
+                .operation("sys.blob.annotate")
+                .is_some()
+        {
+            return self.call_sys_blob_annotate(arguments, input, scope, depth);
+        }
         if let Some(operation_name) = resolved_function.as_deref()
             && let Some(operation) =
                 orna_sys_v1::system_host_operation_registry().operation(operation_name)

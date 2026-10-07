@@ -165,6 +165,15 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
+        function = r###"{"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.annotate","purpose":"Return the same immutable bytes with MIME-1-validated canonical annotations.","signature":"fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob","since":"1.1.0"}"###,
+        role = "langitem.sys.blob.annotate@1.0"
+    )]
+    pub fn sys_blob_annotate(&self) -> &'static SystemFunctionDescriptor {
+        system_function_descriptor("sys.blob.annotate")
+            .expect("annotated system API function has a descriptor")
+    }
+
+    #[ornasys(
         function = r###"{"effect":"read","name":"sys.object","purpose":"Look up a stable object at a snapshot.","signature":"fn sys.object(id: sys.ObjectId, at: sys.SnapshotRef = sys.current.snapshot): sys.ObjectRef"}"###
     )]
     pub fn sys_object(&self) -> &'static SystemFunctionDescriptor {

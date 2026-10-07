@@ -9,7 +9,7 @@ use serde_json::Value;
 #[allow(dead_code)]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "7752f42450cc7cf3c651adcf34ec07288efb3f17de0e895e85a0575fc4c1dcf1";
+const SYS_API_1_1_SHA256: &str = "7752f42450cc7cf3c651adcf34ec07288efb3f17de0e895e85a0575fc4c1dcf1";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
 
@@ -39,8 +39,52 @@ fn published_artifact_is_the_deterministic_registry_projection() {
     let generated = system_api_json();
     let digest = format!("{:x}", Sha256::digest(generated.as_bytes()));
     assert_eq!(
-        digest, SYS_API_V1_SHA256,
-        "the on-demand api/sys.json export matches the reviewed docs-enriched 1.0 artifact"
+        digest, SYS_API_1_1_SHA256,
+        "the on-demand api/sys.json export matches the reviewed generated 1.1 artifact"
+    );
+    let api: Value = serde_json::from_str(&generated).expect("generated API JSON");
+    assert_eq!(api["language_version"], "1.1.0");
+    assert_eq!(api["sys_version"], "1.1");
+    assert_eq!(
+        api["status"],
+        "Final 1.1.0 specification contract; engine execution not claimed"
+    );
+}
+
+#[test]
+fn publication_versions_and_status_are_owned_by_the_rust_generator_template() {
+    let inventory: Value = serde_json::from_str(include_str!("../src/system_api_inventory.json"))
+        .expect("registry-owned system API type graph");
+    let generated: Value =
+        serde_json::from_str(&orna_sys_v1::system_api_json()).expect("generated sys API JSON");
+    let functions = generated["functions"]
+        .as_array()
+        .expect("generated API functions")
+        .clone();
+
+    for field in ["language_version", "sys_version", "status"] {
+        assert!(
+            inventory.get(field).is_none(),
+            "registry inventory cannot hand-author generator-owned `{field}`"
+        );
+        let mut forged_inventory = inventory.clone();
+        forged_inventory[field] = serde_json::json!("hand-authored value");
+        assert!(
+            build_support::generate_system_api_document(
+                forged_inventory,
+                functions.clone()
+            )
+            .unwrap_err()
+            .contains(&format!("generator-owned `{field}`")),
+            "generator rejects hand-authored `{field}`"
+        );
+    }
+
+    assert_eq!(generated["language_version"], "1.1.0");
+    assert_eq!(generated["sys_version"], "1.1");
+    assert_eq!(
+        generated["status"],
+        "Final 1.1.0 specification contract; engine execution not claimed"
     );
 }
 

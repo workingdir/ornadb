@@ -154,7 +154,8 @@
         "contract": { "$ref": "#/$defs/nonBlankString" },
         "preconditions": { "$ref": "#/$defs/nonBlankString" },
         "ownership": { "$ref": "#/$defs/nonBlankString" },
-        "snapshot_rule": { "$ref": "#/$defs/nonBlankString" }
+        "snapshot_rule": { "$ref": "#/$defs/nonBlankString" },
+        "since": { "$ref": "#/$defs/nonBlankString" }
       }
     },
     "counts": {

@@ -113,9 +113,12 @@ fn sys_tokens(text: &str) -> impl Iterator<Item = &str> {
 #[test]
 fn portable_sys_api_has_exact_declared_counts_and_surface() {
     let document = sys_api_document();
-    assert_eq!(document["language_version"], "1.0.0");
-    assert_eq!(document["sys_version"], "1.0");
-    assert_eq!(document["status"], "specification");
+    assert_eq!(document["language_version"], "1.1.0");
+    assert_eq!(document["sys_version"], "1.1");
+    assert_eq!(
+        document["status"],
+        "Final 1.1.0 specification contract; engine execution not claimed"
+    );
 
     for (name, expected) in [
         ("singletons", 4),
@@ -123,8 +126,8 @@ fn portable_sys_api_has_exact_declared_counts_and_surface() {
         ("reference_aliases", 78),
         ("value_types", 34),
         ("relations", 78),
-        ("functions", 66),
-        ("failure_codes", 46),
+        ("functions", 67),
+        ("failure_codes", 49),
     ] {
         assert_eq!(array_len(&document, name), expected, "{name} count");
     }
