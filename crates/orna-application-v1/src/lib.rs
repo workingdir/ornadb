@@ -45,6 +45,7 @@ use std::{
 };
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
+const TABLE_ID_DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST-TABLE-IDENTITIES\0";
 const SOURCE_MUTATION_DOMAIN: &[u8] = b"ORNA-SOURCE-MUTATION\0";
 const MAX_ADMITTED_REPL_SESSIONS: usize = 4096;
 const MAX_RUN_EVENTS_PER_SESSION: usize = 256;
@@ -529,7 +530,14 @@ impl ApplicationAuthority {
             .and_then(|value| value.encode().ok())
             .ok_or(ApplicationError::DigestEncoding)?;
         let mut digest = Sha256::new();
-        digest.update(DIGEST_DOMAIN);
+        let includes_table_identities = mutations
+            .iter()
+            .any(|mutation| mutation.table_object_id().is_some());
+        digest.update(if includes_table_identities {
+            TABLE_ID_DIGEST_DOMAIN
+        } else {
+            DIGEST_DOMAIN
+        });
         digest.update(context.capture().generation_digest());
         put_bytes(&mut digest, &snapshot_bytes);
         let elapsed = context
@@ -541,12 +549,14 @@ impl ApplicationAuthority {
         for mutation in mutations {
             digest.update(mutation.id());
             put_bytes(&mut digest, mutation.table().as_bytes());
-            match mutation.table_object_id() {
-                Some(object_id) => {
-                    digest.update([1]);
-                    digest.update(object_id.bytes());
+            if includes_table_identities {
+                match mutation.table_object_id() {
+                    Some(object_id) => {
+                        digest.update([1]);
+                        digest.update(object_id.bytes());
+                    }
+                    None => digest.update([0]),
                 }
-                None => digest.update([0]),
             }
             put_bytes(&mut digest, mutation.key());
             match mutation.value() {
@@ -952,9 +962,6 @@ impl SourceMutationEffectHandler {
         publication_rows: RuntimePublicationMetadataRows,
         table_object_ids: BTreeMap<String, TableObjectId>,
     ) -> Result<Self, ApplicationError> {
-        if table_object_ids.is_empty() {
-            return Ok(Self::with_publication_rows(tables, publication_rows));
-        }
         let next_automatic_ids = automatic_id_counters(&tables);
         let mut handler = Self::new_with_table_object_ids(tables, table_object_ids)?;
         handler.next_automatic_ids = next_automatic_ids;
@@ -3010,6 +3017,17 @@ mod tests {
         ))
         .expect("canonical integer");
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn name_only_publication_admission_constructs_handler_without_recursion() {
+        let rows = RuntimePublicationMetadataRows {
+            sys_storage: CanonicalValue::new(OvbRaw::Null).unwrap(),
+            maintenance_job: CanonicalValue::new(OvbRaw::Null).unwrap(),
+        };
+        let handler = SourceMutationEffectHandler::with_publication_rows(BTreeMap::new(), rows);
+        assert!(handler.table_object_ids.is_empty());
+        assert!(handler.publication_rows.is_some());
     }
 
     #[test]
