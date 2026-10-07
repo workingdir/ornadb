@@ -1013,7 +1013,7 @@ impl Blob {
             .unwrap_or_else(MimeRegistry::mime1);
         Ok(Self {
             identity: self.identity,
-            annotation: mime_registry.annotation(media_type, suffix)?,
+            annotation: mime_registry.canonical_annotation(media_type, suffix)?,
             content: self.content.clone(),
             context: self.context.clone(),
         })
@@ -1283,6 +1283,20 @@ impl MimeRegistry {
             return Err(Error::InvalidContext);
         }
         MediaAnnotation::with_mime1(media_type, suffix)
+    }
+
+    /// Canonicalize caller-supplied MIME-1 annotation input. Wire values
+    /// continue to use `annotation` and must already be canonical.
+    pub fn canonical_annotation(
+        self,
+        media_type: &str,
+        suffix: Option<&str>,
+    ) -> Result<MediaAnnotation> {
+        let media_type = self.normalize(media_type)?;
+        let suffix = suffix.map(str::to_ascii_lowercase);
+        let preferred = media_suffixes(media_type.split(';').next().unwrap_or(&media_type)).0;
+        let suffix = suffix.filter(|value| value != preferred);
+        self.annotation(&media_type, suffix.as_deref())
     }
 }
 
@@ -1677,6 +1691,45 @@ impl ContextValue {
 
     pub fn blob(&self) -> Result<Blob> {
         decode_blob_raw(&self.raw, self.format, self.context.as_ref())
+    }
+
+    /// Return this annotated Blob with canonical MIME-1 annotations while
+    /// preserving its encoded content commitment and resolution context.
+    ///
+    /// This metadata-only rewrite does not hydrate OVB-2 bytes or recompute
+    /// the `(length, SHA-256)` identity carried by ROV-3/SOV-3.
+    pub fn with_blob_annotation(&self, media_type: &str, suffix: Option<&str>) -> Result<Self> {
+        let mime_registry = self
+            .context
+            .as_ref()
+            .map(Format3Context::mime_registry)
+            .unwrap_or_else(MimeRegistry::mime1);
+        let annotation = mime_registry.canonical_annotation(media_type, suffix)?;
+        let (tag_number, media_index, suffix_index, expected_len) = match self.format {
+            ValueFormat::Ovb2 => (OVB2_BLOB_TAG, 1, 2, 3),
+            ValueFormat::Rov3 => (ROV3_BLOB_TAG, 2, 3, 5),
+            ValueFormat::Sov3 => (SOV3_BLOB_TAG, 2, 3, 4),
+            ValueFormat::Ovb1 => return Err(Error::InvalidProfile),
+        };
+        let mut raw = self.raw.clone();
+        let Raw::Tag(actual_tag, payload) = &mut raw else {
+            return Err(Error::InvalidValue);
+        };
+        if *actual_tag != tag_number {
+            return Err(Error::InvalidValue);
+        }
+        let Raw::Array(fields) = payload.as_mut() else {
+            return Err(Error::InvalidTag);
+        };
+        if fields.len() != expected_len {
+            return Err(Error::InvalidTag);
+        }
+        fields[media_index] = Raw::Text(annotation.media_type().to_owned());
+        fields[suffix_index] = annotation
+            .suffix()
+            .map(|value| Raw::Text(value.to_owned()))
+            .unwrap_or(Raw::Null);
+        Self::new_with_context(self.format, raw, self.context.clone())
     }
 }
 

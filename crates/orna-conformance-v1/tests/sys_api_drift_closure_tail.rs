@@ -1,4 +1,4 @@
-use orna_semantic_v1::{analyze, ModuleInput};
+use orna_semantic_v1::{ModuleInput, analyze};
 use serde_json::Value;
 
 const FROZEN_SYS_API: &str = include_str!("fixtures/reference/api/sys.json");
@@ -9,19 +9,19 @@ const DEFAULT_ARGUMENTS: &str = include_str!("fixtures/sys-api-drift-default-arg
 const EDGE_INTERPLAY: &str = include_str!("fixtures/sys-api-drift-edge-interplay.orna");
 
 #[test]
-fn published_api_matches_the_frozen_schema_and_keeps_local_provenance() {
-    let mut published: Value =
-        serde_json::from_str(&orna_sys_v1::system_api_json()).expect("generated sys API");
-    let frozen: Value = serde_json::from_str(FROZEN_SYS_API).expect("frozen sys API fixture");
+fn committed_compatibility_artifact_matches_typed_registry_generation() {
+    let generated = orna_sys_v1::system_api_json();
+    let published: Value = serde_json::from_str(&generated).expect("generated sys API");
+    let committed: Value =
+        serde_json::from_str(FROZEN_SYS_API).expect("committed sys API artifact");
 
-    assert_ne!(
-        published["source_of_truth"], frozen["source_of_truth"],
-        "the generated artifact records its local annotated-method source"
-    );
-    published["source_of_truth"] = frozen["source_of_truth"].clone();
     assert_eq!(
-        published, frozen,
-        "public schema inventories and edges must match the frozen API"
+        generated, FROZEN_SYS_API,
+        "committed compatibility artifact must be the deterministic typed-registry projection"
+    );
+    assert_eq!(
+        published, committed,
+        "committed artifact parses to the same public API structure"
     );
 }
 
