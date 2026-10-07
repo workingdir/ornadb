@@ -21361,6 +21361,7 @@ mod tests {
         .unwrap();
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
+        let cwd_generation = activation_test_cwd_generation(0);
         let expected_transfer =
             ProtectedContentTransferEvidence::from_transfer(&pin.transfer_record());
         let mutation = table_mutation(5, 1, Some(9))
@@ -21397,7 +21398,9 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
+                cwd_generation: &cwd_generation,
                 mutations: &duplicate_mutations,
+                content_pins: &mut [],
                 next_digest: digest(6),
                 validator: &mut duplicate_validator,
                 faults: &NoFault,
@@ -21425,7 +21428,9 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
+                cwd_generation: &cwd_generation,
                 mutations: &[decoded],
+                content_pins: &mut [],
                 next_digest: digest(6),
                 validator: &mut validator,
                 faults: &NoFault,
@@ -21441,11 +21446,14 @@ mod tests {
         assert!(state.pending().await.unwrap().is_empty());
         assert_eq!(state.latest_checkpoint().await.unwrap(), None);
 
+        let mut pins = [pin];
         let next = state
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
+                cwd_generation: &cwd_generation,
                 mutations: &[mutation],
+                content_pins: &mut pins,
                 next_digest: digest(6),
                 validator: &mut validator,
                 faults: &NoFault,
