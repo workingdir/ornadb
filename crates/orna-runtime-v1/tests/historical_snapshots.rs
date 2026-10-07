@@ -1682,7 +1682,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 | 1204 | 1209 | 1212 | 1213
                 | 1215 | 1218 | 1220 | 1221 | 1223 | 1224
                 | 1226 | 1228 | 1230 | 1231 | 1234 | 1235
-                | 1237 | 1239 | 1240 | 1242 | 1244 | 1245 | 1246
+                | 1237 | 1239 | 1240 | 1242 | 1245 | 1246
                 | 1248 | 1250 | 1251 | 1253 | 1256 | 1257
                 | 1259 | 1262 | 1264 | 1265 | 1267 | 1268
                 | 1270 | 1273 | 1275 | 1276 | 1278 | 1279
@@ -1690,6 +1690,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 | 1292 | 1294 | 1296 | 1297 | 1299 | 1300 | 1301
                 | 1303 | 1306 | 1308 | 1309 | 1311 | 1312
                 | 1313 | 1315 | 1317 | 1319 | 1320 | 1322 | 1323
+                | 1115 | 1126 | 1159 | 1170
         ) {
             mutations.push(
                 TableMutation::new(mutation_id, "records", vec![5], prefix_value)
@@ -6954,15 +6955,6 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 )
                 .expect("valid second case closure edge tail fifty-nine image"),
             );
-        } else if generation == 1107 {
-            // Preserve the tail while its neighbor prefix closes. The reference
-            // does not prescribe this row interaction, so pin the orphan image.
-            let mut extension_mutation_id = mutation_id;
-            extension_mutation_id[0] = 1;
-            mutations.push(
-                TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                    .expect("valid orphan tail after second prefix closure"),
-            );
         } else if generation == 1108 {
             let mut extension_mutation_id = mutation_id;
             extension_mutation_id[0] = 1;
@@ -6990,13 +6982,6 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                     Some(b"case-closure-edge-tail-fifty-nine-second-joint".to_vec()),
                 )
                 .expect("valid second joint case closure tail update"),
-            );
-        } else if generation == 1111 {
-            let mut extension_mutation_id = mutation_id;
-            extension_mutation_id[0] = 1;
-            mutations.push(
-                TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                    .expect("valid second joint tail retained after prefix closure"),
             );
         } else if generation == 1113 {
             let mut extension_mutation_id = mutation_id;
@@ -7068,7 +7053,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 )
                 .expect("valid terminal fixture-backed closure edge tail"),
             );
-        } else if generation == 1128 || generation == 1130 || generation == 1133 || generation == 1136 {
+        } else if generation == 1128 || generation == 1133 || generation == 1136 {
             let mut extension_mutation_id = mutation_id;
             extension_mutation_id[0] = 1;
             mutations.push(
