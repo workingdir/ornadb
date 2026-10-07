@@ -8,6 +8,7 @@ mod cli_dispatch;
 mod cli_help;
 mod cli_status;
 mod cli_serve;
+mod media_range;
 mod repl;
 
 use cli_args::{
