@@ -4895,7 +4895,7 @@ fn std_collection_one_distinguishes_zero_and_multiple_matches() {
 }
 
 #[test]
-fn std_collection_one_evaluates_predicates_in_order_and_stops_after_second_match() {
+fn std_collection_one_evaluates_predicates_in_order_and_propagates_late_failures() {
     assert_eq!(
         code(evaluate_expression(
             include_str!("fixtures/evaluator_source_e89ac240ee943553.orna"),
@@ -4918,7 +4918,7 @@ fn std_collection_one_evaluates_predicates_in_order_and_stops_after_second_match
             &Environment::new(),
             Limits::default(),
         )),
-        "ORNA-EVAL-RELATION-ONE-MULTIPLE"
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
 }
 
