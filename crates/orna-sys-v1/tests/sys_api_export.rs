@@ -19,7 +19,7 @@ mod build_host;
 #[allow(dead_code)]
 mod build_support;
 
-const SYS_API_1_1_SHA256: &str = "d5382d03f977067dfd0af738bca94be094c17db803fd0f3be7e272430e37101d";
+const SYS_API_1_1_SHA256: &str = "6a9dba444ee840b4a58c35720988a06e158784dfde5387bb80874ce6bbee141c";
 
 fn export(schema: bool, output_path: Option<&std::path::Path>) -> Vec<u8> {
     export_mode(schema.then_some("--schema"), output_path)
