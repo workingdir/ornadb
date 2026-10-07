@@ -864,6 +864,39 @@ impl PartialEq for Blob {
         self.value_eq(other).unwrap_or(false)
     }
 }
+/// Payload-free metadata for one Blob value: its annotation and committed
+/// content identity. `hydrated` reports whether the bytes are already local.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlobMetadata {
+    media_type: String,
+    suffix: Option<String>,
+    length: u64,
+    sha256: [u8; 32],
+    hydrated: bool,
+}
+
+impl BlobMetadata {
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn suffix(&self) -> Option<&str> {
+        self.suffix.as_deref()
+    }
+
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+
+    pub const fn sha256(&self) -> [u8; 32] {
+        self.sha256
+    }
+
+    pub const fn is_hydrated(&self) -> bool {
+        self.hydrated
+    }
+}
+
 impl Blob {
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self {
@@ -987,6 +1020,19 @@ impl Blob {
 
     pub fn annotation(&self) -> &MediaAnnotation {
         &self.annotation
+    }
+
+    /// Projects this Blob's descriptor metadata without reading its content.
+    /// Querying rows through this projection never hydrates a payload, so it
+    /// is safe for listings over large media.
+    pub fn metadata(&self) -> BlobMetadata {
+        BlobMetadata {
+            media_type: self.media_type().to_owned(),
+            suffix: self.suffix().map(str::to_owned),
+            length: self.length(),
+            sha256: self.content_identity().sha256(),
+            hydrated: self.is_hydrated(),
+        }
     }
 
     pub fn descriptor_oid(&self) -> Option<&NativeOid> {
