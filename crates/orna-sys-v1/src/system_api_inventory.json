@@ -1,8 +1,5 @@
 {
   "title": "Orna portable sys API",
-  "language_version": "1.1.0",
-  "sys_version": "1.1",
-  "status": "Final 1.1.0 specification contract; engine execution not claimed",
   "value_profiles": {
     "new": "OVB-2",
     "stored": "ROV-3",
