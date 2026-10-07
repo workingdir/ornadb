@@ -190,7 +190,10 @@ impl VfsRepositoryCache {
 
     fn managed_file_for_image<S>(&self, image: Arc<VfsFileSnapshot<S>>) -> Arc<ManagedFile<S>> {
         Arc::new(ManagedFile {
-            state: Mutex::new(ManagedFileState { image }),
+            state: Mutex::new(ManagedFileState {
+                image,
+                unlinked: false,
+            }),
             cache_epoch: self.epoch.clone(),
         })
     }
@@ -419,6 +422,7 @@ pub struct ActivationCandidate<S> {
     baseline: SnapshotPin<S>,
     revision: u64,
     replacement: Arc<[u8]>,
+    removal: bool,
 }
 
 impl<S> ActivationCandidate<S> {
@@ -432,6 +436,12 @@ impl<S> ActivationCandidate<S> {
 
     pub fn replacement_bytes(&self) -> &[u8] {
         &self.replacement
+    }
+
+    /// True for an unlink candidate: the activation must delete the file's
+    /// row, and `replacement_bytes` is empty and meaningless.
+    pub fn is_removal(&self) -> bool {
+        self.removal
     }
 }
 
@@ -514,6 +524,9 @@ pub enum EditDraftError {
 
 struct ManagedFileState<S> {
     image: Arc<VfsFileSnapshot<S>>,
+    /// Set by an accepted unlink. Once set, no new open or replacement can
+    /// observe or change this destination; existing handles keep their pins.
+    unlinked: bool,
 }
 
 /// One already-managed destination. New opens observe its latest accepted
@@ -526,6 +539,13 @@ pub struct ManagedFile<S> {
 impl<S> ManagedFile<S> {
     pub async fn open_read(&self) -> SnapshotReadHandle<S> {
         SnapshotReadHandle::open(Arc::clone(&self.state.lock().await.image))
+    }
+
+    /// Opens the destination as it currently exists. Returns `None` after an
+    /// accepted unlink, so a new open can never see the removed file's bytes.
+    pub async fn open_current(&self) -> Option<SnapshotReadHandle<S>> {
+        let state = self.state.lock().await;
+        (!state.unlinked).then(|| SnapshotReadHandle::open(Arc::clone(&state.image)))
     }
 
     /// Returns the repository-wide invalidation generation.
@@ -583,7 +603,7 @@ impl<S> ManagedFile<S> {
                 handle: handle.clone(),
             });
         }
-        if !Arc::ptr_eq(&destination.image, &scratch.baseline) {
+        if destination.unlinked || !Arc::ptr_eq(&destination.image, &scratch.baseline) {
             let diagnostic = SafeDiagnostic {
                 code: DiagnosticCode::ExecutionRejected,
                 class: DiagnosticClass::Transient,
@@ -662,7 +682,7 @@ impl<S> ManagedFile<S> {
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
         let mut destination = self.state.lock().await;
-        let based_on_current = {
+        let based_on_current = !destination.unlinked && {
             let draft_state = draft.state.lock().await;
             Arc::ptr_eq(&destination.image, &draft_state.baseline)
         };
@@ -703,6 +723,56 @@ impl<S> ManagedFile<S> {
             Ok(FsyncOutcome::Unchanged(_)) => Err(TemporaryRenameError::NoCandidate),
         }
     }
+
+    /// Removes this destination through the validated activation boundary. The
+    /// candidate is a removal (`is_removal`), so the caller must delete the
+    /// file's row. An accepted unlink bumps the shared generation, invalidating
+    /// every projection of the removed image, and makes new opens return `None`.
+    pub async fn unlink_with<F, Fut, E>(
+        self: &Arc<Self>,
+        activate: F,
+    ) -> Result<UnlinkOutcome, TemporaryRenameError<E>>
+    where
+        S: Send + Sync + 'static,
+        F: FnOnce(ActivationCandidate<S>) -> Fut,
+        Fut: Future<Output = Result<ActivationDecision<S>, E>>,
+    {
+        let mut destination = self.state.lock().await;
+        if destination.unlinked {
+            return Ok(UnlinkOutcome::AlreadyUnlinked);
+        }
+        let mut cache_generation = self.cache_epoch.generation.lock().await;
+        let next_generation = cache_generation
+            .checked_add(1)
+            .ok_or(TemporaryRenameError::GenerationExhausted)?;
+        let candidate = ActivationCandidate {
+            baseline: destination.image.pin.clone_pin(),
+            revision: 0,
+            replacement: Arc::from(&[][..]),
+            removal: true,
+        };
+        match activate(candidate)
+            .await
+            .map_err(TemporaryRenameError::Activation)?
+        {
+            ActivationDecision::Accepted(_) => {
+                destination.unlinked = true;
+                *cache_generation = next_generation;
+                Ok(UnlinkOutcome::Applied {
+                    generation: next_generation,
+                })
+            }
+            ActivationDecision::Rejected(diagnostic) => Ok(UnlinkOutcome::Rejected { diagnostic }),
+        }
+    }
+}
+
+/// The result of [`ManagedFile::unlink_with`].
+#[derive(Debug, Eq, PartialEq)]
+pub enum UnlinkOutcome {
+    Applied { generation: u64 },
+    Rejected { diagnostic: SafeDiagnostic },
+    AlreadyUnlinked,
 }
 
 struct TemporarySaveState<S> {
@@ -924,6 +994,7 @@ impl<S> EditDraft<S> {
             baseline: state.baseline.pin.clone(),
             revision,
             replacement: Arc::from(bytes.as_slice()),
+            removal: false,
         };
         match activate(candidate).await? {
             ActivationDecision::Accepted(pin) => {
@@ -1040,6 +1111,76 @@ mod tests {
                 Ok(ActivationDecision::Rejected(diagnostic))
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Routes an unlink candidate through the same validated runtime
+    /// transaction as a write. The row is deleted only when `accept` is set.
+    async fn activate_runtime_removal(
+        runtime: Arc<RuntimeState>,
+        writer: WriterLease,
+        candidate: ActivationCandidate<CwdCapture>,
+        key: Vec<u8>,
+        mutation_id: [u8; 16],
+        accept: bool,
+    ) -> Result<ActivationDecision<CwdCapture>, TableActivationError> {
+        assert!(candidate.is_removal());
+        let context = runtime
+            .begin_activation()
+            .await
+            .map_err(TableActivationError::Runtime)?;
+        let mutation = TableMutation::new(mutation_id, "books", key.clone(), None)
+            .map_err(TableActivationError::Runtime)?;
+        let mutations = [mutation];
+        let mut validator = ExactRuntimeRemovalValidator {
+            tables: vec!["books".into()],
+            key,
+            accept,
+        };
+        let faults = NoFault;
+        match commit_vfs_table_activation(
+            &runtime,
+            ValidatedTableActivationCommit {
+                writer,
+                context: &context,
+                mutations: &mutations,
+                next_digest: [mutation_id[0]; 32],
+                validator: &mut validator,
+                faults: &faults,
+            },
+        )
+        .await
+        {
+            Ok(next_capture) => Ok(ActivationDecision::Accepted(SnapshotPin::capture(
+                Arc::new(next_capture),
+            ))),
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                Ok(ActivationDecision::Rejected(diagnostic))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    struct ExactRuntimeRemovalValidator {
+        tables: Vec<String>,
+        key: Vec<u8>,
+        accept: bool,
+    }
+
+    impl TableActivationCandidateValidator for ExactRuntimeRemovalValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            let still_present = rows
+                .get("books")
+                .is_some_and(|rows| rows.iter().any(|(key, _)| key == &self.key));
+            if self.accept && !still_present {
+                Ok(())
+            } else {
+                Err(rejected())
+            }
         }
     }
 
@@ -1174,6 +1315,121 @@ mod tests {
             runtime.committed_table_row("books", &[0x52]).await.unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn unlink_deletes_row_through_validated_commit_and_hides_new_opens() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(
+            RuntimeState::open_path(
+                &temp.path().join("state.db"),
+                RuntimeIdentity {
+                    database_id: [0x11; 16],
+                    repository_id: [0x22; 16],
+                },
+                [0x33; 32],
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let writer = runtime.acquire_lease([0x44; 16]).await.unwrap();
+
+        let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
+        let accepted_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+
+        let initial_capture = Arc::new(runtime.capture().await.unwrap());
+        let image = Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::clone(&initial_capture)),
+            Arc::<[u8]>::from(baseline.as_bytes()),
+        ));
+        let target = runtime.manage_vfs_file(image).await.unwrap();
+
+        // Seed the file's row through the validated write path so the unlink
+        // has a committed row to delete.
+        let draft = target.open_draft(1 << 20).await;
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
+        let seed_runtime = Arc::clone(&runtime);
+        let seeded = target
+            .commit_draft_with(&draft, move |candidate| {
+                activate_runtime_candidate(
+                    seed_runtime,
+                    writer,
+                    candidate,
+                    vec![0x51],
+                    [0x61; 16],
+                    true,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(matches!(seeded, TemporaryRenameOutcome::Applied { .. }));
+        let live = target.open_current().await.expect("linked before unlink");
+
+        let rejected_runtime = Arc::clone(&runtime);
+        let rejected = target
+            .unlink_with(move |candidate| {
+                activate_runtime_removal(
+                    rejected_runtime,
+                    writer,
+                    candidate,
+                    vec![0x51],
+                    [0x71; 16],
+                    false,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(matches!(rejected, UnlinkOutcome::Rejected { .. }));
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
+        assert!(target.open_current().await.is_some());
+        assert_eq!(
+            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
+            Some(accepted_bytes.as_bytes().to_vec())
+        );
+
+        let unlink_runtime = Arc::clone(&runtime);
+        let unlinked = target
+            .unlink_with(move |candidate| {
+                activate_runtime_removal(
+                    unlink_runtime,
+                    writer,
+                    candidate,
+                    vec![0x51],
+                    [0x72; 16],
+                    true,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(unlinked, UnlinkOutcome::Applied { generation: 2 });
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 2);
+        assert!(target.open_current().await.is_none());
+        assert!(!live.projection_is_current().await.unwrap());
+        assert_eq!(
+            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
+            None
+        );
+
+        // Replacements against the removed file are refused, and a second
+        // unlink is a no-op rather than another activation.
+        let late = target.open_draft(1 << 20).await;
+        late.truncate(0).await.unwrap();
+        late.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
+        let stale = target
+            .commit_draft_with(&late, |_| async {
+                Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(stale, TemporaryRenameOutcome::Stale { .. }));
+        let again = target
+            .unlink_with(|_| async { Ok::<_, ()>(ActivationDecision::Rejected(rejected())) })
+            .await
+            .unwrap();
+        assert_eq!(again, UnlinkOutcome::AlreadyUnlinked);
+        assert_eq!(runtime.vfs_repository_cache().generation().await, 2);
     }
 
     #[tokio::test]
