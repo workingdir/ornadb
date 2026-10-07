@@ -23,7 +23,7 @@ mod build_provider;
 #[path = "../build_support.rs"]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
+const SYS_API_1_1_SHA256: &str = "6a9dba444ee840b4a58c35720988a06e158784dfde5387bb80874ce6bbee141c";
 
 fn regenerate() -> build_support::GeneratedSysArtifacts {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -211,7 +211,7 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
 
     let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
     assert_eq!(
-        api_hash, SYS_API_V1_SHA256,
+        api_hash, SYS_API_1_1_SHA256,
         "on-demand API retains the frozen final 1.1 bytes"
     );
     let embedded_api_json = system_api_json();

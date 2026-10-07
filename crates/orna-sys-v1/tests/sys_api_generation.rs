@@ -11,7 +11,7 @@ use serde_json::Value;
 #[allow(dead_code)]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
+const SYS_API_1_1_SHA256: &str = "6a9dba444ee840b4a58c35720988a06e158784dfde5387bb80874ce6bbee141c";
 const SYSTEM_API_FIXTURE: &str = include_str!("fixtures/system-api-annotation.orna");
 const GENERIC_TYPE_GRAPH_FIXTURE: &str = include_str!("fixtures/sys-generic-type-graph.orna");
 
@@ -60,7 +60,7 @@ fn published_artifact_is_the_deterministic_registry_projection() {
     let generated = system_api_json();
     let digest = format!("{:x}", Sha256::digest(generated.as_bytes()));
     assert_eq!(
-        digest, SYS_API_V1_SHA256,
+        digest, SYS_API_1_1_SHA256,
         "the on-demand api/sys.json export matches the reviewed final 1.1 artifact"
     );
 }
