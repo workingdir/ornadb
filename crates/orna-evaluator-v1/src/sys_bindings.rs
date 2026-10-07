@@ -1,10 +1,13 @@
 //! Evaluator bindings for native operations in the generated sys host registry.
 
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use num_traits::ToPrimitive;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
-use orna_repository_v1::RepositoryCaptureCapability;
+use orna_repository_v1::{CapturedBlobCandidate, OrpBlobBinding, RepositoryCaptureCapability};
 use orna_syntax_v1::Expr;
 use orna_sys_v1::{
     system_host_operation_registry, CaptureFileError, ClockProvider, EnvironmentDispatchValue,
@@ -22,16 +25,38 @@ const MAX_RANDOM_BYTES: usize = 1_048_576;
 /// Operations are selected from the build-generated sys registry. Environment
 /// values are limited to an explicit name snapshot, processes require exact
 /// executable/root grants, and clock waits require a duration cap.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct SysHostBindingRegistry {
     environment: EnvironmentProvider,
     process: Option<ProcessProvider>,
     clock: Option<ClockProvider>,
     filesystem: Option<FilesystemProvider>,
     repository_capture: Option<RepositoryCaptureCapability>,
+    capture_candidates: Arc<Mutex<Vec<CapturedBlobForRow>>>,
     http: Option<HttpProvider>,
     system_random: bool,
 }
+
+#[derive(Debug)]
+struct CapturedBlobForRow {
+    candidate: CapturedBlobCandidate,
+    media_type: String,
+    suffix: Option<String>,
+}
+
+impl PartialEq for SysHostBindingRegistry {
+    fn eq(&self, other: &Self) -> bool {
+        self.environment == other.environment
+            && self.process == other.process
+            && self.clock == other.clock
+            && self.filesystem == other.filesystem
+            && self.repository_capture == other.repository_capture
+            && self.http == other.http
+            && self.system_random == other.system_random
+    }
+}
+
+impl Eq for SysHostBindingRegistry {}
 
 impl SysHostBindingRegistry {
     /// Links the baked environment role to its native provider and a caller
@@ -44,6 +69,7 @@ impl SysHostBindingRegistry {
             clock: None,
             filesystem: None,
             repository_capture: None,
+            capture_candidates: Arc::default(),
             http: None,
             system_random: false,
         }
@@ -79,6 +105,48 @@ impl SysHostBindingRegistry {
     ) -> Self {
         self.repository_capture = Some(capability);
         self
+    }
+
+    /// Accepts the exact OVB-2 capture produced by this binding as a
+    /// graph-backed ORP Blob value. This consumes its scratch candidate and
+    /// returns the value and pin evidence that a table mutation must commit
+    /// together.
+    pub fn accept_captured_blob_for_row(
+        &self,
+        value: &ContextValue,
+    ) -> Result<OrpBlobBinding, EvaluationError> {
+        if value.format() != ValueFormat::Ovb2 {
+            return Err(redacted_error("ORNA-EVAL-VALUE"));
+        }
+        let blob = value
+            .blob()
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        if !blob.is_hydrated() {
+            return Err(redacted_error("ORNA-EVAL-VALUE"));
+        }
+        let candidate = {
+            let mut candidates = self
+                .capture_candidates
+                .lock()
+                .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+            let index = candidates
+                .iter()
+                .rposition(|captured| {
+                    let captured_identity = captured.candidate.content_identity();
+                    let blob_identity = blob.content_identity();
+                    captured_identity.length() == blob_identity.length()
+                        && captured_identity.sha256() == blob_identity.sha256()
+                        && captured.media_type == blob.media_type()
+                        && captured.suffix.as_deref() == blob.suffix()
+                })
+                .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
+            candidates.remove(index).candidate
+        };
+        self.repository_capture
+            .as_ref()
+            .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?
+            .accept_captured_blob(candidate, blob.media_type(), blob.suffix())
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
     }
 
     /// Installs an origin-allowlisted HTTP provider with host-selected limits.
@@ -907,14 +975,25 @@ impl SysHostBindingRegistry {
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
-        let bytes = source.captured_bytes().to_vec();
-        drop(candidate);
         let (media_type, suffix) = mime1_for_path(path);
-        let blob = Blob::from_bytes_with_annotation(bytes, media_type, suffix.as_deref())
+        let blob = Blob::from_bytes_with_annotation(
+            source.captured_bytes().to_vec(),
+            media_type,
+            suffix.as_deref(),
+        )
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
-        ContextValue::from_blob(&blob, ValueFormat::Ovb2)
+        let value = ContextValue::from_blob(&blob, ValueFormat::Ovb2)
             .map(Some)
-            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        self.capture_candidates
+            .lock()
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?
+            .push(CapturedBlobForRow {
+                candidate,
+                media_type: media_type.to_owned(),
+                suffix,
+            });
+        Ok(value)
     }
 }
 

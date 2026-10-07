@@ -331,6 +331,21 @@ impl RepositoryCaptureCapability {
         self.graph
             .capture_blob_candidate(source, max_bytes, &self.scope)
     }
+
+    /// Promotes a captured source into an owner-scoped durable pending pin,
+    /// then binds the MIME-1 annotation supplied by the OVB-2 value.
+    pub fn accept_captured_blob(
+        &self,
+        candidate: CapturedBlobCandidate,
+        media_type: &str,
+        suffix: Option<&str>,
+    ) -> Result<OrpBlobBinding, GraphError> {
+        let pin = self
+            .graph
+            .protect_captured_blob(candidate, &self.scope)?;
+        self.graph
+            .accept_protected_blob_pin_with_annotation(pin, media_type, suffix)
+    }
 }
 
 impl NativeGraphContext {
@@ -1063,8 +1078,7 @@ impl NativeGraphContext {
         self.sync_object_closure(&objects, scope)?;
 
         let pin_id = *crate::Uuid::new_v4().as_bytes();
-        let pin_hex = hex_encode(&pin_id);
-        let provisional_ref = format!("refs/orna/pins/pending/{pin_hex}");
+        let provisional_ref = scratch_content_ref(&self.owner_id, &pin_id);
         if let Err(error) = self.create_protected_ref(&provisional_ref, &descriptor_oid) {
             let _ = self.delete_protected_ref(&provisional_ref, &descriptor_oid);
             return Err(error);
@@ -1178,9 +1192,8 @@ impl NativeGraphContext {
             return Err(GraphError::ReadQuotaExceeded);
         }
         let pin_id = *crate::Uuid::new_v4().as_bytes();
-        let pin_hex = hex_encode(&pin_id);
-        let protected_ref = format!("refs/orna/pins/{pin_hex}");
-        let provisional_ref = format!("refs/orna/pins/pending/{pin_hex}");
+        let protected_ref = accepted_content_ref(&self.owner_id, &pin_id);
+        let provisional_ref = scratch_content_ref(&self.owner_id, &pin_id);
         let cleanup = PendingPrivateRefCleanup::new(
             Arc::clone(&self.private_ref_owner),
             provisional_ref,
@@ -1216,7 +1229,7 @@ impl NativeGraphContext {
             || snapshot_id != self.snapshot_id
             || algorithm != self.algorithm
             || !Arc::ptr_eq(&cleanup.owner, &self.private_ref_owner)
-            || cleanup.reference != format!("refs/orna/pins/pending/{}", hex_encode(&pin_id))
+            || cleanup.reference != scratch_content_ref(&owner_id, &pin_id)
             || cleanup.oid != descriptor_oid
         {
             return Err(GraphError::ContextMismatch);
@@ -1230,7 +1243,7 @@ impl NativeGraphContext {
             identity,
         };
         scope.authorize(self)?;
-        let protected_ref = format!("refs/orna/pins/{}", hex_encode(&pin_id));
+        let protected_ref = accepted_content_ref(&owner_id, &pin_id);
         self.finish_protection(&reference, pin_id, cleanup, protected_ref, scope)
     }
 
@@ -1258,7 +1271,7 @@ impl NativeGraphContext {
         media_type: &str,
         suffix: Option<&str>,
     ) -> Result<OrpBlobBinding, GraphError> {
-        let expected_ref = format!("refs/orna/pins/{}", hex_encode(&pin.pin_id));
+        let expected_ref = accepted_content_ref(&pin.owner_id, &pin.pin_id);
         if pin.context != self.identity
             || pin.repository_id != self.repository_id
             || pin.database_id != self.database_id
@@ -1414,7 +1427,8 @@ impl NativeGraphContext {
             self.sync_object_closure(&written, &scope)?;
 
             let provisional_ref = format!(
-                "refs/orna/pins/pending/row-{}",
+                "refs/orna/pins/{}/scratch/row-{}",
+                hex_encode(&self.owner_id),
                 hex_encode(crate::Uuid::new_v4().as_bytes())
             );
             candidate_cleanup = Some(PendingPrivateRefCleanup::new(
@@ -2730,6 +2744,22 @@ fn hex_encode(bytes: &[u8]) -> String {
     output
 }
 
+fn scratch_content_ref(owner_id: &[u8; 16], pin_id: &[u8; 16]) -> String {
+    format!(
+        "refs/orna/pins/{}/scratch/{}",
+        hex_encode(owner_id),
+        hex_encode(pin_id)
+    )
+}
+
+fn accepted_content_ref(owner_id: &[u8; 16], pin_id: &[u8; 16]) -> String {
+    format!(
+        "refs/orna/pins/{}/pending/{}",
+        hex_encode(owner_id),
+        hex_encode(pin_id)
+    )
+}
+
 fn resolve_git_path(worktree: &Path, output: &[u8]) -> Result<PathBuf, GraphError> {
     let value = std::str::from_utf8(output)
         .map_err(|_| GraphError::GitObjectMalformed)?
@@ -2903,6 +2933,7 @@ impl VerifiedBlobRange {
 pub struct ProtectedContentTransfer {
     repository_id: [u8; 32],
     database_id: [u8; 16],
+    owner_id: [u8; 16],
     pin_id: [u8; 16],
     descriptor_oid: NativeOid,
     identity: crate::blob_store::ContentIdentity,
@@ -2915,6 +2946,10 @@ impl ProtectedContentTransfer {
 
     pub const fn database_id(&self) -> &[u8; 16] {
         &self.database_id
+    }
+
+    pub const fn owner_id(&self) -> &[u8; 16] {
+        &self.owner_id
     }
 
     pub const fn pin_id(&self) -> &[u8; 16] {
@@ -2934,6 +2969,7 @@ impl ProtectedContentTransfer {
 /// native ref until accepted through `protect_captured_blob`; dropping an
 /// unaccepted candidate removes that ref. Raw OIDs are not exposed as
 /// capture authority.
+#[derive(Debug)]
 pub struct CapturedBlobCandidate {
     context: ContextIdentity,
     repository_id: [u8; 32],
@@ -2945,6 +2981,12 @@ pub struct CapturedBlobCandidate {
     descriptor_oid: NativeOid,
     identity: crate::blob_store::ContentIdentity,
     cleanup: PendingPrivateRefCleanup,
+}
+
+impl CapturedBlobCandidate {
+    pub const fn content_identity(&self) -> crate::blob_store::ContentIdentity {
+        self.identity
+    }
 }
 
 /// Proof that a complete content closure was verified, flushed and rooted by
@@ -3001,6 +3043,7 @@ impl ProtectedContentPin {
         ProtectedContentTransfer {
             repository_id: self.repository_id,
             database_id: self.database_id,
+            owner_id: self.owner_id,
             pin_id: self.pin_id,
             descriptor_oid: self.descriptor_oid.clone(),
             identity: self.identity,
@@ -4770,12 +4813,21 @@ mod persisted_orp_tests {
             .args([
                 "for-each-ref",
                 "--format=%(refname)",
-                "refs/orna/pins/pending",
+                "refs/orna/pins",
             ])
             .output()
             .expect("list pending refs");
         assert!(output.status.success());
-        output.stdout
+        output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|reference| {
+                reference
+                    .windows(b"/scratch/".len())
+                    .any(|part| part == b"/scratch/")
+            })
+            .flat_map(|reference| reference.iter().copied().chain(std::iter::once(b'\n')))
+            .collect()
     }
 
     fn rows_domain(relation: [u8; 16], schema: [u8; 32]) -> Vec<u8> {
@@ -4996,7 +5048,7 @@ mod persisted_orp_tests {
             .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
             .expect("capture authorized stream");
         let pin_id = candidate.pin_id;
-        let pending_ref = format!("refs/orna/pins/pending/{}", hex_encode(&pin_id));
+        let pending_ref = scratch_content_ref(&graph.owner_id, &pin_id);
 
         assert!(fixture_ref_exists(directory.path(), &pending_ref));
         let pin = graph
@@ -5007,8 +5059,44 @@ mod persisted_orp_tests {
             pin.content_identity(),
             crate::blob_store::digest_bytes(payload)
         );
+        assert_eq!(
+            pin.protected_ref(),
+            accepted_content_ref(&graph.owner_id, &pin_id)
+        );
+        assert_eq!(*pin.transfer_record().owner_id(), graph.owner_id);
         assert!(fixture_ref_exists(directory.path(), pin.protected_ref()));
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn capture_acceptance_transfers_owner_scoped_scratch_to_annotated_pending_binding() {
+        let (directory, graph) = capture_test_context();
+        let graph = Arc::new(graph);
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let capability = RepositoryCaptureCapability::new(Arc::clone(&graph), scope)
+            .expect("matching graph and owner scope");
+        let payload = b"annotated captured JSON";
+        let candidate = capability
+            .capture_blob_candidate(&payload[..], payload.len() as u64)
+            .expect("capture through the shared writer");
+        let pin_id = candidate.pin_id;
+        let scratch_ref = scratch_content_ref(&graph.owner_id, &pin_id);
+        assert!(fixture_ref_exists(directory.path(), &scratch_ref));
+
+        let binding = capability
+            .accept_captured_blob(candidate, "application/json", None)
+            .expect("promote and annotate captured Blob");
+        let transfer = binding.transfer_record();
+        let pending_ref = accepted_content_ref(transfer.owner_id(), transfer.pin_id());
+        assert_eq!(transfer.content_identity(), crate::blob_store::digest_bytes(payload));
+        assert!(binding
+            .encoded_value()
+            .windows(b"application/json".len())
+            .any(|window| window == b"application/json"));
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
+        assert!(!fixture_ref_exists(directory.path(), &scratch_ref));
+        drop(binding);
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
     }
 
     #[test]
@@ -5022,7 +5110,7 @@ mod persisted_orp_tests {
         let candidate = capability
             .capture_blob_candidate(&payload[..], payload.len() as u64)
             .expect("capture through the shared repository capability");
-        let pending_ref = format!("refs/orna/pins/pending/{}", hex_encode(&candidate.pin_id));
+        let pending_ref = scratch_content_ref(&graph.owner_id, &candidate.pin_id);
         assert!(fixture_ref_exists(directory.path(), &pending_ref));
         drop(candidate);
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
@@ -5142,7 +5230,7 @@ mod persisted_orp_tests {
                     .args([
                         "for-each-ref",
                         "--format=%(refname)",
-                        "refs/orna/pins/pending",
+                        "refs/orna/pins",
                     ])
                     .output()
                     .expect("list provisional row refs");
@@ -5272,10 +5360,7 @@ mod persisted_orp_tests {
         let candidate = graph
             .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
             .expect("capture authorized stream");
-        let pending_ref = format!(
-            "refs/orna/pins/pending/{}",
-            hex_encode(&candidate.pin_id)
-        );
+        let pending_ref = scratch_content_ref(&graph.owner_id, &candidate.pin_id);
         assert!(fixture_ref_exists(directory.path(), &pending_ref));
 
         graph.cancel_reads();
@@ -5296,10 +5381,7 @@ mod persisted_orp_tests {
         let candidate = issuing_graph
             .capture_blob_candidate(&payload[..], payload.len() as u64, &issuing_scope)
             .expect("capture candidate under issuing graph");
-        let pending_ref = format!(
-            "refs/orna/pins/pending/{}",
-            hex_encode(&candidate.pin_id)
-        );
+        let pending_ref = scratch_content_ref(&issuing_graph.owner_id, &candidate.pin_id);
         assert!(fixture_ref_exists(issuing_directory.path(), &pending_ref));
 
         assert!(matches!(
@@ -5317,10 +5399,7 @@ mod persisted_orp_tests {
         let candidate = graph
             .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
             .expect("capture candidate");
-        let pending_ref = format!(
-            "refs/orna/pins/pending/{}",
-            hex_encode(&candidate.pin_id)
-        );
+        let pending_ref = scratch_content_ref(&graph.owner_id, &candidate.pin_id);
         assert!(fixture_ref_exists(directory.path(), &pending_ref));
 
         drop(candidate);
