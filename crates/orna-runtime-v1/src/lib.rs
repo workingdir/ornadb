@@ -2409,6 +2409,7 @@ struct SessionDeletionRecord {
 pub struct RuntimeActivationContext {
     capture: CwdCapture,
     activation_time: SystemTime,
+    table_object_ids: BTreeMap<String, TableObjectId>,
 }
 
 /// Reusable source-derived work for one captured table activation.
@@ -2752,6 +2753,13 @@ impl RuntimeActivationContext {
 
     pub fn activation_time(&self) -> SystemTime {
         self.activation_time
+    }
+
+    /// Stable table identities admitted when this activation began. Commits
+    /// that carry a mutation for one of these tables must present the same
+    /// identity; see [`validate_admitted_table_identities`].
+    pub fn table_object_ids(&self) -> &BTreeMap<String, TableObjectId> {
+        &self.table_object_ids
     }
 }
 
@@ -5918,6 +5926,7 @@ impl RuntimeState {
         Ok(RuntimeActivationContext {
             capture: self.capture().await?,
             activation_time: SystemTime::now(),
+            table_object_ids: BTreeMap::new(),
         })
     }
 
@@ -5974,6 +5983,7 @@ impl RuntimeState {
         let context = RuntimeActivationContext {
             capture: run.snapshot,
             activation_time: observation_instant(run.started_ms)?,
+            table_object_ids: BTreeMap::new(),
         };
         transaction
             .commit()
@@ -6037,6 +6047,7 @@ impl RuntimeState {
         let context = RuntimeActivationContext {
             capture: capture_tx(&transaction).await?,
             activation_time: SystemTime::now(),
+            table_object_ids: table_object_ids.clone(),
         };
         let mut table_rows = BTreeMap::new();
         for table in tables {
@@ -6117,6 +6128,7 @@ impl RuntimeState {
             })
             .collect::<Result<Vec<_>, _>>()?;
         validate_mutations(&encoded, next_digest)?;
+        validate_admitted_table_identities(context, mutations)?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -6184,6 +6196,8 @@ impl RuntimeState {
         validate_id(writer.owner_id).map_err(TableActivationError::Runtime)?;
         validate_mutations(&encoded, next_digest).map_err(TableActivationError::Runtime)?;
         validate_table_candidate_scope(mutations, validator.tables(), &validator.table_object_ids())
+            .map_err(TableActivationError::Runtime)?;
+        validate_admitted_table_identities(context, mutations)
             .map_err(TableActivationError::Runtime)?;
         let transaction = self
             .connection
@@ -6428,6 +6442,7 @@ impl RuntimeState {
         revision_pair: Option<orna_core::revision::RevisionPair>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
+        validate_admitted_table_identities(context, mutations)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -18120,6 +18135,25 @@ fn validate_table_candidate_scope(
     validate_mutation_identities(mutations, table_object_ids)
 }
 
+/// Requires every mutation for an identity-admitted table to address that
+/// exact committed table identity. Name-only mutations for such a table, and
+/// mutations carrying a different identity, fail before any row is applied.
+/// Tables that were not admitted with an identity keep the name-addressed
+/// behavior of the activation they began under.
+fn validate_admitted_table_identities(
+    context: &RuntimeActivationContext,
+    mutations: &[TableMutation],
+) -> Result<(), RuntimeError> {
+    for mutation in mutations {
+        if let Some(admitted) = context.table_object_ids().get(mutation.table()) {
+            if mutation.table_object_id() != Some(*admitted) {
+                return Err(RuntimeError::InvalidTableMutation);
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn append_mutations_tx(
     connection: &Connection,
     expected: &CwdCapture,
@@ -20294,6 +20328,7 @@ mod tests {
         let stale_context = RuntimeActivationContext {
             capture: CwdCapture::new(context.capture().snapshot().clone(), digest(200)).unwrap(),
             activation_time: context.activation_time(),
+            table_object_ids: BTreeMap::new(),
         };
         let result = state
             .commit_validated_catalogue_table_request_activation(
