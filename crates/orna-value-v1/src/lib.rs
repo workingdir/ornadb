@@ -1795,6 +1795,36 @@ pub fn decode_ovb2(bytes: &[u8]) -> Result<Blob> {
     ContextValue::decode(bytes, ValueFormat::Ovb2)?.blob()
 }
 
+/// Projects one stored ROV-3 Blob row to payload-free metadata. The descriptor
+/// carries length, SHA-256 and annotation directly, so listings need neither a
+/// format context nor a content read; `hydrated` is always false here.
+pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
+    let mut reader = Reader::new(bytes);
+    let raw = reader.raw(0)?;
+    if reader.at != bytes.len() {
+        return Err(Error::TrailingBytes);
+    }
+    let Raw::Tag(ROV3_BLOB_TAG, payload) = raw else {
+        return Err(Error::InvalidProfile);
+    };
+    let fields = array(&payload)?;
+    let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(_descriptor)] = fields.as_slice()
+    else {
+        return Err(Error::InvalidTag);
+    };
+    let identity = ContentIdentity::new(int_u64(length)?, bytes32(sha)?)?;
+    let suffix = raw_suffix(suffix)?;
+    let annotation =
+        MimeRegistry::mime1().canonical_annotation(media_type, suffix.as_deref())?;
+    Ok(BlobMetadata {
+        media_type: annotation.media_type().to_owned(),
+        suffix: annotation.suffix().map(str::to_owned),
+        length: identity.length(),
+        sha256: identity.sha256(),
+        hydrated: false,
+    })
+}
+
 pub fn encode_rov3(blob: &Blob) -> Result<Vec<u8>> {
     blob.to_context_value(ValueFormat::Rov3)?.encode()
 }
