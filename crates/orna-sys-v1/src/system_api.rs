@@ -827,7 +827,7 @@ impl SystemApiFunctionBindings {
     }
 
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.annotate","purpose":"Return the same immutable bytes with MIME-1-validated canonical annotations.","since":"1.1.0","signature":"fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob"}"###
+        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.annotate","purpose":"Return the same immutable bytes with MIME-1-validated canonical annotations.","since":"1.1.0","signature":"fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob"}"###,
         role = "langitem.sys.blob.annotate@1.0"
     )]
     pub fn sys_blob_annotate(&self) -> &'static SystemFunctionDescriptor {
