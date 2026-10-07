@@ -394,9 +394,11 @@
     "sys.snapshot.expired",
     "sys.git.invalid_ref",
     "sys.git.branch_exists",
-    "sys.git.nothing_to_commit"
+    "sys.git.nothing_to_commit",
+    "sys.blob.invalid_media_type",
+    "sys.blob.invalid_suffix",
+    "sys.blob.incompatible_suffix"
   ],
-  "language_version": "1.0.0",
   "opaque_identifiers": [
     "sys.DatabaseId",
     "sys.FileId",
@@ -4841,8 +4843,6 @@
     }
   ],
   "source_of_truth": "crates/orna-sys-v1/src/system_api.rs #[ornasys] descriptor methods; normative semantics in source chapters and generated system reference",
-  "status": "specification",
-  "sys_version": "1.0",
   "title": "Orna portable sys API",
   "value_types": [
     {
