@@ -964,22 +964,7 @@ impl NativeGraphContext {
         descriptor_oid: &NativeOid,
         scope: &RepositoryReadScope,
     ) -> Result<AdmittedBlobReference, GraphError> {
-        scope.authorize(self)?;
-        let persisted_row = self.lookup_row(row.key(), scope)?;
-        if row.version().database_id() != &self.database_id
-            || row.version().store_root() != &self.store_root
-            || row.version().schema().schema_digest() != &self.schema_digest
-            || descriptor_oid.algorithm() != self.algorithm
-            || persisted_row.as_ref() != Some(row)
-        {
-            return Err(GraphError::ContextMismatch);
-        }
-        let dependency_present = row.value().dependencies().iter().any(|dependency| {
-            dependency.kind() == NativeObjectKind::Tree && dependency.oid() == descriptor_oid
-        });
-        if !dependency_present {
-            return Err(GraphError::DescriptorNotInRow);
-        }
+        self.require_row_dependency(row, descriptor_oid, scope)?;
         let mut objects = ObjectBudget::new(
             scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
             scope.max_objects,
@@ -989,6 +974,53 @@ impl NativeGraphContext {
         );
         let descriptor = self.read_blob_descriptor(descriptor_oid, scope, &mut objects)?;
         self.admit_blob(descriptor)
+    }
+
+    /// Resolves a native tree object only when an owner-issued row names it as
+    /// a direct tree dependency. Objects that are merely reachable through the
+    /// graph are not admitted here; callers must enter through a committed row.
+    pub fn resolve_row_node(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        oid: &NativeOid,
+        scope: &RepositoryReadScope,
+    ) -> Result<NodeData, GraphError> {
+        self.require_row_dependency(row, oid, scope)?;
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        self.read_native_node(oid, scope, &mut objects)
+    }
+
+    /// Checks that `row` is still the committed row for this context and that
+    /// `oid` is one of its direct tree dependencies.
+    fn require_row_dependency(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        oid: &NativeOid,
+        scope: &RepositoryReadScope,
+    ) -> Result<(), GraphError> {
+        scope.authorize(self)?;
+        let persisted_row = self.lookup_row(row.key(), scope)?;
+        if row.version().database_id() != &self.database_id
+            || row.version().store_root() != &self.store_root
+            || row.version().schema().schema_digest() != &self.schema_digest
+            || oid.algorithm() != self.algorithm
+            || persisted_row.as_ref() != Some(row)
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+        let dependency_present = row.value().dependencies().iter().any(|dependency| {
+            dependency.kind() == NativeObjectKind::Tree && dependency.oid() == oid
+        });
+        if !dependency_present {
+            return Err(GraphError::DescriptorNotInRow);
+        }
+        Ok(())
     }
 
     /// Captures an already-authorized, stable input stream into native OGB-2
