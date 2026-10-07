@@ -1579,5 +1579,17 @@ mod graph_bridge_tests {
             verified.verification(),
             crate::native_graph::RangeVerification::FullBlob
         );
+
+        let resolved = admitted_graph
+            .resolve_row_node(&row, &descriptor_oid, &read_scope)
+            .expect("resolve the descriptor named by the committed row");
+        assert!(matches!(
+            resolved,
+            NodeData::BlobDescriptor { length, .. } if length == identity.length()
+        ));
+        assert!(matches!(
+            admitted_graph.resolve_row_node(&row, &store_root, &read_scope),
+            Err(crate::native_graph::GraphError::DescriptorNotInRow)
+        ));
     }
 }
