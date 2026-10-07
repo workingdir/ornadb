@@ -1616,4 +1616,42 @@ mod graph_bridge_tests {
             );
         }
     }
+
+    #[test]
+    fn revision_walk_lists_commits_and_root_trees_for_admitted_graph() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x74; 16];
+        let initial = context(root);
+        install_overflow_row_store(root, &initial, relation_id, None);
+
+        let admitted_context = context(root);
+        let snapshot = admitted_context
+            .load_row_map(relation_id)
+            .expect("load the committed row-map context");
+        let graph = admitted_context
+            .open_native_graph(&snapshot)
+            .expect("admit the repository-owned graph context");
+
+        let text = |output: Vec<u8>| String::from_utf8(output).unwrap().trim().to_owned();
+        let head = text(git_output(root, &["rev-parse", "HEAD"], None));
+        let head_tree = text(git_output(root, &["rev-parse", "HEAD^{tree}"], None));
+        let commit_count = text(git_output(root, &["rev-list", "--count", "HEAD"], None))
+            .parse::<usize>()
+            .expect("count reachable commits");
+        assert!(commit_count >= 2, "store install must add a commit");
+
+        let all = graph
+            .list_revision_snapshots(commit_count)
+            .expect("list every reachable revision");
+        assert_eq!(all.len(), commit_count);
+        assert_eq!(all[0].commit().to_hex(), head);
+        assert_eq!(all[0].tree().to_hex(), head_tree);
+        assert_eq!(graph.list_revision_snapshots(1).unwrap(), all[..1].to_vec());
+        assert!(graph.list_revision_snapshots(0).unwrap().is_empty());
+        assert!(matches!(
+            graph.list_revision_snapshots(4097),
+            Err(crate::native_graph::GraphError::InventoryQuotaExceeded)
+        ));
+    }
 }
