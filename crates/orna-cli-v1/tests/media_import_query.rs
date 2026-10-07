@@ -6,7 +6,7 @@ use orna_runtime_v1::{
     RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use orna_value_v1::{ContextValue, ValueFormat};
+use orna_value_v1::{ValueFormat, decode_blob_metadata};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -164,11 +164,7 @@ async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
         .unwrap()
         .into_iter()
         .map(|(key, row)| {
-            let blob = ContextValue::decode(&row, ValueFormat::Ovb2)
-                .unwrap()
-                .blob()
-                .unwrap();
-            let metadata = blob.metadata();
+            let metadata = decode_blob_metadata(&row, ValueFormat::Ovb2).unwrap();
             MediaListing {
                 key,
                 media_type: metadata.media_type().to_owned(),

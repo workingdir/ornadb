@@ -1795,6 +1795,12 @@ pub fn decode_ovb2(bytes: &[u8]) -> Result<Blob> {
     ContextValue::decode(bytes, ValueFormat::Ovb2)?.blob()
 }
 
+/// Decodes one stored row straight to payload-free Blob metadata. Listing
+/// queries use this so the media bytes behind a row are never hydrated.
+pub fn decode_blob_metadata(bytes: &[u8], format: ValueFormat) -> Result<BlobMetadata> {
+    Ok(ContextValue::decode(bytes, format)?.blob()?.metadata())
+}
+
 pub fn encode_rov3(blob: &Blob) -> Result<Vec<u8>> {
     blob.to_context_value(ValueFormat::Rov3)?.encode()
 }
