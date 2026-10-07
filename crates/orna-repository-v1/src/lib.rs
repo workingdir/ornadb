@@ -62,7 +62,7 @@ pub use native_graph::{
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
 };
-pub use row_store::{AdmittedRow, RowMapSnapshot, TypedKey};
+pub use row_store::{AdmittedRow, KeyRange, RowMapSnapshot, TypedKey};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
 /// A verified native Git commit ID. It is intentionally Git-local: the
