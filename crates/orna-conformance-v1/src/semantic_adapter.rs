@@ -2229,7 +2229,7 @@ impl DurableTransactionalEvaluator {
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation,
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -2429,7 +2429,7 @@ impl DurableTransactionalEvaluator {
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation,
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -2599,7 +2599,7 @@ impl DurableTransactionalEvaluator {
                 Err(error) => return RunningTableRequestDisposition::Fenced(error),
             };
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation,
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -2863,6 +2863,7 @@ impl DurableTransactionalEvaluator {
             .await;
         }
         self.execute_admitted_project_request(
+            target.repository,
             &state,
             lease,
             request,
@@ -3614,7 +3615,7 @@ impl DurableTransactionalEvaluator {
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation,
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -3650,6 +3651,7 @@ impl DurableTransactionalEvaluator {
     }
     async fn execute_admitted_project_request(
         &self,
+        repository: &Repository,
         state: &RuntimeState,
         lease: WriterLease,
         request: RequestIdentity,
@@ -3734,7 +3736,7 @@ impl DurableTransactionalEvaluator {
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation,
+            cwd_generation.clone(),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
