@@ -50,7 +50,7 @@
   },
   "normative_payload_sha256": {
     "Orna-1.0.0.md": "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d",
-    "api/sys.json": "318b6d54f51d44e8117ffc91520dfd2dc2722cc023fdad51bd4dba601dd9abcb",
+    "api/sys.json": "6a9dba444ee840b4a58c35720988a06e158784dfde5387bb80874ce6bbee141c",
     "grammar/orna.ebnf": "cb42b88bf387a76bc2c7f42858fedcb30b8d8373273066636691e0e8151ff6db",
     "profiles/compact-storage.md": "1a1ea74be9bc4f2410715f5a8f351e701681119178cbbb3478cb1db5b406e752",
     "profiles/hybrid-and-rekey.md": "d919d2848d06811dd3328af8d43faafd66ec02297f87af5751c7851e3652c998",

@@ -7,7 +7,7 @@
     "reference_aliases": 78,
     "relations": 78,
     "singletons": 4,
-    "value_types": 34
+    "value_types": 35
   },
   "enums": {
     "sys.AssertionOwnerKind": [
@@ -4561,6 +4561,14 @@
           "type": "Int"
         },
         {
+          "name": "published_rows",
+          "type": "Int"
+        },
+        {
+          "name": "published_bytes",
+          "type": "Int"
+        },
+        {
           "name": "compression",
           "type": "Str?"
         },
@@ -4582,7 +4590,7 @@
         },
         {
           "name": "publication_policy",
-          "type": "sys.Value"
+          "type": "sys.PublicationPolicy"
         },
         {
           "name": "verification",
@@ -4990,6 +4998,30 @@
         {
           "name": "failure",
           "type": "sys.Diagnostic?"
+        },
+        {
+          "name": "publication_policy",
+          "type": "sys.PublicationPolicy"
+        },
+        {
+          "name": "pending_rows",
+          "type": "Int"
+        },
+        {
+          "name": "pending_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "published_rows",
+          "type": "Int"
+        },
+        {
+          "name": "published_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "last_publication",
+          "type": "Instant?"
         }
       ],
       "grouped_handle": "sys.storage.maintenance",
@@ -5327,6 +5359,27 @@
       "kind": "opaque",
       "name": "sys.Value",
       "purpose": "Explicit existential envelope for a value crossing a reflective system boundary.",
+      "type_parameters": []
+    },
+    {
+      "fields": [
+        {
+          "name": "compressed_target_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "max_file_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "max_pending_age_seconds",
+          "type": "Int"
+        }
+      ],
+      "invariants": [],
+      "kind": "record",
+      "name": "sys.PublicationPolicy",
+      "purpose": "Effective durable publication limits reported by the runtime.",
       "type_parameters": []
     },
     {
