@@ -14,6 +14,9 @@ const GENERATED_API_LANGUAGE_VERSION: &str = "1.1.0";
 const GENERATED_API_SYS_VERSION: &str = "1.1";
 const GENERATED_API_STATUS: &str =
     "Final 1.1.0 specification contract; engine execution not claimed";
+/// Frozen final compatibility artifact. Native metadata is projected and
+/// validated against these reviewed bytes; it does not regenerate them.
+pub const FINAL_API_AUTHORITY_JSON: &str = include_str!("../../api/sys.json");
 #[derive(Clone, Debug)]
 pub struct Function {
     #[allow(dead_code)] // Read by collector proofs; not needed while emitting API JSON.
@@ -39,6 +42,7 @@ pub struct Collector {
 pub struct GeneratedSysArtifacts {
     pub api_json: String,
     pub schema_json: String,
+    pub api_selection_json: String,
     pub provider_abi_json: String,
     pub binding_modules: BTreeMap<String, String>,
     pub binding_modules_json: String,
@@ -97,21 +101,52 @@ pub fn generate_sys_artifacts(
     schema: &Value,
 ) -> Result<GeneratedSysArtifacts, String> {
     validate_collection(functions)?;
+    let authority: Value = serde_json::from_str(FINAL_API_AUTHORITY_JSON)
+        .map_err(|error| format!("parse frozen final system API authority: {error}"))?;
+    validate_api_document(&authority)?;
+
+    // `source_of_truth` belongs to the frozen publication authority, not to
+    // the native registry inventory. Add it only to this in-memory semantic
+    // projection so the registry can be compared without declaring itself
+    // normative.
+    let authority_source = authority
+        .get("source_of_truth")
+        .cloned()
+        .ok_or_else(|| "frozen final system API authority has no source_of_truth".to_owned())?;
+    let mut projected_registry = registry;
+    projected_registry
+        .as_object_mut()
+        .ok_or_else(|| "system API registry inventory must be a JSON object".to_owned())?
+        .insert("source_of_truth".to_owned(), authority_source);
     let function_metadata = functions
         .iter()
-        .map(|function| function.metadata.clone())
+        .filter(|function| function_is_admitted_to_format_3(&function.metadata))
+        .map(|function| published_function_metadata(&function.metadata))
         .collect::<Vec<_>>();
     let published_schema = generated_api_schema(schema)?;
-    let api = generate_system_api_document(registry, function_metadata)?;
-    validate_published_schema_shape(&api, &published_schema)?;
-    let mut api_json = canonical_pretty_json(&api).map_err(|error| error.to_string())?;
-    api_json.push('\n');
+    let projected_api = generate_system_api_document(projected_registry, function_metadata)?;
+    if projected_api != authority {
+        return Err(
+            "native sys metadata does not project the frozen final api/sys.json authority"
+                .to_owned(),
+        );
+    }
+    validate_published_schema_shape(&authority, &published_schema)?;
+    // The authority bytes are the only source for this compatibility artifact.
+    // Keep the semantic projection above as a validation proof, not a serializer.
+    let api = authority;
+    let api_json = FINAL_API_AUTHORITY_JSON.to_owned();
 
     let mut schema_json =
         canonical_pretty_json(&published_schema).map_err(|error| error.to_string())?;
     schema_json.push('\n');
 
-    let provider_abi = generate_provider_abi(functions, &api)?;
+    let published_functions = functions
+        .iter()
+        .filter(|function| function_is_admitted_to_format_3(&function.metadata))
+        .cloned()
+        .collect::<Vec<_>>();
+    let provider_abi = generate_provider_abi(&published_functions, &api)?;
     let mut provider_abi_json =
         canonical_pretty_json(&provider_abi).map_err(|error| error.to_string())?;
     provider_abi_json.push('\n');
@@ -128,6 +163,7 @@ pub fn generate_sys_artifacts(
     Ok(GeneratedSysArtifacts {
         api_json,
         schema_json,
+        api_selection_json: generate_system_api_selection_json(functions)?,
         provider_abi_json,
         binding_modules,
         binding_modules_json,
@@ -154,6 +190,35 @@ fn generated_api_schema(source: &Value) -> Result<Value, String> {
         property.insert("const".to_owned(), Value::String(value.to_owned()));
     }
     Ok(schema)
+}
+
+/// Generate the internal callable-selection projection. Unlike `api/sys.json`,
+/// this keeps explicit format admissions so later runtime selection can remain
+/// typed and fail closed. It contains no durable rows, references, or codecs.
+pub fn generate_system_api_selection_json(functions: &[Function]) -> Result<String, String> {
+    let functions = functions
+        .iter()
+        .map(|function| function.metadata.clone())
+        .collect::<Vec<_>>();
+    let selection = serde_json::json!({"functions": functions});
+    let mut json = canonical_pretty_json(&selection).map_err(|error| error.to_string())?;
+    json.push('\n');
+    Ok(json)
+}
+
+fn function_is_admitted_to_format_3(metadata: &Value) -> bool {
+    metadata
+        .get("contexts")
+        .and_then(Value::as_array)
+        .is_none_or(|contexts| contexts.iter().any(|context| context == "format-3"))
+}
+
+fn published_function_metadata(metadata: &Value) -> Value {
+    let mut metadata = metadata.clone();
+    if let Some(object) = metadata.as_object_mut() {
+        object.remove("contexts");
+    }
+    metadata
 }
 
 fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, String> {
@@ -779,13 +844,14 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
     // These are the fields consumed by semantic SystemApi. Rejecting unknown
     // keys catches annotation typos that serde would otherwise silently drop.
     const REQUIRED: [&str; 4] = ["name", "effect", "signature", "purpose"];
-    const OPTIONAL: [&str; 6] = [
+    const OPTIONAL: [&str; 7] = [
         "contract",
         "preconditions",
         "ownership",
         "snapshot_rule",
         "documentation",
         "since",
+        "contexts",
     ];
 
     for field in REQUIRED {
@@ -800,6 +866,29 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
     }
     for field in OPTIONAL {
         if let Some(value) = object.get(field) {
+            if field == "contexts" {
+                let contexts = value.as_array().ok_or_else(|| {
+                    "function metadata field `contexts` must be an array".to_owned()
+                })?;
+                if contexts.is_empty() {
+                    return Err("function metadata field `contexts` must not be empty".to_owned());
+                }
+                let mut seen = BTreeSet::new();
+                for context in contexts {
+                    let Some(context) = context.as_str() else {
+                        return Err("function metadata context entries must be strings".to_owned());
+                    };
+                    if !matches!(context, "format-1" | "format-2" | "format-3") {
+                        return Err(format!("unknown function metadata context `{context}`"));
+                    }
+                    if !seen.insert(context) {
+                        return Err(format!(
+                            "function metadata contexts contains duplicate `{context}`"
+                        ));
+                    }
+                }
+                continue;
+            }
             let Some(value) = value.as_str() else {
                 return Err(format!(
                     "function metadata field `{field}` must be a string"
@@ -860,25 +949,31 @@ pub fn validate_function_metadata(metadata: &Value) -> Result<(), String> {
         }
     }
 
-    // Freeze the published 1.0 effect partition at generation time. The
-    // semantic loader applies the same surface rule before calls are admitted.
-    let expected_effect = if name.starts_with("sys.admin.plan_checkout") {
-        "read"
-    } else if name.starts_with("sys.admin.") {
-        "admin"
-    } else if matches!(
-        name,
-        "sys.invoke(Value)"
-            | "sys.invoke<T>"
-            | "sys.start(Value)"
-            | "sys.start<T>"
-            | "sys.await"
-            | "sys.cancel"
-    ) {
-        "invoke"
-    } else {
-        "read"
-    };
+    // Freeze the published effect partition at generation time. The semantic
+    // loader applies the same surface rule before calls are admitted.
+    let expected_effect =
+        if name == "sys.admin.review_commit" || name.starts_with("sys.admin.plan_checkout") {
+            "read"
+        } else if name.starts_with("sys.admin.") {
+            "admin"
+        } else if matches!(
+            name,
+            "sys.invoke(Value)"
+                | "sys.invoke<T>"
+                | "sys.start(Value)"
+                | "sys.start<T>"
+                | "sys.await"
+                | "sys.cancel"
+                | "sys.blob.begin"
+                | "sys.blob.append"
+                | "sys.blob.finish"
+                | "sys.blob.abort"
+                | "sys.blob.capture_file"
+        ) {
+            "invoke"
+        } else {
+            "read"
+        };
     if effect != expected_effect {
         return Err(format!(
             "function `{name}` requires effect `{expected_effect}`, found `{effect}`"
@@ -1225,17 +1320,31 @@ fn validate_removed_names(value: &Value) -> Result<(), String> {
         .ok_or_else(|| "system API `removed_names` must be an object".to_owned())?;
     for (name, descriptor) in names {
         let context = format!("system API removed name `{name}`");
-        let descriptor =
-            validate_object_fields(descriptor, &context, &["replacement", "diagnostic"], &[])?;
-        for field in ["replacement", "diagnostic"] {
-            validate_nonblank_string(
-                descriptor.get(field).expect("required field was checked"),
-                &format!("{context}.{field}"),
-            )?;
+        let descriptor = validate_object_fields(
+            descriptor,
+            &context,
+            &["replacement", "diagnostic"],
+            &["reason"],
+        )?;
+        let replacement = descriptor
+            .get("replacement")
+            .expect("required field was checked");
+        if !replacement.is_null() {
+            validate_nonblank_string(replacement, &format!("{context}.replacement"))?;
+        }
+        validate_nonblank_string(
+            descriptor
+                .get("diagnostic")
+                .expect("required field was checked"),
+            &format!("{context}.diagnostic"),
+        )?;
+        if let Some(reason) = descriptor.get("reason") {
+            validate_nonblank_string(reason, &format!("{context}.reason"))?;
         }
     }
     Ok(())
 }
+
 
 const BUILTIN_TYPES: &[&str] = &[
     "Blob",
@@ -1251,6 +1360,7 @@ const BUILTIN_TYPES: &[&str] = &[
     "PresentTree",
     "Str",
     "TimeZone",
+    "Unit",
 ];
 
 #[derive(Default)]
@@ -1455,13 +1565,12 @@ fn validate_cross_inventory_names(api: &Value) -> Result<(), String> {
                 "removed system API name `{removed}` is still publicly declared"
             ));
         }
-        let replacement = descriptor["replacement"]
-            .as_str()
-            .expect("validated replacement");
-        if !api_paths.contains(replacement) {
-            return Err(format!(
-                "removed system API name `{removed}` has unresolved replacement `{replacement}`"
-            ));
+        if let Some(replacement) = descriptor["replacement"].as_str() {
+            if !api_paths.contains(replacement) {
+                return Err(format!(
+                    "removed system API name `{removed}` has unresolved replacement `{replacement}`"
+                ));
+            }
         }
     }
     Ok(())
@@ -1736,7 +1845,10 @@ fn validate_api_type_graph(api: &Value, names: &ApiTypeNames) -> Result<(), Stri
         let parsed = parse_signature_identity(signature)?;
         let mut saw_default = false;
         for (index, (_, has_default)) in parsed.parameters.iter().enumerate() {
-            if !has_default && saw_default {
+            // The final Blob writer contract intentionally keeps the optional
+            // expected length first while requiring the total max bound.
+            let final_blob_bound = name == "sys.blob.begin" && index == 1;
+            if !has_default && saw_default && !final_blob_bound {
                 return Err(format!(
                     "function `{name}` parameter {index} is required after a defaulted parameter"
                 ));
