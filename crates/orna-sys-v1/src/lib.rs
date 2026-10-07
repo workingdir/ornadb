@@ -1,6 +1,6 @@
 #![recursion_limit = "512"]
 
-//! Bounded, pre-effect admission for Orna 1.0 reflective invocation.
+//! Final Orna 1.1.0 portable sys catalogue and bounded, pre-effect admission.
 //!
 //! Resolution and durable transaction ownership stay with the evaluator and
 //! runtime that own those concerns. The portable `sys` declaration schema is
@@ -657,6 +657,9 @@ pub struct SystemFunctionDescriptor {
     pub effect: SystemEffect,
     pub signature: &'static str,
     pub purpose: &'static str,
+    /// Release coordinate for a callable introduced after the original API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<&'static str>,
     /// Extended source documentation for editor hover and reference views.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documentation: Option<&'static str>,
@@ -681,9 +684,17 @@ pub enum SystemEffect {
 mod system_api;
 pub use system_api::*;
 
-/// Returns the generated descriptor for a portable system function.
+// The format/context selector remains an internal proof until the repository
+// owner supplies an owner-issued capability seam.
+#[cfg(test)]
+mod format_api_selection;
+
+/// Returns final-format declaration metadata for a portable system function.
 ///
-/// The descriptor is static declaration metadata. It does not grant
+/// This compatibility lookup exposes final-format declaration metadata only.
+/// Repository/runtime context selection remains an internal non-production
+/// projection until the repository owner supplies an owner-issued capability.
+/// The descriptor is static declaration metadata and does not grant
 /// invocation or administrative authority.
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
     SYSTEM_FUNCTION_DESCRIPTORS
@@ -5133,7 +5144,10 @@ mod tests {
         let document: serde_json::Value = serde_json::from_str(&system_api_json())
             .expect("generated sys API must remain valid JSON");
 
-        assert_eq!(document["status"], "specification");
+        assert_eq!(
+            document["status"],
+            "Final 1.1.0 specification contract; engine execution not claimed"
+        );
         let functions = document["functions"]
             .as_array()
             .expect("sys API must declare function descriptors");
