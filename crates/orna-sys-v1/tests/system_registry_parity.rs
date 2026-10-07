@@ -88,6 +88,10 @@ fn verify_generated_output_tree(
 ) -> Result<(), String> {
     for (relative_path, expected) in [
         ("api_sys.json", artifacts.api_json.as_str()),
+        (
+            "system_api_selection.json",
+            artifacts.api_selection_json.as_str(),
+        ),
         ("system_api_schema.json", artifacts.schema_json.as_str()),
         (
             "system_provider_abi.json",
@@ -134,6 +138,7 @@ fn copy_output_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
     for name in [
         "api_sys.json",
+        "system_api_selection.json",
         "system_api_schema.json",
         "system_provider_abi.json",
         "system_provider_abi.schema.json",
@@ -197,11 +202,17 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
             .expect("second typed provider schema projection"),
         "dispatch schema generation is stable across independent runs"
     );
+    let generated_selection = fs::read_to_string(out_dir.join("system_api_selection.json"))
+        .expect("internal format/context selection build output");
+    assert_eq!(
+        regenerated.api_selection_json, generated_selection,
+        "internal format/context selection output matches native generation"
+    );
 
     let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
     assert_eq!(
         api_hash, SYS_API_1_1_SHA256,
-        "on-demand API retains the reviewed 1.1 bytes"
+        "on-demand API retains the frozen final 1.1 bytes"
     );
     let embedded_api_json = system_api_json();
     let artifact_matrix = [
