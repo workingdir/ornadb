@@ -23,7 +23,7 @@ mod build_provider;
 #[path = "../build_support.rs"]
 mod build_support;
 
-const SYS_API_1_1_SHA256: &str = "d5382d03f977067dfd0af738bca94be094c17db803fd0f3be7e272430e37101d";
+const SYS_API_V1_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
 
 fn regenerate() -> build_support::GeneratedSysArtifacts {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -88,6 +88,10 @@ fn verify_generated_output_tree(
 ) -> Result<(), String> {
     for (relative_path, expected) in [
         ("api_sys.json", artifacts.api_json.as_str()),
+        (
+            "system_api_selection.json",
+            artifacts.api_selection_json.as_str(),
+        ),
         ("system_api_schema.json", artifacts.schema_json.as_str()),
         (
             "system_provider_abi.json",
@@ -134,6 +138,7 @@ fn copy_output_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
     for name in [
         "api_sys.json",
+        "system_api_selection.json",
         "system_api_schema.json",
         "system_provider_abi.json",
         "system_provider_abi.schema.json",
@@ -197,11 +202,17 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
             .expect("second typed provider schema projection"),
         "dispatch schema generation is stable across independent runs"
     );
+    let generated_selection = fs::read_to_string(out_dir.join("system_api_selection.json"))
+        .expect("internal format/context selection build output");
+    assert_eq!(
+        regenerated.api_selection_json, generated_selection,
+        "internal format/context selection output matches native generation"
+    );
 
     let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
     assert_eq!(
-        api_hash, SYS_API_1_1_SHA256,
-        "on-demand API retains the reviewed 1.1 bytes"
+        api_hash, SYS_API_V1_SHA256,
+        "on-demand API retains the frozen final 1.1 bytes"
     );
     let embedded_api_json = system_api_json();
     let artifact_matrix = [

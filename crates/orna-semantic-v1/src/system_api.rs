@@ -115,7 +115,10 @@ pub(crate) struct ParameterDescriptor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemovedName {
-    pub replacement: String,
+    /// A final authority may explicitly retire a name without naming a
+    /// replacement. Older semantic consumers treated every replacement as a
+    /// string, so keep the distinction through the compatibility parser.
+    pub replacement: Option<String>,
     pub diagnostic: String,
 }
 
@@ -526,18 +529,26 @@ impl SystemApi {
         let mut removed = BTreeMap::new();
         for (name, descriptor) in raw.removed_names {
             validate_path(&name)?;
-            validate_path(&descriptor.replacement)?;
-            if !valid_diagnostic(&descriptor.diagnostic)
-                || !portable_path_exists(
-                    &descriptor.replacement,
-                    &singletons,
-                    &types,
-                    &relations,
-                    &functions,
-                    &grouped_relations,
-                    &enums,
-                )
-                || name == descriptor.replacement
+            if let Some(replacement) = descriptor.replacement.as_deref() {
+                validate_path(replacement)?;
+            }
+            let replacement_is_valid = descriptor
+                .replacement
+                .as_deref()
+                .is_none_or(|replacement| {
+                    portable_path_exists(
+                        replacement,
+                        &singletons,
+                        &types,
+                        &relations,
+                        &functions,
+                        &grouped_relations,
+                        &enums,
+                    )
+                });
+            if !valid_diagnostic(&descriptor.diagnostic, &failure_codes)
+                || !replacement_is_valid
+                || descriptor.replacement.as_deref() == Some(name.as_str())
                 || singletons.contains_key(&name)
                 || functions.contains_key(&name)
                 || relations.contains_key(&name)
@@ -867,6 +878,7 @@ fn language_type_arities() -> BTreeMap<String, usize> {
         ("Relation", 1),
         ("Str", 0),
         ("TimeZone", 0),
+        ("Unit", 0),
     ]
     .into_iter()
     .map(|(name, arity)| (name.to_owned(), arity))
@@ -911,7 +923,10 @@ fn parse_function(
             return Err(SystemApiError::InvalidFunction);
         }
         let ty = parse_and_validate_type(ty, type_arities, &type_parameters)?;
-        if default.is_none() && saw_default {
+        // The final Blob writer signature keeps an optional expected length
+        // first while requiring the total max bound as its second parameter.
+        let required_blob_bound = raw.name == "sys.blob.begin" && parameters.len() == 1;
+        if default.is_none() && saw_default && !required_blob_bound {
             return Err(SystemApiError::InvalidDefault);
         }
         if let Some(default) = default {
@@ -976,7 +991,7 @@ fn validate_function_metadata(
         || preconditions.is_some_and(blank)
         || ownership.is_some_and(blank)
         || snapshot_rule.is_some_and(blank)
-        || (requires_contract != contract.is_some())
+        || (requires_contract && contract.is_none())
         || (requires_preconditions != preconditions.is_some())
         || (requires_ownership != ownership.is_some())
         || (requires_snapshot_rule != snapshot_rule.is_some())
@@ -1184,11 +1199,12 @@ fn valid_identifier(name: &str) -> bool {
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
-fn valid_diagnostic(name: &str) -> bool {
-    name.starts_with("ORNA")
+fn valid_diagnostic(name: &str, failure_codes: &BTreeSet<String>) -> bool {
+    (name.starts_with("ORNA")
         && name.chars().all(|character| {
             character.is_ascii_uppercase() || character.is_ascii_digit() || character == '-'
-        })
+        }))
+        || failure_codes.contains(name)
 }
 
 fn valid_failure_code(name: &str) -> bool {
@@ -1558,7 +1574,7 @@ struct RawFunction {
 }
 
 struct RawRemovedName {
-    replacement: String,
+    replacement: Option<String>,
     diagnostic: String,
 }
 
@@ -1607,7 +1623,10 @@ fn raw_document(source: &str) -> Result<RawSystemApi, SystemApiError> {
             Ok((
                 name.clone(),
                 RawRemovedName {
-                    replacement: text(value_at(value, "replacement")?)?.to_owned(),
+                    replacement: match value_at(value, "replacement")? {
+                        value if value.is_null() => None,
+                        value => Some(text(value)?.to_owned()),
+                    },
                     diagnostic: text(value_at(value, "diagnostic")?)?.to_owned(),
                 },
             ))
@@ -2849,7 +2868,39 @@ mod tests {
         assert!(matches!(
             api.resolve(&["sys", "runtime"]),
             PathResolution::Removed(RemovedName { replacement, diagnostic })
-                if replacement == "sys.rt" && diagnostic == "ORNA100-E-SYS-RUNTIME"
+                if replacement.as_deref() == Some("sys.rt")
+                    && diagnostic == "ORNA100-E-SYS-RUNTIME"
+        ));
+    }
+
+    #[test]
+    fn embedded_final_authority_accepts_retirements_without_replacements() {
+        let api = SystemApi::embedded().expect("system_api_json final authority is consumable");
+        assert!(matches!(
+            api.resolve(&["sys", "admin", "set_storage_preference"]),
+            PathResolution::Removed(RemovedName { replacement: None, diagnostic })
+                if diagnostic == "sys.version.incompatible"
+        ));
+    }
+
+    #[test]
+    fn retired_sys_diagnostics_must_be_declared_failure_codes() {
+        let undeclared = generated_system_api_json().replacen(
+            "\"diagnostic\": \"ORNA100-E-SYS-RUNTIME\"",
+            "\"diagnostic\": \"sys.unpublished.diagnostic\"",
+            1,
+        );
+        assert_ne!(undeclared, generated_system_api_json());
+        assert_eq!(
+            SystemApi::from_json(&undeclared),
+            Err(SystemApiError::InvalidRemovedName)
+        );
+
+        let final_authority = SystemApi::embedded().expect("final authority is consumable");
+        assert!(matches!(
+            final_authority.resolve(&["sys", "admin", "set_storage_preference"]),
+            PathResolution::Removed(RemovedName { replacement: None, diagnostic })
+                if diagnostic == "sys.version.incompatible"
         ));
     }
 
