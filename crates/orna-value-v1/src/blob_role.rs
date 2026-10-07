@@ -52,7 +52,11 @@ pub enum BlobRole {
 impl BlobRole {
     /// Selects the behavior an annotation takes by default.
     pub fn for_annotation(annotation: &MediaAnnotation) -> Self {
-        let base = annotation.media_type().split(';').next().unwrap_or_default();
+        let base = annotation
+            .media_type()
+            .split(';')
+            .next()
+            .unwrap_or_default();
         match base {
             "application/json" => return Self::Text,
             "application/pdf" => return Self::Document,
@@ -134,7 +138,8 @@ mod tests {
     }
 
     fn annotated_value(media_type: &str, suffix: &str) -> ContextValue {
-        let blob = Blob::from_bytes_with_annotation(b"payload".to_vec(), media_type, Some(suffix))
+        let suffix = (!suffix.is_empty()).then_some(suffix);
+        let blob = Blob::from_bytes_with_annotation(b"payload".to_vec(), media_type, suffix)
             .expect("fixture annotation is canonical MIME-1");
         ContextValue::from_blob(&blob, ValueFormat::Ovb2).expect("encode OVB-2 Blob")
     }
@@ -147,7 +152,10 @@ mod tests {
             let value = annotated_value(&media_type, &suffix);
             let blob = value.blob().expect("decode OVB-2 Blob");
             assert_eq!(blob.role(), expected, "role for {media_type}");
-            assert!(value.blob_as(expected).is_ok(), "admit {media_type} as {expected:?}");
+            assert!(
+                value.blob_as(expected).is_ok(),
+                "admit {media_type} as {expected:?}"
+            );
         }
     }
 
@@ -156,8 +164,14 @@ mod tests {
         let bindings = bindings();
         let (media_type, suffix, _) = asset(&bindings, "hero");
         let value = annotated_value(&media_type, &suffix);
-        assert_eq!(value.blob_as(BlobRole::Video).unwrap_err(), Error::RoleMismatch);
-        assert_eq!(value.blob_as(BlobRole::Document).unwrap_err(), Error::RoleMismatch);
+        assert_eq!(
+            value.blob_as(BlobRole::Video).unwrap_err(),
+            Error::RoleMismatch
+        );
+        assert_eq!(
+            value.blob_as(BlobRole::Document).unwrap_err(),
+            Error::RoleMismatch
+        );
         // Opaque is the bytes-only consumer and admits every canonical annotation.
         assert!(value.blob_as(BlobRole::Opaque).is_ok());
     }
@@ -168,10 +182,16 @@ mod tests {
         let (config_type, config_suffix, _) = asset(&bindings, "config");
         let config = annotated_value(&config_type, &config_suffix);
         assert!(config.blob_as(BlobRole::Text).is_ok());
-        assert_eq!(config.blob_as(BlobRole::Opaque).map(|blob| blob.role()), Ok(BlobRole::Text));
+        assert_eq!(
+            config.blob_as(BlobRole::Opaque).map(|blob| blob.role()),
+            Ok(BlobRole::Text)
+        );
 
         let (report_type, report_suffix, _) = asset(&bindings, "report");
         let report = annotated_value(&report_type, &report_suffix);
-        assert_eq!(report.blob_as(BlobRole::Text).unwrap_err(), Error::RoleMismatch);
+        assert_eq!(
+            report.blob_as(BlobRole::Text).unwrap_err(),
+            Error::RoleMismatch
+        );
     }
 }
