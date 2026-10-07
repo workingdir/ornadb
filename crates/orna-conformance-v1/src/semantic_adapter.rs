@@ -1235,7 +1235,7 @@ impl TransactionTableKey {
     fn key_from_encoded(&self, encoded: &[u8]) -> Result<TransactionKey, EvaluationError> {
         let values = self.values_from_encoded(encoded)?;
         Ok(TransactionKey::typed(
-            encoded.to_vec(),
+            encoded_table_key(&values)?,
             values,
         ))
     }
