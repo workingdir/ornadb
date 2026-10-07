@@ -1,8 +1,13 @@
 use std::collections::BTreeMap;
 
-use orna_evaluator_v1::{Environment, Limits, evaluate_expression, evaluate_expression_ovb2};
+use orna_evaluator_v1::{
+    EffectHandler, Environment, EvaluationError, Limits, Ovb2EffectHandler, evaluate_expression,
+    evaluate_expression_ovb2, evaluate_expression_ovb2_with_effects,
+    evaluate_expression_with_effects,
+};
 use orna_foundation_v1::CanonicalValue;
-use orna_value_v1::{Blob, ContextValue, Raw, ValueFormat};
+use orna_syntax_v1::Expr;
+use orna_value_v1::{Blob, ContextValue, OVB2_BLOB_TAG, Raw, ValueFormat};
 
 fn annotated_blob_value(bytes: &[u8]) -> ContextValue {
     let blob = Blob::from_bytes_with_annotation(bytes.to_vec(), "image/jpeg", Some("jpeg"))
@@ -57,6 +62,92 @@ fn legacy_ovb1_evaluator_still_treats_blob_bytes_as_bytes() {
             .expect("evaluate legacy OVB-1 byte value"),
         value
     );
+}
+
+struct AnnotatedBlobEcho {
+    received: Option<ContextValue>,
+}
+
+impl Ovb2EffectHandler for AnnotatedBlobEcho {
+    fn handle(
+        &mut self,
+        _callee: &Expr,
+        arguments: &[ContextValue],
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        let Some(value) = arguments.first() else {
+            return Ok(None);
+        };
+        self.received = Some(value.clone());
+        Ok(Some(value.clone()))
+    }
+}
+
+#[test]
+fn ovb2_native_effect_binding_round_trips_annotated_blob_without_conversion() {
+    let bytes = [0xff, 0xd8, 0x00, 0xff, 0xd9];
+    let blob_value = annotated_blob_value(&bytes);
+    let environment = BTreeMap::from([("asset".to_owned(), blob_value.clone())]);
+    let mut effects = AnnotatedBlobEcho { received: None };
+
+    let returned = evaluate_expression_ovb2_with_effects(
+        "sys.blob.annotate(asset)",
+        &environment,
+        Limits::default(),
+        &mut effects,
+    )
+    .expect("dispatch OVB-2 annotated Blob through native binding");
+
+    let received = effects.received.expect("native binding received argument");
+    assert_eq!(received.format(), ValueFormat::Ovb2);
+    assert!(matches!(received.raw(), Raw::Tag(OVB2_BLOB_TAG, _)));
+    assert!(
+        CanonicalValue::new(received.raw().clone()).is_err(),
+        "annotated Blob must not be flattened through the OVB-1 canonical ABI"
+    );
+    assert_eq!(received, blob_value);
+    assert_eq!(returned, blob_value);
+
+    let returned_blob = returned.blob().expect("returned annotated Blob");
+    assert_eq!(returned_blob.media_type(), "image/jpeg");
+    assert_eq!(returned_blob.suffix(), Some("jpeg"));
+    assert_eq!(returned_blob.read_to_end().expect("read Blob bytes"), bytes);
+}
+
+struct LegacyBytesEcho {
+    received: Option<CanonicalValue>,
+}
+
+impl EffectHandler for LegacyBytesEcho {
+    fn handle(
+        &mut self,
+        _callee: &Expr,
+        arguments: &[CanonicalValue],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        let Some(value) = arguments.first() else {
+            return Ok(None);
+        };
+        self.received = Some(value.clone());
+        Ok(Some(value.clone()))
+    }
+}
+
+#[test]
+fn legacy_effect_handler_still_receives_and_returns_canonical_ovb1_bytes() {
+    let bytes = vec![0xff, 0xd8, 0x00, 0xff, 0xd9];
+    let value = CanonicalValue::new(Raw::Bytes(bytes.clone())).expect("canonical OVB-1 bytes");
+    let environment: Environment = BTreeMap::from([("asset".to_owned(), value.clone())]);
+    let mut effects = LegacyBytesEcho { received: None };
+
+    let returned = evaluate_expression_with_effects(
+        "host.echo(asset)",
+        &environment,
+        Limits::default(),
+        &mut effects,
+    )
+    .expect("dispatch through legacy EffectHandler ABI");
+
+    assert_eq!(effects.received, Some(value.clone()));
+    assert_eq!(returned, value);
 }
 
 #[test]
