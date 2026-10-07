@@ -360,6 +360,125 @@ fn mime1_annotations_reject_noncanonical_and_unsafe_inputs() {
 }
 
 #[test]
+fn annotate_canonicalizes_mime_and_suffix_without_hydrating_content() {
+    let bytes = b"payload";
+    let identity = ContentIdentity::from_bytes(bytes);
+    let resolver = counting_resolver(bytes);
+    let context = test_context(resolver.clone());
+    let descriptor_oid = NativeOid::from_bytes(&[6; 20]).unwrap();
+    let blob = Blob::from_reference_with_annotation(
+        context.reference(identity, descriptor_oid.clone()).unwrap(),
+        "audio/mpeg",
+        None,
+    )
+    .unwrap();
+
+    let mpeg = blob.annotate("Audio/MPEG", Some("MP2")).unwrap();
+    assert_eq!(mpeg.media_type(), "audio/mpeg");
+    assert_eq!(mpeg.suffix(), Some("mp2"));
+    assert_eq!(mpeg.content_identity(), identity);
+    assert_eq!(mpeg.descriptor_oid(), Some(&descriptor_oid));
+    assert!(!mpeg.is_hydrated());
+
+    let javascript = blob
+        .annotate("Application/JavaScript;CHARSET=\"UTF-8\"", Some("JS"))
+        .unwrap();
+    assert_eq!(javascript.media_type(), "text/javascript;charset=utf-8");
+    assert_eq!(javascript.suffix(), None, "preferred suffix is stored as no hint");
+    assert_eq!(javascript.content_identity(), identity);
+
+    let gzip = blob.annotate("application/gzip", Some("TAR.GZ")).unwrap();
+    assert_eq!(gzip.suffix(), Some("tar.gz"));
+    assert_eq!(
+        blob.annotate("image/jpeg", Some("png")),
+        Err(Error::IncompatibleSuffix)
+    );
+    assert_eq!(
+        blob.annotate("image/jpeg", Some(".jpg")),
+        Err(Error::InvalidSuffix)
+    );
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn annotation_rewrite_preserves_ovb2_and_rov3_sov3_identity_fields() {
+    let bytes = b"annotated payload";
+    let identity = ContentIdentity::from_bytes(bytes);
+    let context = test_context(counting_resolver(bytes));
+    let descriptor_oid = NativeOid::from_bytes(&[0x55; 20]).unwrap();
+    let reference = context.reference(identity, descriptor_oid.clone()).unwrap();
+    let rov3_blob = Blob::from_reference_with_annotation(reference, "audio/mpeg", None).unwrap();
+    let sov3_blob =
+        Blob::from_semantic_commitment_in_context(identity, &context, "audio/mpeg", None).unwrap();
+    let rov3 = ContextValue::from_blob(&rov3_blob, ValueFormat::Rov3).unwrap();
+    let sov3 = ContextValue::from_blob(&sov3_blob, ValueFormat::Sov3).unwrap();
+
+    let annotated_rov3 = rov3
+        .with_blob_annotation("Audio/MPEG", Some("MP2"))
+        .unwrap();
+    let annotated_sov3 = sov3
+        .with_blob_annotation("Audio/MPEG", Some("MP2"))
+        .unwrap();
+    let Raw::Tag(ROV3_BLOB_TAG, before_rov3) = rov3.raw() else {
+        panic!("expected ROV-3 Blob");
+    };
+    let Raw::Tag(ROV3_BLOB_TAG, after_rov3) = annotated_rov3.raw() else {
+        panic!("expected annotated ROV-3 Blob");
+    };
+    let (Raw::Array(before_rov3), Raw::Array(after_rov3)) =
+        (before_rov3.as_ref(), after_rov3.as_ref())
+    else {
+        panic!("expected ROV-3 field arrays");
+    };
+    assert_eq!(before_rov3[0], after_rov3[0]);
+    assert_eq!(before_rov3[1], after_rov3[1]);
+    assert_eq!(before_rov3[4], after_rov3[4]);
+
+    let Raw::Tag(SOV3_BLOB_TAG, before_sov3) = sov3.raw() else {
+        panic!("expected SOV-3 Blob");
+    };
+    let Raw::Tag(SOV3_BLOB_TAG, after_sov3) = annotated_sov3.raw() else {
+        panic!("expected annotated SOV-3 Blob");
+    };
+    let (Raw::Array(before_sov3), Raw::Array(after_sov3)) =
+        (before_sov3.as_ref(), after_sov3.as_ref())
+    else {
+        panic!("expected SOV-3 field arrays");
+    };
+    assert_eq!(before_sov3[0], after_sov3[0]);
+    assert_eq!(before_sov3[1], after_sov3[1]);
+
+    let rov3_round_trip =
+        decode_rov3_in_context(&annotated_rov3.encode().unwrap(), &context).unwrap();
+    let sov3_round_trip =
+        decode_sov3_in_context(&annotated_sov3.encode().unwrap(), &context).unwrap();
+    assert_eq!(rov3_round_trip.content_identity(), identity);
+    assert_eq!(rov3_round_trip.descriptor_oid(), Some(&descriptor_oid));
+    assert_eq!(rov3_round_trip.suffix(), Some("mp2"));
+    assert_eq!(sov3_round_trip.content_identity(), identity);
+    assert_eq!(sov3_round_trip.suffix(), Some("mp2"));
+
+    let ovb2_blob = Blob::from_bytes_with_annotation(bytes.to_vec(), "audio/mpeg", None).unwrap();
+    let ovb2 = ContextValue::from_blob(&ovb2_blob, ValueFormat::Ovb2).unwrap();
+    let annotated_ovb2 = ovb2
+        .with_blob_annotation("Audio/MPEG", Some("MP2"))
+        .unwrap();
+    let Raw::Tag(OVB2_BLOB_TAG, before_ovb2) = ovb2.raw() else {
+        panic!("expected OVB-2 Blob");
+    };
+    let Raw::Tag(OVB2_BLOB_TAG, after_ovb2) = annotated_ovb2.raw() else {
+        panic!("expected annotated OVB-2 Blob");
+    };
+    let (Raw::Array(before_ovb2), Raw::Array(after_ovb2)) =
+        (before_ovb2.as_ref(), after_ovb2.as_ref())
+    else {
+        panic!("expected OVB-2 field arrays");
+    };
+    assert_eq!(before_ovb2[0], after_ovb2[0]);
+    assert_eq!(annotated_ovb2.blob().unwrap().content_identity(), identity);
+}
+
+#[test]
 fn legacy_codec_rejects_new_tags_and_profiles_do_not_mix() {
     let raw = Raw::Tag(
         60110,
