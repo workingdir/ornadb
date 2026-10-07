@@ -1261,6 +1261,7 @@ dependencies = [
  "orna-semantic-v1",
  "orna-serving-v1",
  "orna-syntax-v1",
+ "orna-sys-v1",
  "orna-value-v1",
  "serde_json",
  "sha2 0.10.9",
@@ -1592,10 +1593,12 @@ dependencies = [
  "orna-sys-macros",
  "quote",
  "reqwest",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "syn 2.0.119",
+ "tempfile",
  "uuid",
 ]
 

@@ -633,6 +633,9 @@ fn validate_operation(metadata: &Value, method: &syn::Signature) -> Result<(), S
         }
         "std.concurrent.sleep" => "fn std.concurrent.sleep(duration: Duration): Null",
         "std.io.fs.read_text" => "fn std.io.fs.read_text(root: Str, path: Str): Str",
+        "sys.blob.capture_file" => {
+            "fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob"
+        }
         "std.io.fs.write_text" => {
             "fn std.io.fs.write_text(root: Str, path: Str, contents: Str, overwrite: Bool): Unit"
         }
@@ -779,6 +782,11 @@ fn validate_native_method_signature(
                 &[("root", "&str"), ("path", "&str")],
                 "String",
                 "FilesystemProviderError",
+            ),
+            "sys.blob.capture_file" => (
+                &[("root", "&str"), ("path", "&str"), ("max_bytes", "u64")],
+                "CaptureFileReader",
+                "CaptureFileError",
             ),
             "std.io.fs.write_text" => (
                 &[

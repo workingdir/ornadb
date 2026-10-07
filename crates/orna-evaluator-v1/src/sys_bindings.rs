@@ -1,15 +1,19 @@
 //! Evaluator bindings for native operations in the generated sys host registry.
 
+use std::path::Path;
+
 use num_traits::ToPrimitive;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
+use orna_repository_v1::RepositoryCaptureCapability;
 use orna_syntax_v1::Expr;
 use orna_sys_v1::{
-    ClockProvider, EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError,
-    FilesystemProvider, HostHttpResponse, HostOperationDescriptor, HttpProvider, ProcessProvider,
-    system_host_operation_registry,
+    system_host_operation_registry, CaptureFileError, ClockProvider, EnvironmentDispatchValue,
+    EnvironmentProvider, EnvironmentProviderError, FilesystemProvider, HostHttpResponse,
+    HostOperationDescriptor, HttpProvider, ProcessProvider,
 };
+use orna_value_v1::{Blob, ContextValue, ValueFormat};
 
-use crate::{CancellationToken, EffectHandler, EvaluationError, StepBudget};
+use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
 
 const MAX_RANDOM_BYTES: usize = 1_048_576;
 
@@ -24,6 +28,7 @@ pub struct SysHostBindingRegistry {
     process: Option<ProcessProvider>,
     clock: Option<ClockProvider>,
     filesystem: Option<FilesystemProvider>,
+    repository_capture: Option<RepositoryCaptureCapability>,
     http: Option<HttpProvider>,
     system_random: bool,
 }
@@ -38,6 +43,7 @@ impl SysHostBindingRegistry {
             process: None,
             clock: None,
             filesystem: None,
+            repository_capture: None,
             http: None,
             system_random: false,
         }
@@ -61,6 +67,17 @@ impl SysHostBindingRegistry {
     #[must_use]
     pub fn with_filesystem_provider(mut self, provider: FilesystemProvider) -> Self {
         self.filesystem = Some(provider);
+        self
+    }
+
+    /// Installs the repository graph and its matching owner-issued read scope
+    /// for native Blob capture. The capability is shared with cloned bindings.
+    #[must_use]
+    pub fn with_repository_capture_capability(
+        mut self,
+        capability: RepositoryCaptureCapability,
+    ) -> Self {
+        self.repository_capture = Some(capability);
         self
     }
 
@@ -454,15 +471,8 @@ impl SysHostBindingRegistry {
             .process
             .as_ref()
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-        let [
-            executable,
-            args,
-            working_directory,
-            environment,
-            input,
-            timeout,
-            output_limit,
-        ] = arguments
+        let [executable, args, working_directory, environment, input, timeout, output_limit] =
+            arguments
         else {
             return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
         };
@@ -801,6 +811,168 @@ impl EffectHandler for SysHostBindingRegistry {
     }
 }
 
+impl Ovb2EffectHandler for SysHostBindingRegistry {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        let Some(operation_name) = static_call_name(callee) else {
+            return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+        };
+        if operation_name != "sys.blob.capture_file" {
+            return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        self.capture_file_ovb2(&operation_name, arguments, None)
+    }
+
+    fn handle_registered_with_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        Ovb2EffectHandler::handle_registered_with_cancellation_and_budget(
+            self, operation, callee, arguments, budget, None,
+        )
+    }
+
+    fn handle_registered_with_cancellation_and_budget(
+        &mut self,
+        operation_name: &str,
+        _callee: &Expr,
+        arguments: &[ContextValue],
+        _budget: &mut StepBudget,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.capture_file_ovb2(operation_name, arguments, cancellation)
+    }
+}
+
+impl SysHostBindingRegistry {
+    fn capture_file_ovb2(
+        &self,
+        operation_name: &str,
+        arguments: &[ContextValue],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        let operation = system_host_operation_registry()
+            .operation(operation_name)
+            .filter(|operation| {
+                operation.name == "sys.blob.capture_file"
+                    && operation.implementation == "capture_file"
+                    && operation.role == "host.sys.blob.capture@1.0"
+                    && operation.provider == "orna.sys.host.filesystem.v1"
+                    && operation.effects == ["read"]
+            })
+            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+        let [root, path, max_bytes] = arguments else {
+            return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+        };
+        let root = raw_text(root.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let path = raw_text(path.raw()).ok_or_else(|| redacted_error("ORNA-EVAL-TYPE"))?;
+        let OvbRaw::Int(max_bytes) = max_bytes.raw() else {
+            return Err(redacted_error("ORNA-EVAL-TYPE"));
+        };
+        let max_bytes = max_bytes
+            .to_u64()
+            .ok_or_else(|| redacted_error(CaptureFileError::LimitExceeded.code()))?;
+        if cancellation.is_some_and(CancellationToken::is_requested) {
+            return Err(redacted_error("ORNA-EVAL-CANCELLED"));
+        }
+        let filesystem = self
+            .filesystem
+            .as_ref()
+            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+        let repository = self
+            .repository_capture
+            .as_ref()
+            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+        let mut source = filesystem
+            .capture_file(root, path, max_bytes)
+            .map_err(|failure| capture_file_failure(operation, failure))?;
+        let candidate = repository.capture_blob_candidate(&mut source, max_bytes);
+        source
+            .verify_unchanged()
+            .map_err(|failure| capture_file_failure(operation, failure))?;
+        if source.exceeded() {
+            return Err(capture_file_failure(
+                operation,
+                CaptureFileError::LimitExceeded,
+            ));
+        }
+        let candidate = candidate
+            .map_err(|_| capture_file_failure(operation, CaptureFileError::SourceUnavailable))?;
+        if cancellation.is_some_and(CancellationToken::is_requested) {
+            return Err(redacted_error("ORNA-EVAL-CANCELLED"));
+        }
+        let bytes = source.captured_bytes().to_vec();
+        drop(candidate);
+        let (media_type, suffix) = mime1_for_path(path);
+        let blob = Blob::from_bytes_with_annotation(bytes, media_type, suffix.as_deref())
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        ContextValue::from_blob(&blob, ValueFormat::Ovb2)
+            .map(Some)
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
+    }
+}
+
+fn static_call_name(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Name { text, .. } => Some(text.clone()),
+        Expr::Field { base, name, .. } => Some(format!("{}.{}", static_call_name(base)?, name)),
+        Expr::Group { inner, .. } => static_call_name(inner),
+        _ => None,
+    }
+}
+
+fn capture_file_failure(
+    operation: &HostOperationDescriptor,
+    failure: CaptureFileError,
+) -> EvaluationError {
+    if operation
+        .failures
+        .iter()
+        .any(|code| code == failure.failure_code())
+    {
+        redacted_error(failure.code())
+    } else {
+        redacted_error("ORNA-EVAL-UNSUPPORTED")
+    }
+}
+
+fn mime1_for_path(path: &str) -> (&'static str, Option<String>) {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "json" => ("application/json", None),
+        "pdf" => ("application/pdf", None),
+        "wasm" => ("application/wasm", None),
+        "zip" => ("application/zip", None),
+        "gz" | "tgz" => ("application/gzip", (extension != "gz").then_some(extension)),
+        "flac" => ("audio/flac", None),
+        "m4a" | "m4b" | "mpg4" => ("audio/mp4", (extension != "m4a").then_some(extension)),
+        "mp1" | "mp2" | "mp3" => ("audio/mpeg", (extension != "mp3").then_some(extension)),
+        "oga" | "ogg" | "opus" => ("audio/ogg", (extension != "ogg").then_some(extension)),
+        "wav" => ("audio/wav", None),
+        "gif" => ("image/gif", None),
+        "jpe" | "jpeg" | "jpg" => ("image/jpeg", (extension != "jpg").then_some(extension)),
+        "png" => ("image/png", None),
+        "svg" => ("image/svg+xml", None),
+        "webp" => ("image/webp", None),
+        "css" => ("text/css", None),
+        "mjs" | "js" => ("text/javascript", (extension != "js").then_some(extension)),
+        "text" | "txt" => ("text/plain", (extension != "txt").then_some(extension)),
+        "m4v" | "mp4" => ("video/mp4", (extension != "mp4").then_some(extension)),
+        "webm" => ("video/webm", None),
+        _ => ("application/octet-stream", None),
+    }
+}
+
 fn redacted_error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static evaluator error code is safe"))
 }
@@ -833,6 +1005,16 @@ mod tests {
 
         for operation in system_host_operation_registry().operations() {
             checked += 1;
+            if operation.name == "sys.blob.capture_file" {
+                assert_eq!(
+                    bindings
+                        .dispatch(&operation.name, &[], None)
+                        .expect_err("Blob capture has no OVB-1 fallback")
+                        .code(),
+                    "ORNA-EVAL-UNSUPPORTED"
+                );
+                continue;
+            }
             if operation.provider == "orna.sys.host.environment.v1" {
                 let actual = bindings
                     .dispatch(
@@ -870,8 +1052,41 @@ mod tests {
         }
 
         assert_eq!(
-            checked, 20,
+            checked, 21,
             "the host dispatch audit covers the full registry"
+        );
+    }
+
+    #[test]
+    fn capture_file_selects_only_mime1_annotations() {
+        let operation = system_host_operation_registry()
+            .operation("sys.blob.capture_file")
+            .expect("capture_file is present in the generated host ABI");
+        assert_eq!(
+            operation
+                .failures
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "sys.blob.capture.unauthorized_root",
+                "sys.blob.capture.invalid_path",
+                "sys.blob.capture.source_unavailable",
+                "sys.blob.capture.limit_exceeded",
+                "sys.blob.capture.source_changed",
+            ]
+        );
+        assert_eq!(
+            mime1_for_path("records/data.json"),
+            ("application/json", None)
+        );
+        assert_eq!(
+            mime1_for_path("records/photo.jpeg"),
+            ("image/jpeg", Some("jpeg".to_owned()))
+        );
+        assert_eq!(
+            mime1_for_path("records/unknown.custom"),
+            ("application/octet-stream", None)
         );
     }
 }
