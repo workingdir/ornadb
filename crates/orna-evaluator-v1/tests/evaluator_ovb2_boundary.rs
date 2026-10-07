@@ -64,6 +64,62 @@ fn legacy_ovb1_evaluator_still_treats_blob_bytes_as_bytes() {
     );
 }
 
+#[test]
+fn native_sys_blob_annotate_canonicalizes_mime_and_preserves_content_identity() {
+    let bytes = [0xff, 0xd8, 0x00, 0xff, 0xd9];
+    let blob_value = annotated_blob_value(&bytes);
+    let original_identity = blob_value.blob().unwrap().content_identity();
+    let environment = BTreeMap::from([("asset".to_owned(), blob_value.clone())]);
+
+    let annotated = evaluate_expression_ovb2(
+        "sys.blob.annotate(asset, \"Application/JavaScript\", \"MJS\")",
+        &environment,
+        Limits::default(),
+    )
+    .expect("dispatch generated native Blob annotation");
+    assert_eq!(annotated.format(), ValueFormat::Ovb2);
+    let blob = annotated.blob().expect("annotated OVB-2 Blob");
+    assert_eq!(blob.media_type(), "text/javascript");
+    assert_eq!(blob.suffix(), Some("mjs"));
+    assert_eq!(blob.content_identity(), original_identity);
+    assert_eq!(blob.read_to_end().unwrap(), bytes);
+
+    let preferred = evaluate_expression_ovb2(
+        "sys.blob.annotate(asset, \"text/javascript\", \"JS\")",
+        &environment,
+        Limits::default(),
+    )
+    .expect("preferred suffix canonicalizes to no explicit hint");
+    let preferred_blob = preferred.blob().unwrap();
+    assert_eq!(preferred_blob.media_type(), "text/javascript");
+    assert_eq!(preferred_blob.suffix(), None);
+    assert_eq!(preferred_blob.content_identity(), original_identity);
+}
+
+#[test]
+fn native_sys_blob_annotate_reports_mime_policy_failures() {
+    let blob_value = annotated_blob_value(b"payload");
+    let environment = BTreeMap::from([("asset".to_owned(), blob_value)]);
+    for (call, expected) in [
+        (
+            "sys.blob.annotate(asset, \"image/*\")",
+            "sys.blob.invalid_media_type",
+        ),
+        (
+            "sys.blob.annotate(asset, \"image/jpeg\", \"../jpg\")",
+            "sys.blob.invalid_suffix",
+        ),
+        (
+            "sys.blob.annotate(asset, \"image/jpeg\", \"png\")",
+            "sys.blob.incompatible_suffix",
+        ),
+    ] {
+        let error = evaluate_expression_ovb2(call, &environment, Limits::default())
+            .expect_err("invalid MIME-1 annotation must fail");
+        assert_eq!(error.code(), expected, "{call}");
+    }
+}
+
 struct AnnotatedBlobEcho {
     received: Option<ContextValue>,
 }
@@ -90,7 +146,7 @@ fn ovb2_native_effect_binding_round_trips_annotated_blob_without_conversion() {
     let mut effects = AnnotatedBlobEcho { received: None };
 
     let returned = evaluate_expression_ovb2_with_effects(
-        "sys.blob.annotate(asset)",
+        "host.echo(asset)",
         &environment,
         Limits::default(),
         &mut effects,

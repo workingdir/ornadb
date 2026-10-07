@@ -807,7 +807,7 @@ fn generated_provider_default_values_match_schema_and_idl_stubs() {
     }
 
     assert!(defaulted_operations > 0);
-    assert_eq!(defaulted_parameters, 14);
+    assert_eq!(defaulted_parameters, 15);
     assert!(null_defaults > 0);
     assert!(qualified_defaults > 0);
     println!(
@@ -2485,6 +2485,67 @@ fn generated_provider_metadata_edges_match_schema_and_bindings() {
         fixture["fields"].as_array().unwrap().len(),
         cases.len() + fixture["fields"].as_array().unwrap().len() + 7
     );
+}
+
+#[test]
+fn generated_blob_annotate_declaration_matches_api_and_typed_dispatch() {
+    const OPERATION: &str = "sys.blob.annotate";
+    const SIGNATURE: &str =
+        "fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob";
+
+    let operation = system_provider_abi()
+        .operation(OPERATION)
+        .expect("Blob annotation operation is in the generated dispatch registry");
+    assert_eq!(operation.signature.source, SIGNATURE);
+    assert_eq!(operation.effects.iter().next(), Some(SystemEffect::Read));
+    assert_eq!(
+        operation.signature.parameters[2].default.as_deref(),
+        Some("null")
+    );
+    assert_eq!(
+        operation
+            .failures
+            .iter()
+            .filter(|failure| failure.as_str().starts_with("sys.blob."))
+            .map(|failure| failure.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "sys.blob.incompatible_suffix",
+            "sys.blob.invalid_media_type",
+            "sys.blob.invalid_suffix"
+        ]
+    );
+
+    let descriptor = system_function_descriptor(OPERATION)
+        .expect("Blob annotation operation is in the generated API descriptors");
+    assert_eq!(descriptor.signature, SIGNATURE);
+
+    let api: Value = serde_json::from_str(&system_api_json()).expect("generated API JSON");
+    let function = api["functions"]
+        .as_array()
+        .expect("generated functions")
+        .iter()
+        .find(|function| function["name"] == OPERATION)
+        .expect("generated API function row");
+    assert_eq!(function["signature"], SIGNATURE);
+    assert_eq!(function["effect"], "read");
+    assert_eq!(function["contract"], "annotated-blob-format-3");
+    assert_eq!(function["since"], "1.1.0");
+
+    let source = system_binding_stubs();
+    let parsed = parse_module(source);
+    assert!(
+        parsed.is_ok(),
+        "generated sys declarations parse: {:?}",
+        parsed.diagnostics
+    );
+    let marker = format!("// sys-op: {OPERATION}");
+    let declaration = source
+        .split("\n\n")
+        .find(|declaration| declaration.lines().any(|line| line == marker))
+        .expect("generated sys/blob declaration");
+    validate_stub_contract(declaration, operation)
+        .unwrap_or_else(|error| panic!("Blob annotation declaration parity: {error}"));
 }
 
 #[test]

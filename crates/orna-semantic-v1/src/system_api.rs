@@ -89,6 +89,7 @@ pub(crate) struct FunctionDescriptor {
     pub result: SystemType,
     pub effect: SystemEffect,
     pub purpose: String,
+    pub since: Option<String>,
     pub contract: Option<String>,
     pub preconditions: Option<String>,
     pub ownership: Option<String>,
@@ -204,7 +205,9 @@ impl SystemApi {
                 .failure_codes
                 .iter()
                 .filter(|code| {
-                    code.as_str() == namespace
+                    (descriptor.contract.as_deref() == Some("annotated-blob-format-3")
+                        && code.starts_with("sys.blob."))
+                        || code.as_str() == namespace
                         || code
                             .strip_prefix(namespace)
                             .is_some_and(|tail| tail.starts_with('.'))
@@ -924,6 +927,7 @@ fn parse_function(
     validate_function_metadata(
         &raw.name,
         &raw.purpose,
+        raw.since.as_deref(),
         raw.contract.as_deref(),
         raw.preconditions.as_deref(),
         raw.ownership.as_deref(),
@@ -938,6 +942,7 @@ fn parse_function(
         result,
         effect,
         purpose: raw.purpose.clone(),
+        since: raw.since.clone(),
         contract: raw.contract.clone(),
         preconditions: raw.preconditions.clone(),
         ownership: raw.ownership.clone(),
@@ -948,12 +953,13 @@ fn parse_function(
 fn validate_function_metadata(
     label: &str,
     purpose: &str,
+    since: Option<&str>,
     contract: Option<&str>,
     preconditions: Option<&str>,
     ownership: Option<&str>,
     snapshot_rule: Option<&str>,
 ) -> Result<(), SystemApiError> {
-    let requires_contract = label.starts_with("sys.admin.");
+    let requires_contract = label.starts_with("sys.admin.") || label.starts_with("sys.blob.");
     let requires_preconditions = orna_sys_v1::system_dispatch_table()
         .operation(label)
         .map_or(preconditions.is_some(), |operation| {
@@ -965,6 +971,7 @@ fn validate_function_metadata(
         "sys.invoke(Value)" | "sys.invoke<T>" | "sys.start(Value)" | "sys.start<T>"
     );
     if purpose.trim().is_empty()
+        || since.is_some_and(blank)
         || contract.is_some_and(blank)
         || preconditions.is_some_and(blank)
         || ownership.is_some_and(blank)
@@ -1543,6 +1550,7 @@ struct RawFunction {
     signature: String,
     effect: String,
     purpose: String,
+    since: Option<String>,
     contract: Option<String>,
     preconditions: Option<String>,
     ownership: Option<String>,
@@ -1877,6 +1885,7 @@ fn raw_function(value: &serde_json::Value) -> Result<RawFunction, SystemApiError
         signature: text(value_at(value, "signature")?)?.to_owned(),
         effect: text(value_at(value, "effect")?)?.to_owned(),
         purpose: text(value_at(value, "purpose")?)?.to_owned(),
+        since: optional_text(value.get("since"))?,
         contract: optional_text(value.get("contract"))?,
         preconditions: optional_text(value.get("preconditions"))?,
         ownership: optional_text(value.get("ownership"))?,
@@ -1984,11 +1993,24 @@ mod tests {
                 value_types: 34,
                 enums: 44,
                 relations: 78,
-                functions: 66,
-                failure_codes: 46,
+                functions: 67,
+                failure_codes: 49,
             }
         );
         assert_eq!(api.function("sys.rt.info").unwrap().len(), 1);
+        let annotate = api.function("sys.blob.annotate").unwrap().first().unwrap();
+        assert_eq!(annotate.since.as_deref(), Some("1.1.0"));
+        assert_eq!(
+            annotate.signature,
+            "fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob"
+        );
+        assert_eq!(
+            api.provider_operation("sys.blob.annotate")
+                .expect("Blob annotation is linked to generated dispatch metadata")
+                .signature
+                .source,
+            annotate.signature
+        );
         assert_eq!(
             api.singleton("sys.database").unwrap().ty,
             SystemType::Named("sys.DatabaseView".into())
@@ -3278,7 +3300,7 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(duplicate_function);
-        duplicate["counts"]["functions"] = serde_json::Value::from(67);
+        duplicate["counts"]["functions"] = serde_json::Value::from(68);
         duplicate["functions"].as_array_mut().unwrap()[66]["effect"] =
             serde_json::Value::String("read".into());
         assert_eq!(

@@ -23,7 +23,7 @@ mod build_provider;
 #[path = "../build_support.rs"]
 mod build_support;
 
-const SYS_API_V1_SHA256: &str = "b569785bfaa204b366b2cee444c01a9aa8dd74c710852fdad925dcfae60a256f";
+const SYS_API_1_1_SHA256: &str = "d5382d03f977067dfd0af738bca94be094c17db803fd0f3be7e272430e37101d";
 
 fn regenerate() -> build_support::GeneratedSysArtifacts {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -200,8 +200,8 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
 
     let api_hash = format!("{:x}", Sha256::digest(regenerated.api_json.as_bytes()));
     assert_eq!(
-        api_hash, SYS_API_V1_SHA256,
-        "on-demand API retains the frozen 1.0 bytes"
+        api_hash, SYS_API_1_1_SHA256,
+        "on-demand API retains the reviewed 1.1 bytes"
     );
     let embedded_api_json = system_api_json();
     let artifact_matrix = [
@@ -279,8 +279,23 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
         .expect("regenerated dispatch table is valid");
     assert_eq!(system_dispatch_table(), &regenerated_table);
     let api: Value = serde_json::from_str(&regenerated.api_json).expect("regenerated API JSON");
+    assert_eq!(api["language_version"], "1.1.0");
+    assert_eq!(api["sys_version"], "1.1");
+    assert_eq!(
+        api["status"],
+        "Final 1.1.0 specification contract; engine execution not claimed"
+    );
     let schema: Value =
         serde_json::from_str(&regenerated.schema_json).expect("generated system API schema");
+    assert_eq!(
+        schema["properties"]["language_version"]["const"],
+        api["language_version"]
+    );
+    assert_eq!(
+        schema["properties"]["sys_version"]["const"],
+        api["sys_version"]
+    );
+    assert_eq!(schema["properties"]["status"]["const"], api["status"]);
     let provider_schema: Value =
         serde_json::from_str(&provider_schema_json).expect("generated typed provider JSON Schema");
     let provider_registry: Value = serde_json::from_str(&regenerated.provider_abi_json)
@@ -327,6 +342,21 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
         function_ids, dispatch_ids,
         "API and dispatch registry are 1:1"
     );
+
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for relative_path in [
+        "orna-conformance-v1/tests/fixtures/reference/api/sys.json",
+        "orna-traceability-v1/tests/fixtures/reference/api/sys.json",
+    ] {
+        let committed =
+            fs::read_to_string(fixture_root.join(relative_path)).unwrap_or_else(|error| {
+                panic!("read committed generated API artifact {relative_path}: {error}")
+            });
+        assert_eq!(
+            committed, regenerated.api_json,
+            "committed API compatibility artifact {relative_path} matches typed-registry output"
+        );
+    }
 }
 
 #[test]
@@ -422,7 +452,7 @@ fn dispatch_identifier_schema_and_typed_parser_reject_the_same_malformed_ids() {
 
     assert_eq!(
         schema["$defs"]["operation"]["properties"]["role"]["pattern"],
-        r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@[0-9]+\.[0-9]+$"
+        r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@(?:[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])\.(?:[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$"
     );
     assert_eq!(
         schema["$defs"]["role"]["properties"]["name"]["pattern"],
