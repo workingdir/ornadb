@@ -1,0 +1,96 @@
+use std::path::Path;
+
+use orna_repository_v1::offline_copy::{
+    OfflineCopy, OfflineCopyError, OfflineHistoryEntry, OfflineRow, write_offline_copy,
+};
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
+
+const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
+
+/// Builds the row an import would commit for one fixture file. The payload is
+/// included so the bundle writer can copy it.
+fn committed_row(key: &str, media_type: &str, file: &str) -> OfflineRow {
+    let bytes = std::fs::read(Path::new(MEDIA_FIXTURES).join(file)).unwrap();
+    OfflineRow {
+        key: key.as_bytes().to_vec(),
+        media_type: media_type.to_owned(),
+        suffix: None,
+        length: bytes.len() as u64,
+        sha256: Sha256::digest(&bytes).into(),
+        payload: Some(bytes),
+    }
+}
+
+#[test]
+fn offline_copy_answers_metadata_queries_without_media_files() {
+    let directory = TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle");
+    let rows = [
+        committed_row("image", "image/png", "pixel.png"),
+        committed_row("song", "audio/wav", "tone.wav"),
+    ];
+    let history = [OfflineHistoryEntry {
+        sequence: 1,
+        commit: [0x5a; 32],
+    }];
+    write_offline_copy(&bundle, &rows, &history).unwrap();
+
+    // The copy is self-contained: drop every media file and query again.
+    std::fs::remove_dir_all(bundle.join("media")).unwrap();
+    let copy = OfflineCopy::open(&bundle).unwrap();
+
+    let listing = copy.rows();
+    assert_eq!(listing.len(), 2);
+    let song = copy.metadata(b"song").expect("song row is in the copy");
+    assert_eq!(song.media_type, "audio/wav");
+    assert_eq!(song.length, 4044);
+    assert_eq!(song.sha256, rows[1].sha256);
+    assert!(song.has_payload);
+    let image = copy.metadata(b"image").expect("image row is in the copy");
+    assert_eq!(image.media_type, "image/png");
+    assert_eq!(image.length, 73);
+    assert_eq!(copy.history(), &history);
+    assert!(copy.metadata(b"missing").is_none());
+
+    // Hydration is the only path that reads media, and it now fails cleanly.
+    assert!(matches!(
+        copy.hydrate(b"song"),
+        Err(OfflineCopyError::Io(_))
+    ));
+}
+
+#[test]
+fn offline_copy_hydrates_verified_payloads_and_rejects_tampering() {
+    let directory = TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle");
+    let song = committed_row("song", "audio/wav", "tone.wav");
+    let expected = song.payload.clone().unwrap();
+    write_offline_copy(&bundle, std::slice::from_ref(&song), &[]).unwrap();
+
+    let copy = OfflineCopy::open(&bundle).unwrap();
+    assert_eq!(copy.hydrate(b"song").unwrap(), expected);
+
+    // A payload that does not match its recorded digest is refused at write time.
+    let mut tampered = song.clone();
+    tampered.payload = Some(vec![0; expected.len()]);
+    let refused = write_offline_copy(&directory.path().join("bad"), &[tampered], &[]);
+    assert!(matches!(
+        refused,
+        Err(OfflineCopyError::PayloadMismatch { .. })
+    ));
+
+    // A bit flipped on disk is refused at hydration time.
+    let media_file = bundle.join("media").join(hex(&song.sha256));
+    let mut on_disk = std::fs::read(&media_file).unwrap();
+    on_disk[0] ^= 0xff;
+    std::fs::write(&media_file, on_disk).unwrap();
+    assert!(matches!(
+        copy.hydrate(b"song"),
+        Err(OfflineCopyError::PayloadMismatch { .. })
+    ));
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
