@@ -9,8 +9,8 @@
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    PureFunction, RelationPage, StepBudget, invoke_named, invoke_named_with_effects,
-    reference_standard_profile, reference_standard_sources,
+    PureFunction, RelationPage, ReplError, StepBudget, SysHostBindingRegistry, invoke_named,
+    invoke_named_with_effects, reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_live_v1::{
@@ -27,6 +27,7 @@ use orna_runtime_v1::{
     RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
     RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
+use orna_repository_v1::RepositoryCaptureCapability;
 use orna_semantic_v1::{
     Catalogue, ModuleInput, Namespace, SymbolKind, TableSchema, analyze_with_catalogue,
 };
@@ -2109,6 +2110,7 @@ pub struct ApplicationLiveAdapter {
     run_events: Arc<Mutex<BTreeMap<[u8; 16], SessionRunEventLog>>>,
     watches: Arc<Mutex<BTreeMap<([u8; 16], [u8; 16]), ApplicationWatch>>>,
     runtime_identity: Option<([u8; 16], [u8; 16])>,
+    repository_capture: Option<RepositoryCaptureCapability>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2154,6 +2156,7 @@ impl ApplicationLiveAdapter {
             run_events: Arc::new(Mutex::new(BTreeMap::new())),
             watches: Arc::new(Mutex::new(BTreeMap::new())),
             runtime_identity: None,
+            repository_capture: None,
         }
     }
 
@@ -2171,6 +2174,33 @@ impl ApplicationLiveAdapter {
     pub fn with_runtime_identity(mut self, database: [u8; 16], runtime: [u8; 16]) -> Self {
         self.runtime_identity = Some((database, runtime));
         self
+    }
+
+    /// Hands the serving host's authority-scoped repository capture capability
+    /// to the per-session REPL. Without it, REPL input runs with no native sys
+    /// bindings, exactly as before.
+    #[must_use]
+    pub fn with_repository_capture(mut self, capability: RepositoryCaptureCapability) -> Self {
+        self.repository_capture = Some(capability);
+        self
+    }
+
+    /// Submits one REPL input. When the host installed a repository capture
+    /// capability, native sys operations bind to that same authority; otherwise
+    /// this is the plain submit path.
+    fn submit_repl_input(
+        &self,
+        repl: &mut AdmittedReplSession,
+        source: &str,
+    ) -> Result<Option<CanonicalValue>, ReplError> {
+        match &self.repository_capture {
+            Some(capability) => {
+                let mut bindings = SysHostBindingRegistry::default()
+                    .with_repository_capture_capability(capability.clone());
+                repl.submit_with_sys_host_bindings(source, &mut bindings)
+            }
+            None => repl.submit(source),
+        }
     }
 
     /// Sets the logical module path and entry used for future Eval messages.
@@ -2498,7 +2528,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                 return Err(LiveError::ApplicationRejected);
             };
             let mut repl = self.repl_candidate(session)?;
-            let result = match repl.submit(source) {
+            let result = match self.submit_repl_input(&mut repl, source) {
                 Ok(result) => result,
                 Err(error) => {
                     let code = error.code().to_owned();
@@ -2535,7 +2565,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let mut repl = self.repl_candidate(session)?;
                 let staged = match repl.stage_activation(source) {
                     Ok(staged) => staged,
-                    Err(error) if error.code() == "ORNA-REPL-EFFECT" => match repl.submit(source) {
+                    Err(error) if error.code() == "ORNA-REPL-EFFECT" => match self.submit_repl_input(&mut repl, source) {
                         Ok(value) => {
                             let value = value.unwrap_or_else(|| {
                                 CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
