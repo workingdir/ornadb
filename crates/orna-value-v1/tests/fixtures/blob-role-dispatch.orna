@@ -1,0 +1,25 @@
+// OVB-2 annotated Blob context dispatch. Each asset records the canonical
+// MIME-1 annotation and the consuming role that the annotation selects.
+// An empty suffix is the canonical "no suffix" form: MIME-1 rejects a suffix
+// equal to the preferred one, so preferred-suffix assets carry none.
+let hero_type = "image/jpeg"
+let hero_suffix = "jpeg"
+let hero_role = "image"
+let clip_type = "video/mp4"
+let clip_suffix = "m4v"
+let clip_role = "video"
+let voice_type = "audio/mpeg"
+let voice_suffix = ""
+let voice_role = "audio"
+let notes_type = "text/plain"
+let notes_suffix = "text"
+let notes_role = "text"
+let config_type = "application/json"
+let config_suffix = ""
+let config_role = "text"
+let report_type = "application/pdf"
+let report_suffix = ""
+let report_role = "document"
+let blob_type = "application/octet-stream"
+let blob_suffix = ""
+let blob_role = "opaque"
