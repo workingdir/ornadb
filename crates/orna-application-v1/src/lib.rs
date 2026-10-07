@@ -24,8 +24,8 @@ use orna_protocol_v1::{
 };
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
-    RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableRows,
-    StagedTableActivation, TableMutation,
+    RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
+    RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
 use orna_semantic_v1::{
     Catalogue, ModuleInput, Namespace, SymbolKind, TableSchema, analyze_with_catalogue,
@@ -36,7 +36,7 @@ use orna_syntax_v1::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
     pin::Pin,
@@ -74,6 +74,8 @@ pub enum ApplicationError {
     EffectRejected(String),
     /// The source requested an effect that could not be authorized or run.
     SourceEffectFailed(String),
+    /// Committed table identity metadata did not exactly match admitted table schemas.
+    InvalidTableMetadata,
     /// Async runtime effects are supported only as the activation's terminal
     /// result, so their real result is available before the activation commits.
     UnsupportedSourceEffectPlacement,
@@ -103,6 +105,9 @@ impl fmt::Display for ApplicationError {
                 write!(formatter, "admitted effect was rejected: {code}")
             }
             Self::SourceEffectFailed(code) => write!(formatter, "source effect failed: {code}"),
+            Self::InvalidTableMetadata => {
+                formatter.write_str("committed table identity metadata was invalid")
+            }
             Self::UnsupportedSourceEffectPlacement => formatter.write_str(
                 "runtime-backed source effects must be the activation's terminal result",
             ),
@@ -111,6 +116,56 @@ impl fmt::Display for ApplicationError {
 }
 
 impl std::error::Error for ApplicationError {}
+
+/// One committed source metadata binding between the current table name and
+/// its stable semantic identity. Callers must source `object_id` from
+/// committed metadata; it is never inferred or allocated during admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedTableIdentity {
+    table: String,
+    object_id: TableObjectId,
+}
+
+impl CommittedTableIdentity {
+    #[must_use]
+    pub fn new(table: impl Into<String>, object_id: TableObjectId) -> Self {
+        Self {
+            table: table.into(),
+            object_id,
+        }
+    }
+
+    #[must_use]
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    #[must_use]
+    pub const fn object_id(&self) -> TableObjectId {
+        self.object_id
+    }
+}
+
+/// A table schema retained at application admission together with its
+/// committed stable identity, when the caller supplied committed metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedTableSchema {
+    schema: TableSchema,
+    object_id: Option<TableObjectId>,
+}
+
+impl AdmittedTableSchema {
+    #[must_use]
+    pub const fn schema(&self) -> &TableSchema {
+        &self.schema
+    }
+
+    /// `None` is retained only for legacy name-only admission.
+    #[must_use]
+    pub const fn object_id(&self) -> Option<TableObjectId> {
+        self.object_id
+    }
+}
 
 /// A source-backed application authority. The catalogue and evaluator limits
 /// are captured once so every admission in this authority uses the same
@@ -186,6 +241,23 @@ impl ApplicationAuthority {
             return Err(ApplicationError::MissingEntry(entry));
         }
         let admitted_namespace = module_namespace(&logical_path);
+        let module_header = analysis
+            .modules
+            .get(&admitted_namespace)
+            .cloned()
+            .expect("successful analysis records the admitted module header");
+        let table_schemas = admitted_table_schemas(&module_header)
+            .into_iter()
+            .map(|(name, schema)| {
+                (
+                    name,
+                    AdmittedTableSchema {
+                        schema,
+                        object_id: None,
+                    },
+                )
+            })
+            .collect();
 
         Ok(AdmittedApplication {
             logical_path,
@@ -196,12 +268,43 @@ impl ApplicationAuthority {
             functions,
             table_insert_defaults,
             limits: self.limits,
-            module_header: analysis
-                .modules
-                .get(&admitted_namespace)
-                .cloned()
-                .expect("successful analysis records the admitted module header"),
+            table_schemas,
+            #[cfg(test)]
+            module_header,
         })
+    }
+
+    /// Admits a source module using stable table identities read from
+    /// committed source metadata. The metadata must name every admitted table
+    /// exactly once; identity is never inferred from source name, schema,
+    /// path, or runtime allocation.
+    pub fn admit_module_with_committed_table_metadata(
+        &self,
+        logical_path: impl Into<String>,
+        source: impl Into<String>,
+        entry: impl Into<String>,
+        table_metadata: impl IntoIterator<Item = CommittedTableIdentity>,
+    ) -> Result<AdmittedApplication, ApplicationError> {
+        let mut application = self.admit_module(logical_path, source, entry)?;
+        let mut identities = BTreeMap::new();
+        let mut unique_ids = BTreeSet::new();
+        for metadata in table_metadata {
+            if !application.table_schemas.contains_key(metadata.table())
+                || identities
+                    .insert(metadata.table().to_owned(), metadata.object_id())
+                    .is_some()
+                || !unique_ids.insert(metadata.object_id())
+            {
+                return Err(ApplicationError::InvalidTableMetadata);
+            }
+        }
+        if identities.len() != application.table_schemas.len() {
+            return Err(ApplicationError::InvalidTableMetadata);
+        }
+        for (table, schema) in &mut application.table_schemas {
+            schema.object_id = identities.get(table).copied();
+        }
+        Ok(application)
     }
 
     /// Executes the admitted entry through the production bounded evaluator.
@@ -231,12 +334,15 @@ impl ApplicationAuthority {
         application: &AdmittedApplication,
         arguments: &Environment,
     ) -> Result<StagedActivation, ApplicationError> {
-        let tables = admitted_table_schemas(&application.module_header);
-        let mut handler = SourceMutationEffectHandler::new(tables).with_insert_defaults(
-            application.table_insert_defaults.clone(),
-            application.functions.clone(),
-            application.limits,
-        );
+        let tables = application_table_schemas(application);
+        let table_object_ids = application_table_object_ids(application);
+        let mut handler =
+            SourceMutationEffectHandler::new_with_table_object_ids(tables, table_object_ids)?
+                .with_insert_defaults(
+                    application.table_insert_defaults.clone(),
+                    application.functions.clone(),
+                    application.limits,
+                );
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -265,14 +371,19 @@ impl ApplicationAuthority {
         arguments: &Environment,
         snapshot: &RuntimeTableActivationSnapshot,
     ) -> Result<StagedActivation, ApplicationError> {
-        let tables = admitted_table_schemas(&application.module_header);
-        let mut handler =
-            SourceMutationEffectHandler::with_table_rows(tables, snapshot.table_rows().clone())?
-                .with_insert_defaults(
-                    application.table_insert_defaults.clone(),
-                    application.functions.clone(),
-                    application.limits,
-                );
+        let tables = application_table_schemas(application);
+        let table_object_ids = application_table_object_ids(application);
+        validate_snapshot_table_object_ids(&table_object_ids, snapshot)?;
+        let mut handler = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
+            tables,
+            snapshot.table_rows().clone(),
+            table_object_ids,
+        )?
+        .with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
+        );
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -301,14 +412,18 @@ impl ApplicationAuthority {
         arguments: &Environment,
         publication_rows: RuntimePublicationMetadataRows,
     ) -> Result<StagedActivation, ApplicationError> {
-        let tables = admitted_table_schemas(&application.module_header);
-        let mut handler =
-            SourceMutationEffectHandler::with_publication_rows(tables, publication_rows)
-                .with_insert_defaults(
-                    application.table_insert_defaults.clone(),
-                    application.functions.clone(),
-                    application.limits,
-                );
+        let tables = application_table_schemas(application);
+        let table_object_ids = application_table_object_ids(application);
+        let mut handler = SourceMutationEffectHandler::with_publication_rows_and_table_object_ids(
+            tables,
+            publication_rows,
+            table_object_ids,
+        )?
+        .with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
+        );
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -344,12 +459,17 @@ impl ApplicationAuthority {
         dispatcher: &dyn AsyncApplicationEffectDispatcher,
     ) -> Result<StagedActivation, ApplicationError> {
         validate_terminal_runtime_effect(application)?;
-        let tables = admitted_table_schemas(&application.module_header);
+        let tables = application_table_schemas(application);
+        let table_object_ids = application_table_object_ids(application);
         let publication_rows = dispatcher
             .publication_metadata_rows()
             .await
             .map_err(ApplicationError::SourceEffectFailed)?;
-        let mut handler = AsyncSourceMutationEffectHandler::new(tables, publication_rows);
+        let mut handler = AsyncSourceMutationEffectHandler::new_with_table_object_ids(
+            tables,
+            publication_rows,
+            table_object_ids,
+        )?;
         handler.mutations = handler.mutations.with_insert_defaults(
             application.table_insert_defaults.clone(),
             application.functions.clone(),
@@ -421,6 +541,13 @@ impl ApplicationAuthority {
         for mutation in mutations {
             digest.update(mutation.id());
             put_bytes(&mut digest, mutation.table().as_bytes());
+            match mutation.table_object_id() {
+                Some(object_id) => {
+                    digest.update([1]);
+                    digest.update(object_id.bytes());
+                }
+                None => digest.update([0]),
+            }
             put_bytes(&mut digest, mutation.key());
             match mutation.value() {
                 Some(value) => {
@@ -480,7 +607,7 @@ impl ApplicationAuthority {
                 let id: [u8; 16] = digest.finalize()[..16]
                     .try_into()
                     .map_err(|_| ApplicationError::DigestEncoding)?;
-                match (mutation.rekey_to(), mutation.is_insert()) {
+                let rebuilt = match (mutation.rekey_to(), mutation.is_insert()) {
                     (Some(new_key), _) => mutation
                         .value()
                         .ok_or_else(|| {
@@ -517,7 +644,11 @@ impl ApplicationAuthority {
                         mutation.value().map(<[u8]>::to_vec),
                     )
                     .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string())),
-                }
+                }?;
+                Ok(match mutation.table_object_id() {
+                    Some(object_id) => rebuilt.with_table_object_id(object_id),
+                    None => rebuilt,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.stage_mutations(context, mutations)
@@ -693,6 +824,7 @@ impl StagedActivation {
 #[derive(Debug)]
 pub struct SourceMutationEffectHandler {
     tables: BTreeMap<String, TableSchema>,
+    table_object_ids: BTreeMap<String, TableObjectId>,
     insert_defaults: TableInsertDefaults,
     default_functions: Functions,
     default_limits: Limits,
@@ -710,6 +842,7 @@ impl SourceMutationEffectHandler {
         let next_automatic_ids = automatic_id_counters(&tables);
         Self {
             tables,
+            table_object_ids: BTreeMap::new(),
             insert_defaults: BTreeMap::new(),
             default_functions: Functions::new(),
             default_limits: Limits::default(),
@@ -722,11 +855,36 @@ impl SourceMutationEffectHandler {
         }
     }
 
+    fn new_with_table_object_ids(
+        tables: BTreeMap<String, TableSchema>,
+        table_object_ids: BTreeMap<String, TableObjectId>,
+    ) -> Result<Self, ApplicationError> {
+        if (!table_object_ids.is_empty() && table_object_ids.len() != tables.len())
+            || table_object_ids
+                .keys()
+                .any(|table| !tables.contains_key(table))
+        {
+            return Err(ApplicationError::InvalidTableMetadata);
+        }
+        let mut handler = Self::new(tables);
+        handler.table_object_ids = table_object_ids;
+        Ok(handler)
+    }
+
+    #[cfg(test)]
     fn with_table_rows(
         tables: BTreeMap<String, TableSchema>,
         rows: RuntimeTableRows,
     ) -> Result<Self, ApplicationError> {
-        let mut handler = Self::new(tables);
+        Self::with_table_rows_and_table_object_ids(tables, rows, BTreeMap::new())
+    }
+
+    fn with_table_rows_and_table_object_ids(
+        tables: BTreeMap<String, TableSchema>,
+        rows: RuntimeTableRows,
+        table_object_ids: BTreeMap<String, TableObjectId>,
+    ) -> Result<Self, ApplicationError> {
+        let mut handler = Self::new_with_table_object_ids(tables, table_object_ids)?;
         let mut captured = BTreeMap::new();
         let table_names = handler.tables.keys().cloned().collect::<Vec<_>>();
         for table in table_names {
@@ -785,19 +943,23 @@ impl SourceMutationEffectHandler {
         tables: BTreeMap<String, TableSchema>,
         publication_rows: RuntimePublicationMetadataRows,
     ) -> Self {
-        let next_automatic_ids = automatic_id_counters(&tables);
-        Self {
-            tables,
-            insert_defaults: BTreeMap::new(),
-            default_functions: Functions::new(),
-            default_limits: Limits::default(),
-            next_automatic_ids,
-            mutations: Vec::new(),
-            next_ordinal: 0,
-            publication_rows: Some(publication_rows),
-            captured_rows: None,
-            overlay: BTreeMap::new(),
+        Self::with_publication_rows_and_table_object_ids(tables, publication_rows, BTreeMap::new())
+            .expect("name-only publication admissions carry no table identities")
+    }
+
+    fn with_publication_rows_and_table_object_ids(
+        tables: BTreeMap<String, TableSchema>,
+        publication_rows: RuntimePublicationMetadataRows,
+        table_object_ids: BTreeMap<String, TableObjectId>,
+    ) -> Result<Self, ApplicationError> {
+        if table_object_ids.is_empty() {
+            return Ok(Self::with_publication_rows(tables, publication_rows));
         }
+        let next_automatic_ids = automatic_id_counters(&tables);
+        let mut handler = Self::new_with_table_object_ids(tables, table_object_ids)?;
+        handler.next_automatic_ids = next_automatic_ids;
+        handler.publication_rows = Some(publication_rows);
+        Ok(handler)
     }
 
     /// Consumes the handler after validating every recorded mutation.
@@ -891,6 +1053,11 @@ impl SourceMutationEffectHandler {
             _ => return Err(Self::effect_error("ORNA-EVAL-TABLE-ROW")),
         }
         .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+        let mutation = if let Some(object_id) = self.table_object_ids.get(table).copied() {
+            mutation.with_table_object_id(object_id)
+        } else {
+            mutation
+        };
         self.next_ordinal = self
             .next_ordinal
             .checked_add(1)
@@ -1222,6 +1389,24 @@ impl AsyncSourceMutationEffectHandler {
             effects: Vec::new(),
             publication_rows,
         }
+    }
+
+    fn new_with_table_object_ids(
+        tables: BTreeMap<String, TableSchema>,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+        table_object_ids: BTreeMap<String, TableObjectId>,
+    ) -> Result<Self, ApplicationError> {
+        if table_object_ids.is_empty() {
+            return Ok(Self::new(tables, publication_rows));
+        }
+        Ok(Self {
+            mutations: SourceMutationEffectHandler::new_with_table_object_ids(
+                tables,
+                table_object_ids,
+            )?,
+            effects: Vec::new(),
+            publication_rows,
+        })
     }
 
     fn into_parts(
@@ -1787,6 +1972,38 @@ fn admitted_table_schemas(
                 .map(|schema| (name.clone(), schema))
         })
         .collect()
+}
+
+fn application_table_schemas(application: &AdmittedApplication) -> BTreeMap<String, TableSchema> {
+    application
+        .table_schemas
+        .iter()
+        .map(|(name, admitted)| (name.clone(), admitted.schema.clone()))
+        .collect()
+}
+
+fn application_table_object_ids(
+    application: &AdmittedApplication,
+) -> BTreeMap<String, TableObjectId> {
+    application
+        .table_schemas
+        .iter()
+        .filter_map(|(name, schema)| schema.object_id.map(|id| (name.clone(), id)))
+        .collect()
+}
+
+fn validate_snapshot_table_object_ids(
+    admitted: &BTreeMap<String, TableObjectId>,
+    snapshot: &RuntimeTableActivationSnapshot,
+) -> Result<(), ApplicationError> {
+    for (table, object_id) in admitted {
+        if snapshot.table_object_id(table) != Some(*object_id) {
+            return Err(ApplicationError::Runtime(
+                "table snapshot did not carry the admitted committed table identity".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn automatic_id_counters(tables: &BTreeMap<String, TableSchema>) -> BTreeMap<String, BigInt> {
@@ -2716,6 +2933,8 @@ pub struct AdmittedApplication {
     functions: Functions,
     table_insert_defaults: TableInsertDefaults,
     limits: Limits,
+    table_schemas: BTreeMap<String, AdmittedTableSchema>,
+    #[cfg(test)]
     module_header: orna_semantic_v1::ModuleHeader,
 }
 
@@ -2740,6 +2959,29 @@ impl AdmittedApplication {
     #[must_use]
     pub fn entry(&self) -> &str {
         &self.entry
+    }
+
+    /// The schema and committed identity admitted for each writable table.
+    /// Legacy name-only admission retains `None` identities.
+    #[must_use]
+    pub fn table_schemas(&self) -> &BTreeMap<String, AdmittedTableSchema> {
+        &self.table_schemas
+    }
+
+    /// Projects complete committed table metadata into the runtime admission
+    /// contract. Legacy tables without committed identities fail closed when
+    /// a caller asks for identity-aware activation.
+    pub fn runtime_table_identities(&self) -> Result<Vec<RuntimeTableIdentity>, ApplicationError> {
+        self.table_schemas
+            .iter()
+            .map(|(table, schema)| {
+                let object_id = schema
+                    .object_id
+                    .ok_or(ApplicationError::InvalidTableMetadata)?;
+                RuntimeTableIdentity::new(table.clone(), object_id)
+                    .map_err(|error| ApplicationError::Runtime(error.to_string()))
+            })
+            .collect()
     }
 }
 
@@ -3661,6 +3903,102 @@ mod tests {
             _ => None,
         });
         assert_eq!(text, Some(orna_foundation_v1::OvbRaw::Text("once".into())));
+    }
+
+    #[test]
+    fn committed_table_identity_survives_semantic_rename_through_schema_and_mutation() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let object_id = TableObjectId::new([0x73; 16]);
+        let original = authority
+            .admit_module_with_committed_table_metadata(
+                "main.orna",
+                "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 7, text: \"stable\" }); }",
+                "main",
+                [CommittedTableIdentity::new("Note", object_id)],
+            )
+            .expect("committed identity should admit the table schema");
+        assert_eq!(
+            original.table_schemas()["Note"].object_id(),
+            Some(object_id)
+        );
+        assert_eq!(
+            original.runtime_table_identities().unwrap()[0].object_id(),
+            object_id
+        );
+
+        let original_mutation = authority
+            .evaluate_staged(&original, &Environment::new())
+            .expect("identity-bearing table effect should stage")
+            .mutations()
+            .first()
+            .expect("source should insert one row")
+            .clone();
+        assert_eq!(original_mutation.table(), "Note");
+        assert_eq!(original_mutation.table_object_id(), Some(object_id));
+
+        let renamed = authority
+            .admit_module_with_committed_table_metadata(
+                "main.orna",
+                "pub table Memo(id: Int) { text: Str, } fn main() { Memo.insert({ id: 7, text: \"stable\" }); }",
+                "main",
+                [CommittedTableIdentity::new("Memo", object_id)],
+            )
+            .expect("renamed source should reuse committed table identity");
+        assert_eq!(renamed.table_schemas()["Memo"].object_id(), Some(object_id));
+        assert_eq!(
+            renamed.runtime_table_identities().unwrap()[0].object_id(),
+            object_id
+        );
+        let renamed_staged = authority
+            .evaluate_staged(&renamed, &Environment::new())
+            .expect("renamed table effect should stage");
+        let renamed_mutation = renamed_staged
+            .mutations()
+            .first()
+            .expect("renamed source should insert one row");
+        assert_eq!(renamed_mutation.table(), "Memo");
+        assert_eq!(renamed_mutation.table_object_id(), Some(object_id));
+
+        let legacy = authority
+            .admit_module(
+                "main.orna",
+                "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 7, text: \"legacy\" }); }",
+                "main",
+            )
+            .expect("legacy name-only admission remains supported");
+        assert_eq!(legacy.table_schemas()["Note"].object_id(), None);
+        assert_eq!(
+            authority
+                .evaluate_staged(&legacy, &Environment::new())
+                .expect("legacy table effect should stage")
+                .mutations()[0]
+                .table_object_id(),
+            None
+        );
+    }
+
+    #[test]
+    fn committed_table_metadata_must_match_admitted_schemas_exactly() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let source = "pub table Note(id: Int) { text: Str, } fn main() {}";
+        assert!(matches!(
+            authority.admit_module_with_committed_table_metadata("main.orna", source, "main", [],),
+            Err(ApplicationError::InvalidTableMetadata)
+        ));
+        assert!(matches!(
+            authority.admit_module_with_committed_table_metadata(
+                "main.orna",
+                source,
+                "main",
+                [CommittedTableIdentity::new(
+                    "Other",
+                    TableObjectId::new([0x74; 16]),
+                )],
+            ),
+            Err(ApplicationError::InvalidTableMetadata)
+        ));
     }
 
     #[test]
