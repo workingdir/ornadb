@@ -34,10 +34,12 @@ fn main() {
     let build_support_path = manifest.join("build_support.rs");
     let build_host_path = manifest.join("build_host.rs");
     let build_provider_path = manifest.join("build_provider.rs");
+    let authority_path = manifest.join("../../api/sys.json");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", build_support_path.display());
     println!("cargo:rerun-if-changed={}", build_host_path.display());
     println!("cargo:rerun-if-changed={}", build_provider_path.display());
+    println!("cargo:rerun-if-changed={}", authority_path.display());
     // Watch the directory recursively so adding a new annotated module also
     // invalidates the collected schema, even before that file is known here.
     println!("cargo:rerun-if-changed={}", source_root.display());
@@ -77,6 +79,11 @@ fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), artifacts.api_json)
         .expect("write generated api/sys.json");
+    fs::write(
+        out_dir.join("system_api_selection.json"),
+        artifacts.api_selection_json,
+    )
+    .expect("write generated native sys API selection");
     let typed_host_registry = build_host::generate_typed_host_registry(&source_root)
         .expect("annotated native sys host operations form a valid typed registry");
     let host_registry = build_host::serialize_host_registry(&typed_host_registry)
