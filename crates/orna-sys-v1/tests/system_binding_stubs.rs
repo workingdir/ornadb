@@ -12,6 +12,12 @@ use orna_sys_v1::{
 };
 use serde_json::Value;
 
+#[path = "../src/abi_version.rs"]
+#[allow(dead_code)]
+mod abi_version;
+#[path = "../src/host_registry_model.rs"]
+#[allow(dead_code)]
+mod host_registry_model;
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
 mod build_host;
