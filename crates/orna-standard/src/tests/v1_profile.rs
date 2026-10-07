@@ -73,6 +73,52 @@ fn pinned_ui_presentation_helpers_are_included_as_source() {
 }
 
 #[test]
+fn pinned_core_collection_exports_are_declared_in_source() {
+    let sources = reference_standard_sources_v1();
+    let profile = reference_standard_profile_v1();
+    for path in [
+        REFERENCE_STANDARD_COLLECTION_PATH_V1,
+        REFERENCE_STANDARD_QUERY_PATH_V1,
+    ] {
+        let source = sources
+            .iter()
+            .find(|(source_path, _)| source_path == path)
+            .map(|(_, source)| source)
+            .expect("the core collection module is pinned");
+        for declaration in [
+            "pub fn filter<T>(rows: [T]",
+            "pub fn map<T, U>(rows: [T]",
+            "pub fn flat_map<T, U>(rows: [T]",
+            "pub fn sort_by<T, K>(rows: [T]",
+            "pub fn take<T>(rows: [T]",
+            "pub fn drop<T>(rows: [T]",
+            "pub fn distinct<T>(rows: [T]",
+            "pub fn union<T>(left: [T], right: [T]",
+            "pub fn count<T>(rows: [T]): Int",
+            "pub fn first<T>(rows: [T]): T?",
+            "pub fn one<T>(rows: [T]",
+            "pub fn sum<T>(rows: [T]): T",
+            "pub fn min<T>(rows: [T]): T?",
+            "pub fn max<T>(rows: [T]): T?",
+            "pub fn every<T>(rows: [T]",
+            "pub fn exists<T>(rows: [T]",
+        ] {
+            assert!(
+                source.contains(declaration),
+                "{path} is missing `{declaration}`"
+            );
+        }
+        profile
+            .verify_source(path, source)
+            .expect("core collection source is part of the pinned standard profile");
+        let parsed = orna_syntax_v1::parse_module_with_file(source, path);
+        assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
+    }
+    reference_standard_catalogue_v1()
+        .expect("core collection source resolves in the pinned standard catalogue");
+}
+
+#[test]
 fn pinned_algorithm_module_is_part_of_the_captured_std_snapshot() {
     let sources = reference_standard_sources_v1();
     let (index, (path, source)) = sources
