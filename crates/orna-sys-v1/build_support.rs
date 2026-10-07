@@ -1345,30 +1345,6 @@ fn validate_removed_names(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_value_profiles(value: &Value) -> Result<(), String> {
-    let profiles = value
-        .as_object()
-        .ok_or_else(|| "system API `value_profiles` must be an object".to_owned())?;
-    let expected = ["new", "stored", "semantic", "legacy_wire"];
-    if profiles.len() != expected.len()
-        || expected.iter().any(|name| !profiles.contains_key(*name))
-        || profiles
-            .keys()
-            .any(|name| !expected.contains(&name.as_str()))
-    {
-        return Err(
-            "system API `value_profiles` must contain exactly new, stored, semantic and legacy_wire"
-                .to_owned(),
-        );
-    }
-    for name in expected {
-        validate_nonblank_string(
-            profiles.get(name).expect("profile key was checked"),
-            &format!("system API value profile `{name}`"),
-        )?;
-    }
-    Ok(())
-}
 
 const BUILTIN_TYPES: &[&str] = &[
     "Blob",
@@ -2258,13 +2234,12 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
     let object = api
         .as_object()
         .ok_or_else(|| "system API document must be a JSON object".to_owned())?;
-    const TOP_LEVEL_FIELDS: [&str; 16] = [
+    const TOP_LEVEL_FIELDS: [&str; 15] = [
         "title",
         "language_version",
         "sys_version",
         "status",
         "source_of_truth",
-        "value_profiles",
         "removed_names",
         "singletons",
         "opaque_identifiers",
@@ -2347,7 +2322,6 @@ pub fn validate_api_document(api: &Value) -> Result<(), String> {
     }
 
     validate_removed_names(&object["removed_names"])?;
-    validate_value_profiles(&object["value_profiles"])?;
     validate_named_rows(
         &object["singletons"],
         "singletons",

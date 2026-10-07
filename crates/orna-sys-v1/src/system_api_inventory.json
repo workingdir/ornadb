@@ -1,11 +1,5 @@
 {
   "title": "Orna portable sys API",
-  "value_profiles": {
-    "new": "OVB-2",
-    "stored": "ROV-3",
-    "semantic": "SOV-3",
-    "legacy_wire": "OVB-1"
-  },
   "removed_names": {
     "sys.runtime": {
       "diagnostic": "ORNA100-E-SYS-RUNTIME",
