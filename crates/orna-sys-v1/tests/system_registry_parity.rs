@@ -23,7 +23,7 @@ mod build_provider;
 #[path = "../build_support.rs"]
 mod build_support;
 
-const SYS_API_1_1_SHA256: &str = "9897e8fe9999676d9661a6be0d4cf54f5f88103933752667f74fb74fe29a0697";
+const SYS_API_1_1_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
 
 fn regenerate() -> build_support::GeneratedSysArtifacts {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
