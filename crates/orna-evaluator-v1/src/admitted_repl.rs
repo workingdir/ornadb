@@ -154,9 +154,56 @@ pub struct AdmittedReplSession {
     semantic: ReplContext,
     runtime: ReplSession,
     attached_databases: Option<AttachedDatabaseSession>,
+    repository_scope: Option<RepositoryScope>,
+}
+
+/// Database and repository identity that one REPL session is authority-scoped
+/// to. The identity is supplied by the executable host at session creation and
+/// is never inferred from source or from a global registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepositoryScope {
+    database_id: [u8; 16],
+    repository_id: [u8; 16],
+}
+
+impl RepositoryScope {
+    /// Binds a session to one database and repository identity.
+    #[must_use]
+    pub const fn new(database_id: [u8; 16], repository_id: [u8; 16]) -> Self {
+        Self {
+            database_id,
+            repository_id,
+        }
+    }
+
+    /// Returns the database identity this scope is bound to.
+    #[must_use]
+    pub const fn database_id(&self) -> [u8; 16] {
+        self.database_id
+    }
+
+    /// Returns the repository identity this scope is bound to.
+    #[must_use]
+    pub const fn repository_id(&self) -> [u8; 16] {
+        self.repository_id
+    }
 }
 
 impl AdmittedReplSession {
+    /// Binds this session to the database and repository the executable host
+    /// selected. Sessions created without a scope stay unscoped.
+    #[must_use]
+    pub fn with_repository_scope(mut self, scope: RepositoryScope) -> Self {
+        self.repository_scope = Some(scope);
+        self
+    }
+
+    /// Returns the repository scope this session was bound to, if any.
+    #[must_use]
+    pub const fn repository_scope(&self) -> Option<RepositoryScope> {
+        self.repository_scope
+    }
+
     /// Starts a core-only typed REPL with no project bindings.
     #[must_use]
     pub fn new(limits: Limits) -> Self {
@@ -165,6 +212,7 @@ impl AdmittedReplSession {
             semantic: ReplContext::empty(),
             runtime: ReplSession::new(limits),
             attached_databases: None,
+            repository_scope: None,
         }
     }
 
@@ -250,6 +298,7 @@ impl AdmittedReplSession {
             semantic: ReplContext::from_analysis(&analysis).map_err(semantic_error)?,
             runtime,
             attached_databases: None,
+            repository_scope: None,
         })
     }
 
@@ -297,6 +346,7 @@ impl AdmittedReplSession {
             semantic,
             runtime,
             attached_databases: None,
+            repository_scope: None,
         })
     }
 
@@ -1660,5 +1710,22 @@ mod tests {
             std_session.submit("std.answer()"),
             Ok(Some(Value::int(42.into())))
         );
+    }
+}
+
+#[cfg(test)]
+mod repository_scope_tests {
+    use super::*;
+
+    #[test]
+    fn repl_session_carries_the_repository_scope_it_was_bound_to() {
+        let scope = RepositoryScope::new([1; 16], [2; 16]);
+        let session = AdmittedReplSession::new(Limits::default());
+        assert_eq!(session.repository_scope(), None);
+
+        let scoped = session.with_repository_scope(scope);
+        assert_eq!(scoped.repository_scope(), Some(scope));
+        assert_eq!(scope.database_id(), [1; 16]);
+        assert_eq!(scope.repository_id(), [2; 16]);
     }
 }
