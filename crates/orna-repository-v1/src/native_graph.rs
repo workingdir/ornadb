@@ -3529,6 +3529,32 @@ impl ObjectStats {
     pub fn nodes(&self) -> &BTreeMap<NodeKind, u64> {
         &self.nodes
     }
+
+    /// Renders the counts as one line of JSON with a fixed key order: node
+    /// kinds in format-3 order, then `blob_references`. Every key is a fixed
+    /// identifier, so no escaping is needed.
+    pub fn to_json(&self) -> String {
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|(kind, count)| format!("\"{}\":{count}", node_kind_name(*kind)))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{{\"nodes\":{{{nodes}}},\"blob_references\":{}}}", self.blob_references)
+    }
+}
+
+fn node_kind_name(kind: NodeKind) -> &'static str {
+    match kind {
+        NodeKind::StoreRoot => "StoreRoot",
+        NodeKind::OrderedLeaf => "OrderedLeaf",
+        NodeKind::OrderedBranch => "OrderedBranch",
+        NodeKind::ValueOverflow => "ValueOverflow",
+        NodeKind::ByteIndex => "ByteIndex",
+        NodeKind::BlobDescriptor => "BlobDescriptor",
+        NodeKind::Schema => "Schema",
+        NodeKind::DependencyIndex => "DependencyIndex",
+    }
 }
 
 /// The format-3 node kinds from `profiles/store-3.json`.
