@@ -41,3 +41,40 @@ fn run_import(bundle: &Path) -> Output {
         .output()
         .unwrap()
 }
+
+#[test]
+fn import_exits_zero_for_a_fixture_bundle_and_one_for_a_corrupt_payload() {
+    use tempfile::TempDir;
+
+    let directory = TempDir::new().unwrap();
+    let bundle = export_bundle(directory.path(), "catalogue-exit-ogx1.orna");
+
+    let good = run_import(&bundle);
+    assert_eq!(
+        good.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    assert!(String::from_utf8_lossy(&good.stdout).contains("dry run: 1 of 1 rows"));
+
+    // Flip one byte of the stored payload so its digest no longer matches.
+    let media = std::fs::read_dir(bundle.join("media"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut payload = std::fs::read(&media).unwrap();
+    payload[0] ^= 0xff;
+    std::fs::write(&media, payload).unwrap();
+
+    let corrupt = run_import(&bundle);
+    assert_eq!(
+        corrupt.status.code(),
+        Some(1),
+        "stdout: {}",
+        String::from_utf8_lossy(&corrupt.stdout)
+    );
+    assert!(String::from_utf8_lossy(&corrupt.stderr).contains("E2000"));
+}
