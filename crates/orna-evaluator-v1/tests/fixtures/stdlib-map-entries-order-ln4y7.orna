@@ -1,0 +1,6 @@
+map.to_entries([("z", 1), ("a", 2), ("m", 3)]) == [("z", 1), ("a", 2), ("m", 3)]
+&& map.to_entries([("z", 1), ("a", 2), ("z", 9)]) == [("z", 9), ("a", 2)]
+&& map.to_entries(map.insert([("z", 1), ("a", 2)], "m", 3)) == [("z", 1), ("a", 2), ("m", 3)]
+&& map.to_entries(map.insert([("z", 1), ("a", 2)], "z", 7)) == [("z", 7), ("a", 2)]
+&& map.to_entries(map.remove([("z", 1), ("a", 2), ("m", 3)], "a")) == [("z", 1), ("m", 3)]
+&& map.to_entries([("b", 1), ("a", 2)]) != map.to_entries([("a", 2), ("b", 1)])
