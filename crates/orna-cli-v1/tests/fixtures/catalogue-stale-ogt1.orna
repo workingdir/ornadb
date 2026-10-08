@@ -1,0 +1,3 @@
+pub fn revision(): Int = 3;
+
+pub fn label(): Text = "current";
