@@ -2543,6 +2543,7 @@ e2bc3b3148b04d473431147e0bf0c6d7763eefc4302a2f2f7c9a22054b84abcc  crates/orna-ev
 58d58f131e2d18b6becf02efcfd1581a4c767b4e6fa6644a7aa01697d2a792c0  crates/orna-evaluator-v1/tests/fixtures/stdlib-query-paired-window-fold-right-frame-distinct-y5hv5.orna
 e6e99c2c4e28a51665c7d7bf888102ec5b35cd934cf03a2fbc36ee3685a4fe58  crates/orna-evaluator-v1/tests/fixtures/stdlib-query-paired-window-fold-right-frames-y5hv5.orna
 73af389b21f2e6571b406af069dd3ea2ba33f34e312b3f7140140142349fbb41  crates/orna-evaluator-v1/tests/fixtures/stdlib-query-paired-window-frame-folds-y5hv5.orna
+32fdeac73f7a6ff9fef008ba806e4602fc0f1432efee0202d2d57b5116393666  crates/orna-evaluator-v1/tests/fixtures/stdlib-query-recursive-cte-cycle-guard-ln4y7.orna
 6b5958c697886b9330204cb4d168b0c51de5d4f1b2e900d279ee2a81c84f2d7c  crates/orna-evaluator-v1/tests/fixtures/stdlib-query-recursive-cte-n0o0e.orna
 28872ecd51bdda04d15018bc9967d13f7899b4e844e043674a1d62a6511d46ab  crates/orna-evaluator-v1/tests/fixtures/stdlib-query-sparse-window-rate-integral-pairs-eed1k.orna
 71c0863057c271f7257ee0dcfda16e4662539d01cef16e583e3b0f09843f5930  crates/orna-evaluator-v1/tests/fixtures/stdlib-query-time-order-sparse-windows-d05h9.orna
