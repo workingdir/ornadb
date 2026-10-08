@@ -28,6 +28,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  semantic-legend --quiet          bare names, one per line, for scripts",
     "  semantic-legend --markdown       legend table with hover samples",
     "  semantic-legend --format csv     kind,index,name,sample rows",
+    "  semantic-legend exit codes: 0 legend printed; 2 unsupported option or invalid --limit value",
     "Exit status:",
     "  0 success            1 target             2 usage              3 connection",
     "  4 authorisation      5 presentation       6 cancelled          7 protocol",
@@ -70,6 +71,11 @@ mod tests {
         assert!(HELP_LINES.contains(
             &"  semantic-legend --limit 5        first five token types (default: all token types)"
         ));
+        assert!(
+            group
+                .iter()
+                .any(|line| line.contains("exit codes: 0 legend printed; 2 unsupported"))
+        );
         for mode in ["--json", "--markdown", "--format csv", "--quiet", "--limit"] {
             assert!(
                 group.iter().any(|line| line.contains(mode)),
