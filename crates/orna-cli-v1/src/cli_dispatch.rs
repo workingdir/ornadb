@@ -27,26 +27,30 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         ),
         Command::SemanticLegend {
             format: LegendFormat::Json,
+            ..
         } => {
             print!("{}", orna_syntax_v1::editor::semantic_legend_json());
             Ok(())
         }
         Command::SemanticLegend {
             format: LegendFormat::Markdown,
+            ..
         } => {
             print!("{}", orna_syntax_v1::editor::semantic_legend_markdown());
             Ok(())
         }
         Command::SemanticLegend {
             format: LegendFormat::Csv,
+            ..
         } => {
             print!("{}", orna_syntax_v1::editor::semantic_legend_csv());
             Ok(())
         }
         Command::SemanticLegend {
             format: LegendFormat::Quiet,
+            limit,
         } => {
-            for token_type in orna_syntax_v1::editor::legend_token_types() {
+            for token_type in orna_syntax_v1::editor::legend_token_types().take(limit.unwrap_or(usize::MAX)) {
                 println!("{token_type}");
             }
             for modifier in orna_syntax_v1::editor::TOKEN_MODIFIERS {
@@ -56,9 +60,10 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         }
         Command::SemanticLegend {
             format: LegendFormat::Text,
+            limit,
         } => {
             println!("Token types:");
-            for token_type in orna_syntax_v1::editor::legend_token_types() {
+            for token_type in orna_syntax_v1::editor::legend_token_types().take(limit.unwrap_or(usize::MAX)) {
                 println!("  {token_type}");
             }
             println!("Token modifiers:");
