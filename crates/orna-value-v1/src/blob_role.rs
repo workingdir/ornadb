@@ -102,6 +102,7 @@ impl Blob {
             Err(Error::RoleMismatch {
                 role,
                 family: MediaFamily::of(self.annotation()),
+                length: self.length(),
             })
         }
     }
@@ -194,6 +195,18 @@ mod tests {
         );
         // Opaque is the bytes-only consumer and admits every canonical annotation.
         assert!(value.blob_as(BlobRole::Opaque).is_ok());
+    }
+
+    #[test]
+    fn mismatch_message_names_the_blob_size() {
+        let bindings = bindings();
+        let (media_type, suffix, _) = asset(&bindings, "hero");
+        let value = annotated_value(&media_type, &suffix);
+        let error = value.blob_as(BlobRole::Video).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "OVB-2 Blob role Video does not admit MIME family image (7 bytes)"
+        );
     }
 
     #[test]
