@@ -3290,6 +3290,87 @@ mod tests {
     }
 
     #[test]
+    fn listing_routes_serve_a_published_capture_artifact() {
+        use orna_repository_v1::{
+            ManagedFileChange, ManagedPath, PublicationJournal, PublicationJournalEntry,
+        };
+
+        let directory = tempfile::tempdir().expect("temporary database");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=publish"],
+        );
+        std::fs::write(directory.path().join("main.orna"), SERVE_FIXTURE)
+            .expect("crate-local Orna source fixture");
+        git_succeeds(directory.path(), &["add", "--", "main.orna"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "base",
+            ],
+        );
+
+        let repository = Repository::discover(directory.path()).expect("database repository");
+        let head = repository
+            .head()
+            .expect("read HEAD")
+            .expect("base commit");
+        let index_before = repository.index_generation().expect("index generation");
+        let artifact = ManagedPath::new("published/capture.orna").unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[ManagedFileChange::new(
+                    artifact.clone(),
+                    Some(SERVE_FIXTURE.as_bytes().to_vec()),
+                )],
+                "orna: publish capture artifact",
+            )
+            .expect("private candidate commit");
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            candidate.commit().clone(),
+            index_before.tree().expect("index tree").clone(),
+            [3; 16],
+            vec![PublicationJournalEntry::new(
+                artifact.clone(),
+                None,
+                Some(SERVE_FIXTURE.as_bytes().to_vec()),
+            )],
+        )
+        .expect("publication journal");
+        repository
+            .publish_candidate(&index_before, &candidate, &mut journal)
+            .expect("publish capture artifact");
+        let published = repository
+            .head()
+            .expect("read published HEAD")
+            .expect("published commit");
+        let published_id = published.as_str();
+
+        let tree = listing_page(directory.path(), &format!("/tree/{published_id}/published/"));
+        assert_eq!(tree.status, 200);
+        let tree = String::from_utf8(tree.body).expect("published tree HTML");
+        assert!(tree.contains(&format!("/blob/{published_id}/published/capture.orna")));
+
+        let blob = listing_page(
+            directory.path(),
+            &format!("/blob/{published_id}/published/capture.orna"),
+        );
+        assert_eq!(blob.status, 200);
+        let blob = String::from_utf8(blob.body).expect("published blob HTML");
+        assert!(blob.contains("orna"));
+        assert!(!blob.contains("uncommitted"));
+    }
+
+    #[test]
     fn default_listing_reads_commits_trees_and_files_from_git() {
         let directory = tempfile::tempdir().expect("temporary database");
         git_succeeds(
