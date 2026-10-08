@@ -32,6 +32,7 @@ mod compact;
 mod init;
 mod native_graph;
 pub mod offline_copy;
+pub mod publication_describe;
 mod publication_transaction;
 mod row_store;
 #[cfg(test)]
