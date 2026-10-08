@@ -508,6 +508,27 @@ fn revisions_since(revisions: &[RowRevision], since: &str) -> Option<Vec<RowRevi
 }
 
 
+/// Runs `orna history <relation> <key> --format json` as a child process inside
+/// the repository and parses its stdout as the revision array.
+fn history_json(directory: &Path, relation_id: [u8; 16], key: &str) -> Vec<serde_json::Value> {
+    let relation: String = relation_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .current_dir(directory)
+        .args(["history", &relation, key, "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "history failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    match serde_json::from_slice(&output.stdout).unwrap() {
+        serde_json::Value::Array(entries) => entries,
+        other => panic!("history --format json must print an array, got {other}"),
+    }
+}
+
 /// Keeps the `limit` newest revisions, the truncation `orna history --limit`
 /// applies to the newest-first walk.
 fn limited(revisions: &[RowRevision], limit: usize) -> Vec<RowRevision> {
