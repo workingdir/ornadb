@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Repository, RepositoryError};
 use crate::{
-    native_graph::{GitHashAlgorithm, NativeGraphContext, NativeOid},
+    native_graph::{GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability},
     row_store::RowMapSnapshot,
 };
 
@@ -470,6 +470,26 @@ impl Repository {
     pub fn open_format_context(&self) -> Result<RepositoryFormatContext, FormatContextError> {
         let snapshot = self.pin_snapshot("HEAD")?;
         self.open_format_context_at(&snapshot)
+    }
+
+    /// Issues capture authority for one format-3 relation at the current
+    /// HEAD. The row map, native graph, and read scope all come from this
+    /// repository's own format context, so callers supply only the relation.
+    pub fn capture_capability(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<RepositoryCaptureCapability, CaptureCapabilityError> {
+        let format = self.open_format_context().map_err(CaptureCapabilityError::Format)?;
+        let row_map = format
+            .load_row_map(relation_id)
+            .map_err(CaptureCapabilityError::Format)?;
+        let graph = std::sync::Arc::new(
+            format
+                .open_native_graph(&row_map)
+                .map_err(CaptureCapabilityError::Format)?,
+        );
+        let scope = graph.open_read_scope().map_err(CaptureCapabilityError::Graph)?;
+        RepositoryCaptureCapability::new(graph, scope).map_err(CaptureCapabilityError::Graph)
     }
 
     /// Opens and validates metadata at a previously repository-pinned
@@ -1654,4 +1674,13 @@ mod graph_bridge_tests {
             Err(crate::native_graph::GraphError::InventoryQuotaExceeded)
         ));
     }
+}
+
+/// Why a repository could not issue capture authority for a relation.
+#[derive(Debug)]
+pub enum CaptureCapabilityError {
+    /// The format context, row map, or native graph was unavailable.
+    Format(FormatContextError),
+    /// The graph refused to issue the read scope or capability.
+    Graph(GraphError),
 }
