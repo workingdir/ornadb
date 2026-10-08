@@ -3314,6 +3314,7 @@ cd04e763ea6bd21a7201fc468207f68dd3de91ad4ce1e1841288aab86c0d0fe9  crates/orna-ls
 c75bbee709cc649cc9025108885f1ffae279b05b13edfd66647c6f56003b77d3  crates/orna-lsp/tests/fixtures/call-v1.orna
 48192399bc07aec2a77ce8acb9f810d4427fbdbd1b282141564bc9f442388859  crates/orna-lsp/tests/fixtures/diagnostic-clean-v1.orna
 c495e288bad67eb7ccd2a0f52580b2dde835d84c45bb85ab675aab178b59654d  crates/orna-lsp/tests/fixtures/diagnostic-keyword-name-v1.orna
+1d6507c277771162faf5ab37dfe673dbbe59c3184ddf06274272d00a134470d9  crates/orna-lsp/tests/fixtures/diagnostic-severity-v1.orna
 415bdfd6d8187cea64dccd750f93055025db74f13f49919190ce0ae830014460  crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna
 e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/document-link-target-v1.orna
 06ab71790499bbcd5b856ec721ae09b10eaeb511923b0882d3bdbc45c838cca7  crates/orna-lsp/tests/fixtures/document-links-v1.orna
@@ -3492,6 +3493,7 @@ e135e88ea724373eded488eca7b9aef9e871b22379d5aa456b1af647db94c424  crates/orna-re
 5075d2e2d2ea0ceedb49a53ad8daf559c89cb9c3f86b11853bcc1586907cf3d1  crates/orna-repository-v1/tests/fixtures/foundation-adapter-main.orna
 5075d2e2d2ea0ceedb49a53ad8daf559c89cb9c3f86b11853bcc1586907cf3d1  crates/orna-repository-v1/tests/fixtures/git-repository-main.orna
 abe8d8d34d5b65d1556e2e286cc6d6649b29b7fd9f5fb78d028f6853e364371c  crates/orna-repository-v1/tests/fixtures/git-repository-nested-tool.orna
+9662403d4258a1075344fce92e27c27b4975046f1056b89f176eec84133497e0  crates/orna-repository-v1/tests/fixtures/pin-roundtrip.orna
 2e88c870800727fb7dbf4dbe95619ab9cfa1b675b896b9985f15ec78e9fca510  crates/orna-repository-v1/tests/fixtures/snapshot-round-trip.orna
 1210bee01ae93bc95bf92f9377713fa21c8a4731d7fd18d02c38a3efdfd00df4  crates/orna-repository-v1/tests/fixtures/traceability-row-base.orna
 92854279a1ee438259fa7b57b1be5327a2210727eefa30f11bd574b9a66db9f0  crates/orna-repository-v1/tests/fixtures/traceability-row-conflict-name.orna
