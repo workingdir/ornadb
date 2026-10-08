@@ -94,3 +94,73 @@ fn offline_copy_hydrates_verified_payloads_and_rejects_tampering() {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+#[test]
+fn offline_import_plan_restores_every_verified_row_or_rejects_the_bundle() {
+    let directory = TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle");
+    let image = committed_row("image", "image/png", "pixel.png");
+    let song = committed_row("song", "audio/wav", "tone.wav");
+    let history = [
+        OfflineHistoryEntry {
+            sequence: 1,
+            commit: [0x11; 32],
+        },
+        OfflineHistoryEntry {
+            sequence: 2,
+            commit: [0x22; 32],
+        },
+    ];
+    write_offline_copy(&bundle, &[image.clone(), song.clone()], &history).unwrap();
+
+    // The plan carries every payload, verified, in bundle order.
+    let plan = OfflineCopy::open(&bundle).unwrap().import_plan().unwrap();
+    assert_eq!(plan.history, history);
+    assert_eq!(plan.rows.len(), 2);
+    assert_eq!(plan.rows[0].key, b"image");
+    assert_eq!(plan.rows[0].payload, image.payload.clone().unwrap());
+    assert_eq!(plan.rows[1].payload, song.payload.clone().unwrap());
+
+    // A row without a copied payload cannot restore its pin, so the whole
+    // bundle is refused.
+    let metadata_only = directory.path().join("metadata-only");
+    let mut without_payload = song.clone();
+    without_payload.payload = None;
+    write_offline_copy(&metadata_only, &[without_payload], &[]).unwrap();
+    assert!(matches!(
+        OfflineCopy::open(&metadata_only).unwrap().import_plan(),
+        Err(OfflineCopyError::NoPayload { .. })
+    ));
+
+    // Out-of-order history is refused before any row is read.
+    let reversed = directory.path().join("reversed");
+    write_offline_copy(
+        &reversed,
+        &[],
+        &[
+            OfflineHistoryEntry {
+                sequence: 2,
+                commit: [0x22; 32],
+            },
+            OfflineHistoryEntry {
+                sequence: 1,
+                commit: [0x11; 32],
+            },
+        ],
+    )
+    .unwrap();
+    assert!(matches!(
+        OfflineCopy::open(&reversed).unwrap().import_plan(),
+        Err(OfflineCopyError::InvalidBundle(_))
+    ));
+
+    // A flipped media byte makes the whole import fail.
+    let media_file = bundle.join("media").join(hex(&song.sha256));
+    let mut on_disk = std::fs::read(&media_file).unwrap();
+    on_disk[0] ^= 0xff;
+    std::fs::write(&media_file, on_disk).unwrap();
+    assert!(matches!(
+        OfflineCopy::open(&bundle).unwrap().import_plan(),
+        Err(OfflineCopyError::PayloadMismatch { .. })
+    ));
+}
