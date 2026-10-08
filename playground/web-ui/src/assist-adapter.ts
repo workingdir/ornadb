@@ -127,3 +127,46 @@ export function inlayHintFields(value: unknown): InlayHintFields[] {
     return [mapped];
   });
 }
+
+export interface DocumentSymbolRange {
+  start: { line: number; character: number };
+  end: { line: number; character: number };
+}
+
+export interface DocumentSymbolFields {
+  name: string;
+  detail?: string;
+  kind: number;
+  range: DocumentSymbolRange;
+  selectionRange: DocumentSymbolRange;
+  children: DocumentSymbolFields[];
+}
+
+function isRange(value: unknown): value is DocumentSymbolRange {
+  if (typeof value !== 'object' || value === null) return false;
+  const { start, end } = value as Record<string, unknown>;
+  return [start, end].every((point) => (
+    typeof point === 'object'
+    && point !== null
+    && typeof (point as Record<string, unknown>).line === 'number'
+    && typeof (point as Record<string, unknown>).character === 'number'
+  ));
+}
+
+export function documentSymbolFields(value: unknown): DocumentSymbolFields[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): DocumentSymbolFields[] => {
+    if (typeof item !== 'object' || item === null) return [];
+    const symbol = item as Record<string, unknown>;
+    if (typeof symbol.name !== 'string' || typeof symbol.kind !== 'number') return [];
+    if (!isRange(symbol.range) || !isRange(symbol.selectionRange)) return [];
+    return [{
+      name: symbol.name,
+      ...(typeof symbol.detail === 'string' ? { detail: symbol.detail } : {}),
+      kind: symbol.kind,
+      range: symbol.range,
+      selectionRange: symbol.selectionRange,
+      children: documentSymbolFields(symbol.children),
+    }];
+  });
+}
