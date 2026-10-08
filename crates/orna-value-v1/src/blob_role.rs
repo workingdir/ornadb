@@ -47,6 +47,19 @@ pub enum BlobRole {
     Document,
 }
 
+impl MediaFamily {
+    /// The lowercase top-level type name, as it appears before `/` in MIME-1.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Application => "application",
+            Self::Audio => "audio",
+            Self::Image => "image",
+            Self::Text => "text",
+            Self::Video => "video",
+        }
+    }
+}
+
 impl BlobRole {
     /// Selects the behavior an annotation takes by default.
     pub fn for_annotation(annotation: &MediaAnnotation) -> Self {
@@ -86,7 +99,10 @@ impl Blob {
         if role.admits(self.annotation()) {
             Ok(self)
         } else {
-            Err(Error::RoleMismatch)
+            Err(Error::RoleMismatch {
+                role,
+                family: MediaFamily::of(self.annotation()),
+            })
         }
     }
 }
@@ -163,13 +179,18 @@ mod tests {
         let bindings = bindings();
         let (media_type, suffix, _) = asset(&bindings, "hero");
         let value = annotated_value(&media_type, &suffix);
+        assert!(matches!(
+            value.blob_as(BlobRole::Video),
+            Err(Error::RoleMismatch { .. })
+        ));
+        assert!(matches!(
+            value.blob_as(BlobRole::Document),
+            Err(Error::RoleMismatch { .. })
+        ));
+        let message = value.blob_as(BlobRole::Video).unwrap_err().to_string();
         assert_eq!(
-            value.blob_as(BlobRole::Video).unwrap_err(),
-            Error::RoleMismatch
-        );
-        assert_eq!(
-            value.blob_as(BlobRole::Document).unwrap_err(),
-            Error::RoleMismatch
+            message,
+            "OVB-2 Blob role Video does not admit MIME family image"
         );
         // Opaque is the bytes-only consumer and admits every canonical annotation.
         assert!(value.blob_as(BlobRole::Opaque).is_ok());
@@ -188,9 +209,9 @@ mod tests {
 
         let (report_type, report_suffix, _) = asset(&bindings, "report");
         let report = annotated_value(&report_type, &report_suffix);
-        assert_eq!(
-            report.blob_as(BlobRole::Text).unwrap_err(),
-            Error::RoleMismatch
-        );
+        assert!(matches!(
+            report.blob_as(BlobRole::Text),
+            Err(Error::RoleMismatch { .. })
+        ));
     }
 }
