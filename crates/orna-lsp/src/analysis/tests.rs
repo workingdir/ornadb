@@ -437,3 +437,31 @@ fn keyword_completion_documentation_matches_the_keyword_hover_card() {
     }
     assert_eq!(checked, Keyword::ALL.to_vec(), "every reserved word is checked");
 }
+
+const SIGNATURE_KEYWORD_ARGS_SOURCE: &str =
+    include_str!("../../tests/fixtures/signature-keyword-args-v1.orna");
+
+#[test]
+fn signature_help_round_trips_through_a_reserved_word_argument() {
+    let document = document(SIGNATURE_KEYWORD_ARGS_SOURCE);
+    let parse = parse_document(&document);
+    assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
+    let mapper = PositionMapper::new(&document.text);
+
+    let keyword_byte = document.text.find("true").unwrap();
+    let keyword_position = mapper.position(keyword_byte);
+    assert_eq!(mapper.byte_offset(keyword_position), keyword_byte);
+    let help = signature_help(&document, &parse, keyword_position, &mapper)
+        .expect("signature help inside the call");
+    assert_eq!(help.active_parameter, Some(0));
+    assert!(
+        help.signatures[0].label.contains("choose"),
+        "{:?}",
+        help.signatures[0].label
+    );
+
+    let literal_byte = document.text.find("2)").unwrap();
+    let literal_help = signature_help(&document, &parse, mapper.position(literal_byte), &mapper)
+        .expect("signature help on the second argument");
+    assert_eq!(literal_help.active_parameter, Some(1));
+}
