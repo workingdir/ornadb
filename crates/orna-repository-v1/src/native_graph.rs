@@ -3649,9 +3649,21 @@ impl ObjectStats {
             .map(|(kind, count)| format!("\"{}\":{count}", node_kind_name(*kind)))
             .collect::<Vec<_>>()
             .join(",");
-        format!("{{\"nodes\":{{{nodes}}},\"blob_references\":{}}}", self.blob_references)
+        format!(
+            "{{\"nodes\":{{{nodes}}},\"blob_references\":{},\"schema_version\":{STATS_SCHEMA_VERSION}}}",
+            self.blob_references
+        )
+    }
+
+    /// Version of the stats output schema, the value `ogs stats --version`
+    /// reports. Bump it when a key or its meaning changes.
+    pub const fn schema_version(&self) -> u32 {
+        STATS_SCHEMA_VERSION
     }
 }
+
+/// Output schema version for [`ObjectStats::to_json`].
+pub const STATS_SCHEMA_VERSION: u32 = 1;
 
 fn node_kind_name(kind: NodeKind) -> &'static str {
     match kind {
