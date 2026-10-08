@@ -184,6 +184,11 @@ pub fn semantic_legend_table() -> String {
     out
 }
 
+/// Number of advertised token types and token modifiers.
+pub fn semantic_legend_counts() -> (usize, usize) {
+    (legend_token_types().count(), TOKEN_MODIFIERS.len())
+}
+
 /// Semantic legend as CSV with the columns `kind,index,name,sample`. Token
 /// type rows use the protocol index; modifier rows use the bit position and
 /// have an empty sample. Fields are quoted per RFC 4180 when needed.
