@@ -836,7 +836,7 @@ fn encoded_playground_row_id(prefix: &str, value: &str) -> String {
 /// Lists the playground routes committed as DB-resident `playground/Route` rows.
 /// Each row is decoded with the same validation the route serving path uses, and
 /// rows that fail decoding are left out rather than listed.
-fn playground_catalogue_routes(root: &Path) -> Result<Vec<String>, ()> {
+fn playground_catalogue_routes(root: &Path, needle: Option<&str>) -> Result<Vec<String>, ()> {
     let repository = Repository::discover(root).map_err(|_| ())?;
     let Some(commit) = repository.head().map_err(|_| ())? else {
         return Ok(Vec::new());
@@ -868,7 +868,9 @@ fn playground_catalogue_routes(root: &Path) -> Result<Vec<String>, ()> {
         let Ok(source) = String::from_utf8(source) else {
             continue;
         };
-        if let Some((route_path, _)) = decode_playground_route(&source, file_name) {
+        if let Some((route_path, _)) = decode_playground_route(&source, file_name)
+            && needle.is_none_or(|needle| route_path.contains(needle))
+        {
             routes.push(route_path);
         }
     }
@@ -880,7 +882,7 @@ fn playground_catalogue_routes(root: &Path) -> Result<Vec<String>, ()> {
 /// JSON rows for the playground catalogue: the committed route paths, read from
 /// the DB-resident `playground/Route` rows and sorted.
 fn playground_catalogue_json(root: &Path) -> Response {
-    let Ok(routes) = playground_catalogue_routes(root) else {
+    let Ok(routes) = playground_catalogue_routes(root, None) else {
         return unavailable_response();
     };
     let rows = routes
@@ -899,29 +901,47 @@ fn playground_catalogue_json(root: &Path) -> Response {
     response
 }
 
-/// Parses the optional `page=N` parameter for the catalogue page. Pages are
-/// 1-based; an absent parameter is the first page.
-fn playground_catalogue_page_number(query: &str) -> Result<usize, ()> {
-    if query.is_empty() {
-        return Ok(1);
+/// Parses the catalogue page query: an optional `q=<path-text>` filter and an
+/// optional 1-based `page=N`, each at most once. Anything else is a bad request.
+/// The filter is a plain substring over route paths, so only path-safe
+/// characters are accepted.
+fn playground_catalogue_params(query: &str) -> Result<(Option<&str>, usize), ()> {
+    let mut needle = None;
+    let mut page = None;
+    for parameter in query.split('&').filter(|parameter| !parameter.is_empty()) {
+        let Some((name, value)) = parameter.split_once('=') else {
+            return Err(());
+        };
+        match name {
+            "q" if needle.is_none()
+                && !value.is_empty()
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.')
+                }) =>
+            {
+                needle = Some(value);
+            }
+            "page"
+                if page.is_none()
+                    && !value.is_empty()
+                    && value.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                match value.parse::<usize>() {
+                    Ok(number) if number > 0 => page = Some(number),
+                    _ => return Err(()),
+                }
+            }
+            _ => return Err(()),
+        }
     }
-    let Some(number) = query.strip_prefix("page=") else {
-        return Err(());
-    };
-    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(());
-    }
-    match number.parse::<usize>() {
-        Ok(page) if page > 0 => Ok(page),
-        _ => Err(()),
-    }
+    Ok((needle, page.unwrap_or(1)))
 }
 
 fn playground_catalogue_page(root: &Path, identity: RuntimeIdentity, query: &str) -> Response {
-    let Ok(page) = playground_catalogue_page_number(query) else {
+    let Ok((needle, page)) = playground_catalogue_params(query) else {
         return bad_request_response();
     };
-    let Ok(routes) = playground_catalogue_routes(root) else {
+    let Ok(routes) = playground_catalogue_routes(root, needle) else {
         return unavailable_response();
     };
     let start = (page - 1).saturating_mul(PLAYGROUND_CATALOGUE_PAGE_SIZE);
@@ -952,7 +972,10 @@ fn playground_catalogue_page(root: &Path, identity: RuntimeIdentity, query: &str
             "More".into(),
             InspectionNode::Link {
                 label: "Next page".into(),
-                href: format!("/playground/catalogue?page={}", page + 1),
+                href: match needle {
+                    Some(needle) => format!("/playground/catalogue?q={needle}&page={}", page + 1),
+                    None => format!("/playground/catalogue?page={}", page + 1),
+                },
             },
         ));
     }
@@ -3058,7 +3081,7 @@ mod tests {
         );
 
         assert_eq!(
-            playground_catalogue_routes(directory.path()),
+            playground_catalogue_routes(directory.path(), None),
             Ok(vec!["/playground/assets/examples.css".to_owned()])
         );
     }
@@ -3274,6 +3297,53 @@ mod tests {
         assert_eq!(page.status, 200);
         let page = String::from_utf8(page.body).expect("HTML body is UTF-8");
         assert!(page.contains("<dt>Total routes</dt><dd>1</dd>"));
+    }
+
+    #[test]
+    fn playground_catalogue_filters_committed_routes_by_q_and_page() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git_succeeds(directory.path(), &["init", "--quiet"]);
+        let route_directory = directory.path().join("playground/Route");
+        std::fs::create_dir_all(&route_directory).expect("create route rows");
+        for (file, source) in [
+            (
+                "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373.orna",
+                include_str!("../tests/fixtures/playground-route-example-catalog-style.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e6d6a73.orna",
+                include_str!("../tests/fixtures/playground-route-catalogue-script.orna"),
+            ),
+        ] {
+            std::fs::write(route_directory.join(file), source).expect("write route row");
+        }
+        git_succeeds(directory.path(), &["add", "playground/Route"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add catalogue routes for filtering",
+            ],
+        );
+
+        assert_eq!(
+            playground_catalogue_routes(directory.path(), Some("css")),
+            Ok(vec!["/playground/assets/examples.css".to_owned()])
+        );
+        assert_eq!(
+            playground_catalogue_params("q=css&page=1"),
+            Ok((Some("css"), 1))
+        );
+        assert_eq!(playground_catalogue_params(""), Ok((None, 1)));
+        for query in ["q=", "q=css%20x", "q=css&q=mjs", "page=0", "x=css"] {
+            assert_eq!(playground_catalogue_params(query), Err(()), "{query}");
+        }
     }
 
     #[test]
