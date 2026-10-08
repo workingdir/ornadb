@@ -15,6 +15,7 @@ from scripts import check_fixture_manifest
 from scripts.check_fixture_manifest import (
     fixture_hashes,
     only_changed,
+    scan_exit_status,
     render_manifest,
     validate_manifest,
 )
@@ -552,3 +553,30 @@ class FixtureManifestHelpTests(unittest.TestCase):
         self.assertIn("--since origin/main", help_text)
         self.assertIn("exit status:", help_text)
         self.assertIn("2  the pinned manifest is missing", help_text)
+
+
+class FixtureManifestUnreadableTests(unittest.TestCase):
+    def test_unreadable_fixture_is_a_scan_error_with_exit_4(self) -> None:
+        with TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            fixtures = workspace / "crates" / "example" / "tests" / "fixtures"
+            fixtures.mkdir(parents=True)
+            (fixtures / "locked.orna").write_bytes(b"locked\n")
+            original_read_bytes = Path.read_bytes
+
+            def read_bytes(path: Path) -> bytes:
+                if path.name == "locked.orna":
+                    raise PermissionError(13, "Permission denied")
+                return original_read_bytes(path)
+
+            with mock.patch.object(Path, "read_bytes", read_bytes):
+                hashes, errors = fixture_hashes(workspace)
+
+        self.assertEqual(hashes, {})
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("fixture file is unreadable: "))
+        self.assertIn("crates/example/tests/fixtures/locked.orna", errors[0])
+        self.assertEqual(scan_exit_status(errors), 4)
+
+    def test_other_scan_errors_still_exit_1(self) -> None:
+        self.assertEqual(scan_exit_status(["fixture file symlink is not supported: x"]), 1)
