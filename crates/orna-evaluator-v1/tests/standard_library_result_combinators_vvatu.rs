@@ -183,6 +183,13 @@ fn result_map_error_transforms_only_the_error_branch() {
 }
 
 #[test]
+fn result_map_error_composes_with_error_queries() {
+    assert_true_fixture(include_str!(
+        "fixtures/stdlib-result-map-error-compose.orna"
+    ));
+}
+
+#[test]
 fn result_map_error_propagates_failures_from_its_callback() {
     let error = evaluate_fixture(include_str!(
         "fixtures/stdlib-result-map-error-callback-failure.orna"
