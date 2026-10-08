@@ -23,6 +23,10 @@ const PAGED_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-paged.orna"
 );
+const AUTHORED_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-authored.orna"
+);
 const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
@@ -231,6 +235,69 @@ async fn history_pages_cover_every_revision_once_across_imported_rows() {
 
 /// Lists the committed song row's revisions through the OGS-1 walk. Only
 /// commit headers and tree listings are read; no blob is opened or pinned.
+#[tokio::test]
+async fn author_filter_keeps_every_revision_of_each_imported_row() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    // Two imported rows from two fixtures, so the filter runs across both walks.
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let authored = import_expression(AUTHORED_SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &authored, "song-authored", 0x80, true).await;
+
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let rows = graph
+        .range_rows(&KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+    let head = git_output(directory.path(), &["rev-parse", "HEAD"], None);
+    let head = String::from_utf8(head).unwrap().trim().to_owned();
+
+    for key in ["song", "song-authored"] {
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.key() == &TypedKey::Bytes(key.as_bytes().to_vec())
+                    || row.key() == &TypedKey::Text(key.to_owned())
+            })
+            .unwrap_or_else(|| panic!("the {key} row is committed"));
+        let revisions = graph.list_row_revisions(row, 64, &scope).unwrap();
+        assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
+        // Every revision in the walk is stamped with the fixture identity, so the
+        // filter keeps all of them and an unknown author keeps none.
+        assert!(
+            revisions.iter().all(|revision| revision.author().contains("kierandrewett")),
+            "{key}: every revision carries the fixture author"
+        );
+        assert_eq!(filter_by_author(&revisions, "kierandrewett"), revisions, "{key}");
+        assert!(filter_by_author(&revisions, "no-such-author").is_empty(), "{key}");
+    }
+    drop(directory);
+}
+
 fn assert_song_revision_history(
     repository: &Repository,
     directory: &TempDir,
@@ -269,6 +336,19 @@ fn assert_song_revision_history(
         revisions.len(),
     );
     assert_eq!(pages.concat(), revisions);
+    // The author filter keeps revisions whose `Name <email>` contains the text.
+    assert_eq!(filter_by_author(&revisions, "kierandrewett"), revisions);
+    assert!(filter_by_author(&revisions, "no-such-author").is_empty());
+}
+
+/// Keeps the revisions whose commit author contains `needle`, the same
+/// substring rule `orna history --author` applies to each listed revision.
+fn filter_by_author(revisions: &[RowRevision], needle: &str) -> Vec<RowRevision> {
+    revisions
+        .iter()
+        .filter(|revision| revision.author().contains(needle))
+        .cloned()
+        .collect()
 }
 
 /// Splits a newest-first revision walk into pages of `size`. `list(max)`
