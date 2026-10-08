@@ -1,0 +1,1 @@
+stats.variance([3, 3]) == first([0])
