@@ -1,0 +1,6 @@
+map.remove(empty_pairs, "a") == empty_pairs
+&& map.remove([("b", 1), ("a", 2)], "c") == [("b", 1), ("a", 2)]
+&& map.remove([("a", 1), ("a", 2), ("b", 3)], "zz") == [("a", 2), ("b", 3)]
+&& map.size(map.remove([("a", 1)], "zz")) == 1
+&& map.remove(map.remove([("a", 1)], "a"), "a") == empty_pairs
+&& map.keys(map.remove([("x", 1), ("y", 2)], "w")) == ["x", "y"]
