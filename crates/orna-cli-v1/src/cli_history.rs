@@ -244,6 +244,7 @@ fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_HISTORY_LIMIT, HistoryFormat, parse_options, parse_relation_id};
+    use crate::Exit;
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -289,6 +290,20 @@ mod tests {
         assert_eq!(super::summary_line(0, 0), "0 revisions (0 present, 0 absent)");
         assert_eq!(super::summary_line(1, 1), "1 revision (1 present, 0 absent)");
         assert_eq!(super::summary_line(4, 3), "4 revisions (3 present, 1 absent)");
+    }
+
+    #[test]
+    fn history_errors_exit_with_target_code_one() {
+        // Every history failure is a target diagnostic, so the documented
+        // exit status for `orna history` errors is 1.
+        let bad = [
+            words(&["r"]),
+            words(&["r", "k", "--limit", "0"]),
+            words(&["r", "k", "--bogus"]),
+        ];
+        for arguments in &bad {
+            assert_eq!(parse_options(arguments).unwrap_err().exit, Exit::Target);
+        }
     }
 
     #[test]
