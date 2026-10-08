@@ -79,6 +79,31 @@ pub enum Error {
     QuotaExceeded,
     SinkFailed,
 }
+/// Stable, machine-readable codes for dispatch failures. The string form is
+/// part of the contract, so a variant rename must not change it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorCode {
+    RoleMismatch,
+}
+
+impl ErrorCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RoleMismatch => "OVB2_ROLE_MISMATCH",
+        }
+    }
+}
+
+impl Error {
+    /// The stable code for this failure, when it has one.
+    pub const fn code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::RoleMismatch { .. } => Some(ErrorCode::RoleMismatch),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -88,10 +113,11 @@ impl fmt::Display for Error {
                 length,
                 expected,
             } => {
+                let code = ErrorCode::RoleMismatch.as_str();
                 let family = family.map_or("unknown", MediaFamily::name);
                 write!(
                     f,
-                    "OVB-2 Blob role {role:?} does not admit MIME family {family} ({length} bytes); admit as {expected:?} or Opaque"
+                    "{code}: OVB-2 Blob role {role:?} does not admit MIME family {family} ({length} bytes); admit as {expected:?} or Opaque"
                 )
             }
             _ => write!(f, "OVB-1 {self:?}"),
