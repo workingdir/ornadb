@@ -1,0 +1,1 @@
+std.math.clamp(5, 10, 0) == 10 && std.math.clamp(-3, 10, 0) == 10 && std.math.clamp(12, 10, 0) == 10
