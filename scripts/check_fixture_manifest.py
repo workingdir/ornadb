@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import sys
@@ -145,9 +146,17 @@ def main() -> int:
         action="store_true",
         help="suppress success output; drift and scan errors are still reported",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="with --check, write one JSON result object to stdout instead of text",
+    )
     args = parser.parse_args()
 
     hashes, scan_errors = fixture_hashes(WORKSPACE_ROOT)
+    if scan_errors and args.check and args.json:
+        print(json.dumps({"ok": False, "scan_errors": scan_errors, "errors": []}))
+        return 1
     if scan_errors:
         print("fixture manifest scan failed:", file=sys.stderr)
         for error in scan_errors:
@@ -164,6 +173,21 @@ def main() -> int:
         print(f"fixture manifest does not exist: {MANIFEST_PATH}", file=sys.stderr)
         return 1
     errors = validate_manifest(hashes, MANIFEST_PATH.read_text(encoding="utf-8"))
+    trees = len(fixture_roots(WORKSPACE_ROOT))
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "ok": not errors,
+                    "files": len(hashes),
+                    "trees": trees,
+                    "scan_errors": [],
+                    "errors": errors,
+                },
+                sort_keys=True,
+            )
+        )
+        return 1 if errors else 0
     if errors:
         print("fixture manifest drift detected:", file=sys.stderr)
         for error in errors:
@@ -172,10 +196,7 @@ def main() -> int:
         return 1
 
     if not args.quiet:
-        print(
-            f"fixture manifest matches {len(hashes)} files across "
-            f"{len(fixture_roots(WORKSPACE_ROOT))} trees"
-        )
+        print(f"fixture manifest matches {len(hashes)} files across {trees} trees")
     return 0
 
 
