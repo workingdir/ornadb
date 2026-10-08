@@ -635,3 +635,19 @@ class FixtureManifestErrorPrefixTests(unittest.TestCase):
         self.assertEqual(lines[0], "ornadb: fixture manifest drift detected:")
         self.assertTrue(lines[1].startswith("  "))
         self.assertEqual(lines[-1], "ornadb: fixture manifest drift total: 1")
+
+
+class FixtureManifestVersionTests(unittest.TestCase):
+    def test_version_prints_the_checker_version_and_exits_0(self) -> None:
+        stdout = StringIO()
+        with (
+            mock.patch("sys.argv", ["check_fixture_manifest.py", "--version"]),
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            check_fixture_manifest.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(
+            stdout.getvalue(), f"check_fixture_manifest.py {check_fixture_manifest.CHECKER_VERSION}\n"
+        )
