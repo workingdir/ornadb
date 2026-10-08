@@ -1777,9 +1777,11 @@ mod graph_bridge_tests {
             "store root sorts first: {json}"
         );
         assert!(json.ends_with(&format!(
-            "}},\"blob_references\":{}}}",
-            stats.blob_references()
+            "}},\"blob_references\":{},\"schema_version\":{}}}",
+            stats.blob_references(),
+            crate::native_graph::STATS_SCHEMA_VERSION
         )));
+        assert_eq!(stats.schema_version(), 1, "--version reports the stats schema");
     }
 }
 
