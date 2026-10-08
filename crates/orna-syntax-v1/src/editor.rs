@@ -152,6 +152,33 @@ pub fn semantic_legend_markdown() -> String {
     out
 }
 
+/// Semantic legend as CSV with the columns `kind,index,name,sample`. Token
+/// type rows use the protocol index; modifier rows use the bit position and
+/// have an empty sample. Fields are quoted per RFC 4180 when needed.
+pub fn semantic_legend_csv() -> String {
+    let mut out = String::from("kind,index,name,sample\n");
+    for (index, token_type) in legend_token_types().enumerate() {
+        let sample = token_type_sample(token_type).unwrap_or("");
+        out.push_str(&format!(
+            "token_type,{index},{},{}\n",
+            csv_field(token_type),
+            csv_field(sample)
+        ));
+    }
+    for (index, modifier) in TOKEN_MODIFIERS.iter().enumerate() {
+        out.push_str(&format!("token_modifier,{index},{},\n", csv_field(modifier)));
+    }
+    out
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
+}
+
 /// Example lexeme shown as the hover sample for each legend token type.
 const TOKEN_TYPE_SAMPLES: &[(&str, &str)] = &[
     ("keyword", "fn"),
