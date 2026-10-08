@@ -93,7 +93,10 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     let small_png = BlobMetadataFilter::new()
         .with_media_type("image/png")
         .with_max_length(100);
-    assert_eq!(filter_media(&state, &small_png).await, vec![b"image".to_vec()]);
+    assert_eq!(
+        filter_media(&state, &small_png).await,
+        vec![b"image".to_vec()]
+    );
     let too_small = BlobMetadataFilter::new().with_max_length(10);
     assert!(filter_media(&state, &too_small).await.is_empty());
 
@@ -207,8 +210,6 @@ async fn import_media(
     assert_eq!(committed.request.state, RequestState::Completed);
 }
 
-/// Lists every committed media row as payload-free metadata. Rows are decoded
-/// as Blob references only; no read or hydration call is made.
 async fn filter_media(state: &RuntimeState, filter: &BlobMetadataFilter) -> Vec<Vec<u8>> {
     state
         .committed_table_rows("media")
@@ -220,6 +221,8 @@ async fn filter_media(state: &RuntimeState, filter: &BlobMetadataFilter) -> Vec<
         .collect()
 }
 
+/// Lists every committed media row as payload-free metadata. Rows are decoded
+/// as Blob references only; no read or hydration call is made.
 async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
     state
         .committed_table_rows("media")
