@@ -44,6 +44,17 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::SemanticLegend {
+            format: LegendFormat::Quiet,
+        } => {
+            for token_type in orna_syntax_v1::editor::legend_token_types() {
+                println!("{token_type}");
+            }
+            for modifier in orna_syntax_v1::editor::TOKEN_MODIFIERS {
+                println!("{modifier}");
+            }
+            Ok(())
+        }
+        Command::SemanticLegend {
             format: LegendFormat::Text,
         } => {
             println!("Token types:");
