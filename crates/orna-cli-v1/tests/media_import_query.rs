@@ -31,6 +31,10 @@ const SINCE_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-since.orna"
 );
+const LIMIT_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-limit.orna"
+);
 const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
@@ -372,6 +376,71 @@ async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
     drop(directory);
 }
 
+#[tokio::test]
+async fn limit_walk_matches_the_truncated_full_walk_for_each_imported_row() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    // Three imported rows, so the limit is checked against more than one walk.
+    let imports = [
+        ("song", SONG_IMPORT_FIXTURE, 0x70_u8),
+        ("song-limit", LIMIT_SONG_IMPORT_FIXTURE, 0x80_u8),
+        ("song-later", SINCE_SONG_IMPORT_FIXTURE, 0x90_u8),
+    ];
+    for (key, fixture, ordinal) in imports {
+        let expression = import_expression(fixture, source.path());
+        import_media(&state, writer, &mut bindings, &expression, key, ordinal, true).await;
+    }
+    // Reading the committed rows first makes them visible to the graph.
+    state.committed_table_rows("media").await.unwrap();
+
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let rows = graph
+        .range_rows(&KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+
+    for (key, _, _) in imports {
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.key() == &TypedKey::Bytes(key.as_bytes().to_vec())
+                    || row.key() == &TypedKey::Text(key.to_owned())
+            })
+            .unwrap_or_else(|| panic!("the {key} row is committed"));
+        let full = graph.list_row_revisions(row, 64, &scope).unwrap();
+        // `orna history --limit N` walks only N commits, so each bounded walk
+        // must equal the first N revisions of the full walk.
+        for n in 1..=full.len() {
+            let bounded = graph.list_row_revisions(row, n, &scope).unwrap();
+            assert_eq!(bounded, limited(&full, n), "{key}: limit {n}");
+        }
+    }
+    drop(directory);
+}
+
 fn assert_song_revision_history(
     repository: &Repository,
     directory: &TempDir,
@@ -417,6 +486,10 @@ fn assert_song_revision_history(
     let since = revisions[2].commit().to_hex();
     assert_eq!(revisions_since(&revisions, &since), Some(revisions[..2].to_vec()));
     assert_eq!(revisions_since(&revisions, "no-such-commit"), None);
+    // `--limit N` keeps the N newest revisions; a limit past the walk keeps all.
+    assert_eq!(limited(&revisions, 2), revisions[..2].to_vec());
+    assert_eq!(limited(&revisions, revisions.len() + 5), revisions);
+    assert!(limited(&revisions, 0).is_empty());
 }
 
 /// Keeps the revisions newer than `since`, the same cut `orna history --since`
@@ -427,6 +500,13 @@ fn revisions_since(revisions: &[RowRevision], since: &str) -> Option<Vec<RowRevi
         .iter()
         .position(|revision| revision.commit().to_hex() == since)?;
     Some(revisions[..position].to_vec())
+}
+
+
+/// Keeps the `limit` newest revisions, the truncation `orna history --limit`
+/// applies to the newest-first walk.
+fn limited(revisions: &[RowRevision], limit: usize) -> Vec<RowRevision> {
+    revisions.iter().take(limit).cloned().collect()
 }
 
 /// Keeps the revisions whose commit author contains `needle`, the same
