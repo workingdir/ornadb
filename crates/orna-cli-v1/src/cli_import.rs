@@ -1,37 +1,54 @@
-//! `orna import <bundle-dir> --dry-run [--limit N] [--quiet]`: verifies an
-//! offline copy bundle in full and reports the rows and history an import would
-//! write. Nothing is written to the bundle or to any repository. A committing
-//! import is not wired yet, so `--dry-run` is required. `--limit N` reports only
-//! the first N rows in bundle order; every row is still verified. `--quiet`
-//! suppresses the success report; failures still exit non-zero with a diagnostic.
+//! `orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE]`:
+//! verifies an offline copy bundle in full and reports the rows and history an
+//! import would write. Nothing is written to the bundle or to any repository. A
+//! committing import is not wired yet, so `--dry-run` is required. `--limit N`
+//! reports only the first N rows in bundle order; every row is still verified.
+//! `--quiet` suppresses the success report; failures still exit non-zero with a
+//! diagnostic. `--type MEDIA_TYPE` reports every row under that media type
+//! instead of its recorded one; the bundle's stored types are not changed.
 
 use std::path::Path;
 
 use orna_repository_v1::offline_copy::OfflineCopy;
+use orna_value_v1::normalize_media_type;
 
 use super::Diagnostic;
 
-const USAGE: &str = "usage: orna import <bundle-dir> --dry-run [--limit N] [--quiet]";
+const USAGE: &str =
+    "usage: orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE]";
 
-/// Parsed import options: the bundle directory, optional row limit, and output mode.
+/// Parsed import options: the bundle directory, optional row limit, output mode, and media type override.
 #[derive(Debug, Eq, PartialEq)]
 struct ImportOptions<'a> {
     bundle: &'a str,
     limit: Option<usize>,
     quiet: bool,
+    media_type: Option<String>,
 }
 
-/// Returns the bundle directory, row limit, and quiet flag when the arguments name one and request a dry run.
+/// Returns the bundle directory, row limit, quiet flag, and media type override when the arguments name one and request a dry run.
 fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> {
     let mut bundle = None;
     let mut dry_run = false;
     let mut limit = None;
     let mut quiet = false;
+    let mut media_type = None;
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
             "--dry-run" => dry_run = true,
             "--quiet" => quiet = true,
+            "--type" => {
+                let value = words.next().ok_or_else(|| {
+                    import_error("--type needs a value", "usage: --type <MEDIA_TYPE>")
+                })?;
+                media_type = Some(normalize_media_type(value).map_err(|error| {
+                    import_error(
+                        "--type is not a valid media type",
+                        format!("got {value:?}: {error:?}"),
+                    )
+                })?);
+            }
             "--limit" => {
                 let value = words.next().ok_or_else(|| {
                     import_error("--limit needs a value", "usage: --limit <N>, N >= 1")
@@ -52,7 +69,7 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
             flag if flag.starts_with("--") => {
                 return Err(import_error(
                     "Unknown import flag",
-                    format!("got {flag:?}; accepted: --dry-run, --limit, --quiet"),
+                    format!("got {flag:?}; accepted: --dry-run, --limit, --quiet, --type"),
                 ));
             }
             path if bundle.is_none() => bundle = Some(path),
@@ -75,12 +92,17 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
         bundle,
         limit,
         quiet,
+        media_type,
     })
 }
 
 pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
-    let summary = dry_run_summary(Path::new(options.bundle), options.limit)?;
+    let summary = dry_run_summary(
+        Path::new(options.bundle),
+        options.limit,
+        options.media_type.as_deref(),
+    )?;
     if !options.quiet {
         println!("{summary}");
     }
@@ -89,15 +111,21 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
 
 /// Verifies the bundle and returns the one-line dry-run report. With a limit,
 /// only the first rows are counted; history is bundle-wide and always counted.
-fn dry_run_summary(bundle: &Path, limit: Option<usize>) -> Result<String, Diagnostic> {
+/// A media type override is named in the report; it does not alter the bundle.
+fn dry_run_summary(
+    bundle: &Path,
+    limit: Option<usize>,
+    media_type: Option<&str>,
+) -> Result<String, Diagnostic> {
     let plan = OfflineCopy::open(bundle)
         .and_then(|copy| copy.import_plan())
         .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?;
     let total = plan.rows.len();
     let reported = limit.map_or(total, |limit| limit.min(total));
     let payload_bytes: u64 = plan.rows[..reported].iter().map(|row| row.length).sum();
+    let typed = media_type.map_or(String::new(), |media_type| format!(" as {media_type}"));
     Ok(format!(
-        "dry run: {reported} of {total} rows, {payload_bytes} payload bytes, {} history entries; nothing written",
+        "dry run: {reported} of {total} rows{typed}, {payload_bytes} payload bytes, {} history entries; nothing written",
         plan.history.len()
     ))
 }
@@ -176,23 +204,40 @@ mod tests {
         write_offline_copy(&bundle, &rows, &history).unwrap();
 
         assert_eq!(
-            dry_run_summary(&bundle, None).unwrap(),
+            dry_run_summary(&bundle, None, None).unwrap(),
             "dry run: 2 of 2 rows, 16 payload bytes, 1 history entries; nothing written"
         );
         assert_eq!(
-            dry_run_summary(&bundle, Some(1)).unwrap(),
+            dry_run_summary(&bundle, Some(1), None).unwrap(),
             "dry run: 1 of 2 rows, 6 payload bytes, 1 history entries; nothing written"
         );
         assert!(
-            dry_run_summary(&bundle, Some(9))
+            dry_run_summary(&bundle, Some(9), None)
                 .unwrap()
                 .starts_with("dry run: 2 of 2")
         );
     }
 
     #[test]
+    fn type_override_is_validated_and_named_in_the_report() {
+        let typed_arguments = words(&["--type", "audio/wav", "bundle", "--dry-run"]);
+        let typed = parse_options(&typed_arguments).unwrap();
+        assert_eq!(typed.media_type.as_deref(), Some("audio/wav"));
+        assert!(parse_options(&words(&["bundle", "--dry-run", "--type"])).is_err());
+        assert!(parse_options(&words(&["bundle", "--dry-run", "--type", "bogus"])).is_err());
+
+        let directory = TempDir::new().unwrap();
+        let bundle = directory.path().join("bundle");
+        write_offline_copy(&bundle, &[row("song", b"tone-bytes")], &[]).unwrap();
+        assert_eq!(
+            dry_run_summary(&bundle, None, Some("audio/wav")).unwrap(),
+            "dry run: 1 of 1 rows as audio/wav, 10 payload bytes, 0 history entries; nothing written"
+        );
+    }
+
+    #[test]
     fn dry_run_refuses_a_missing_bundle_without_writing() {
         let missing = Path::new("/nonexistent/orna-import-dry-run-bundle");
-        assert!(dry_run_summary(missing, None).is_err());
+        assert!(dry_run_summary(missing, None, None).is_err());
     }
 }
