@@ -3633,7 +3633,7 @@ impl ObjectStats {
     /// Process exit code for `ogs stats`: 3 for an empty object store, so a
     /// script can tell "nothing stored" from a corrupt index (2) or a
     /// failure (1). Zero when the walk reached at least one node.
-    pub const fn exit_code(&self) -> i32 {
+    pub fn exit_code(&self) -> i32 {
         if self.nodes.is_empty() { 3 } else { 0 }
     }
 
