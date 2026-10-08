@@ -743,4 +743,26 @@ mod tests {
         let text = scalars(&"a".repeat(64));
         assert_eq!(pattern.find_from(&text, 0), Err(RegexError::LimitExhausted));
     }
+
+    const ANCHOR_FIXTURE: &str = include_str!("../tests/fixtures/stdlib-regex-lite-anchors.orna");
+
+    // Read the string literal returned by `pub fn {name}(): Str = "..."`.
+    fn fixture_string(name: &str) -> &'static str {
+        let marker = format!("pub fn {name}(): Str = \"");
+        let start = ANCHOR_FIXTURE.find(&marker).expect("fixture declares the function") + marker.len();
+        let length = ANCHOR_FIXTURE[start..].find('"').expect("fixture literal is closed");
+        &ANCHOR_FIXTURE[start..start + length]
+    }
+
+    #[test]
+    fn anchored_fixture_matches_only_the_whole_text() {
+        let pattern = compile(fixture_string("anchored_pattern")).expect("fixture pattern compiles");
+        let anchored = scalars(fixture_string("anchored_text"));
+        let embedded = scalars(fixture_string("embedded_text"));
+        assert_eq!(
+            pattern.find_from(&anchored, 0).expect("within budget").map(|found| (found.start, found.end)),
+            Some((0, 2))
+        );
+        assert_eq!(pattern.find_from(&embedded, 0).expect("within budget"), None);
+    }
 }
