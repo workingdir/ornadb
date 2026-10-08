@@ -14,6 +14,7 @@ from unittest import mock
 from scripts import check_fixture_manifest
 from scripts.check_fixture_manifest import (
     fixture_hashes,
+    format_table,
     only_changed,
     scan_exit_status,
     render_manifest,
@@ -651,3 +652,34 @@ class FixtureManifestVersionTests(unittest.TestCase):
         self.assertEqual(
             stdout.getvalue(), f"check_fixture_manifest.py {check_fixture_manifest.CHECKER_VERSION}\n"
         )
+
+
+class FixtureManifestTableFormatTests(unittest.TestCase):
+    def test_format_table_aligns_columns_to_the_widest_cell(self) -> None:
+        rows = [["ok", "files", "trees", "errors"], ["true", "5926", "31", "0"]]
+        self.assertEqual(
+            format_table(rows).splitlines(),
+            ["ok    files  trees  errors", "true  5926   31     0"],
+        )
+
+    def test_table_format_prints_aligned_summary_and_exit_codes(self) -> None:
+        path = "crates/example/tests/fixtures/input.orna"
+        pinned = hashlib.sha256(b"original\n").hexdigest()
+        changed = hashlib.sha256(b"changed\n").hexdigest()
+        for hashes, expected_status, expected_ok in [({path: pinned}, 0, "true"), ({path: changed}, 1, "false")]:
+            with TemporaryDirectory() as directory:
+                manifest_path = Path(directory) / "fixture-manifest.sha256"
+                manifest_path.write_text(render_manifest({path: pinned}), encoding="utf-8")
+                stdout = StringIO()
+                with (
+                    mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", manifest_path),
+                    mock.patch.object(check_fixture_manifest, "fixture_hashes", return_value=(hashes, [])),
+                    mock.patch.object(check_fixture_manifest, "fixture_roots", return_value=[Path(directory)]),
+                    mock.patch("sys.argv", ["check_fixture_manifest.py", "--check", "--format", "table"]),
+                    redirect_stdout(stdout),
+                ):
+                    status = check_fixture_manifest.main()
+            rows = stdout.getvalue().splitlines()
+            self.assertEqual(status, expected_status)
+            self.assertEqual(rows[0].split(), ["ok", "files", "trees", "errors"])
+            self.assertEqual(rows[1].split(), [expected_ok, "1", "1", str(expected_status * 1)])

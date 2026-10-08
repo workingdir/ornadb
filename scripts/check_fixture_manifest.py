@@ -184,6 +184,14 @@ def only_changed(errors: list[str], paths: set[str]) -> list[str]:
     ]
 
 
+def format_table(rows: list[list[str]]) -> str:
+    """Left-align each column to its widest cell, separated by two spaces."""
+    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
+    return "\n".join(
+        "  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip() for row in rows
+    )
+
+
 def _limited(errors: list[str], limit: int | None) -> list[str]:
     """Return the first `limit` errors, or all of them when no limit is given."""
     return errors if limit is None else errors[:limit]
@@ -235,7 +243,7 @@ exit status:
     )
     parser.add_argument(
         "--format",
-        choices=("text", "json", "tsv"),
+        choices=("text", "json", "tsv", "table"),
         default="text",
         help="with --check, output format; json writes one object, tsv writes a header and one row",
     )
@@ -293,6 +301,16 @@ exit status:
     if args.format == "tsv":
         print("ok\tfiles\ttrees\terrors")
         print(f"{str(not errors).lower()}\t{len(hashes)}\t{trees}\t{len(errors)}")
+        return 1 if errors else 0
+    if args.format == "table":
+        print(
+            format_table(
+                [
+                    ["ok", "files", "trees", "errors"],
+                    [str(not errors).lower(), str(len(hashes)), str(trees), str(len(errors))],
+                ]
+            )
+        )
         return 1 if errors else 0
     if args.format == "json":
         print(
