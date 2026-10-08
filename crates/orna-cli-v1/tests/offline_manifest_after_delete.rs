@@ -20,3 +20,33 @@ fn fixture_row(file: &str) -> OfflineRow {
         payload: Some(bytes),
     }
 }
+
+#[test]
+fn manifest_after_deleting_the_only_row_has_no_row_and_no_orphan_media() {
+    use orna_repository_v1::offline_copy::{OfflineCopy, write_offline_copy};
+    use tempfile::TempDir;
+
+    let directory = TempDir::new().unwrap();
+    let row = fixture_row("catalogue-manifest-del-ogm2.orna");
+
+    let before = directory.path().join("before");
+    write_offline_copy(&before, std::slice::from_ref(&row), &[]).unwrap();
+    assert_eq!(OfflineCopy::open(&before).unwrap().rows().len(), 1);
+
+    // "Delete" the only row by exporting without it.
+    let after = directory.path().join("after");
+    write_offline_copy(&after, &[], &[]).unwrap();
+    let index = std::fs::read_to_string(after.join("index.tsv")).unwrap();
+    assert!(
+        !index.lines().any(|line| line.starts_with("row\t")),
+        "manifest still lists a row: {index}"
+    );
+    assert!(OfflineCopy::open(&after).unwrap().rows().is_empty());
+
+    // No orphan payload is left behind for the deleted row.
+    let media_dir = after.join("media");
+    let leftover = std::fs::read_dir(&media_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(leftover, 0, "a deleted row left a payload behind");
+}
