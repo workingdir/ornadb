@@ -39,6 +39,10 @@ const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
 );
+const NEGATION_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-negation.orna"
+);
 const PROJECTION_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-projection.orna"
@@ -792,4 +796,42 @@ async fn listing_projects_suffix_column_for_song_and_image_rows() {
             (b"song".to_vec(), Some("wav".to_owned())),
         ]
     );
+}
+
+#[tokio::test]
+async fn negated_media_type_filter_excludes_only_the_named_type() {
+    let (_directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(Path::new(MEDIA_FIXTURES).join(name), source.path().join(name)).unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(NEGATION_SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+
+    let not_png = BlobMetadataFilter::new().without_media_type("image/png");
+    assert_eq!(filter_media(&state, &not_png).await, vec![b"song".to_vec()]);
+    let not_wav = BlobMetadataFilter::new().without_media_type("audio/wav");
+    assert_eq!(filter_media(&state, &not_wav).await, vec![b"image".to_vec()]);
+    let neither = BlobMetadataFilter::new()
+        .without_media_type("image/png")
+        .without_media_type("audio/wav");
+    assert!(filter_media(&state, &neither).await.is_empty());
 }
