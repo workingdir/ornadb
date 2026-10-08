@@ -1,0 +1,6 @@
+database Roundtrip {
+  table notes {
+    id: text primary key
+    body: text
+  }
+}
