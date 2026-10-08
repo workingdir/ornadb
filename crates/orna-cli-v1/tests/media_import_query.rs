@@ -47,6 +47,10 @@ const PROJECTION_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-projection.orna"
 );
+const NEGATIVE_LIMIT_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-negative-limit.orna"
+);
 const IMAGE_JSON_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image-json.orna"
@@ -764,6 +768,55 @@ async fn history_json_lists_each_revision_with_exactly_the_four_keys() {
     assert_eq!(entries[0]["commit"], head.as_str());
     assert_eq!(entries[0]["present"], true);
     assert!(entries.iter().any(|entry| entry["present"] == false));
+    drop(directory);
+}
+
+#[tokio::test]
+async fn history_rejects_negative_and_out_of_range_limits_before_listing() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let fixture = import_expression(NEGATIVE_LIMIT_SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &fixture, "song", 0x70, true).await;
+    drop(bindings);
+    drop(state);
+
+    let relation: String = relation_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    // Each value is outside 1..=4096 or not a number; `-1` is the negative case.
+    for value in ["-1", "0", "4097", "x"] {
+        let output = run_history(directory.path(), &[&relation, "song", "--limit", value]);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "--limit {value} must exit 1: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "--limit {value} must list no revisions: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
     drop(directory);
 }
 
