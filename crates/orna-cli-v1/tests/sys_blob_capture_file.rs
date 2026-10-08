@@ -2,11 +2,10 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, Stdio},
-    sync::Arc,
 };
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::{Repository, RepositoryCaptureCapability};
+use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     FaultInjector, FaultPoint, RequestIdentity, RequestState, RuntimeError, RuntimeIdentity,
     RuntimeState, TableMutation, TerminalOutcome,
@@ -52,11 +51,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap();
     let context = state.begin_activation().await.unwrap();
 
-    let format = repository.open_format_context().unwrap();
-    let row_map = format.load_row_map(relation_id).unwrap();
-    let graph = Arc::new(format.open_native_graph(&row_map).unwrap());
-    let scope = graph.open_read_scope().unwrap();
-    let capability = RepositoryCaptureCapability::new(graph, scope).unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
 
     let mut filesystem = FilesystemProvider::with_limits(1024, 16).unwrap();
     filesystem.allow_root(root).unwrap();
