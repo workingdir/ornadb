@@ -1390,6 +1390,47 @@ mod graph_bridge_tests {
     }
 
     #[test]
+    fn object_stats_since_traverses_the_second_fixture_root_against_the_first() {
+        let directory = repository();
+        let root = directory.path();
+        let first_context = context(root);
+        let (first_schema, first_digest) = schema_node(root, &first_context);
+        let first_rows = sealed_rows(&first_context, &first_schema, first_digest);
+        let first = first_context
+            .open_native_graph(&first_rows)
+            .expect("admit the first fixture root");
+        let first_scope = first.open_read_scope().expect("first read scope");
+        let first_stats = first
+            .object_stats(&first_scope)
+            .expect("walk the first fixture root");
+
+        fs::write(root.join(".orna/store/data"), b"store root two")
+            .expect("write second store root");
+        commit(root);
+        let second_context = context(root);
+        let (second_schema, second_digest) = schema_node(root, &second_context);
+        let second_rows = sealed_rows(&second_context, &second_schema, second_digest);
+        let second = second_context
+            .open_native_graph(&second_rows)
+            .expect("admit the second fixture root");
+        let second_scope = second.open_read_scope().expect("second read scope");
+        let second_stats = second
+            .object_stats(&second_scope)
+            .expect("walk the second fixture root");
+
+        let added = second
+            .object_stats_since(&second_scope, first.store_root())
+            .expect("traverse the second root and prune what the first root reaches");
+        assert!(first_stats.total_nodes() >= 1);
+        assert!(added.total_nodes() >= 1, "the new store root adds at least one node");
+        assert!(
+            added.total_nodes() < second_stats.total_nodes(),
+            "shared subtrees are pruned, so the added count is smaller than the whole walk"
+        );
+        assert!(added.blob_references() <= second_stats.blob_references());
+    }
+
+    #[test]
     fn native_graph_bridge_rejects_tampered_schema_payload_length_and_digest() {
         let directory = repository();
         let root = directory.path();
