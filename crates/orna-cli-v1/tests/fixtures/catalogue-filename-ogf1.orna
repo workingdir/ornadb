@@ -1,0 +1,3 @@
+pub fn name(): Text = "sanitized";
+
+pub fn size(values: [Int]): Int = std.collection.count(values);
