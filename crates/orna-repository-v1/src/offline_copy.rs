@@ -293,6 +293,15 @@ impl OfflineCopy {
     /// all-or-nothing: a row without a copied payload, a payload that fails its
     /// digest, or out-of-order history rejects the entire bundle.
     pub fn import_plan(&self) -> Result<OfflineImportPlan, OfflineCopyError> {
+        self.import_plan_with_progress(|_| {})
+    }
+
+    /// Same verification as `import_plan`, reporting each row once its
+    /// payload has been verified. Progress is reported in bundle order.
+    pub fn import_plan_with_progress(
+        &self,
+        mut progress: impl FnMut(OfflineImportProgress),
+    ) -> Result<OfflineImportPlan, OfflineCopyError> {
         if self
             .history
             .windows(2)
@@ -303,8 +312,14 @@ impl OfflineCopy {
             ));
         }
         let mut rows = Vec::with_capacity(self.rows.len());
-        for metadata in &self.rows {
+        for (index, metadata) in self.rows.iter().enumerate() {
             let payload = self.hydrate(&metadata.key)?;
+            progress(OfflineImportProgress {
+                verified: index + 1,
+                total: self.rows.len(),
+                key: metadata.key.clone(),
+                bytes: metadata.length,
+            });
             rows.push(OfflineImportRow {
                 key: metadata.key.clone(),
                 media_type: metadata.media_type.clone(),
@@ -328,6 +343,30 @@ pub struct OfflineImportDryRun {
     pub rows: usize,
     pub payload_bytes: u64,
     pub history: usize,
+}
+
+/// One verified row, reported while an import is being checked.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineImportProgress {
+    pub verified: usize,
+    pub total: usize,
+    pub key: Vec<u8>,
+    pub bytes: u64,
+}
+
+impl fmt::Display for OfflineImportProgress {
+    /// Renders one progress line, for example:
+    /// `verified 1/2 image (73 bytes)`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "verified {}/{} {} ({} bytes)",
+            self.verified,
+            self.total,
+            String::from_utf8_lossy(&self.key),
+            self.bytes
+        )
+    }
 }
 
 impl OfflineCopy {

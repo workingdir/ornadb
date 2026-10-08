@@ -250,3 +250,27 @@ fn offline_import_dry_run_reports_counts_and_writes_nothing() {
         Err(OfflineCopyError::PayloadMismatch { .. })
     ));
 }
+
+#[test]
+fn offline_import_progress_reports_each_verified_row_in_order() {
+    let directory = TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle");
+    let rows = [
+        committed_row("image", "image/png", "pixel.png"),
+        committed_row("song", "audio/wav", "tone.wav"),
+    ];
+    write_offline_copy(&bundle, &rows, &[]).unwrap();
+
+    let mut lines = Vec::new();
+    OfflineCopy::open(&bundle)
+        .unwrap()
+        .import_plan_with_progress(|progress| lines.push(progress.to_string()))
+        .unwrap();
+    assert_eq!(
+        lines,
+        [
+            "verified 1/2 image (73 bytes)",
+            "verified 2/2 song (4044 bytes)",
+        ]
+    );
+}
