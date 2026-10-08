@@ -27,6 +27,7 @@ struct HistoryOptions<'a> {
     since: Option<&'a str>,
     format: HistoryFormat,
     reverse: bool,
+    count: bool,
     author: Option<&'a str>,
 }
 
@@ -36,6 +37,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     let mut since = None;
     let mut format = HistoryFormat::Human;
     let mut reverse = false;
+    let mut count = false;
     let mut author = None;
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
@@ -62,6 +64,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
                 since = Some(value);
             }
             "--reverse" => reverse = true,
+            "--count" => count = true,
             "--author" => {
                 let value = words.next().ok_or_else(|| {
                     history_error("--author needs a value", "usage: --author <substring>")
@@ -86,7 +89,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             flag if flag.starts_with("--") => {
                 return Err(history_error(
                     "Unknown history flag",
-                    format!("got {flag:?}; accepted: --limit, --since, --format, --reverse, --author"),
+                    format!("got {flag:?}; accepted: --limit, --since, --format, --reverse, --author, --count"),
                 ));
             }
             _ => positional.push(word),
@@ -105,6 +108,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
         since,
         format,
         reverse,
+        count,
         author,
     })
 }
@@ -166,6 +170,11 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     // Revisions arrive newest first; `--reverse` prints oldest first.
     if options.reverse {
         revisions.reverse();
+    }
+    // `--count` prints only the number of revisions left after every filter.
+    if options.count {
+        println!("{}", revisions.len());
+        return Ok(());
     }
     match options.format {
         HistoryFormat::Human => {
@@ -280,6 +289,14 @@ mod tests {
         assert_eq!(super::summary_line(0, 0), "0 revisions (0 present, 0 absent)");
         assert_eq!(super::summary_line(1, 1), "1 revision (1 present, 0 absent)");
         assert_eq!(super::summary_line(4, 3), "4 revisions (3 present, 1 absent)");
+    }
+
+    #[test]
+    fn count_is_a_bare_flag_and_defaults_off() {
+        let plain = words(&["0102", "song"]);
+        assert!(!parse_options(&plain).unwrap().count);
+        let flagged = words(&["0102", "--count", "song"]);
+        assert!(parse_options(&flagged).unwrap().count);
     }
 
     #[test]
