@@ -411,3 +411,21 @@ fn offline_import_media_type_override_keeps_payload_identity() {
         Err(OfflineCopyError::InvalidRow(_))
     ));
 }
+
+#[test]
+fn committed_blob_exports_to_a_bundle_that_imports_back_unchanged() {
+    let directory = TempDir::new().unwrap();
+    let bytes = std::fs::read(Path::new(MEDIA_FIXTURES).join("tone.wav")).unwrap();
+    let blob =
+        orna_value_v1::Blob::from_bytes_with_annotation(bytes.clone(), "audio/wav", None).unwrap();
+    let row = OfflineRow::from_blob(b"song", &blob).unwrap();
+    assert_eq!(row.media_type, "audio/wav");
+    assert_eq!(row.length, 4044);
+    assert_eq!(row.payload.as_deref(), Some(bytes.as_slice()));
+
+    let bundle = directory.path().join("bundle");
+    write_offline_copy(&bundle, std::slice::from_ref(&row), &[]).unwrap();
+    let plan = OfflineCopy::open(&bundle).unwrap().import_plan().unwrap();
+    assert_eq!(plan.rows[0].payload, bytes);
+    assert_eq!(plan.rows[0].sha256, row.sha256);
+}
