@@ -118,6 +118,24 @@ const REFINEMENT_TOKEN_TYPES: &[&str] = &[
     "parameter",
 ];
 
+/// Semantic-token modifiers advertised to editors, in protocol bit order.
+pub const TOKEN_MODIFIERS: &[&str] = &["declaration", "readonly", "modification"];
+
+/// Renders the complete semantic-token legend as the JSON that editor
+/// attachments and the `semantic-legend` command consume.
+pub fn semantic_legend_json() -> String {
+    let token_types = legend_token_types()
+        .map(json_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let modifiers = TOKEN_MODIFIERS
+        .iter()
+        .map(|modifier| json_string(modifier))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{\n  \"tokenTypes\": [{token_types}],\n  \"tokenModifiers\": [{modifiers}]\n}}\n")
+}
+
 /// Complete semantic-token legend advertised to editors: the lexical classes
 /// in protocol index order, then the LSP refinements.
 pub fn legend_token_types() -> impl Iterator<Item = &'static str> {
