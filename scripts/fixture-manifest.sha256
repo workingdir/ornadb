@@ -118,6 +118,7 @@ c1cfe3394230c341e4d8086c7988f09d2ed5d6bca9da42599ff084d4255e0a22  crates/orna-cl
 27009f68d2f1d1be88e9b03465dae3d8f96993df24038ba30b6e6a1a344b4858  crates/orna-cli-v1/tests/fixtures/catalogue-mtime-ogm1.orna
 3a685284720875ee62575099d7ce51fee9746aa2fe9759c099a2104587403094  crates/orna-cli-v1/tests/fixtures/catalogue-reimport-ogr1.orna
 4e9beee8565f7fce2ce23f742bfbf12266776af6ff5a0f920810b1317465cbfd  crates/orna-cli-v1/tests/fixtures/catalogue-reimport2-ogr2.orna
+01fb282836bbca8383c60cc52849c8f79714ec27fe6f51fba9b9ba77579e5768  crates/orna-cli-v1/tests/fixtures/catalogue-slash-ogs1.orna
 fa370caf837c9f5f602f4edbc6e4d7f2401239f2524827e0e43ea396ed18126e  crates/orna-cli-v1/tests/fixtures/function-expression-staged.orna
 fd1db994cb47cf7e21a59c01ae97eedc6e00e1df9ba8ed2e9ad8b0d789226b3b  crates/orna-cli-v1/tests/fixtures/function-expression-unstaged.orna
 b42f8ed673740c142be33126aa268fbc57999745475d31c06ec9578a64dc1052  crates/orna-cli-v1/tests/fixtures/function-expression.orna
