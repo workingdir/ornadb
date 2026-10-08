@@ -32,6 +32,9 @@ pub(super) const HELP_LINES: &[&str] = &[
     "Exit status:",
     "  0 success            1 target             2 usage              3 connection",
     "  4 authorisation      5 presentation       6 cancelled          7 protocol",
+    "History commands:",
+    "  history RELATION KEY [--limit N] [--since COMMIT] [--format human|json] [--reverse] [--author TEXT] [--count]",
+    "  history exit codes: 0 listed or counted; 1 any history error (bad flag or value, unknown repository, row, or --since commit)",
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];
 
@@ -59,6 +62,36 @@ mod tests {
             &"  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid"
         ));
         assert!(HELP_LINES.contains(&"  status [--porcelain|--short|--format human|short|json]"));
+    }
+
+    #[test]
+    fn help_documents_history_flags_and_exit_codes() {
+        let index = HELP_LINES
+            .iter()
+            .position(|line| *line == "History commands:")
+            .expect("history group");
+        let group = &HELP_LINES[index + 1..];
+        for flag in [
+            "--limit",
+            "--since",
+            "--format",
+            "--reverse",
+            "--author",
+            "--count",
+        ] {
+            assert!(
+                group
+                    .iter()
+                    .any(|line| line.starts_with("  history ") && line.contains(flag)),
+                "help lacks history flag {flag}"
+            );
+        }
+        assert!(
+            group
+                .iter()
+                .any(|line| line.starts_with("  history exit codes: 0 ")
+                    && line.contains("; 1 any history error"))
+        );
     }
 
     #[test]
