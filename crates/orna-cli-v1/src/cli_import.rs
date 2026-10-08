@@ -6,6 +6,8 @@
 //! `--quiet` suppresses the success report; failures still exit non-zero with a
 //! diagnostic. `--type MEDIA_TYPE` reports every row under that media type
 //! instead of its recorded one; the bundle's stored types are not changed.
+//! Unless `--quiet` is given, one progress line per verified row goes to stderr.
+//! Progress covers every row, because `--limit` does not skip verification.
 
 use std::path::Path;
 
@@ -102,6 +104,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         Path::new(options.bundle),
         options.limit,
         options.media_type.as_deref(),
+        !options.quiet,
     )?;
     if !options.quiet {
         println!("{summary}");
@@ -116,9 +119,16 @@ fn dry_run_summary(
     bundle: &Path,
     limit: Option<usize>,
     media_type: Option<&str>,
+    progress: bool,
 ) -> Result<String, Diagnostic> {
     let plan = OfflineCopy::open(bundle)
-        .and_then(|copy| copy.import_plan())
+        .and_then(|copy| {
+            copy.import_plan_with_progress(|step| {
+                if progress {
+                    eprintln!("{step}");
+                }
+            })
+        })
         .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?;
     let total = plan.rows.len();
     let reported = limit.map_or(total, |limit| limit.min(total));
@@ -204,17 +214,30 @@ mod tests {
         write_offline_copy(&bundle, &rows, &history).unwrap();
 
         assert_eq!(
-            dry_run_summary(&bundle, None, None).unwrap(),
+            dry_run_summary(&bundle, None, None, false).unwrap(),
             "dry run: 2 of 2 rows, 16 payload bytes, 1 history entries; nothing written"
         );
         assert_eq!(
-            dry_run_summary(&bundle, Some(1), None).unwrap(),
+            dry_run_summary(&bundle, Some(1), None, false).unwrap(),
             "dry run: 1 of 2 rows, 6 payload bytes, 1 history entries; nothing written"
         );
         assert!(
-            dry_run_summary(&bundle, Some(9), None)
+            dry_run_summary(&bundle, Some(9), None, false)
                 .unwrap()
                 .starts_with("dry run: 2 of 2")
+        );
+    }
+
+    #[test]
+    fn progress_does_not_change_the_report() {
+        let directory = TempDir::new().unwrap();
+        let bundle = directory.path().join("bundle");
+        let rows = [row("image", b"pixels"), row("song", b"tone-bytes")];
+        write_offline_copy(&bundle, &rows, &[]).unwrap();
+
+        assert_eq!(
+            dry_run_summary(&bundle, Some(1), None, true).unwrap(),
+            dry_run_summary(&bundle, Some(1), None, false).unwrap(),
         );
     }
 
@@ -230,7 +253,7 @@ mod tests {
         let bundle = directory.path().join("bundle");
         write_offline_copy(&bundle, &[row("song", b"tone-bytes")], &[]).unwrap();
         assert_eq!(
-            dry_run_summary(&bundle, None, Some("audio/wav")).unwrap(),
+            dry_run_summary(&bundle, None, Some("audio/wav"), false).unwrap(),
             "dry run: 1 of 1 rows as audio/wav, 10 payload bytes, 0 history entries; nothing written"
         );
     }
@@ -238,6 +261,6 @@ mod tests {
     #[test]
     fn dry_run_refuses_a_missing_bundle_without_writing() {
         let missing = Path::new("/nonexistent/orna-import-dry-run-bundle");
-        assert!(dry_run_summary(missing, None, None).is_err());
+        assert!(dry_run_summary(missing, None, None, true).is_err());
     }
 }
