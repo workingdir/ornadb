@@ -182,18 +182,18 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     }
     match options.format {
         HistoryFormat::Human => {
-            let present = revisions.iter().filter(|revision| revision.present()).count();
-            for revision in &revisions {
-                let state = if revision.present() { "present" } else { "absent" };
-                println!(
-                    "{} {} {state}",
-                    revision.commit().to_hex(),
-                    revision.tree().to_hex()
-                );
-            }
-            // `--quiet` drops only the summary line; the listing is unchanged.
-            if !options.quiet {
-                println!("{}", summary_line(revisions.len(), present));
+            let entries: Vec<(String, String, bool)> = revisions
+                .iter()
+                .map(|revision| {
+                    (
+                        revision.commit().to_hex(),
+                        revision.tree().to_hex(),
+                        revision.present(),
+                    )
+                })
+                .collect();
+            for line in human_lines(&entries, options.quiet) {
+                println!("{line}");
             }
         }
         HistoryFormat::Json => {
@@ -222,6 +222,23 @@ fn revision_json(commit: &str, tree: &str, present: bool, author: &str) -> serde
         "present": present,
         "author": author,
     })
+}
+
+/// Human listing: one `commit tree state` line per revision, then the summary
+/// unless `quiet`. `--quiet` drops only the summary; the listing is unchanged.
+fn human_lines(entries: &[(String, String, bool)], quiet: bool) -> Vec<String> {
+    let mut lines: Vec<String> = entries
+        .iter()
+        .map(|(commit, tree, present)| {
+            let state = if *present { "present" } else { "absent" };
+            format!("{commit} {tree} {state}")
+        })
+        .collect();
+    if !quiet {
+        let present = entries.iter().filter(|(_, _, present)| *present).count();
+        lines.push(summary_line(entries.len(), present));
+    }
+    lines
 }
 
 /// Final human line: total revisions and how many carry the row.
