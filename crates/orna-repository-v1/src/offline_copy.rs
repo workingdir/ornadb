@@ -106,6 +106,18 @@ pub fn write_offline_copy(
     rows: &[OfflineRow],
     history: &[OfflineHistoryEntry],
 ) -> Result<(), OfflineCopyError> {
+    write_offline_copy_limited(directory, rows, history, rows.len())
+}
+
+/// Writes the first `limit` rows, in the order given, with their payloads.
+/// The history is written in full, because the bundle does not record which
+/// commit produced which row.
+pub fn write_offline_copy_limited(
+    directory: &Path,
+    rows: &[OfflineRow],
+    history: &[OfflineHistoryEntry],
+    limit: usize,
+) -> Result<(), OfflineCopyError> {
     if directory.exists() && fs::read_dir(directory)?.next().is_some() {
         return Err(OfflineCopyError::InvalidBundle(
             "target directory is not empty",
@@ -113,7 +125,7 @@ pub fn write_offline_copy(
     }
     let mut index = format!("{HEADER}\n");
     let media = directory.join(MEDIA_DIR);
-    for row in rows {
+    for row in &rows[..rows.len().min(limit)] {
         validate_row(row)?;
         if let Some(payload) = &row.payload {
             verify_payload(row, payload)?;
