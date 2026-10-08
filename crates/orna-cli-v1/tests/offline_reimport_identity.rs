@@ -21,3 +21,38 @@ fn source_row(file: &str) -> OfflineRow {
         payload: Some(bytes),
     }
 }
+
+#[test]
+fn orna_fixture_payload_reimports_with_identical_bytes_and_index() {
+    use orna_repository_v1::offline_copy::{OfflineCopy, write_offline_copy};
+    use tempfile::TempDir;
+
+    let directory = TempDir::new().unwrap();
+    let row = source_row("catalogue-reimport-ogr1.orna");
+    let original = row.payload.clone().unwrap();
+
+    let first = directory.path().join("first");
+    write_offline_copy(&first, std::slice::from_ref(&row), &[]).unwrap();
+    let plan = OfflineCopy::open(&first).unwrap().import_plan().unwrap();
+    assert_eq!(plan.rows.len(), 1);
+    assert_eq!(plan.rows[0].payload, original);
+    assert_eq!(plan.rows[0].sha256, row.sha256);
+    assert_eq!(plan.rows[0].length, row.length);
+    assert_eq!(plan.rows[0].suffix.as_deref(), Some("orna"));
+
+    // Writing the imported row again must produce a byte-identical index.
+    let imported = OfflineRow {
+        key: plan.rows[0].key.clone(),
+        media_type: plan.rows[0].media_type.clone(),
+        suffix: plan.rows[0].suffix.clone(),
+        length: plan.rows[0].length,
+        sha256: plan.rows[0].sha256,
+        payload: Some(plan.rows[0].payload.clone()),
+    };
+    let second = directory.path().join("second");
+    write_offline_copy(&second, std::slice::from_ref(&imported), &[]).unwrap();
+    assert_eq!(
+        std::fs::read(first.join("index.tsv")).unwrap(),
+        std::fs::read(second.join("index.tsv")).unwrap()
+    );
+}
