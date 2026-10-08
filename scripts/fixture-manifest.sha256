@@ -5977,3 +5977,4 @@ b48369756a137544a9d3888f17ad10a97e7a2010618ec084a5b8b3b603844095  crates/orna-va
 3eef68f03fdc30a0743384484a2a9b2137b5e15a7805b2e344afff0fa691d9de  crates/orna-value-v1/tests/fixtures/blob-role-dispatch.orna
 cd36ebb657d074e7093e5e50c002fdee04cb65c9b726da6c072698d793e36441  crates/orna-value-v1/tests/fixtures/error-trace-secret.orna
 953db2cefdcc80db9f15250c696afba8defd1458875a8262019bbf1d8465a3df  crates/orna-value-v1/tests/fixtures/secret-surface.orna
+40a483fe75ff1e47621b58d28c13b62f078ece3643e8ac8c7b1a5e5d7ded5a4f  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-reload.orna
