@@ -134,6 +134,18 @@ def validate_manifest(actual: Mapping[str, str], manifest_text: str) -> list[str
     return errors
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
+def _limited(errors: list[str], limit: int | None) -> list[str]:
+    """Return the first `limit` errors, or all of them when no limit is given."""
+    return errors if limit is None else errors[:limit]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group()
@@ -163,6 +175,12 @@ def main() -> int:
         action="store_const",
         const="json",
         help="alias for --format json",
+    )
+    parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        metavar="N",
+        help="print at most N drift entries in text or --list output; totals stay complete",
     )
     args = parser.parse_args()
     if args.list and args.update:
@@ -204,12 +222,12 @@ def main() -> int:
         )
         return 1 if errors else 0
     if errors and args.list:
-        for error in errors:
+        for error in _limited(errors, args.limit):
             print(error)
         return 1
     if errors:
         print("fixture manifest drift detected:", file=sys.stderr)
-        for error in errors:
+        for error in _limited(errors, args.limit):
             print(f"  {error}", file=sys.stderr)
         print(f"fixture manifest drift total: {len(errors)}", file=sys.stderr)
         return 1
