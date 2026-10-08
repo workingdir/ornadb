@@ -22,7 +22,10 @@ fn one_regeneration_cycle_leaves_the_fixture_manifest_byte_identical() {
     let fixtures = Path::new(MEDIA_FIXTURES);
     let committed = std::fs::read(fixtures.join("manifest.sha256")).unwrap();
     let before = manifest_bytes(fixtures, &FIXTURE_NAMES);
-    assert_eq!(before, committed, "the committed manifest matches the fixtures");
+    assert_eq!(
+        before, committed,
+        "the committed manifest matches the fixtures"
+    );
 
     // One cycle: regenerate the import source for a scratch root and write it
     // out. Regeneration must touch only the scratch copy.
@@ -32,7 +35,10 @@ fn one_regeneration_cycle_leaves_the_fixture_manifest_byte_identical() {
     assert!(!regenerated.contains(MEDIA_ROOT_PLACEHOLDER));
 
     let after = manifest_bytes(fixtures, &FIXTURE_NAMES);
-    assert_eq!(after, before, "one regeneration cycle leaves the manifest unchanged");
+    assert_eq!(
+        after, before,
+        "one regeneration cycle leaves the manifest unchanged"
+    );
     assert_eq!(after, committed);
 }
 
