@@ -1,0 +1,2 @@
+pub fn choose(flag: Bool, count: Int): Int = count;
+pub fn run(): Int = choose(true, 2);
