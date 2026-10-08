@@ -492,3 +492,17 @@ fn reserved_word_declaration_name_reports_a_syntax_v1_error_anchor() {
         );
     }
 }
+
+const DIAGNOSTIC_CLEAN_SOURCE: &str = include_str!("../../tests/fixtures/diagnostic-clean-v1.orna");
+
+#[test]
+fn clean_syntax_v1_fixture_renders_an_empty_diagnostic_list() {
+    let document = document(DIAGNOSTIC_CLEAN_SOURCE);
+    let mapper = PositionMapper::new(&document.text);
+    let diagnostics = check_document(&document, &mapper);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        serde_json::to_value(&diagnostics).unwrap(),
+        serde_json::json!([])
+    );
+}
