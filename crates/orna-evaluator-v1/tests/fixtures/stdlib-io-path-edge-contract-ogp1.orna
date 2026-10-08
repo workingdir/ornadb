@@ -1,0 +1,17 @@
+io.path.components("") == []
+ &&
+io.path.components(".") == []
+ &&
+io.path.basename("") == null
+ &&
+io.path.dirname("") == null
+ &&
+io.path.stem(".config") == first([".config"])
+ &&
+io.path.extension(".config") == null
+ &&
+io.path.join("", "assets/logo.svg") == "assets/logo.svg"
+ &&
+io.path.join(".", "./logo.svg") == "logo.svg"
+ &&
+io.path.is_absolute("") == false
