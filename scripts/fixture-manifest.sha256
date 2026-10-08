@@ -2571,6 +2571,9 @@ e7d41e467840f0fb88edea8ef5b769970b99377bc35ae4fc9ce953e641f7c60e  crates/orna-ev
 579df951a1559c52bc54c227216d90cf1e71ae5f0967bf81a9a495b4bc6d5ec8  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-percentile-linear-ymou.orna
 b5c1eb7601503f1b644f1540a04e6f0d0c6f10baadbde1ac35c306895fe35cfd  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-percentile-lower-edge-azb4m.orna
 9d96bf3d121312374854f4349b8fb6bf721af46adbf1034716da70af39925376  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-percentile-lower-ymou.orna
+27fe8f3a44214f003f27167e1928e89bb6ac2661dcf03e2badbf2ed46c034e18  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-percentile-nearest-above-tie-ln4y7.orna
+13dd850737ffc96b07d8514f57fba3047883c45c4f1c3e0631495d3eeacbdac9  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-percentile-nearest-below-tie-ln4y7.orna
+f6948ac50bc8eb7836531eb1bcf9cf6da222ca8c7740341f1afe55206b2426d7  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-percentile-nearest-tie-ln4y7.orna
 2b1c7c5d6a95de2a7ad5828384c10215299606b5d9dab9d01e4cbadd70fc3d02  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-percentile-upper-edge-azb4m.orna
 b5072d6d6f6d5405946b4b9d644961cf87b2904ccba3a2ff52909d8c1e24c720  crates/orna-evaluator-v1/tests/fixtures/stdlib-stats-without-snapshot-ymou.orna
 07040a4c5fbaad3ebf3ae1bd7651e515a12ea601f39bc9524e3a7f63f310e28b  crates/orna-evaluator-v1/tests/fixtures/stdlib-stream-adapters-buffered-batches-uttqw.orna
