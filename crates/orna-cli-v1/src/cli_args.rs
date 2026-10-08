@@ -42,7 +42,7 @@ pub(super) enum Command {
     Init(Option<PathBuf>),
     Status { format: StatusFormat },
     Fetch { remote: String, branch: String },
-    SemanticLegend,
+    SemanticLegend { json: bool },
     Serve { port: u16 },
     Diff(Vec<String>),
     History(Vec<String>),
@@ -252,7 +252,20 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 format: local_format.or(output_format).unwrap_or(StatusFormat::Human),
             }
         }
-        Some("semantic-legend") => Command::SemanticLegend,
+        Some("semantic-legend") => {
+            let json = match (words.next(), words.next()) {
+                (None, _) => false,
+                (Some("--json"), None) => true,
+                _ => {
+                    return Err(Diagnostic::usage(
+                        "E1002",
+                        "unsupported `semantic-legend` option",
+                        "use `semantic-legend` or `semantic-legend --json`",
+                    ));
+                }
+            };
+            Command::SemanticLegend { json }
+        }
         Some("fetch") => Command::Fetch {
             remote: words.next().unwrap_or("origin").to_owned(),
             branch: words.next().unwrap_or("main").to_owned(),
