@@ -142,6 +142,11 @@ def main() -> int:
     )
     action.add_argument("--update", action="store_true", help="rewrite the pinned manifest")
     parser.add_argument(
+        "--list",
+        action="store_true",
+        help="print only drift entries, one per line on stdout; implies --check",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="suppress success output; drift and scan errors are still reported",
@@ -160,6 +165,8 @@ def main() -> int:
         help="alias for --format json",
     )
     args = parser.parse_args()
+    if args.list and args.update:
+        parser.error("--list cannot be combined with --update")
 
     hashes, scan_errors = fixture_hashes(WORKSPACE_ROOT)
     if scan_errors and args.check and args.format == "json":
@@ -196,6 +203,10 @@ def main() -> int:
             )
         )
         return 1 if errors else 0
+    if errors and args.list:
+        for error in errors:
+            print(error)
+        return 1
     if errors:
         print("fixture manifest drift detected:", file=sys.stderr)
         for error in errors:
