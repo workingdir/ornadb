@@ -18,6 +18,13 @@ pub(super) enum Invocation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LegendFormat {
+    Text,
+    Json,
+    Markdown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum StatusFormat {
     Human,
     Porcelain,
@@ -42,7 +49,7 @@ pub(super) enum Command {
     Init(Option<PathBuf>),
     Status { format: StatusFormat },
     Fetch { remote: String, branch: String },
-    SemanticLegend { json: bool },
+    SemanticLegend { format: LegendFormat },
     Serve { port: u16 },
     Diff(Vec<String>),
     History(Vec<String>),
@@ -253,18 +260,19 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             }
         }
         Some("semantic-legend") => {
-            let json = match (words.next(), words.next()) {
-                (None, _) => false,
-                (Some("--json"), None) => true,
+            let format = match (words.next(), words.next()) {
+                (None, _) => LegendFormat::Text,
+                (Some("--json"), None) => LegendFormat::Json,
+                (Some("--markdown"), None) => LegendFormat::Markdown,
                 _ => {
                     return Err(Diagnostic::usage(
                         "E1002",
                         "unsupported `semantic-legend` option",
-                        "use `semantic-legend` or `semantic-legend --json`",
+                        "use `semantic-legend`, `semantic-legend --json` or `semantic-legend --markdown`",
                     ));
                 }
             };
-            Command::SemanticLegend { json }
+            Command::SemanticLegend { format }
         }
         Some("fetch") => Command::Fetch {
             remote: words.next().unwrap_or("origin").to_owned(),
