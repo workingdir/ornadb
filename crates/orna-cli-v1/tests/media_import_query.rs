@@ -46,6 +46,7 @@ const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 struct MediaListing {
     key: Vec<u8>,
     media_type: String,
+    suffix: Option<String>,
     length: u64,
     sha256: [u8; 32],
     hydrated: bool,
@@ -738,6 +739,7 @@ async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
             MediaListing {
                 key,
                 media_type: metadata.media_type().to_owned(),
+                suffix: metadata.suffix().map(str::to_owned),
                 length: metadata.length(),
                 sha256: metadata.sha256(),
                 hydrated: metadata.is_hydrated(),
