@@ -200,18 +200,28 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
             let entries: Vec<serde_json::Value> = revisions
                 .iter()
                 .map(|revision| {
-                    serde_json::json!({
-                        "commit": revision.commit().to_hex(),
-                        "tree": revision.tree().to_hex(),
-                        "present": revision.present(),
-                        "author": revision.author(),
-                    })
+                    revision_json(
+                        &revision.commit().to_hex(),
+                        &revision.tree().to_hex(),
+                        revision.present(),
+                        revision.author(),
+                    )
                 })
                 .collect();
             println!("{}", serde_json::Value::Array(entries));
         }
     }
     Ok(())
+}
+
+/// One revision as a JSON object: commit, root tree, presence and author.
+fn revision_json(commit: &str, tree: &str, present: bool, author: &str) -> serde_json::Value {
+    serde_json::json!({
+        "commit": commit,
+        "tree": tree,
+        "present": present,
+        "author": author,
+    })
 }
 
 /// Final human line: total revisions and how many carry the row.
@@ -311,6 +321,32 @@ mod tests {
         for arguments in &bad {
             assert_eq!(parse_options(arguments).unwrap_err().exit, Exit::Target);
         }
+    }
+
+    #[test]
+    fn revision_json_has_exactly_the_documented_keys() {
+        let value = super::revision_json("c0ffee", "7ree", true, "Ada <ada@example.test>");
+        let object = value.as_object().unwrap();
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["author", "commit", "present", "tree"]);
+        assert_eq!(object["present"], serde_json::Value::Bool(true));
+        assert_eq!(object["author"], "Ada <ada@example.test>");
+    }
+
+    #[test]
+    fn revision_listing_round_trips_in_order_as_a_json_array() {
+        let listing = serde_json::Value::Array(vec![
+            super::revision_json("aaa", "t1", true, "Ada <ada@example.test>"),
+            super::revision_json("bbb", "t2", false, "Ada <ada@example.test>"),
+        ]);
+        let parsed: serde_json::Value = serde_json::from_str(&listing.to_string()).unwrap();
+        let entries = parsed.as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["commit"], "aaa");
+        assert_eq!(entries[1]["commit"], "bbb");
+        assert_eq!(entries[1]["present"], serde_json::Value::Bool(false));
+        assert_eq!(serde_json::Value::Array(vec![]).to_string(), "[]");
     }
 
     #[test]
