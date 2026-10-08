@@ -15,6 +15,10 @@ mod format3;
 use format3::*;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
+const SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song.orna"
+);
 const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
@@ -64,14 +68,12 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         ("image", "pixel.png", 0x80_u8),
     ];
     for (key, file, ordinal) in imports {
-        let expression = match key {
-            // The image import runs from the committed .orna fixture.
-            "image" => image_import_expression(source.path()),
-            _ => format!(
-                "sys.blob.capture_file({root:?}, {file:?}, 65536)",
-                root = source.path().to_string_lossy().as_ref()
-            ),
+        // Both imports run from committed .orna fixtures.
+        let fixture = match key {
+            "image" => IMAGE_IMPORT_FIXTURE,
+            _ => SONG_IMPORT_FIXTURE,
         };
+        let expression = import_expression(fixture, source.path());
         import_media(&state, writer, &mut bindings, &expression, key, ordinal).await;
     }
 
@@ -163,10 +165,10 @@ fn assert_song_revision_history(
     assert_eq!(newest, revisions[..1]);
 }
 
-/// Loads the image import expression from its committed .orna fixture, with the
+/// Loads an import expression from its committed .orna fixture, with the
 /// scratch media root written in as a quoted string literal.
-fn image_import_expression(root: &Path) -> String {
-    let fixture = std::fs::read_to_string(IMAGE_IMPORT_FIXTURE).unwrap();
+fn import_expression(fixture: &str, root: &Path) -> String {
+    let fixture = std::fs::read_to_string(fixture).unwrap();
     let root = format!("{:?}", root.to_string_lossy().as_ref());
     fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root)
 }
