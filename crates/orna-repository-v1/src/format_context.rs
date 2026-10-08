@@ -1752,6 +1752,8 @@ mod graph_bridge_tests {
         assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0), "rows sort by type name");
         assert_eq!(rows.iter().map(|(_, count)| count).sum::<u64>(), total);
         assert!(rows.iter().any(|(name, count)| *name == "StoreRoot" && *count == 1));
+        assert_eq!(stats.to_quiet_line(), total.to_string());
+        assert_eq!(stats.total_nodes(), total);
         let json = stats.to_json();
         assert!(
             json.starts_with("{\"nodes\":{\"StoreRoot\":1,"),
