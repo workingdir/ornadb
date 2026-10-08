@@ -77,6 +77,47 @@ pub fn describe_pins_json<'a>(pins: impl IntoIterator<Item = &'a ProtectedConten
     format!("[{}]", entries.join(","))
 }
 
+/// The column names for `describe_pins_csv`, in the order each row prints
+/// them.
+pub const PIN_CSV_HEADER: &str = "pin_id,repository_id,database_id,owner_id,descriptor_algorithm,descriptor_oid,content_length,content_sha256";
+
+/// Describes one protected pin as a single CSV row with the columns in
+/// `PIN_CSV_HEADER`. Every value is a hex string, a decimal number, or a fixed
+/// algorithm name, so no quoting is needed.
+pub fn describe_pin_csv(pin: &ProtectedContentPin) -> String {
+    describe_transfer_csv(&pin.transfer_record())
+}
+
+/// Describes the transfer record as one CSV row with the same fields as
+/// `describe_transfer`.
+pub fn describe_transfer_csv(transfer: &ProtectedContentTransfer) -> String {
+    let identity = transfer.content_identity();
+    format!(
+        "{},{},{},{},{:?},{},{},{}",
+        hex(transfer.pin_id()),
+        hex(transfer.repository_id()),
+        hex(transfer.database_id()),
+        hex(transfer.owner_id()),
+        transfer.descriptor_oid().algorithm(),
+        transfer.descriptor_oid().to_hex(),
+        identity.length(),
+        hex(&identity.sha256()),
+    )
+}
+
+/// Describes every pin as CSV: the header row followed by one row per pin, in
+/// order, each terminated by a newline.
+pub fn describe_pins_csv<'a>(pins: impl IntoIterator<Item = &'a ProtectedContentPin>) -> String {
+    let mut out = String::new();
+    out.push_str(PIN_CSV_HEADER);
+    out.push('\n');
+    for pin in pins {
+        out.push_str(&describe_pin_csv(pin));
+        out.push('\n');
+    }
+    out
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
