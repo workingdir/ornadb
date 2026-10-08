@@ -294,7 +294,7 @@ async fn deleting_a_committed_media_row_removes_it_from_listing_and_filters() {
     ];
     for (key, fixture, ordinal) in imports {
         let expression = import_expression(fixture, source.path());
-        import_media(&state, writer, &mut bindings, &expression, key, ordinal).await;
+        import_media(&state, writer, &mut bindings, &expression, key, ordinal, true).await;
     }
 
     let song_filter = BlobMetadataFilter::new().with_media_type("audio/wav");
