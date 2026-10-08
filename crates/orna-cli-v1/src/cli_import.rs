@@ -128,9 +128,11 @@ mod tests {
 
     #[test]
     fn options_take_one_bundle_and_require_dry_run() {
-        let plain = parse_options(&words(&["bundle", "--dry-run"])).unwrap();
+        let plain_words = words(&["bundle", "--dry-run"]);
+        let plain = parse_options(&plain_words).unwrap();
         assert_eq!((plain.bundle, plain.limit), ("bundle", None));
-        let reordered = parse_options(&words(&["--dry-run", "bundle"])).unwrap();
+        let reordered_words = words(&["--dry-run", "bundle"]);
+        let reordered = parse_options(&reordered_words).unwrap();
         assert_eq!(reordered.bundle, "bundle");
         assert!(parse_options(&words(&["bundle"])).is_err());
         assert!(parse_options(&words(&["--dry-run"])).is_err());
@@ -140,7 +142,8 @@ mod tests {
 
     #[test]
     fn limit_takes_a_positive_count_in_any_position() {
-        let limited = parse_options(&words(&["--limit", "2", "bundle", "--dry-run"])).unwrap();
+        let limited_words = words(&["--limit", "2", "bundle", "--dry-run"]);
+        let limited = parse_options(&limited_words).unwrap();
         assert_eq!((limited.bundle, limited.limit), ("bundle", Some(2)));
         assert!(parse_options(&words(&["bundle", "--dry-run", "--limit"])).is_err());
         assert!(parse_options(&words(&["bundle", "--dry-run", "--limit", "0"])).is_err());
