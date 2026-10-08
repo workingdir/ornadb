@@ -399,3 +399,41 @@ fn every_lex_007_keyword_hovers_from_the_lexer_table() {
     }
     assert_eq!(hovered, Keyword::ALL.to_vec(), "every reserved word hovers");
 }
+
+#[test]
+fn keyword_completion_documentation_matches_the_keyword_hover_card() {
+    let document = document(KEYWORD_COVERAGE_SOURCE);
+    let parse = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    let completions = completion_at(&parse, &document.text, None, None);
+    let mut checked = Vec::new();
+    for token in orna_syntax_v1::lex(&document.text).expect("keyword fixture lexes") {
+        let orna_syntax_v1::TokenKind::Keyword(keyword) = token.kind else {
+            continue;
+        };
+        let item = completions
+            .iter()
+            .find(|item| item.label == keyword.spelling())
+            .expect("keyword completion");
+        assert_eq!(item.kind, Some(CompletionItemKind::KEYWORD));
+        assert_eq!(item.detail.as_deref(), Some("keyword"));
+        let Some(lsp_types::Documentation::String(documentation)) = item.documentation.clone()
+        else {
+            panic!("keyword completion carries string documentation");
+        };
+        assert!(documentation.contains("ORNA-LEX-007"), "{documentation}");
+
+        let card = hover(&document, &parse, mapper.position(token.span.start), &mapper)
+            .expect("keyword hover");
+        let lsp_types::HoverContents::Markup(content) = card.contents else {
+            panic!("expected markdown hover");
+        };
+        assert!(
+            content.value.ends_with(&documentation),
+            "hover and completion share one documentation source: {}",
+            content.value
+        );
+        checked.push(keyword);
+    }
+    assert_eq!(checked, Keyword::ALL.to_vec(), "every reserved word is checked");
+}
