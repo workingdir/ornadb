@@ -179,14 +179,14 @@ mod tests {
         let bindings = bindings();
         let (media_type, suffix, _) = asset(&bindings, "hero");
         let value = annotated_value(&media_type, &suffix);
-        assert_eq!(
+        assert!(matches!(
             value.blob_as(BlobRole::Video).unwrap_err(),
-            Error::RoleMismatch { .. }
-        );
-        assert_eq!(
+            Err(Error::RoleMismatch { .. })
+        ));
+        assert!(matches!(
             value.blob_as(BlobRole::Document).unwrap_err(),
-            Error::RoleMismatch { .. }
-        );
+            Err(Error::RoleMismatch { .. })
+        ));
         let message = value.blob_as(BlobRole::Video).unwrap_err().to_string();
         assert_eq!(
             message,
@@ -209,9 +209,9 @@ mod tests {
 
         let (report_type, report_suffix, _) = asset(&bindings, "report");
         let report = annotated_value(&report_type, &report_suffix);
-        assert_eq!(
+        assert!(matches!(
             report.blob_as(BlobRole::Text).unwrap_err(),
-            Error::RoleMismatch { .. }
-        );
+            Err(Error::RoleMismatch { .. })
+        ));
     }
 }
