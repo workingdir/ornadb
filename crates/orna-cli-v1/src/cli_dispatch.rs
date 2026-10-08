@@ -47,6 +47,13 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::SemanticLegend {
+            format: LegendFormat::Version,
+            ..
+        } => {
+            println!("orna-syntax-v1 {}", orna_syntax_v1::editor::SEMANTIC_LEGEND_VERSION);
+            Ok(())
+        }
+        Command::SemanticLegend {
             format: LegendFormat::Quiet,
             limit,
         } => {
