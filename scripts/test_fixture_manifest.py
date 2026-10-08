@@ -683,3 +683,32 @@ class FixtureManifestTableFormatTests(unittest.TestCase):
             self.assertEqual(status, expected_status)
             self.assertEqual(rows[0].split(), ["ok", "files", "trees", "errors"])
             self.assertEqual(rows[1].split(), [expected_ok, "1", "1", str(expected_status * 1)])
+
+
+class FixtureManifestCountTests(unittest.TestCase):
+    def run_count(self, hashes: dict[str, str], pinned: dict[str, str]) -> tuple[int, str]:
+        with TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "fixture-manifest.sha256"
+            manifest_path.write_text(render_manifest(pinned), encoding="utf-8")
+            stdout = StringIO()
+            with (
+                mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(check_fixture_manifest, "fixture_hashes", return_value=(hashes, [])),
+                mock.patch.object(check_fixture_manifest, "fixture_roots", return_value=[Path(directory)]),
+                mock.patch("sys.argv", ["check_fixture_manifest.py", "--check", "--count"]),
+                redirect_stdout(stdout),
+            ):
+                status = check_fixture_manifest.main()
+        return status, stdout.getvalue()
+
+    def test_count_prints_zero_and_exits_0_when_clean(self) -> None:
+        path = "crates/example/tests/fixtures/input.orna"
+        pinned = {path: hashlib.sha256(b"original\n").hexdigest()}
+        self.assertEqual(self.run_count(pinned, pinned), (0, "0\n"))
+
+    def test_count_prints_drift_entries_and_exits_1(self) -> None:
+        first = "crates/example/tests/fixtures/a.orna"
+        second = "crates/example/tests/fixtures/b.orna"
+        pinned = {first: hashlib.sha256(b"a\n").hexdigest(), second: hashlib.sha256(b"b\n").hexdigest()}
+        changed = {first: hashlib.sha256(b"x\n").hexdigest(), second: hashlib.sha256(b"y\n").hexdigest()}
+        self.assertEqual(self.run_count(changed, pinned), (1, "2\n"))

@@ -265,6 +265,11 @@ exit status:
         metavar="N",
         help="print at most N drift entries in text or --list output; totals stay complete",
     )
+    parser.add_argument(
+        "--count",
+        action="store_true",
+        help="print only the number of drift entries (0 when clean) and exit 1 if any",
+    )
     args = parser.parse_args()
     if args.list and args.update:
         parser.error("--list cannot be combined with --update")
@@ -298,6 +303,9 @@ exit status:
         errors = only_changed(errors, changed)
     roots = fixture_roots(WORKSPACE_ROOT)
     trees = len(roots)
+    if args.count:
+        print(len(errors))
+        return 1 if errors else 0
     if args.format == "tsv":
         print("ok\tfiles\ttrees\terrors")
         print(f"{str(not errors).lower()}\t{len(hashes)}\t{trees}\t{len(errors)}")
