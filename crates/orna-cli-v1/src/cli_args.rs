@@ -44,6 +44,7 @@ pub(super) enum Command {
     Fetch { remote: String, branch: String },
     Serve { port: u16 },
     Diff(Vec<String>),
+    History(Vec<String>),
     Check,
     Explain(String),
     Invoke(String),
@@ -254,6 +255,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             remote: words.next().unwrap_or("origin").to_owned(),
             branch: words.next().unwrap_or("main").to_owned(),
         },
+        Some("history") => Command::History(words.map(str::to_owned).collect()),
         Some("serve") => {
             let mut port = 8080;
             while let Some(option) = words.next() {
