@@ -1826,6 +1826,23 @@ mod graph_bridge_tests {
                 "packed range {range:?} returned the wrong bytes"
             );
         }
+
+        // Cross-root boundary: a row committed under this store root must not
+        // resolve through a graph admitted at a later store root.
+        fs::write(root.join(".orna/store/data"), b"store root two")
+            .expect("write later store root");
+        commit(root);
+        let later_context = context(root);
+        let (later_schema, later_digest) = schema_node(root, &later_context);
+        let later_rows = sealed_rows(&later_context, &later_schema, later_digest);
+        let later_graph = later_context
+            .open_native_graph(&later_rows)
+            .expect("admit the later fixture root");
+        let later_scope = later_graph.open_read_scope().expect("later read scope");
+        assert!(matches!(
+            later_graph.resolve_row_node(&row, &descriptor_oid, &later_scope),
+            Err(crate::native_graph::GraphError::ContextMismatch)
+        ));
     }
 
     #[test]
