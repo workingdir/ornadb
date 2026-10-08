@@ -198,6 +198,18 @@ mod tests {
     }
 
     #[test]
+    fn mismatch_message_names_the_blob_size() {
+        let bindings = bindings();
+        let (media_type, suffix, _) = asset(&bindings, "hero");
+        let value = annotated_value(&media_type, &suffix);
+        let error = value.blob_as(BlobRole::Video).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "OVB-2 Blob role Video does not admit MIME family image (7 bytes)"
+        );
+    }
+
+    #[test]
     fn json_is_text_and_pdf_is_a_document_rather_than_their_families() {
         let bindings = bindings();
         let (config_type, config_suffix, _) = asset(&bindings, "config");
