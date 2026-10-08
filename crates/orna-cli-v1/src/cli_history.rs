@@ -148,7 +148,8 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     revisions.truncate(options.limit);
     match options.format {
         HistoryFormat::Human => {
-            for revision in revisions {
+            let present = revisions.iter().filter(|revision| revision.present()).count();
+            for revision in &revisions {
                 let state = if revision.present() { "present" } else { "absent" };
                 println!(
                     "{} {} {state}",
@@ -156,6 +157,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
                     revision.tree().to_hex()
                 );
             }
+            println!("{}", summary_line(revisions.len(), present));
         }
         HistoryFormat::Json => {
             let entries: Vec<serde_json::Value> = revisions
@@ -172,6 +174,15 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         }
     }
     Ok(())
+}
+
+/// Final human line: total revisions and how many carry the row.
+fn summary_line(total: usize, present: usize) -> String {
+    let noun = if total == 1 { "revision" } else { "revisions" };
+    format!(
+        "{total} {noun} ({present} present, {} absent)",
+        total - present
+    )
 }
 
 /// Parses a 32-digit hexadecimal relation id into its 16 raw bytes.
@@ -239,5 +250,12 @@ mod tests {
         assert!(parse_options(&words(&["r"])).is_err());
         assert!(parse_options(&words(&["r", "k", "--format", "xml"])).is_err());
         assert!(parse_options(&words(&["r", "k", "--format"])).is_err());
+    }
+
+    #[test]
+    fn summary_line_counts_total_present_and_absent() {
+        assert_eq!(super::summary_line(0, 0), "0 revisions (0 present, 0 absent)");
+        assert_eq!(super::summary_line(1, 1), "1 revision (1 present, 0 absent)");
+        assert_eq!(super::summary_line(4, 3), "4 revisions (3 present, 1 absent)");
     }
 }
