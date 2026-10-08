@@ -390,3 +390,24 @@ fn offline_export_quiet_writes_nothing_and_verbose_reports_each_written_row() {
         "exported 1/1 image (73 bytes)\n"
     );
 }
+
+#[test]
+fn offline_import_media_type_override_keeps_payload_identity() {
+    let directory = TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle");
+    let song = committed_row("song", "audio/wav", "tone.wav");
+    write_offline_copy(&bundle, std::slice::from_ref(&song), &[]).unwrap();
+    let copy = OfflineCopy::open(&bundle).unwrap();
+
+    let plan = copy
+        .import_plan_as_media_type("application/octet-stream")
+        .unwrap();
+    assert_eq!(plan.rows[0].media_type, "application/octet-stream");
+    assert_eq!(plan.rows[0].payload, song.payload.clone().unwrap());
+    assert_eq!(plan.rows[0].sha256, song.sha256);
+
+    assert!(matches!(
+        copy.import_plan_as_media_type("bad type"),
+        Err(OfflineCopyError::InvalidRow(_))
+    ));
+}
