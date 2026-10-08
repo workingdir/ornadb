@@ -42,6 +42,16 @@ def fixture_roots(workspace_root: Path) -> list[Path]:
     return roots
 
 
+UNREADABLE_FIXTURE_PREFIX = "fixture file is unreadable: "
+
+
+def scan_exit_status(scan_errors: list[str]) -> int:
+    """Exit 4 when a fixture cannot be read; other scan errors exit 1."""
+    if any(error.startswith(UNREADABLE_FIXTURE_PREFIX) for error in scan_errors):
+        return 4
+    return 1
+
+
 def fixture_hashes(workspace_root: Path) -> tuple[dict[str, str], list[str]]:
     """Return hashes for all regular files below fixture roots and scan errors."""
     hashes: dict[str, str] = {}
@@ -72,7 +82,13 @@ def fixture_hashes(workspace_root: Path) -> tuple[dict[str, str], list[str]]:
                     continue
                 if not path.is_file():
                     continue
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                try:
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError as error:
+                    errors.append(
+                        f"{UNREADABLE_FIXTURE_PREFIX}{relative}: {error.strerror or error}"
+                    )
+                    continue
                 hashes[relative] = digest
     return hashes, errors
 
@@ -185,6 +201,7 @@ examples:
 exit status:
   0  the checkout matches the pinned manifest
   1  drift, a scan error, or a rejected manifest
+  4  a fixture file exists but cannot be read
   2  the pinned manifest is missing, or an argument (such as --since) is invalid
 """,
     )
@@ -234,12 +251,12 @@ exit status:
     hashes, scan_errors = fixture_hashes(WORKSPACE_ROOT)
     if scan_errors and args.check and args.format == "json":
         print(json.dumps({"ok": False, "scan_errors": scan_errors, "errors": []}))
-        return 1
+        return scan_exit_status(scan_errors)
     if scan_errors:
         print("fixture manifest scan failed:", file=sys.stderr)
         for error in scan_errors:
             print(f"  {error}", file=sys.stderr)
-        return 1
+        return scan_exit_status(scan_errors)
 
     if args.update:
         MANIFEST_PATH.write_text(render_manifest(hashes), encoding="utf-8", newline="\n")
