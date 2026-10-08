@@ -1,0 +1,6 @@
+map.keys(map.insert([("b", 1), ("a", 2)], "b", 9)) == ["b", "a"]
+&& map.keys(map.insert([("b", 1), ("a", 2)], "c", 3)) == ["b", "a", "c"]
+&& map.keys(map.remove([("b", 1), ("a", 2), ("c", 3)], "a")) == ["b", "c"]
+&& map.keys([("k", 1), ("j", 2), ("k", 3)]) == ["k", "j"]
+&& map.keys(map.insert(map.remove([("x", 1), ("y", 2)], "x"), "x", 5)) == ["y", "x"]
+&& map.keys([("p", 1)]) == map.keys([("p", 2)])
