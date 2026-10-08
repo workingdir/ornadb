@@ -209,7 +209,13 @@ impl SystemApi {
                 .iter()
                 .filter(|code| {
                     (descriptor.contract.as_deref() == Some("annotated-blob-format-3")
-                        && code.starts_with("sys.blob."))
+                        && namespace == "sys.blob.annotate"
+                        && matches!(
+                            code.as_str(),
+                            "sys.blob.incompatible_suffix"
+                                | "sys.blob.invalid_media_type"
+                                | "sys.blob.invalid_suffix"
+                        ))
                         || code.as_str() == namespace
                         || code
                             .strip_prefix(namespace)
@@ -2009,11 +2015,11 @@ mod tests {
                 singletons: 4,
                 opaque_identifiers: 21,
                 reference_aliases: 78,
-                value_types: 34,
-                enums: 44,
+                value_types: 35,
+                enums: 42,
                 relations: 78,
-                functions: 67,
-                failure_codes: 49,
+                functions: 82,
+                failure_codes: 67,
             }
         );
         assert_eq!(api.function("sys.rt.info").unwrap().len(), 1);
@@ -3351,7 +3357,7 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(duplicate_function);
-        duplicate["counts"]["functions"] = serde_json::Value::from(68);
+        duplicate["counts"]["functions"] = serde_json::Value::from(83);
         duplicate["functions"].as_array_mut().unwrap()[66]["effect"] =
             serde_json::Value::String("read".into());
         assert_eq!(
