@@ -156,6 +156,34 @@ pub fn semantic_legend_markdown() -> String {
 /// the legend and the crate that defines it change together.
 pub const SEMANTIC_LEGEND_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Semantic legend as an aligned plain-text table with the columns
+/// `Index`, `Token type` and `Hover sample`. Columns are padded to the widest
+/// cell so the table reads cleanly in a terminal.
+pub fn semantic_legend_table() -> String {
+    let rows = legend_token_types()
+        .enumerate()
+        .map(|(index, token_type)| {
+            (
+                index.to_string(),
+                token_type.to_owned(),
+                token_type_sample(token_type).unwrap_or("").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let index_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(0).max("Index".len());
+    let type_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(0).max("Token type".len());
+    let mut out = format!(
+        "{:<index_width$}  {:<type_width$}  {}\n",
+        "Index", "Token type", "Hover sample"
+    );
+    for (index, token_type, sample) in &rows {
+        out.push_str(&format!(
+            "{index:<index_width$}  {token_type:<type_width$}  {sample}\n"
+        ));
+    }
+    out
+}
+
 /// Semantic legend as CSV with the columns `kind,index,name,sample`. Token
 /// type rows use the protocol index; modifier rows use the bit position and
 /// have an empty sample. Fields are quoted per RFC 4180 when needed.
