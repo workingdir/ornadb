@@ -1,0 +1,16 @@
+use std.math.{clamp, increment};
+
+pub fn successor(value: Int): Int {
+    let next = increment(value);
+    next
+}
+
+pub fn shadowed(value: Int): Int {
+    let clamp = value;
+    clamp
+}
+
+pub fn bounded(value: Int, lower: Int, upper: Int): Int = clamp(value, lower, upper);
+
+pub fn qualified_bounded(value: Int, lower: Int, upper: Int): Int =
+    std.math.clamp(value, lower, upper);
