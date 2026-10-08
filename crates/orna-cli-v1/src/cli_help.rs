@@ -22,7 +22,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "Editor tooling:",
     "  semantic-legend [--json|--markdown|--format csv|--quiet] [--limit N]",
     "  semantic-legend                  token types and modifiers as text",
-    "  semantic-legend --limit 5        first five token types",
+    "  semantic-legend --limit 5        first five token types (default: all token types)",
     "  semantic-legend --quiet          bare names, one per line, for scripts",
     "  semantic-legend --markdown       legend table with hover samples",
     "  semantic-legend --format csv     kind,index,name,sample rows",
@@ -56,6 +56,9 @@ mod tests {
             .position(|line| *line == "Editor tooling:")
             .expect("editor tooling group");
         let group = &HELP_LINES[index + 1..];
+        assert!(HELP_LINES.contains(
+            &"  semantic-legend --limit 5        first five token types (default: all token types)"
+        ));
         for mode in ["--json", "--markdown", "--format csv", "--quiet", "--limit"] {
             assert!(
                 group.iter().any(|line| line.contains(mode)),
