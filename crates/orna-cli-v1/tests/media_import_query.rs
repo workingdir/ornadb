@@ -149,6 +149,15 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     assert_eq!(song.length, 73);
     assert!(!song.hydrated, "edited listing must not hydrate the song");
 
+    // Re-import: committing the same .orna fixture again leaves the listing
+    // exactly as the edit left it. Only committed rows are compared.
+    import_media(&state, writer, &mut bindings, &edit, "song", 0xa0, false).await;
+    assert_eq!(
+        list_media(&state).await,
+        edited,
+        "re-importing the same fixture must not change the listing"
+    );
+
     drop(directory);
 }
 
