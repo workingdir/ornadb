@@ -321,6 +321,29 @@ impl OfflineCopy {
     }
 }
 
+/// What an import would write, reported after full verification. Payload
+/// bytes are not kept.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineImportDryRun {
+    pub rows: usize,
+    pub payload_bytes: u64,
+    pub history: usize,
+}
+
+impl OfflineCopy {
+    /// Verifies the whole bundle exactly as `import_plan` does, then reports
+    /// the counts an import would write. Nothing is written to the bundle or
+    /// to any repository.
+    pub fn dry_run_import(&self) -> Result<OfflineImportDryRun, OfflineCopyError> {
+        let plan = self.import_plan()?;
+        Ok(OfflineImportDryRun {
+            rows: plan.rows.len(),
+            payload_bytes: plan.rows.iter().map(|row| row.length).sum(),
+            history: plan.history.len(),
+        })
+    }
+}
+
 fn validate_row(row: &OfflineRow) -> Result<(), OfflineCopyError> {
     let token_ok = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_graphic());
     if !token_ok(&row.media_type) {

@@ -140,6 +140,11 @@ def main() -> int:
         "--check", action="store_true", help="compare the checkout with the pinned manifest"
     )
     action.add_argument("--update", action="store_true", help="rewrite the pinned manifest")
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress success output; drift and scan errors are still reported",
+    )
     args = parser.parse_args()
 
     hashes, scan_errors = fixture_hashes(WORKSPACE_ROOT)
@@ -151,7 +156,8 @@ def main() -> int:
 
     if args.update:
         MANIFEST_PATH.write_text(render_manifest(hashes), encoding="utf-8", newline="\n")
-        print(f"updated {MANIFEST_PATH.relative_to(WORKSPACE_ROOT)}: {len(hashes)} files")
+        if not args.quiet:
+            print(f"updated {MANIFEST_PATH.relative_to(WORKSPACE_ROOT)}: {len(hashes)} files")
         return 0
 
     if not MANIFEST_PATH.is_file():
@@ -162,12 +168,14 @@ def main() -> int:
         print("fixture manifest drift detected:", file=sys.stderr)
         for error in errors:
             print(f"  {error}", file=sys.stderr)
+        print(f"fixture manifest drift total: {len(errors)}", file=sys.stderr)
         return 1
 
-    print(
-        f"fixture manifest matches {len(hashes)} files across "
-        f"{len(fixture_roots(WORKSPACE_ROOT))} trees"
-    )
+    if not args.quiet:
+        print(
+            f"fixture manifest matches {len(hashes)} files across "
+            f"{len(fixture_roots(WORKSPACE_ROOT))} trees"
+        )
     return 0
 
 

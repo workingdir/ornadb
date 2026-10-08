@@ -274,3 +274,18 @@ fn collect_editor_files(directory: &Path, root: &Path, files: &mut BTreeSet<Stri
         }
     }
 }
+
+#[test]
+fn semantic_legend_markdown_lists_every_token_type_and_modifier_bit() {
+    let markdown = editor::semantic_legend_markdown();
+    let type_rows = editor::legend_token_types()
+        .enumerate()
+        .map(|(index, token_type)| format!("| {index} | {token_type} |"))
+        .collect::<Vec<_>>();
+    for row in &type_rows {
+        assert!(markdown.contains(row), "missing row {row}");
+    }
+    for (index, modifier) in editor::TOKEN_MODIFIERS.iter().enumerate() {
+        assert!(markdown.contains(&format!("| 1 << {index} | {modifier} |")));
+    }
+}
