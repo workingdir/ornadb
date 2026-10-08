@@ -167,6 +167,23 @@ fn durable_project(fixture_id: &str, source: &str) -> ProjectUnit {
     }
 }
 
+/// Reopens the runtime after a failed durable request and asserts that no row
+/// of `table` survived: the failed request must end with an empty batch.
+async fn assert_failed_request_left_no_rows(
+    repository: &Repository,
+    identity: RuntimeIdentity,
+    table: &str,
+    digest: [u8; 32],
+) {
+    let state = RuntimeState::open(repository, identity, digest)
+        .await
+        .expect("reopen after failed request");
+    assert!(
+        state.committed_table_rows(table).await.unwrap().is_empty(),
+        "a failed request must not leave rows in {table}"
+    );
+}
+
 fn canonical_eval_fingerprint(
     unit: &SourceUnit,
     request: RequestIdentity,
@@ -387,10 +404,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
     assert!(
         matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
     );
-    let state = RuntimeState::open(&repository, identity, [44; 32])
-        .await
-        .expect("reopen after rollback");
-    assert!(state.committed_table_rows("Note").await.unwrap().is_empty());
+    assert_failed_request_left_no_rows(&repository, identity, "Note", [44; 32]).await;
 
     let commit = scenario("TXN-002");
     assert_eq!(commit.requirements, ["ORNA-TXN-001"]);
