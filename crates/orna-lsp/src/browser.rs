@@ -75,6 +75,15 @@ pub fn signature_help(source: String, line: u32, character: u32) -> String {
     ))
 }
 
+/// Returns document symbols and their nested outline as an LSP JSON array.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn document_symbols(source: String) -> String {
+    let document = document(source);
+    let parsed = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    json(&analysis::document_symbols(&parsed, &document.text, &mapper))
+}
+
 /// Returns inlay hints for the requested document range as an LSP JSON array.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
 pub fn inlay_hints(
@@ -106,7 +115,7 @@ pub fn inlay_hints(
 
 #[cfg(test)]
 mod tests {
-    use super::{completions, diagnostics, hover, inlay_hints, signature_help};
+    use super::{completions, diagnostics, document_symbols, hover, inlay_hints, signature_help};
 
     const SOURCE: &str = include_str!("browser/fixtures/browser-intelligence.orna");
     const STANDARD_SOURCE: &str = include_str!("analysis/fixtures/standard-math-import.orna");
@@ -415,5 +424,24 @@ mod tests {
             );
             assert_eq!(shifted_character, base_character);
         }
+    }
+
+    #[test]
+    fn browser_document_symbols_expose_the_nested_outline_with_lsp_ranges() {
+        const DOCUMENT_SYMBOLS_SOURCE: &str =
+            include_str!("browser/fixtures/standard-document-symbols.orna");
+        let symbols: serde_json::Value =
+            serde_json::from_str(&document_symbols(DOCUMENT_SYMBOLS_SOURCE.to_owned()))
+                .expect("document symbol JSON");
+        let outcome = &symbols[0];
+        assert_eq!(outcome["name"], "Outcome");
+        assert_eq!(outcome["range"]["start"]["line"], 1, "{outcome:#}");
+        let children: Vec<&str> = outcome["children"]
+            .as_array()
+            .expect("enum variants are nested children")
+            .iter()
+            .map(|child| child["name"].as_str().expect("child name"))
+            .collect();
+        assert_eq!(children, ["success", "failed"], "{outcome:#}");
     }
 }

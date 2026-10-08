@@ -4,6 +4,9 @@ import '../node_modules/monaco-editor/min/vs/editor/editor.main.css';
 import { loadOrnaEditorConfig, registerOrnaLanguage } from './language';
 import {
   completionRankingFields,
+  documentSymbolFields,
+  type DocumentSymbolFields,
+  type DocumentSymbolRange,
   hoverMarkdown,
   inlayHintFields,
   signatureHelpFields,
@@ -20,7 +23,7 @@ import { startStyleReload } from './style-reload';
 import './theme.css';
 import './layout.css';
 
-type LspAction = 'diagnostics' | 'completions' | 'hover' | 'signature_help' | 'inlay_hints';
+type LspAction = 'diagnostics' | 'completions' | 'hover' | 'signature_help' | 'inlay_hints' | 'document_symbols';
 type Position = { line: number; character: number };
 type DocumentRange = { start: Position; end: Position };
 type LspReply = { id: number; value?: unknown; error?: string };
@@ -185,6 +188,35 @@ monaco.languages.registerSignatureHelpProvider('orna', {
       value: response,
       dispose: () => undefined,
     };
+  },
+});
+
+function toMonacoRange(range: DocumentSymbolRange): monaco.IRange {
+  return {
+    startLineNumber: range.start.line + 1,
+    startColumn: range.start.character + 1,
+    endLineNumber: range.end.line + 1,
+    endColumn: range.end.character + 1,
+  };
+}
+
+function toMonacoDocumentSymbol(symbol: DocumentSymbolFields): monaco.languages.DocumentSymbol {
+  return {
+    name: symbol.name,
+    detail: symbol.detail ?? '',
+    // LSP SymbolKind starts at 1 (File); Monaco SymbolKind starts at 0.
+    kind: symbol.kind - 1,
+    tags: [],
+    range: toMonacoRange(symbol.range),
+    selectionRange: toMonacoRange(symbol.selectionRange),
+    children: symbol.children.map(toMonacoDocumentSymbol),
+  };
+}
+
+monaco.languages.registerDocumentSymbolProvider('orna', {
+  async provideDocumentSymbols(model) {
+    const response = await requestLsp('document_symbols', model.getValue());
+    return documentSymbolFields(response).map(toMonacoDocumentSymbol);
   },
 });
 

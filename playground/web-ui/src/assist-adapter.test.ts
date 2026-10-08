@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { completionRankingFields, hoverMarkdown, inlayHintFields, signatureHelpFields } from './assist-adapter';
+import {
+  completionRankingFields,
+  documentSymbolFields,
+  hoverMarkdown,
+  inlayHintFields,
+  signatureHelpFields,
+} from './assist-adapter';
 
 describe('LSP completion ranking adapter', () => {
   it('preserves backend ordering and preselection for Monaco', () => {
@@ -125,5 +131,25 @@ describe('LSP inlay hint adapter', () => {
       position: { line: 0, character: 1 },
       label: [{ label: 'T', tooltip: 'type detail' }],
     }]);
+  });
+});
+
+describe('LSP document symbol adapter', () => {
+  it('keeps nested outline children and drops malformed entries', () => {
+    const range = { start: { line: 1, character: 0 }, end: { line: 3, character: 1 } };
+    const symbols = documentSymbolFields([
+      {
+        name: 'Outcome',
+        kind: 10,
+        range,
+        selectionRange: range,
+        children: [{ name: 'success', kind: 8, range, selectionRange: range }],
+      },
+      { name: 'broken', kind: 'enum', range, selectionRange: range },
+    ]);
+
+    expect(symbols.map((symbol) => symbol.name)).toEqual(['Outcome']);
+    expect(symbols[0].children.map((child) => child.name)).toEqual(['success']);
+    expect(documentSymbolFields('not a list')).toEqual([]);
   });
 });
