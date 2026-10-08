@@ -1,8 +1,9 @@
-//! `orna import <bundle-dir> --dry-run [--limit N]`: verifies an offline copy
-//! bundle in full and reports the rows and history an import would write.
-//! Nothing is written to the bundle or to any repository. A committing import
-//! is not wired yet, so `--dry-run` is required. `--limit N` reports only the
-//! first N rows in bundle order; every row is still verified.
+//! `orna import <bundle-dir> --dry-run [--limit N] [--quiet]`: verifies an
+//! offline copy bundle in full and reports the rows and history an import would
+//! write. Nothing is written to the bundle or to any repository. A committing
+//! import is not wired yet, so `--dry-run` is required. `--limit N` reports only
+//! the first N rows in bundle order; every row is still verified. `--quiet`
+//! suppresses the success report; failures still exit non-zero with a diagnostic.
 
 use std::path::Path;
 
@@ -10,24 +11,27 @@ use orna_repository_v1::offline_copy::OfflineCopy;
 
 use super::Diagnostic;
 
-const USAGE: &str = "usage: orna import <bundle-dir> --dry-run [--limit N]";
+const USAGE: &str = "usage: orna import <bundle-dir> --dry-run [--limit N] [--quiet]";
 
-/// Parsed import options: the bundle directory plus the optional row limit.
+/// Parsed import options: the bundle directory, optional row limit, and output mode.
 #[derive(Debug, Eq, PartialEq)]
 struct ImportOptions<'a> {
     bundle: &'a str,
     limit: Option<usize>,
+    quiet: bool,
 }
 
-/// Returns the bundle directory and row limit when the arguments name one and request a dry run.
+/// Returns the bundle directory, row limit, and quiet flag when the arguments name one and request a dry run.
 fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> {
     let mut bundle = None;
     let mut dry_run = false;
     let mut limit = None;
+    let mut quiet = false;
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
             "--dry-run" => dry_run = true,
+            "--quiet" => quiet = true,
             "--limit" => {
                 let value = words.next().ok_or_else(|| {
                     import_error("--limit needs a value", "usage: --limit <N>, N >= 1")
@@ -48,7 +52,7 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
             flag if flag.starts_with("--") => {
                 return Err(import_error(
                     "Unknown import flag",
-                    format!("got {flag:?}; accepted: --dry-run, --limit"),
+                    format!("got {flag:?}; accepted: --dry-run, --limit, --quiet"),
                 ));
             }
             path if bundle.is_none() => bundle = Some(path),
@@ -67,15 +71,19 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
             USAGE,
         ));
     }
-    Ok(ImportOptions { bundle, limit })
+    Ok(ImportOptions {
+        bundle,
+        limit,
+        quiet,
+    })
 }
 
 pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
-    println!(
-        "{}",
-        dry_run_summary(Path::new(options.bundle), options.limit)?
-    );
+    let summary = dry_run_summary(Path::new(options.bundle), options.limit)?;
+    if !options.quiet {
+        println!("{summary}");
+    }
     Ok(())
 }
 
@@ -145,6 +153,15 @@ mod tests {
         assert!(parse_options(&words(&["bundle", "--dry-run", "--limit"])).is_err());
         assert!(parse_options(&words(&["bundle", "--dry-run", "--limit", "0"])).is_err());
         assert!(parse_options(&words(&["bundle", "--dry-run", "--limit", "x"])).is_err());
+    }
+
+    #[test]
+    fn quiet_is_accepted_in_any_position_and_still_requires_dry_run() {
+        let quiet = parse_options(&words(&["--quiet", "bundle", "--dry-run"])).unwrap();
+        assert_eq!((quiet.bundle, quiet.quiet), ("bundle", true));
+        let trailing = parse_options(&words(&["bundle", "--dry-run", "--quiet"])).unwrap();
+        assert!(trailing.quiet);
+        assert!(parse_options(&words(&["bundle", "--quiet"])).is_err());
     }
 
     #[test]
