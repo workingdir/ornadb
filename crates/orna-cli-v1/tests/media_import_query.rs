@@ -55,6 +55,10 @@ const NEGATIVE_LIMIT_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-negative-limit.orna"
 );
+const IMAGE_SINCE_BOUNDARY_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-image-since-boundary.orna"
+);
 const IMAGE_JSON_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image-json.orna"
@@ -825,6 +829,72 @@ async fn history_rejects_negative_and_out_of_range_limits_before_listing() {
             String::from_utf8_lossy(&output.stdout)
         );
     }
+    drop(directory);
+}
+
+#[tokio::test]
+async fn history_since_excludes_the_named_boundary_commit_end_to_end() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("pixel.png"),
+        source.path().join("pixel.png"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let image = import_expression(IMAGE_SINCE_BOUNDARY_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x70, true).await;
+    drop(bindings);
+    drop(state);
+
+    let relation = relation_hex(relation_id);
+    let full = history_json(directory.path(), relation_id, "image");
+    assert!(full.len() >= 2, "the image row has a present and an absent revision");
+
+    // `--since <commit>` drops the named commit and everything older, so the
+    // boundary revision itself is excluded and only the newer one remains.
+    let boundary = full[1]["commit"].as_str().unwrap();
+    let output = run_history(
+        directory.path(),
+        &[&relation, "image", "--since", boundary, "--format", "json"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    let newer: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(newer, full[..1].to_vec(), "only the revision newer than the boundary");
+
+    // Cutting at the oldest revision keeps every other revision.
+    let oldest = full.last().unwrap()["commit"].as_str().unwrap();
+    let output = run_history(
+        directory.path(),
+        &[&relation, "image", "--since", oldest, "--format", "json"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let kept: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(kept, full[..full.len() - 1].to_vec());
+
+    // A commit outside the walk is refused with exit 1 and no listing.
+    let unknown = "0".repeat(40);
+    let output = run_history(
+        directory.path(),
+        &[&relation, "image", "--since", &unknown, "--format", "json"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
     drop(directory);
 }
 
