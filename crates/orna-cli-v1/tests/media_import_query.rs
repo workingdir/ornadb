@@ -191,7 +191,7 @@ async fn history_pages_cover_every_revision_once_across_imported_rows() {
         .await
         .unwrap();
     let writer = state.acquire_lease([0x63; 16]).await.unwrap();
-    let capability = capture_capability(&repository, relation_id);
+    let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(source.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
