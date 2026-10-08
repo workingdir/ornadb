@@ -59,6 +59,34 @@ fn query_preserves_named_percentile_interpolation_inside_each_window() {
 }
 
 #[test]
+fn stats_percentile_nearest_breaks_the_exact_half_tie_upward() {
+    // Over the sorted pair [0, 10] the position equals the probability, so the
+    // decimal fraction decides the choice: below one half picks the lower
+    // value, exactly one half and above pick the upper value.
+    let mut session = session();
+    for (fixture, expected) in [
+        (
+            include_str!("fixtures/stdlib-stats-percentile-nearest-below-tie-ln4y7.orna"),
+            0,
+        ),
+        (
+            include_str!("fixtures/stdlib-stats-percentile-nearest-tie-ln4y7.orna"),
+            10,
+        ),
+        (
+            include_str!("fixtures/stdlib-stats-percentile-nearest-above-tie-ln4y7.orna"),
+            10,
+        ),
+    ] {
+        assert_eq!(
+            session.submit(fixture),
+            Ok(Some(optional_int(expected))),
+            "{fixture}"
+        );
+    }
+}
+
+#[test]
 fn stats_percentile_endpoints_and_histogram_bounds_return_exact_values() {
     let mut session = session();
     assert_eq!(
