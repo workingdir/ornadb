@@ -1335,6 +1335,11 @@ fn standard_references(
         if local_references.contains(&(span.start, span.end)) {
             continue;
         }
+        // A qualified occurrence reports each segment; only the final segment
+        // names the symbol, so the segments before a `.` are not references.
+        if document.text[span.end..].starts_with('.') {
+            continue;
+        }
         let occurrence_token = Token {
             kind: token.kind.clone(),
             text: occurrence.clone(),
