@@ -108,6 +108,22 @@ pub fn semantic_token_types() -> impl Iterator<Item = &'static str> {
         .filter_map(|item| item.semantic_token_type)
 }
 
+/// Semantic-token types the LSP refines beyond the lexical classes. They are
+/// declared here so every editor attach legend advertises the same list.
+const REFINEMENT_TOKEN_TYPES: &[&str] = &[
+    "type",
+    "enum",
+    "interface",
+    "function",
+    "parameter",
+];
+
+/// Complete semantic-token legend advertised to editors: the lexical classes
+/// in protocol index order, then the LSP refinements.
+pub fn legend_token_types() -> impl Iterator<Item = &'static str> {
+    semantic_token_types().chain(REFINEMENT_TOKEN_TYPES.iter().copied())
+}
+
 /// Semantic-token index for one v1 lexical class; punctuation is omitted.
 pub fn semantic_token_index(class: TokenClass) -> Option<usize> {
     let mut index = 0;
@@ -575,7 +591,7 @@ fn render_textmate() -> String {
 }
 
 fn render_semantic_legend() -> String {
-    let token_types = semantic_token_types()
+    let token_types = legend_token_types()
         .map(json_string)
         .collect::<Vec<_>>()
         .join(", ");
