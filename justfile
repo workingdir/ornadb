@@ -16,6 +16,7 @@ fixture-audit:
     cargo test --locked -p orna-evaluator-v1 --test standard_snapshot_replay
     cargo test --locked -p orna-evaluator-v1 --test standard_library_hash_snapshot_27d5k --test standard_library_random_snapshot_27d5k
     cargo test --locked -p orna-evaluator-v1 --test standard_library_format_strings_si45g
+    cargo test --locked -p orna-evaluator-v1 --test standard_library_map_conflicts_ln4y7
     cargo test --locked -p orna-runtime-v1 --test historical_snapshots
 
 # Regenerate every editor package artifact from orna-syntax-v1.

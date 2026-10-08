@@ -2108,6 +2108,17 @@ dd2a6c8f25808469febca965527d6af0677c75272d54fe6917e35fb1b71643e0  crates/orna-ev
 00995552e2d6d097d4f9467ffc9786e50480957397ad5e2904e47a6a51dbc771  crates/orna-evaluator-v1/tests/fixtures/split_when_callbacks.orna
 caa74a4612c6361259f23874f6d9506654e04cc680abb18acf26aaf84f08ca60  crates/orna-evaluator-v1/tests/fixtures/split_when_collection_limit.orna
 600b75dfe9ebba80290535c24b3414efc4e632910f25afa2df1aecd89403c378  crates/orna-evaluator-v1/tests/fixtures/split_when_step_budget.orna
+34e04ed64b06abf107a9c3230df5cfa832fb98a8505b912a062c5e054722cafd  crates/orna-evaluator-v1/tests/fixtures/std-list-behavior.orna
+339401df65f73e627b72b9912aea5fe4032ce6d1f19df41f8aea8235d6ba46a5  crates/orna-evaluator-v1/tests/fixtures/std-list-empty.orna
+09c1ae880e90fdc22243ad704eb19dec38f67ee6ca12c57c0e715cc253e8004f  crates/orna-evaluator-v1/tests/fixtures/std-list-negative-drop.orna
+532b4360a97ce0ca53d93f68be91165fe88c6459dff1b51b978166bb7a2f90d2  crates/orna-evaluator-v1/tests/fixtures/std-list-negative-take.orna
+92eb8bd38505190e779a55c0c7e8a9b5d9608e510a480d234b9be9b9363071c6  crates/orna-evaluator-v1/tests/fixtures/std-list-search-behavior.orna
+339401df65f73e627b72b9912aea5fe4032ce6d1f19df41f8aea8235d6ba46a5  crates/orna-evaluator-v1/tests/fixtures/std-list-search-empty.orna
+7df7bbfa4b64e5dbc5f35277e53a9dc65da15f0cf94ea9aa0fa647eef8a44e42  crates/orna-evaluator-v1/tests/fixtures/std-list-search-one-many.orna
+36bc61747f7843a3ac30e2082b7034c32c4bc35e19ad730feae3372ea5040468  crates/orna-evaluator-v1/tests/fixtures/std-list-search-one-none.orna
+877403d3428de5489dc1d1c95f935858c5458e1fe122cdcd80d781e5d0ba0de6  crates/orna-evaluator-v1/tests/fixtures/std-list-search-sorting-use.orna
+19247dded0992eec6f61fc754c2aa726f818f6d650f9685cf6c73aa4f02d3aca  crates/orna-evaluator-v1/tests/fixtures/std-list-search-use.orna
+19247dded0992eec6f61fc754c2aa726f818f6d650f9685cf6c73aa4f02d3aca  crates/orna-evaluator-v1/tests/fixtures/std-list-use.orna
 e7355a2df5a7a747a74245fbd9466037c012d264e5d487cdb835f7e863a07dd0  crates/orna-evaluator-v1/tests/fixtures/stdlib-algorithm-behavior-oo3k6.orna
 1ce40fa00233ba78e775b81fc2a6a0a9b0e0f2be9ee82e36bd054a3d2fc00df2  crates/orna-evaluator-v1/tests/fixtures/stdlib-algorithm-sort-oo3k6.orna
 a6c71821d016530ffbd8b62a277c2f29ccb16415eedaaa793490fabf9de03353  crates/orna-evaluator-v1/tests/fixtures/stdlib-algorithm-stable-ties-cli9f.orna
@@ -2190,6 +2201,7 @@ cf063418df0664b7d66e025b0d7031da3798dcb4410b0b9e1620a0991d7fbf2a  crates/orna-ev
 2bf815f3cb9db0727fec2cf7bdb55a02f6bea5d25879295dd010e3cf755bdd97  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-map-insert-q730o.orna
 6f69dcd70b8b674326dcbbcdc8f6650c2daaf4bae9b29ebb534ac3c5635d0b2e  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-map-lookup-q730o.orna
 e1bd4a33308cb249b511e8fefafd79dcfdca97cbd8d33251438f1dc578b33a77  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-map-merge-q730o.orna
+0cabfda074cf51c09d7adf4f0d164cb0482d1fbccba7ca6f28e67046556e6ced  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-map-remove-absent-q730o.orna
 08b5514208eb3398b47270803d33cbc84995f8b2e531ff4490135c9b7c1b2e00  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-set-deduplicate-q730o.orna
 f890093544236a8c910084c4f071d6764e8ce677149f046acf9e986b32740d80  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-set-empty-call-q730o.orna
 e12a72b75e4b9bb73994892298cbf0917e66407c85be9c8cee054c2892bc602a  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-set-empty-q730o.orna
@@ -2400,6 +2412,7 @@ a2e9d3b162aa79a4c4b6b3badc7fcc508bc602d5468ad022035504ec57fa73c9  crates/orna-ev
 76d3f8983a52c0fa4d88d3c15deda3c83375f34ae56b7573b4779de0ca6a2d09  crates/orna-evaluator-v1/tests/fixtures/stdlib-lazy-without-snapshot-s58ir.orna
 602352fa36c9bf07e23b35d81406cc3353edc6350a013437048b1a86e961827d  crates/orna-evaluator-v1/tests/fixtures/stdlib-lazy-zip-with-xef6t.orna
 66e60288a0f14f9f9faa766adf6557551c2e11af35d69f22f559923b72cca6f4  crates/orna-evaluator-v1/tests/fixtures/stdlib-list-contract-i7bat.orna
+914b918806ea7d6730cb1a9380b42b5928917cc4ec680e3e3b501c17827e8000  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-conflicts-ln4y7.orna
 df3d028daf2148cf175c3e73bc06468771b0f1ffe0e0cbaf9bc543defc5cd68c  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-contract-i7bat.orna
 43985941b63599cfce81d28f975be57d27698ae15f3327a0a0e3d22cb90eadc5  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-four-entry-ovb-order-w02pm.orna
 9e19b72f4ffd2ff37fc701b01b715078488b4e9d8002aed4df5b173f4e139271  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-four-unique-o3yue.orna
@@ -2551,6 +2564,9 @@ bc3609caa9d25df4441716260bb02f0283dc8b6291750667c9139c79123dd2b3  crates/orna-ev
 9d305f0882e1762e7dfa9293bc6b9eb441b848d4ab09c7eccf5c9dcc2cd7b2ac  crates/orna-evaluator-v1/tests/fixtures/stdlib-result-combinators-fallbacks-vvatu.orna
 370c0bf56c1cde2d20a744fbfd8c8e86598da9d5f2932746fc9ae6fc1219701b  crates/orna-evaluator-v1/tests/fixtures/stdlib-result-combinators-transpose-vvatu.orna
 921d3442e36468d1648abda9312e3e337a00c27fbf80ff566d1141a452c1cc84  crates/orna-evaluator-v1/tests/fixtures/stdlib-result-combinators-values-vvatu.orna
+41e963ed9775d4aac9847e65eb96f9ee8b5c5074e3d2d28e9866e44eb802e996  crates/orna-evaluator-v1/tests/fixtures/stdlib-result-map-error-callback-failure.orna
+7a6bc1010576f81873bfdbab7dc1ca58bfe3b6c3b47169dc428651d7be138dda  crates/orna-evaluator-v1/tests/fixtures/stdlib-result-map-error-compose.orna
+c16c6e9cd1b578e197837735bc600a3d244b67ab50b5b368f1dea216646bbf89  crates/orna-evaluator-v1/tests/fixtures/stdlib-result-map-error-proof.orna
 48f0b3af9a94f6cf66555103d3b053ff8a7d995bf2326edf2fd4d25c5f15e3e3  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-contract-i7bat.orna
 c952d9eb7bb38efab0120e600e1c8741ae9ec9bc1fc98e08c61add9e92c4d8fc  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-order-ovb-o3yue.orna
 23b81a7b751f8b921444c0ee4e21a142232c07ac6134e26f2dacbd4e916b1807  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-order-roundtrip-o3yue.orna
@@ -3272,6 +3288,10 @@ d49a4b8de867606627946be5ce4c374f36ce18c0ae9d0d19e191d51498850da8  crates/orna-ls
 1d6507c277771162faf5ab37dfe673dbbe59c3184ddf06274272d00a134470d9  crates/orna-lsp/tests/fixtures/ji3t0-invalid-v1.orna
 01e3906bf653fdb21af2004278ef449a14178756ebb34f4e0bd6cc49ee4d7e21  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1-self-contained.orna
 953ba69f21a16700cc90bee0b6920e14a9af8c340a6c88def7d2b466aed1b4b6  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna
+394e849ed3b715bd9f3a157d126ad913bc733ec96fb25f186d84ba1bab96b082  crates/orna-lsp/tests/fixtures/legacy-guard/current-manifest.toml
+0b6c66aacbf3c8db45d19b3c1da08f970e95b9b433f0fa4800043dcbce64e373  crates/orna-lsp/tests/fixtures/legacy-guard/current-source.rs
+39d46f817fc5a242361bd06502ce7312e7376fe8484bea27a24aefe74e87c184  crates/orna-lsp/tests/fixtures/legacy-guard/legacy-manifest.toml
+aa425441889b554bf9e18fa4accf98c45c5bf53cc05fbd204d15aa07540e57e8  crates/orna-lsp/tests/fixtures/legacy-guard/legacy-source.rs
 3db450900296cabab55c405651bc2dc28ca73db8f2ae207768c3d2c21fa6c322  crates/orna-lsp/tests/fixtures/lexical-v1.orna
 e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/library/math.orna
 e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/library/math/main.orna

@@ -1,0 +1,14 @@
+map.merge([("a", 1), ("a", 2)], [("a", 3)]) == [("a", 3)]
+&& map.merge([("a", 1)], [("b", 2), ("a", 3), ("b", 4)]) == [("a", 3), ("b", 4)]
+&& map.merge(empty_pairs, [("a", 1), ("a", 2)]) == [("a", 2)]
+&& map.merge([("a", 1)], empty_pairs) == [("a", 1)]
+&& map.merge(empty_pairs, empty_pairs) == empty_pairs
+&& map.merge([("x", 1), ("y", 2)], [("x", 1), ("y", 2)]) == [("x", 1), ("y", 2)]
+&& map.merge([("x", 1), ("y", 2)], [("y", 3), ("x", 4)]) == [("x", 4), ("y", 3)]
+&& map.merge([("x", 1), ("y", 2)], [("y", 3), ("x", 4)]) != map.merge([("y", 3), ("x", 4)], [("x", 1), ("y", 2)])
+&& map.size(map.merge([("a", 1), ("a", 2)], [("a", 3), ("b", 4)])) == 2
+&& map.keys(map.merge([("b", 1)], [("a", 2), ("b", 3)])) == ["b", "a"]
+&& map.remove([("a", 1), ("a", 2)], "a") == empty_pairs
+&& map.remove([("a", 1)], "missing") == [("a", 1)]
+&& map.insert([("a", 1), ("a", 2)], "b", 3) == [("a", 2), ("b", 3)]
+&& map.values([("k", 1), ("k", 2)]) == [2]
