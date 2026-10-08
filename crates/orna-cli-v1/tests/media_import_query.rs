@@ -100,6 +100,16 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     let too_small = BlobMetadataFilter::new().with_max_length(10);
     assert!(filter_media(&state, &too_small).await.is_empty());
 
+    // Bytes avoided: every listed payload is committed but never hydrated, so
+    // the listing saves the full committed length of each row.
+    let on_disk: u64 = ["tone.wav", "pixel.png"]
+        .iter()
+        .map(|file| std::fs::metadata(Path::new(MEDIA_FIXTURES).join(file)).unwrap().len())
+        .sum();
+    let avoided: u64 = listing.iter().map(|row| row.length).sum();
+    assert_eq!(avoided, on_disk, "listing avoids every committed payload byte");
+    assert!(listing.iter().all(|row| !row.hydrated));
+
     assert_song_revision_history(&repository, &directory, relation_id);
 
     drop(directory);
