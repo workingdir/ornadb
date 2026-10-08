@@ -176,6 +176,7 @@ cd626bdd714dc3c2e1c69489ec753104ee212a829b3494f1044cff3ba849737f  crates/orna-cl
 07788a7921adf9478be9b93e6e919d24611366074cd7e4cacab9f5450d144ab6  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-count.orna
 32aa4b201a98b3c1abcdf29654b39e848a2fb3366115c405974ea7712e2e8680  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-invalid.orna
 07788a7921adf9478be9b93e6e919d24611366074cd7e4cacab9f5450d144ab6  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-page.orna
+40a483fe75ff1e47621b58d28c13b62f078ece3643e8ac8c7b1a5e5d7ded5a4f  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-reload.orna
 40a483fe75ff1e47621b58d28c13b62f078ece3643e8ac8c7b1a5e5d7ded5a4f  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-script.orna
 056072ca9f179c11cf23a45c9829c50d15f33bd2a060c86228754285a5ed877c  crates/orna-cli-v1/tests/fixtures/playground-route-config.orna
 a38ff0ce3d75c0d1c9235b00fb73b6a56d1958b9565902691d7ff6c4776d5f88  crates/orna-cli-v1/tests/fixtures/playground-route-embed-script.orna
@@ -659,6 +660,7 @@ c498fa5e77701507c101050917ef995ec18b00e65b02763c8be21ce9588db876  crates/orna-co
 f312e3c7448c00c5372679f0c5f11e32a22ed1130834d390e00614084ed0b3aa  crates/orna-conformance-v1/tests/fixtures/relation-aggregate-nested-assertion.orna
 f55f43057a03cd8c7366e46357c3c01ce2b736f332e65543f86b0263352a2662  crates/orna-conformance-v1/tests/fixtures/relation-aggregate-nested-seed.orna
 8034021bd0f73e2251b9d118c706ce729154bb483c07a34050fab3f42803c544  crates/orna-conformance-v1/tests/fixtures/relation-core-section9-m9f62.orna
+497bd763b52217238012bacf37764ccca556fd516cc935fcde38e6288485a93f  crates/orna-conformance-v1/tests/fixtures/relation-edit-follow-linked-rows.orna
 071e596f6d851fdd4cc9d8ccdacfff17de3d6d9483206afa1793ad016930ea6f  crates/orna-conformance-v1/tests/fixtures/relation-one-absence-rollback.orna
 2d2fdad3b695b7eec8bbfa71439b9c034002fc9ee4b12adcdb3243e7f0cf3ac8  crates/orna-conformance-v1/tests/fixtures/relation-one-candidate-row.orna
 f6d45ef49f78362ef10687de44e6b32a355529ba63a81785b15c18e67f2d2a76  crates/orna-conformance-v1/tests/fixtures/relation-one-filtered-multiple.orna
@@ -5977,4 +5979,3 @@ b48369756a137544a9d3888f17ad10a97e7a2010618ec084a5b8b3b603844095  crates/orna-va
 3eef68f03fdc30a0743384484a2a9b2137b5e15a7805b2e344afff0fa691d9de  crates/orna-value-v1/tests/fixtures/blob-role-dispatch.orna
 cd36ebb657d074e7093e5e50c002fdee04cb65c9b726da6c072698d793e36441  crates/orna-value-v1/tests/fixtures/error-trace-secret.orna
 953db2cefdcc80db9f15250c696afba8defd1458875a8262019bbf1d8465a3df  crates/orna-value-v1/tests/fixtures/secret-surface.orna
-40a483fe75ff1e47621b58d28c13b62f078ece3643e8ac8c7b1a5e5d7ded5a4f  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-reload.orna
