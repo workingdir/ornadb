@@ -325,3 +325,9 @@ fn semantic_legend_csv_quotes_samples_that_need_it() {
     let csv = editor::semantic_legend_csv();
     assert!(csv.contains("token_type,3,string,\"\"\"text\"\"\"\n"));
 }
+
+#[test]
+fn semantic_legend_version_tracks_the_crate_version() {
+    assert_eq!(editor::SEMANTIC_LEGEND_VERSION, env!("CARGO_PKG_VERSION"));
+    assert_eq!(editor::SEMANTIC_LEGEND_VERSION, "1.0.0");
+}
