@@ -164,3 +164,45 @@ fn offline_import_plan_restores_every_verified_row_or_rejects_the_bundle() {
         Err(OfflineCopyError::PayloadMismatch { .. })
     ));
 }
+
+#[test]
+fn offline_bundle_round_trips_rows_media_and_history() {
+    let directory = TempDir::new().unwrap();
+    let first = directory.path().join("first");
+    let rows = [
+        committed_row("image", "image/png", "pixel.png"),
+        committed_row("song", "audio/wav", "tone.wav"),
+    ];
+    let history = [
+        OfflineHistoryEntry {
+            sequence: 1,
+            commit: [0x5a; 32],
+        },
+        OfflineHistoryEntry {
+            sequence: 2,
+            commit: [0x5b; 32],
+        },
+    ];
+    write_offline_copy(&first, &rows, &history).unwrap();
+
+    // Import the copy back: every row, payload, and history entry must match.
+    let imported = OfflineCopy::open(&first).unwrap().import_rows().unwrap();
+    assert_eq!(imported, rows);
+    let reopened = OfflineCopy::open(&first).unwrap();
+    assert_eq!(reopened.history(), &history);
+
+    // Writing the imported rows again yields a byte-identical bundle.
+    let second = directory.path().join("second");
+    write_offline_copy(&second, &imported, reopened.history()).unwrap();
+    assert_eq!(
+        std::fs::read(first.join("index.tsv")).unwrap(),
+        std::fs::read(second.join("index.tsv")).unwrap()
+    );
+    for row in &rows {
+        let name = hex(&row.sha256);
+        assert_eq!(
+            std::fs::read(first.join("media").join(&name)).unwrap(),
+            std::fs::read(second.join("media").join(&name)).unwrap()
+        );
+    }
+}
