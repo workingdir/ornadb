@@ -1635,6 +1635,28 @@ mod graph_bridge_tests {
                 "range {range:?} returned the wrong bytes"
             );
         }
+
+        // Pack boundary: move every reachable object, including the OGB-2
+        // chunks, into a packfile and drop the loose copies. Reads must still
+        // verify full and straddling ranges against the same committed row.
+        git(root, &["repack", "-a", "-d", "--quiet"]);
+        git(root, &["prune-packed"]);
+        let packed_scope = admitted_graph.open_read_scope().unwrap();
+        let packed = admitted_graph
+            .read_blob_range(&reference, 0..identity.length(), &packed_scope)
+            .expect("verify the complete OGB-2 closure after repacking");
+        assert_eq!(packed.bytes(), payload);
+        for range in [0..1, maximum - 1..maximum + 1, length - 1..length] {
+            let range_scope = admitted_graph.open_read_scope().unwrap();
+            let read = admitted_graph
+                .read_blob_range(&reference, range.clone(), &range_scope)
+                .unwrap_or_else(|error| panic!("packed range {range:?} failed: {error:?}"));
+            assert_eq!(
+                read.bytes(),
+                &payload[range.start as usize..range.end as usize],
+                "packed range {range:?} returned the wrong bytes"
+            );
+        }
     }
 
     #[test]
