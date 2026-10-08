@@ -1754,6 +1754,11 @@ mod graph_bridge_tests {
         assert!(rows.iter().any(|(name, count)| *name == "StoreRoot" && *count == 1));
         assert_eq!(stats.to_quiet_line(), total.to_string());
         assert_eq!(stats.total_nodes(), total);
+        let since_self = graph
+            .object_stats_since(&scope, graph.store_root())
+            .expect("count objects added since the current root");
+        assert!(since_self.nodes().is_empty(), "nothing is added since the current root");
+        assert_eq!(since_self.blob_references(), 0);
         let json = stats.to_json();
         assert!(
             json.starts_with("{\"nodes\":{\"StoreRoot\":1,"),
