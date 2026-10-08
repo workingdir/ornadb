@@ -1,0 +1,3 @@
+pub fn route(): Text = "/catalogue";
+
+pub fn depth(segments: [Text]): Int = std.collection.count(segments);
