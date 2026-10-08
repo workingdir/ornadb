@@ -1,0 +1,3 @@
+pub fn status(): Text = "ready";
+
+pub fn code(value: Int): Int = value + 1;
