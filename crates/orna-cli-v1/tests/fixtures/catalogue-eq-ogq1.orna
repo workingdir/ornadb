@@ -1,0 +1,3 @@
+pub fn title(): Text = "equal";
+
+pub fn scale(value: Int): Int = value * 3;
