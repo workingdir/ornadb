@@ -44,3 +44,43 @@ fn source_row(path: &Path) -> OfflineRow {
         payload: Some(bytes),
     }
 }
+
+#[test]
+fn offline_export_of_an_orna_fixture_is_stable_under_mtime_changes() {
+    use orna_repository_v1::offline_copy::{OfflineCopy, write_offline_copy};
+
+    let directory = TempDir::new().unwrap();
+    let source = copy_fixture(directory.path(), "catalogue-mtime-ogm1.orna");
+
+    set_mtime(&source, 1_700_000_000);
+    let first_row = source_row(&source);
+    let first = directory.path().join("first");
+    write_offline_copy(&first, std::slice::from_ref(&first_row), &[]).unwrap();
+
+    set_mtime(&source, 1_800_000_000);
+    let mtime_after = fs::metadata(&source).unwrap().modified().unwrap();
+    assert_eq!(
+        mtime_after,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+        "the copy's mtime must actually change for this proof to mean anything"
+    );
+    let second_row = source_row(&source);
+    let second = directory.path().join("second");
+    write_offline_copy(&second, std::slice::from_ref(&second_row), &[]).unwrap();
+
+    assert_eq!(
+        fs::read(first.join("index.tsv")).unwrap(),
+        fs::read(second.join("index.tsv")).unwrap()
+    );
+    let digest = hex_digest(&first_row.sha256);
+    assert_eq!(
+        fs::read(first.join("media").join(&digest)).unwrap(),
+        fs::read(second.join("media").join(&digest)).unwrap()
+    );
+    let opened = OfflineCopy::open(&second).unwrap();
+    assert_eq!(opened.rows()[0].sha256, first_row.sha256);
+}
+
+fn hex_digest(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
