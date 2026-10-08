@@ -1,0 +1,3 @@
+pub fn pattern(): Str = "[a-c]{2,3}x";
+
+pub fn text(): Str = "zbcax";
