@@ -580,3 +580,34 @@ class FixtureManifestUnreadableTests(unittest.TestCase):
 
     def test_other_scan_errors_still_exit_1(self) -> None:
         self.assertEqual(scan_exit_status(["fixture file symlink is not supported: x"]), 1)
+
+
+class FixtureManifestRootsTests(unittest.TestCase):
+    def test_roots_prints_each_fixture_root_after_the_summary(self) -> None:
+        path = "crates/example/tests/fixtures/input.orna"
+        pinned = hashlib.sha256(b"original\n").hexdigest()
+        with TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "fixture-manifest.sha256"
+            manifest_path.write_text(render_manifest({path: pinned}), encoding="utf-8")
+            stdout = StringIO()
+            with (
+                mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(check_fixture_manifest, "fixture_hashes", return_value=({path: pinned}, [])),
+                mock.patch.object(
+                    check_fixture_manifest,
+                    "fixture_roots",
+                    return_value=[check_fixture_manifest.WORKSPACE_ROOT / "crates/example/tests/fixtures"],
+                ),
+                mock.patch("sys.argv", ["check_fixture_manifest.py", "--check", "--roots"]),
+                redirect_stdout(stdout),
+            ):
+                status = check_fixture_manifest.main()
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            stdout.getvalue().splitlines(),
+            [
+                "fixture manifest matches 1 files across 1 trees",
+                "crates/example/tests/fixtures",
+            ],
+        )
