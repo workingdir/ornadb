@@ -956,11 +956,15 @@ impl NativeGraphContext {
             return Ok(Vec::new());
         }
         let limit = format!("--max-count={max_commits}");
-        let output = self.git_output(&["log", "--format=%H %T", &limit, "HEAD"])?;
+        // `%an <%ae>` follows a tab, so names containing spaces stay intact.
+        let output = self.git_output(&["log", "--format=%H %T%x09%an <%ae>", &limit, "HEAD"])?;
         let text = std::str::from_utf8(&output).map_err(|_| GraphError::GitObjectMalformed)?;
         let mut snapshots = Vec::new();
         for line in text.lines() {
-            let mut fields = line.split(' ');
+            let Some((header, author)) = line.split_once('\t') else {
+                return Err(GraphError::GitObjectMalformed);
+            };
+            let mut fields = header.split(' ');
             let (Some(commit), Some(tree), None) = (fields.next(), fields.next(), fields.next())
             else {
                 return Err(GraphError::GitObjectMalformed);
@@ -974,7 +978,11 @@ impl NativeGraphContext {
                     actual,
                 });
             }
-            snapshots.push(RevisionSnapshot { commit, tree });
+            snapshots.push(RevisionSnapshot {
+                commit,
+                tree,
+                author: author.to_owned(),
+            });
         }
         Ok(snapshots)
     }
@@ -1019,6 +1027,7 @@ impl NativeGraphContext {
             revisions.push(RowRevision {
                 commit: snapshot.commit().clone(),
                 tree: snapshot.tree().clone(),
+                author: snapshot.author().to_owned(),
                 present,
             });
         }
@@ -2985,6 +2994,7 @@ pub(crate) struct VerifiedBlobDescriptor {
 pub struct RevisionSnapshot {
     commit: NativeOid,
     tree: NativeOid,
+    author: String,
 }
 
 impl RevisionSnapshot {
@@ -2995,6 +3005,11 @@ impl RevisionSnapshot {
     pub const fn tree(&self) -> &NativeOid {
         &self.tree
     }
+
+    /// Commit author as `Name <email>`, as git prints `%an <%ae>`.
+    pub fn author(&self) -> &str {
+        &self.author
+    }
 }
 
 /// One reachable commit of a row's history, as listed by
@@ -3004,6 +3019,7 @@ impl RevisionSnapshot {
 pub struct RowRevision {
     commit: NativeOid,
     tree: NativeOid,
+    author: String,
     present: bool,
 }
 
@@ -3014,6 +3030,11 @@ impl RowRevision {
 
     pub const fn tree(&self) -> &NativeOid {
         &self.tree
+    }
+
+    /// Commit author as `Name <email>`.
+    pub fn author(&self) -> &str {
+        &self.author
     }
 
     pub const fn present(&self) -> bool {
