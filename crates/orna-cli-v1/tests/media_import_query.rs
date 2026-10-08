@@ -39,6 +39,10 @@ const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
 );
+const LIMIT_ZERO_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-limit-zero.orna"
+);
 const SORT_IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image-sort.orna"
@@ -1026,4 +1030,62 @@ async fn sort_orders_mixed_media_types_by_type_then_length() {
         .collect();
     // audio/wav sorts before image/png; each type's rows sort by length.
     assert_eq!(order, vec![("audio/wav", 4044), ("image/png", 73)]);
+}
+
+/// Revision walk for the committed song row, through the OGS-1 graph.
+fn song_revisions_limited_to(
+    repository: &Repository,
+    relation_id: [u8; 16],
+    max_commits: usize,
+) -> Vec<RowRevision> {
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let rows = graph
+        .range_rows(&KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+    let song = rows
+        .iter()
+        .find(|row| {
+            row.key() == &TypedKey::Bytes(b"song".to_vec())
+                || row.key() == &TypedKey::Text("song".to_owned())
+        })
+        .expect("the song row is committed");
+    graph.list_row_revisions(song, max_commits, &scope).unwrap()
+}
+
+#[tokio::test]
+async fn zero_limit_history_walk_returns_no_revisions() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(Path::new(MEDIA_FIXTURES).join(name), source.path().join(name)).unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(LIMIT_ZERO_SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+
+    // Control: a limit of one returns the head revision, so the walk is live.
+    assert_eq!(song_revisions_limited_to(&repository, relation_id, 1).len(), 1);
+    // Zero limit returns an empty listing, not an error or the full walk.
+    assert!(song_revisions_limited_to(&repository, relation_id, 0).is_empty());
+    drop(directory);
 }
