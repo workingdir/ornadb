@@ -89,6 +89,7 @@ fn prove_pinned_collection_builders() {
         include_str!("fixtures/stdlib-collection-builders-map-insert-q730o.orna"),
         include_str!("fixtures/stdlib-collection-builders-map-merge-q730o.orna"),
         include_str!("fixtures/stdlib-collection-builders-map-lookup-q730o.orna"),
+        include_str!("fixtures/stdlib-collection-builders-map-remove-absent-q730o.orna"),
         include_str!("fixtures/stdlib-collection-builders-set-deduplicate-q730o.orna"),
         include_str!("fixtures/stdlib-collection-builders-set-insert-q730o.orna"),
         include_str!("fixtures/stdlib-collection-builders-set-ops-q730o.orna"),
