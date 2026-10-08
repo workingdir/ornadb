@@ -206,3 +206,47 @@ fn offline_bundle_round_trips_rows_media_and_history() {
         );
     }
 }
+
+#[test]
+fn offline_import_dry_run_reports_counts_and_writes_nothing() {
+    let directory = TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle");
+    let rows = [
+        committed_row("image", "image/png", "pixel.png"),
+        committed_row("song", "audio/wav", "tone.wav"),
+    ];
+    let history = [
+        OfflineHistoryEntry {
+            sequence: 1,
+            commit: [0x31; 32],
+        },
+        OfflineHistoryEntry {
+            sequence: 2,
+            commit: [0x32; 32],
+        },
+    ];
+    write_offline_copy(&bundle, &rows, &history).unwrap();
+    let index_before = std::fs::read(bundle.join("index.tsv")).unwrap();
+
+    let report = OfflineCopy::open(&bundle)
+        .unwrap()
+        .dry_run_import()
+        .unwrap();
+    assert_eq!(report.rows, 2);
+    assert_eq!(report.payload_bytes, 73 + 4044);
+    assert_eq!(report.history, 2);
+    assert_eq!(
+        std::fs::read(bundle.join("index.tsv")).unwrap(),
+        index_before
+    );
+
+    // A flipped media byte fails the dry run as it would fail the import.
+    let media_file = bundle.join("media").join(hex(&rows[1].sha256));
+    let mut on_disk = std::fs::read(&media_file).unwrap();
+    on_disk[0] ^= 0xff;
+    std::fs::write(&media_file, on_disk).unwrap();
+    assert!(matches!(
+        OfflineCopy::open(&bundle).unwrap().dry_run_import(),
+        Err(OfflineCopyError::PayloadMismatch { .. })
+    ));
+}
