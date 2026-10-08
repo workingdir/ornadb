@@ -21,7 +21,6 @@ const TOKEN_TYPES: &[&str] = &[
     "parameter",
 ];
 
-const TOKEN_MODIFIERS: &[&str] = &["declaration", "readonly", "modification"];
 const TOKEN_VARIABLE: u32 = 1;
 const TOKEN_TYPE: u32 = 6;
 const TOKEN_ENUM: u32 = 7;
@@ -42,7 +41,7 @@ pub fn legend() -> Vec<SemanticTokenType> {
 
 /// LSP token modifiers supported by this server.
 pub fn modifiers() -> Vec<SemanticTokenModifier> {
-    TOKEN_MODIFIERS
+    editor::TOKEN_MODIFIERS
         .iter()
         .map(|modifier| SemanticTokenModifier::new(modifier))
         .collect()
@@ -256,7 +255,7 @@ mod tests {
             .map(SemanticTokenType::new)
             .collect::<Vec<_>>()
         );
-        assert_eq!(modifiers().len(), TOKEN_MODIFIERS.len());
+        assert_eq!(modifiers().len(), editor::TOKEN_MODIFIERS.len());
         assert_eq!(
             &TOKEN_TYPES[..6],
             editor::semantic_token_types()
