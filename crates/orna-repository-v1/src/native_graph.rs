@@ -5838,6 +5838,54 @@ impl fmt::Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
+impl GraphError {
+    /// True when the bytes on disk do not match the format: a malformed or
+    /// mismatched object, a node of the wrong kind, or a broken envelope.
+    /// Missing objects, quota limits and git failures are not corruption.
+    pub const fn is_corrupt_index(&self) -> bool {
+        matches!(
+            self,
+            Self::MalformedOid
+                | Self::UnknownNodeKind(_)
+                | Self::NonCanonicalData
+                | Self::InvalidTreeEnvelope
+                | Self::MissingNodeData
+                | Self::GitObjectMalformed
+                | Self::GitObjectHashMismatch
+                | Self::ContentIdentityMismatch
+                | Self::ChunkDigestMismatch
+                | Self::WrongNodeKind { .. }
+                | Self::WrongObjectKind { .. }
+                | Self::InvalidByteIndex
+        )
+    }
+
+    /// Process exit code for `ogs stats`: 2 for a corrupt index, matching the
+    /// fixture manifest check's "could not verify" code, and 1 otherwise.
+    pub const fn exit_code(&self) -> i32 {
+        if self.is_corrupt_index() { 2 } else { 1 }
+    }
+}
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::GraphError;
+
+    #[test]
+    fn corrupt_index_exits_2_and_other_failures_exit_1() {
+        assert_eq!(GraphError::GitObjectHashMismatch.exit_code(), 2);
+        assert_eq!(GraphError::InvalidByteIndex.exit_code(), 2);
+        assert_eq!(GraphError::WrongNodeKind {
+            expected: super::NodeKind::StoreRoot,
+            actual: super::NodeKind::OrderedLeaf,
+        }
+        .exit_code(), 2);
+        assert_eq!(GraphError::ReadQuotaExceeded.exit_code(), 1);
+        assert_eq!(GraphError::ObjectUnavailable.exit_code(), 1);
+        assert_eq!(GraphError::GitCommandFailed.exit_code(), 1);
+    }
+}
+
 fn check_length(length: u64) -> Result<(), GraphError> {
     if length > MAX_SIGNED_LENGTH {
         Err(GraphError::InvalidLength(length))
