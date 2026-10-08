@@ -62,7 +62,12 @@ pub enum Error {
     InvalidRange,
     MissingDescriptor,
     InvalidContext,
-    RoleMismatch,
+    /// The Blob's MIME family is a closed set (see `MediaFamily`), so naming it
+    /// does not echo any caller-supplied media type.
+    RoleMismatch {
+        role: BlobRole,
+        family: Option<MediaFamily>,
+    },
     OwnerExpired,
     Cancelled,
     QuotaExceeded,
@@ -70,7 +75,13 @@ pub enum Error {
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "OVB-1 {self:?}")
+        match self {
+            Self::RoleMismatch { role, family } => {
+                let family = family.map_or("unknown", MediaFamily::name);
+                write!(f, "OVB-2 Blob role {role:?} does not admit MIME family {family}")
+            }
+            _ => write!(f, "OVB-1 {self:?}"),
+        }
     }
 }
 impl std::error::Error for Error {}
