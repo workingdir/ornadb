@@ -1342,6 +1342,7 @@ version = "1.0.0"
 dependencies = [
  "base64",
  "getrandom 0.3.4",
+ "icu_properties",
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
