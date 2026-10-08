@@ -525,3 +525,24 @@ fn every_syntax_v1_error_maps_to_an_error_severity_diagnostic() {
         assert_eq!(diagnostic.source.as_deref(), Some("orna-syntax-v1"));
     }
 }
+
+const SIGNATURE_OVERLOADS_SOURCE: &str =
+    include_str!("../../tests/fixtures/signature-overloads-v1.orna");
+
+#[test]
+fn signature_help_lists_every_same_name_declaration_as_a_signature() {
+    let document = document(SIGNATURE_OVERLOADS_SOURCE);
+    let parse = super::parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    let argument_byte = SIGNATURE_OVERLOADS_SOURCE.find("scale(1, 2)").unwrap() + "scale(1, ".len();
+    let help = super::signature_help(&document, &parse, mapper.position(argument_byte), &mapper)
+        .expect("the overloaded call resolves to its declarations");
+    let mut counts = help
+        .signatures
+        .iter()
+        .map(|signature| signature.parameters.as_ref().map_or(0, Vec::len))
+        .collect::<Vec<_>>();
+    counts.sort_unstable();
+    assert_eq!(counts, vec![1, 2], "{:?}", help.signatures);
+    assert_eq!(help.active_signature, Some(0));
+}

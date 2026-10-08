@@ -1039,56 +1039,70 @@ pub fn signature_help(
     if callee_resolves_to_local(&parse.value, &call.callee) {
         return None;
     }
+    let short_name = call.name.rsplit('.').next().unwrap_or(&call.name);
     let symbols = declaration_symbols(parse, &document.text);
-    let function = symbol_for_name(&symbols, call.name.rsplit('.').next().unwrap_or(&call.name))
+    // Every same-name declaration in the file is a candidate signature.
+    let mut functions = symbols
+        .iter()
+        .filter(|symbol| symbol.name == short_name)
         .cloned()
-        .or_else(|| {
-            standard_symbol_for_call(parse, &call.name).map(|entry| entry.symbol.clone())
-        })?;
-    if function.kind != EditorSymbolKind::Function {
+        .collect::<Vec<_>>();
+    if functions.is_empty() {
+        functions.extend(
+            standard_symbol_for_call(parse, &call.name).map(|entry| entry.symbol.clone()),
+        );
+    }
+    functions.retain(|function| function.kind == EditorSymbolKind::Function);
+    if functions.is_empty() {
         return None;
     }
     let active_argument = active_argument_index(&call, &document.text, byte);
-    let active_parameter = call
-        .arguments
-        .get(active_argument)
-        .and_then(|argument| argument.name.as_deref())
-        .and_then(|name| {
-            let name = normalized_identifier(name);
-            function.parameters.iter().position(|parameter| {
-                parameter_name(parameter)
-                    .is_some_and(|parameter| normalized_identifier(parameter) == name)
-            })
-        })
-        .unwrap_or(active_argument)
-        .min(function.parameters.len().saturating_sub(1)) as u32;
-    let signature = function
-        .detail
-        .clone()
-        .unwrap_or_else(|| function.name.clone());
-    let parameters = function
-        .parameters
+    let signatures = functions
         .iter()
-        .cloned()
-        .map(|label| ParameterInformation {
-            label: ParameterLabel::Simple(label),
-            documentation: None,
-        })
-        .collect();
-    Some(SignatureHelp {
-        signatures: vec![SignatureInformation {
-            label: signature,
-            documentation: function.documentation.clone().map(|text| {
-                lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {
-                    kind: lsp_types::MarkupKind::Markdown,
-                    value: text,
+        .map(|function| {
+            let active_parameter = call
+                .arguments
+                .get(active_argument)
+                .and_then(|argument| argument.name.as_deref())
+                .and_then(|name| {
+                    let name = normalized_identifier(name);
+                    function.parameters.iter().position(|parameter| {
+                        parameter_name(parameter)
+                            .is_some_and(|parameter| normalized_identifier(parameter) == name)
+                    })
                 })
-            }),
-            parameters: Some(parameters),
-            active_parameter: Some(active_parameter),
-        }],
+                .unwrap_or(active_argument)
+                .min(function.parameters.len().saturating_sub(1)) as u32;
+            let parameters = function
+                .parameters
+                .iter()
+                .cloned()
+                .map(|label| ParameterInformation {
+                    label: ParameterLabel::Simple(label),
+                    documentation: None,
+                })
+                .collect();
+            SignatureInformation {
+                label: function
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| function.name.clone()),
+                documentation: function.documentation.clone().map(|text| {
+                    lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {
+                        kind: lsp_types::MarkupKind::Markdown,
+                        value: text,
+                    })
+                }),
+                parameters: Some(parameters),
+                active_parameter: Some(active_parameter),
+            }
+        })
+        .collect::<Vec<_>>();
+    let active_parameter = signatures[0].active_parameter;
+    Some(SignatureHelp {
+        signatures,
         active_signature: Some(0),
-        active_parameter: Some(active_parameter),
+        active_parameter,
     })
 }
 
