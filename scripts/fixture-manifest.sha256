@@ -704,6 +704,7 @@ b0a9b2e5903629204593a132430e616374f8feb44d9bf5751db7088442cbed60  crates/orna-co
 77b372dff3dc5e0fbd18628dc38222d1785038cd463c520cbc05457e0adfe12d  crates/orna-conformance-v1/tests/fixtures/relation-plan-signed-sort.orna
 32ba6443ff72dc9456121a790d122a7b79f74ec82f16ae1cd8accbac10553bf7  crates/orna-conformance-v1/tests/fixtures/relation-plan-take-before-sort.orna
 05526b117f89dc47f887d265debc5dad99c826eacbcd9fc85f3aa712b897a7fc  crates/orna-conformance-v1/tests/fixtures/relation-plan-union-order.orna
+74973e9a5c44d238acb1356475c3586e1f8ef9b8c33ea13126da294e50708df6  crates/orna-conformance-v1/tests/fixtures/relation-update-round-trip.orna
 6bcdea5b7e7a0d53fc0636f0388f8a0ef829c9456d5d817027b6e23d6e4059d8  crates/orna-conformance-v1/tests/fixtures/relation-window-negative-rejected.orna
 edac40f90a37d126338c9029a66725ee7cb091430e509d69082ebdf605f07975  crates/orna-conformance-v1/tests/fixtures/relation-window-positive.orna
 12bd18e492062400aa04dcb672f65508fcccd2ad6e838aaaed40dc3c6eab4e09  crates/orna-conformance-v1/tests/fixtures/relation-window-zero-rejected.orna
