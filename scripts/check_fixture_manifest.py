@@ -147,14 +147,22 @@ def main() -> int:
         help="suppress success output; drift and scan errors are still reported",
     )
     parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="with --check, output format; json writes one result object to stdout",
+    )
+    parser.add_argument(
         "--json",
-        action="store_true",
-        help="with --check, write one JSON result object to stdout instead of text",
+        dest="format",
+        action="store_const",
+        const="json",
+        help="alias for --format json",
     )
     args = parser.parse_args()
 
     hashes, scan_errors = fixture_hashes(WORKSPACE_ROOT)
-    if scan_errors and args.check and args.json:
+    if scan_errors and args.check and args.format == "json":
         print(json.dumps({"ok": False, "scan_errors": scan_errors, "errors": []}))
         return 1
     if scan_errors:
@@ -174,7 +182,7 @@ def main() -> int:
         return 1
     errors = validate_manifest(hashes, MANIFEST_PATH.read_text(encoding="utf-8"))
     trees = len(fixture_roots(WORKSPACE_ROOT))
-    if args.json:
+    if args.format == "json":
         print(
             json.dumps(
                 {
