@@ -1,0 +1,7 @@
+map.merge([("first", 1), ("middle", 2), ("last", 3)], [("last", 30), ("first", 10)]) == [("first", 10), ("middle", 2), ("last", 30)]
+&& map.keys(map.merge([("first", 1), ("middle", 2), ("last", 3)], [("last", 30), ("first", 10)])) == ["first", "middle", "last"]
+&& map.merge([("first", 1), ("middle", 2), ("last", 3)], [("last", 9)]) == [("first", 1), ("middle", 2), ("last", 9)]
+&& map.merge([("first", 1), ("middle", 2), ("last", 3)], [("first", 7)]) == [("first", 7), ("middle", 2), ("last", 3)]
+&& map.merge([("first", 1), ("middle", 2), ("last", 3)], [("zeta", 4), ("first", 7)]) == [("first", 7), ("middle", 2), ("last", 3), ("zeta", 4)]
+&& map.merge([("first", 1), ("middle", 2), ("last", 3)], [("first", 7), ("first", 8)]) == [("first", 8), ("middle", 2), ("last", 3)]
+&& map.merge([("first", 1), ("middle", 2), ("last", 3)], [("first", 1), ("last", 3), ("middle", 2)]) == [("first", 1), ("middle", 2), ("last", 3)]
