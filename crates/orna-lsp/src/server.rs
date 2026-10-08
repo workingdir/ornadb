@@ -2386,3 +2386,46 @@ fn request_selection_ranges(
         editor_ranges::selection_ranges(&parse.value, &document.text, &params.positions, &mapper);
     Ok(serde_json::to_value(ranges)?)
 }
+
+#[cfg(test)]
+mod rename_reserved_word_tests {
+    use super::*;
+    use orna_syntax_v1::Keyword;
+
+    const EXPRESSIONS_SOURCE: &str = include_str!("../tests/fixtures/expressions-v1.orna");
+
+    #[test]
+    fn every_reserved_word_is_rejected_as_a_rename_target() {
+        for keyword in Keyword::ALL {
+            assert!(
+                !valid_rename_identifier(keyword.spelling()),
+                "reserved word `{}` must not be a rename target",
+                keyword.spelling()
+            );
+        }
+        assert!(valid_rename_identifier("total"));
+    }
+
+    #[test]
+    fn rename_to_a_reserved_word_returns_no_edits_and_a_plain_name_does() {
+        let uri: Uri = "file:///workspace/expressions.orna".parse().unwrap();
+        let mut documents = HashMap::new();
+        documents.insert(
+            uri.clone(),
+            Document::new(uri.clone(), EXPRESSIONS_SOURCE.to_owned(), 1),
+        );
+        let call_byte = EXPRESSIONS_SOURCE.find("add(value, 2)").unwrap() + 1;
+        let position = PositionMapper::new(EXPRESSIONS_SOURCE).position(call_byte);
+
+        for keyword in Keyword::ALL {
+            assert!(
+                semantic_rename(&documents, &uri, position, keyword.spelling()).is_none(),
+                "rename to `{}` must produce no edits",
+                keyword.spelling()
+            );
+        }
+        let edits = semantic_rename(&documents, &uri, position, "total")
+            .expect("a plain identifier renames the function");
+        assert_eq!(edits.values().map(Vec::len).sum::<usize>(), 2);
+    }
+}
