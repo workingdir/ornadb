@@ -1754,9 +1754,11 @@ mod graph_bridge_tests {
             "store root sorts first: {json}"
         );
         assert!(json.ends_with(&format!(
-            "}},\"blob_references\":{}}}",
-            stats.blob_references()
+            "}},\"blob_references\":{},\"blob_bytes\":{}}}",
+            stats.blob_references(),
+            stats.blob_bytes()
         )));
+
     }
 }
 

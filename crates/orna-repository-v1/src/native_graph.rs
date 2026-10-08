@@ -927,6 +927,9 @@ impl NativeGraphContext {
             }
             let node = self.read_native_node(&oid, scope, &mut objects)?;
             *stats.nodes.entry(node.kind()).or_insert(0) += 1;
+            if let NodeData::BlobDescriptor { length, .. } = &node {
+                stats.blob_bytes = stats.blob_bytes.saturating_add(*length);
+            }
             for dependency in node.dependencies()? {
                 match dependency.kind() {
                     NativeObjectKind::Tree => pending.push(dependency.oid().clone()),
@@ -3514,6 +3517,7 @@ impl NativeRefEntry {
 pub struct ObjectStats {
     nodes: BTreeMap<NodeKind, u64>,
     blob_references: u64,
+    blob_bytes: u64,
 }
 
 impl ObjectStats {
@@ -3526,13 +3530,19 @@ impl ObjectStats {
         self.blob_references
     }
 
+    /// Sum of the logical lengths recorded by the reachable BlobDescriptor
+    /// nodes. Each descriptor is visited once, so shared content counts once.
+    pub const fn blob_bytes(&self) -> u64 {
+        self.blob_bytes
+    }
+
     pub fn nodes(&self) -> &BTreeMap<NodeKind, u64> {
         &self.nodes
     }
 
     /// Renders the counts as one line of JSON with a fixed key order: node
-    /// kinds in format-3 order, then `blob_references`. Every key is a fixed
-    /// identifier, so no escaping is needed.
+    /// kinds in format-3 order, then `blob_references` and `blob_bytes`. Every
+    /// key is a fixed identifier, so no escaping is needed.
     pub fn to_json(&self) -> String {
         let nodes = self
             .nodes
@@ -3540,7 +3550,10 @@ impl ObjectStats {
             .map(|(kind, count)| format!("\"{}\":{count}", node_kind_name(*kind)))
             .collect::<Vec<_>>()
             .join(",");
-        format!("{{\"nodes\":{{{nodes}}},\"blob_references\":{}}}", self.blob_references)
+        format!(
+            "{{\"nodes\":{{{nodes}}},\"blob_references\":{},\"blob_bytes\":{}}}",
+            self.blob_references, self.blob_bytes
+        )
     }
 }
 
