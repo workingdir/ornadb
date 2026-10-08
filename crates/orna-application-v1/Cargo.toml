@@ -16,10 +16,10 @@ orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-live-v1 = { path = "../orna-live-v1" }
 orna-protocol-v1 = { path = "../orna-protocol-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
+orna-repository-v1 = { path = "../orna-repository-v1" }
 num-bigint = "0.4.6"
 sha2 = "0.10.9"
 getrandom = "0.3.4"
 
 [dev-dependencies]
 futures = "0.3.31"
-orna-repository-v1 = { path = "../orna-repository-v1" }
