@@ -974,6 +974,36 @@ mod graph_bridge_tests {
         .expect("valid native OID")
     }
 
+    fn unwritten_blob_id(directory: &Path, algorithm: GitHashAlgorithm, bytes: &[u8]) -> NativeOid {
+        let mut child = Command::new("git")
+            .current_dir(directory)
+            .args(["hash-object", "-t", "blob", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn git hash-object");
+        child
+            .stdin
+            .take()
+            .expect("hash-object stdin")
+            .write_all(bytes)
+            .expect("write blob bytes");
+        let output = child.wait_with_output().expect("wait for hash-object");
+        assert!(
+            output.status.success(),
+            "git hash-object: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        NativeOid::from_hex(
+            algorithm,
+            std::str::from_utf8(&output.stdout)
+                .expect("hash-object OID is UTF-8")
+                .trim(),
+        )
+        .expect("valid native OID")
+    }
+
     fn append_tree_entry(tree: &mut Vec<u8>, mode: &str, name: &str, oid: &NativeOid) {
         tree.extend_from_slice(mode.as_bytes());
         tree.push(b' ');
@@ -1551,6 +1581,39 @@ mod graph_bridge_tests {
             .unresolved_object_ids(&scope, &[graph.store_root().clone(), missing.clone()])
             .expect("list unresolved ids");
         assert_eq!(listed, vec![missing], "the resolvable store root is left out");
+    }
+
+    #[test]
+    fn unresolved_listing_breaks_a_cycle_of_repeated_candidates() {
+        let directory = repository();
+        let root = directory.path();
+        let context = context(root);
+        let (schema, digest) = schema_node(root, &context);
+        let rows = sealed_rows(&context, &schema, digest);
+        let graph = context
+            .open_native_graph(&rows)
+            .expect("admit the fixture graph");
+        let scope = graph.open_read_scope().expect("read scope");
+        // Hash the fixture without writing it, so the id is well formed but
+        // absent from the repository and must be reported as unresolved.
+        let fixture = include_bytes!("../tests/fixtures/ogs-unresolved-cycle.orna");
+        let fixture_id = unwritten_blob_id(root, GitHashAlgorithm::Sha1, fixture);
+        let other = NativeOid::from_hex(GitHashAlgorithm::Sha1, &"1".repeat(40))
+            .expect("well-formed all-one SHA-1 object id");
+        let cycle = [
+            fixture_id.clone(),
+            other.clone(),
+            fixture_id.clone(),
+            other.clone(),
+        ];
+        let listed = graph
+            .unresolved_object_ids(&scope, &cycle)
+            .expect("list unresolved ids around a cycle");
+        assert_eq!(
+            listed,
+            vec![fixture_id, other],
+            "each unresolved id is listed once, in first-seen order"
+        );
     }
 
     #[test]
