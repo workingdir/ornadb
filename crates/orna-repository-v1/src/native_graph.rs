@@ -959,9 +959,10 @@ impl NativeGraphContext {
     }
 
     /// Lists the candidate ids that this repository cannot resolve, in input
-    /// order. An id git can resolve is left out. An id of another object
-    /// format is an error, not a missing object, and any other git failure is
-    /// returned as-is rather than reported as missing.
+    /// order. An id git can resolve is left out, and a repeated id is listed
+    /// once, so a candidate cycle cannot repeat an entry. An id of another
+    /// object format is an error, not a missing object, and any other git
+    /// failure is returned as-is rather than reported as missing.
     pub fn unresolved_object_ids(
         &self,
         scope: &RepositoryReadScope,
@@ -969,12 +970,16 @@ impl NativeGraphContext {
     ) -> Result<Vec<NativeOid>, GraphError> {
         scope.authorize(self)?;
         let mut unresolved = Vec::new();
+        let mut listed = BTreeSet::new();
         for candidate in candidates {
             if candidate.algorithm() != self.algorithm {
                 return Err(GraphError::InvalidOidWidth {
                     expected: self.algorithm.width(),
                     actual: candidate.algorithm().width(),
                 });
+            }
+            if !listed.insert(candidate.clone()) {
+                continue;
             }
             match self.git_object_kind(candidate) {
                 Ok(_) => {}
