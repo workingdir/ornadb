@@ -1681,9 +1681,16 @@ mod graph_bridge_tests {
         // Pack boundary: move every reachable object, including the OGB-2
         // chunks, into a packfile and drop the loose copies. Reads must still
         // verify full and straddling ranges against the same committed row.
+        let loose_stats = admitted_graph
+            .object_stats(&admitted_graph.open_read_scope().unwrap())
+            .expect("count loose objects before repacking");
         git(root, &["repack", "-a", "-d", "--quiet"]);
         git(root, &["prune-packed"]);
         let packed_scope = admitted_graph.open_read_scope().unwrap();
+        let packed_stats = admitted_graph
+            .object_stats(&packed_scope)
+            .expect("count packed objects after repacking");
+        assert_eq!(packed_stats, loose_stats, "repacking must not change reachable objects");
         let packed = admitted_graph
             .read_blob_range(&reference, 0..identity.length(), &packed_scope)
             .expect("verify the complete OGB-2 closure after repacking");
