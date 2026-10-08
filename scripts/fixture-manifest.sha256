@@ -3239,6 +3239,7 @@ cc65b25177b4a62dfcef28ef1da7fe88ca7bf533e227285882d13eb032405b36  crates/orna-ls
 2ac7143a5dcab472864d2d6820c6236939d21476a980df28c267024f3f656171  crates/orna-lsp/src/analysis/fixtures/standard-missing-import.orna
 7448019e1215ea705ad3416bc881c489dfcc1720400162ff0b5ef39c83acfeff  crates/orna-lsp/src/browser/fixtures/browser-intelligence.orna
 9217afe5354b9d31db8467723528fc99b7ca08977dd1d0d0e82677e9853e472f  crates/orna-lsp/src/browser/fixtures/standard-completion-ranking.orna
+53f2d49f982abd7ade14ec9c879664066e0f29caea747da100e2dbecfc01f113  crates/orna-lsp/src/browser/fixtures/standard-document-symbols.orna
 11aa3d9691dc679777f093cf3ae7369ccb8b4b9160a235cb6894fb8a5bed840d  crates/orna-lsp/src/browser/fixtures/standard-inlay-hints.orna
 02f372407ed86c6c12d749f66890dbb378cd4a08201cec7ea64af6ee0bdc2dd0  crates/orna-lsp/src/browser/fixtures/standard-signature-help.orna
 f4e8d5cfdb20469a0205e848d75d377e63d3b54ad383d005ce0959d27b277110  crates/orna-lsp/tests/fixtures/accepted-corpus.txt
@@ -3771,6 +3772,7 @@ b141cc91a345fbfdbda8f26f15a4df12f19f9b49644a119acda877c6b3ab73aa  crates/orna-se
 45e965b0cbd37d2185ab2d2f2103d6a921f25865601050f01cc577d52ee3cb10  crates/orna-semantic-v1/tests/fixtures/generic-implementation-does-not-satisfy.orna
 1abbacd05b00d25ab871b4b7b1de497c96f926767f2f6fba30cc6164e1c0c358  crates/orna-semantic-v1/tests/fixtures/guarded_case_exhaustiveness.orna
 503487ff4dd88216679f895e9238493a104f835ce7324c6d72ec40a0f7c35ae8  crates/orna-semantic-v1/tests/fixtures/historical-cascaded-sparse-paired-three-way-rebinds.orna
+5479560081495ffa4876dd004a4f3b008efe6d3e4bca5a1a2ddd10b4f5628ae3  crates/orna-semantic-v1/tests/fixtures/historical-checkpoint-map-compaction-chain-fold.orna
 1888e6788059a60834b3d94d486d3a1c0cc80345a45918eb80fb6290654e711e  crates/orna-semantic-v1/tests/fixtures/historical-checkpoint-map-compatible-rebind-values.orna
 d0f252bbfb568bcc05600ef2b5c380a286a652483cd88b457cb15c9ed3c51098  crates/orna-semantic-v1/tests/fixtures/historical-checkpoint-map-exact-equality.orna
 a08f33f52be7b4fcf7341101fc7c52f26219205ce8989866d0852a4f1580f02d  crates/orna-semantic-v1/tests/fixtures/historical-closure-context-decomposed.orna
