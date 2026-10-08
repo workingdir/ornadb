@@ -24,6 +24,10 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             branch,
             parsed.color.stdout_enabled(),
         ),
+        Command::SemanticLegend => {
+            print!("{}", orna_syntax_v1::editor::semantic_legend_json());
+            Ok(())
+        }
         Command::Serve { port } => cli_serve::run(&parsed.endpoint, port),
         Command::Diff(ref arguments) => run_git_diff(arguments),
         Command::History(ref arguments) => cli_history::run(arguments),
