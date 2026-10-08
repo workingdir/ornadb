@@ -1,0 +1,15 @@
+pub fn factory_at(pin: sys.SnapshotRef) =
+    sys.database.as_of(pin).energy.factory;
+
+pub fn checkpoint_map_compaction_chain_fold_returns_values() {
+    let saved = factory_at(sys.snapshot("HEAD~12"));
+    let rolling = saved;
+    rolling = factory_at(sys.snapshot("HEAD~10"));
+    let folded = rolling;
+    folded = factory_at(sys.snapshot("HEAD~8"));
+    {
+        saved: saved,
+        rolling: rolling,
+        folded: folded,
+    }
+}
