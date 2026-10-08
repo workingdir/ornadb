@@ -3660,6 +3660,25 @@ impl ObjectStats {
         rows
     }
 
+    /// Renders the counts as an aligned text table: one row per reached node
+    /// kind sorted by name, then the blob reference count. The kind column is
+    /// as wide as its longest name, so the counts line up.
+    pub fn to_table(&self) -> String {
+        let rows = self.rows_by_type_name();
+        let width = rows
+            .iter()
+            .map(|(name, _)| name.len())
+            .chain(["blob_references".len()])
+            .max()
+            .unwrap_or(0);
+        let mut out = format!("{:<width$}  COUNT\n", "KIND");
+        for (name, count) in rows {
+            out.push_str(&format!("{name:<width$}  {count}\n"));
+        }
+        out.push_str(&format!("{:<width$}  {}\n", "blob_references", self.blob_references));
+        out
+    }
+
     /// Renders the counts as one line of JSON with a fixed key order: node
     /// kinds in format-3 order, then `blob_references`. Every key is a fixed
     /// identifier, so no escaping is needed.
