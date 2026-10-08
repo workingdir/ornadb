@@ -2963,6 +2963,45 @@ mod tests {
     }
 
     #[test]
+    fn playground_catalogue_lists_only_committed_route_rows_that_decode() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git_succeeds(directory.path(), &["init", "--quiet"]);
+        let route_directory = directory.path().join("playground/Route");
+        std::fs::create_dir_all(&route_directory).expect("create route rows");
+        std::fs::write(
+            route_directory.join(
+                "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373.orna",
+            ),
+            include_str!("../tests/fixtures/playground-route-example-catalog-style.orna"),
+        )
+        .expect("write valid route row");
+        std::fs::write(
+            route_directory.join("route-0000000000000000.orna"),
+            "{ not a route row }",
+        )
+        .expect("write invalid route row");
+        git_succeeds(directory.path(), &["add", "playground/Route"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add catalogue routes",
+            ],
+        );
+
+        assert_eq!(
+            playground_catalogue_routes(directory.path()),
+            Ok(vec!["/playground/assets/examples.css".to_owned()])
+        );
+    }
+
+    #[test]
     fn playground_example_catalog_rows_decode_for_asset_namespace() {
         const ROUTE: &str =
             include_str!("../tests/fixtures/playground-route-example-catalog-style.orna");
