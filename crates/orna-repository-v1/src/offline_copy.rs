@@ -238,6 +238,57 @@ impl OfflineCopy {
     }
 }
 
+/// One row ready to be re-committed, with its payload verified against its
+/// recorded length and SHA-256.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineImportRow {
+    pub key: Vec<u8>,
+    pub media_type: String,
+    pub suffix: Option<String>,
+    pub length: u64,
+    pub sha256: [u8; 32],
+    pub payload: Vec<u8>,
+}
+
+/// A complete, verified import of a bundle. Every row carries its payload,
+/// and history is strictly ordered by sequence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineImportPlan {
+    pub rows: Vec<OfflineImportRow>,
+    pub history: Vec<OfflineHistoryEntry>,
+}
+
+impl OfflineCopy {
+    /// Verifies the whole bundle before any repository write. Import is
+    /// all-or-nothing: a row without a copied payload, a payload that fails its
+    /// digest, or out-of-order history rejects the entire bundle.
+    pub fn import_plan(&self) -> Result<OfflineImportPlan, OfflineCopyError> {
+        if self
+            .history
+            .windows(2)
+            .any(|pair| pair[0].sequence >= pair[1].sequence)
+        {
+            return Err(OfflineCopyError::InvalidBundle("history is not strictly ordered"));
+        }
+        let mut rows = Vec::with_capacity(self.rows.len());
+        for metadata in &self.rows {
+            let payload = self.hydrate(&metadata.key)?;
+            rows.push(OfflineImportRow {
+                key: metadata.key.clone(),
+                media_type: metadata.media_type.clone(),
+                suffix: metadata.suffix.clone(),
+                length: metadata.length,
+                sha256: metadata.sha256,
+                payload,
+            });
+        }
+        Ok(OfflineImportPlan {
+            rows,
+            history: self.history.clone(),
+        })
+    }
+}
+
 fn validate_row(row: &OfflineRow) -> Result<(), OfflineCopyError> {
     let token_ok = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_graphic());
     if !token_ok(&row.media_type) {
