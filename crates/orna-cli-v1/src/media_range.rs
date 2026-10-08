@@ -129,6 +129,58 @@ pub fn plan_media_response(method: MediaMethod, range: Option<&str>, length: u64
     }
 }
 
+/// Failure while producing an explicit media body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MediaReplyError<E> {
+    /// The byte reader reported a failure for the requested span.
+    Read(E),
+    /// The reader returned other than the planned `content_length` bytes.
+    ShortRead { expected: u64, actual: u64 },
+}
+
+/// A planned explicit media response with the bytes it carries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MediaReply {
+    pub plan: MediaResponsePlan,
+    pub body: Vec<u8>,
+}
+
+/// Plans one explicit media response and reads only the bytes it carries.
+///
+/// `read_span` receives the inclusive `start..=end` span of the representation
+/// and is never called for `HEAD`, for `416`, or for an empty representation.
+/// A `206` therefore loads only its requested span, never the full payload.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn media_reply<E>(
+    method: MediaMethod,
+    range: Option<&str>,
+    length: u64,
+    read_span: impl FnOnce(u64, u64) -> Result<Vec<u8>, E>,
+) -> Result<MediaReply, MediaReplyError<E>> {
+    let plan = plan_media_response(method, range, length);
+    let span = match resolve_range(range, length) {
+        RangeOutcome::Full if length > 0 => Some((0, length - 1)),
+        RangeOutcome::Full => None,
+        RangeOutcome::Partial { start, end } => Some((start, end)),
+        RangeOutcome::Unsatisfiable => None,
+    };
+    let body = match span {
+        Some((start, end)) if plan.send_body => {
+            let body = read_span(start, end).map_err(MediaReplyError::Read)?;
+            let actual = body.len() as u64;
+            if actual != plan.content_length {
+                return Err(MediaReplyError::ShortRead {
+                    expected: plan.content_length,
+                    actual,
+                });
+            }
+            body
+        }
+        _ => Vec::new(),
+    };
+    Ok(MediaReply { plan, body })
+}
+
 fn parse_digits(text: &str) -> Option<u64> {
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -211,6 +263,86 @@ mod tests {
         assert_eq!(head.status, 200);
         assert_eq!(head.content_length, 10);
         assert!(!head.send_body);
+    }
+
+    #[test]
+    fn partial_get_reads_only_the_requested_span() {
+        let mut requested = Vec::new();
+        let reply = media_reply(MediaMethod::Get, Some("bytes=2-4"), 10, |start, end| {
+            requested.push((start, end));
+            Ok::<_, ()>(vec![2, 3, 4])
+        })
+        .expect("partial read");
+        assert_eq!(requested, vec![(2, 4)]);
+        assert_eq!(reply.plan.status, 206);
+        assert_eq!(reply.body, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn full_get_reads_the_whole_representation_once() {
+        let mut requested = Vec::new();
+        let reply = media_reply(MediaMethod::Get, None, 4, |start, end| {
+            requested.push((start, end));
+            Ok::<_, ()>(vec![9; 4])
+        })
+        .expect("full read");
+        assert_eq!(requested, vec![(0, 3)]);
+        assert_eq!(reply.plan.status, 200);
+        assert_eq!(reply.body.len(), 4);
+    }
+
+    #[test]
+    fn head_and_unsatisfiable_never_read_bytes() {
+        let mut calls = 0;
+        let head = media_reply(MediaMethod::Head, Some("bytes=0-1"), 10, |_, _| {
+            calls += 1;
+            Ok::<_, ()>(vec![0; 2])
+        })
+        .expect("head plan");
+        let unsatisfiable = media_reply(MediaMethod::Get, Some("bytes=50-60"), 10, |_, _| {
+            calls += 1;
+            Ok::<_, ()>(vec![0; 11])
+        })
+        .expect("416 plan");
+        assert_eq!(calls, 0);
+        assert_eq!(head.plan.status, 206);
+        assert!(head.body.is_empty());
+        assert_eq!(unsatisfiable.plan.status, 416);
+        assert!(unsatisfiable.body.is_empty());
+    }
+
+    #[test]
+    fn empty_representation_reads_nothing() {
+        let reply = media_reply(MediaMethod::Get, None, 0, |_, _| {
+            Ok::<Vec<u8>, ()>(panic!("empty representation must not read"))
+        })
+        .expect("empty plan");
+        assert_eq!(reply.plan.status, 200);
+        assert!(reply.body.is_empty());
+    }
+
+    #[test]
+    fn short_read_is_rejected_not_served() {
+        let error = media_reply(MediaMethod::Get, Some("bytes=0-3"), 10, |_, _| {
+            Ok::<_, ()>(vec![1, 2])
+        })
+        .expect_err("short read");
+        assert_eq!(
+            error,
+            MediaReplyError::ShortRead {
+                expected: 4,
+                actual: 2
+            }
+        );
+    }
+
+    #[test]
+    fn reader_failure_is_surfaced() {
+        let error = media_reply(MediaMethod::Get, Some("bytes=0-0"), 10, |_, _| {
+            Err::<Vec<u8>, _>("verification failed")
+        })
+        .expect_err("reader failure");
+        assert_eq!(error, MediaReplyError::Read("verification failed"));
     }
 
     #[test]
