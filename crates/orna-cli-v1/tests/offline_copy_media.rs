@@ -274,3 +274,27 @@ fn offline_import_progress_reports_each_verified_row_in_order() {
         ]
     );
 }
+
+#[test]
+fn offline_import_limit_plans_only_the_first_rows_and_keeps_history() {
+    let directory = TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle");
+    let rows = [
+        committed_row("image", "image/png", "pixel.png"),
+        committed_row("song", "audio/wav", "tone.wav"),
+    ];
+    let history = [OfflineHistoryEntry {
+        sequence: 1,
+        commit: [0x41; 32],
+    }];
+    write_offline_copy(&bundle, &rows, &history).unwrap();
+    let copy = OfflineCopy::open(&bundle).unwrap();
+
+    let first = copy.import_plan_limited(1).unwrap();
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(first.rows[0].key, b"image");
+    assert_eq!(first.history, history);
+
+    assert!(copy.import_plan_limited(0).unwrap().rows.is_empty());
+    assert_eq!(copy.import_plan_limited(99).unwrap().rows.len(), 2);
+}
