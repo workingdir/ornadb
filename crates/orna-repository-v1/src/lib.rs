@@ -61,6 +61,7 @@ pub use native_graph::{
     ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification,
     RepositoryCaptureCapability, RepositoryReadScope, VerifiedBlobRange,
 };
+pub use native_graph::RowRevision;
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
 };
