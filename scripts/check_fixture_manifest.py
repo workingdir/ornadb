@@ -168,6 +168,7 @@ def main() -> int:
         print("fixture manifest drift detected:", file=sys.stderr)
         for error in errors:
             print(f"  {error}", file=sys.stderr)
+        print(f"fixture manifest drift total: {len(errors)}", file=sys.stderr)
         return 1
 
     if not args.quiet:
