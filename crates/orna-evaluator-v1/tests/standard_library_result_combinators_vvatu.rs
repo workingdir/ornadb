@@ -176,3 +176,17 @@ fn result_combinators_propagate_failures_from_selected_callbacks() {
     .expect_err("a failure raised by an active Result callback must propagate");
     assert_eq!(error.code(), "ORNA-EVAL-ERROR");
 }
+
+#[test]
+fn result_map_error_transforms_only_the_error_branch() {
+    assert_true_fixture(include_str!("fixtures/stdlib-result-map-error-proof.orna"));
+}
+
+#[test]
+fn result_map_error_propagates_failures_from_its_callback() {
+    let error = evaluate_fixture(include_str!(
+        "fixtures/stdlib-result-map-error-callback-failure.orna"
+    ))
+    .expect_err("a failure raised by the map_error callback on Err must propagate");
+    assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+}
