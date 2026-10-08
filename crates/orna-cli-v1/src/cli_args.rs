@@ -26,6 +26,7 @@ pub(super) enum LegendFormat {
     Quiet,
     Version,
     Table,
+    Count,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,7 +146,7 @@ fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Dia
         Diagnostic::usage(
             "E1002",
             "unsupported `semantic-legend` option",
-            "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown`, `semantic-legend --format csv`, `semantic-legend --quiet`, `semantic-legend --limit N`, `semantic-legend --version` or `semantic-legend --format table`",
+            "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown`, `semantic-legend --format csv`, `semantic-legend --quiet`, `semantic-legend --limit N`, `semantic-legend --version`, `semantic-legend --format table` or `semantic-legend --count`",
         )
     };
     let limit = |value: &str| {
@@ -165,6 +166,7 @@ fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Dia
         ["--quiet"] => Ok((LegendFormat::Quiet, None)),
         ["--version"] => Ok((LegendFormat::Version, None)),
         ["--format", "table"] => Ok((LegendFormat::Table, None)),
+        ["--count"] => Ok((LegendFormat::Count, None)),
         ["--limit", count] => Ok((LegendFormat::Text, Some(limit(count)?))),
         ["--quiet", "--limit", count] | ["--limit", count, "--quiet"] => {
             Ok((LegendFormat::Quiet, Some(limit(count)?)))
@@ -451,6 +453,18 @@ mod tests {
         assert!(parse_cli(&args(&["semantic-legend", "--limit", "0"])).is_err());
         assert!(parse_cli(&args(&["semantic-legend", "--limit", "x"])).is_err());
         assert!(parse_cli(&args(&["semantic-legend", "--json", "--limit", "3"])).is_err());
+    }
+
+    #[test]
+    fn semantic_legend_count_flag_selects_counts() {
+        assert_eq!(
+            parse_cli(&args(&["semantic-legend", "--count"])).unwrap().command,
+            Command::SemanticLegend {
+                format: LegendFormat::Count,
+                limit: None,
+            }
+        );
+        assert!(parse_cli(&args(&["semantic-legend", "--count", "--json"])).is_err());
     }
 
     #[test]
