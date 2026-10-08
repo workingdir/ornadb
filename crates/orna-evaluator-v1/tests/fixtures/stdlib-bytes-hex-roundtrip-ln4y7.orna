@@ -1,0 +1,6 @@
+std.bytes.hex_encode([]) == Some("") && std.bytes.hex_decode("") == Some([])
+&& std.bytes.hex_encode([0, 15, 255]) == Some("000fff") && std.bytes.hex_decode("000FFF") == Some([0, 15, 255])
+&& case std.bytes.hex_encode([1, 127, 128, 254]) { Some(text): std.bytes.hex_decode(text) == Some([1, 127, 128, 254]), null: false, }
+&& std.bytes.hex_encode([256]) == null && std.bytes.hex_encode([-1]) == null
+&& std.bytes.hex_decode("0") == null && std.bytes.hex_decode("abc") == null && std.bytes.hex_decode("zz") == null
+&& std.bytes.hex_decode("0x00") == null && std.bytes.hex_decode(" 00") == null
