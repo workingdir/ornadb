@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::{KeyRange, Repository, TypedKey};
+use orna_repository_v1::{KeyRange, Repository, RowRevision, TypedKey};
 use orna_runtime_v1::{
     RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
@@ -194,8 +194,35 @@ fn assert_song_revision_history(
         !revisions.last().unwrap().present(),
         "the oldest revision predates the import"
     );
-    let newest = graph.list_row_revisions(song, 1, &scope).unwrap();
-    assert_eq!(newest, revisions[..1]);
+    // Paging one commit at a time must reproduce the full walk exactly.
+    let pages = revision_pages(
+        |max| graph.list_row_revisions(song, max, &scope).unwrap(),
+        1,
+        revisions.len(),
+    );
+    assert_eq!(pages.concat(), revisions);
+}
+
+/// Splits a newest-first revision walk into pages of `size`. `list(max)`
+/// returns the first `max` revisions, so page `n` is the slice that the walk
+/// adds beyond page `n - 1`: concatenated pages must equal the full history.
+fn revision_pages(
+    list: impl Fn(usize) -> Vec<RowRevision>,
+    size: usize,
+    total: usize,
+) -> Vec<Vec<RowRevision>> {
+    (0..total.div_ceil(size))
+        .map(|page| {
+            let walked = list((page + 1) * size);
+            walked
+                .get(page * size..)
+                .unwrap_or_default()
+                .iter()
+                .take(size)
+                .cloned()
+                .collect()
+        })
+        .collect()
 }
 
 /// Loads an import expression from its committed .orna fixture, with the
