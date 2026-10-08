@@ -885,6 +885,8 @@ fn project_location(
     })
 }
 
+/// Edits rewrite the declaration and every reference that resolves to the same
+/// symbol, so a follow-up query on the new name finds the same identity.
 fn semantic_rename(
     documents: &HashMap<Uri, Document>,
     uri: &Uri,
