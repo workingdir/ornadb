@@ -3530,6 +3530,18 @@ impl ObjectStats {
         &self.nodes
     }
 
+    /// Reached node kinds as `(name, count)` rows sorted by kind name, for
+    /// listings that order by type name rather than format-3 order.
+    pub fn rows_by_type_name(&self) -> Vec<(&'static str, u64)> {
+        let mut rows: Vec<(&'static str, u64)> = self
+            .nodes
+            .iter()
+            .map(|(kind, count)| (node_kind_name(*kind), *count))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(b.0));
+        rows
+    }
+
     /// Renders the counts as one line of JSON with a fixed key order: node
     /// kinds in format-3 order, then `blob_references`. Every key is a fixed
     /// identifier, so no escaping is needed.
