@@ -1771,6 +1771,8 @@ mod graph_bridge_tests {
             graph.object_stats_limited(&scope, total_nodes - 1),
             Err(crate::native_graph::GraphError::InventoryQuotaExceeded)
         ));
+        assert_eq!(stats.kind_count(), stats.rows_by_type_name().len());
+        assert!(stats.kind_count() >= 1 && stats.kind_count() <= 8, "at most eight kinds exist");
         let table = stats.to_table();
         assert!(table.starts_with("KIND  COUNT\n"), "table header: {table}");
         assert!(table.contains("StoreRoot  1\n"), "table row: {table}");
