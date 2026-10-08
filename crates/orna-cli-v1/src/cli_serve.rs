@@ -443,6 +443,9 @@ fn git_listing_route(
             Path::new("playground/web-ui/src/layout.css"),
             &request.query,
         )),
+        "/playground/catalogue" | "/playground/catalogue/" => {
+            Some(playground_catalogue_page(root, identity))
+        }
         "/playground" => Some(playground_asset(root, identity, &request.path)),
         path if path.starts_with("/playground/") => {
             Some(playground_asset(root, identity, &request.path))
@@ -671,6 +674,7 @@ fn is_committed_row_path(path: &Path) -> bool {
     })
 }
 
+const MAX_PLAYGROUND_CATALOGUE_ENTRIES: usize = 4096;
 const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PLAYGROUND_STYLE_BYTES: usize = 256 * 1024;
@@ -824,6 +828,72 @@ fn encoded_playground_row_id(prefix: &str, value: &str) -> String {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
+    )
+}
+
+/// Lists the playground routes committed as DB-resident `playground/Route` rows.
+/// Each row is decoded with the same validation the route serving path uses, and
+/// rows that fail decoding are left out rather than listed.
+fn playground_catalogue_routes(root: &Path) -> Result<Vec<String>, ()> {
+    let repository = Repository::discover(root).map_err(|_| ())?;
+    let Some(commit) = repository.head().map_err(|_| ())? else {
+        return Ok(Vec::new());
+    };
+    let tree = repository
+        .list_committed_tree(&commit, MAX_PLAYGROUND_CATALOGUE_ENTRIES)
+        .map_err(|_| ())?;
+    let mut routes = Vec::new();
+    for entry in tree {
+        let path = entry.path().as_path();
+        if path.parent() != Some(Path::new("playground/Route"))
+            || path.extension().is_none_or(|ext| ext != "orna")
+        {
+            continue;
+        }
+        let Some(file_name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if !matches!(entry.kind(), CommittedTreeEntryKind::File { .. }) {
+            continue;
+        }
+        let Ok(source) = repository.read_committed_file(
+            &commit,
+            path,
+            MAX_PLAYGROUND_ASSET_ROW_BYTES,
+        ) else {
+            continue;
+        };
+        let Ok(source) = String::from_utf8(source) else {
+            continue;
+        };
+        if let Some((route_path, _)) = decode_playground_route(&source, file_name) {
+            routes.push(route_path);
+        }
+    }
+    routes.sort();
+    routes.dedup();
+    Ok(routes)
+}
+
+fn playground_catalogue_page(root: &Path, identity: RuntimeIdentity) -> Response {
+    let Ok(routes) = playground_catalogue_routes(root) else {
+        return unavailable_response();
+    };
+    let rows = routes
+        .iter()
+        .map(|route| InspectionNode::Link {
+            label: route.clone(),
+            href: route.clone(),
+        })
+        .collect::<Vec<_>>();
+    let content = if rows.is_empty() {
+        InspectionNode::Text("No playground catalogue entries are committed.".into())
+    } else {
+        InspectionNode::List(rows)
+    };
+    render_home_document(
+        identity,
+        &InspectionNode::Record(vec![("Catalogue".into(), content)]),
     )
 }
 
