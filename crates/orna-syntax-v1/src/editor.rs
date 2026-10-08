@@ -152,6 +152,10 @@ pub fn semantic_legend_markdown() -> String {
     out
 }
 
+/// Version of the semantic-token legend, taken from this crate's version so
+/// the legend and the crate that defines it change together.
+pub const SEMANTIC_LEGEND_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Semantic legend as CSV with the columns `kind,index,name,sample`. Token
 /// type rows use the protocol index; modifier rows use the bit position and
 /// have an empty sample. Fields are quoted per RFC 4180 when needed.

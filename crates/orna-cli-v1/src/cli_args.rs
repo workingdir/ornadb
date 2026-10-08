@@ -24,6 +24,7 @@ pub(super) enum LegendFormat {
     Markdown,
     Csv,
     Quiet,
+    Version,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,7 +144,7 @@ fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Dia
         Diagnostic::usage(
             "E1002",
             "unsupported `semantic-legend` option",
-            "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown`, `semantic-legend --format csv`, `semantic-legend --quiet` or `semantic-legend --limit N`",
+            "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown`, `semantic-legend --format csv`, `semantic-legend --quiet`, `semantic-legend --limit N` or `semantic-legend --version`",
         )
     };
     let limit = |value: &str| {
@@ -161,6 +162,7 @@ fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Dia
         ["--markdown"] => Ok((LegendFormat::Markdown, None)),
         ["--format", "csv"] => Ok((LegendFormat::Csv, None)),
         ["--quiet"] => Ok((LegendFormat::Quiet, None)),
+        ["--version"] => Ok((LegendFormat::Version, None)),
         ["--limit", count] => Ok((LegendFormat::Text, Some(limit(count)?))),
         ["--quiet", "--limit", count] | ["--limit", count, "--quiet"] => {
             Ok((LegendFormat::Quiet, Some(limit(count)?)))
@@ -447,6 +449,18 @@ mod tests {
         assert!(parse_cli(&args(&["semantic-legend", "--limit", "0"])).is_err());
         assert!(parse_cli(&args(&["semantic-legend", "--limit", "x"])).is_err());
         assert!(parse_cli(&args(&["semantic-legend", "--json", "--limit", "3"])).is_err());
+    }
+
+    #[test]
+    fn semantic_legend_version_flag_selects_version_output() {
+        assert_eq!(
+            parse_cli(&args(&["semantic-legend", "--version"])).unwrap().command,
+            Command::SemanticLegend {
+                format: LegendFormat::Version,
+                limit: None,
+            }
+        );
+        assert!(parse_cli(&args(&["semantic-legend", "--version", "--limit", "2"])).is_err());
     }
 
     #[test]
