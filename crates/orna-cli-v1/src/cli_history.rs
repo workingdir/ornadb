@@ -367,6 +367,26 @@ mod tests {
     }
 
     #[test]
+    fn quiet_keeps_the_two_revision_listing_and_drops_only_the_summary() {
+        let entries = vec![
+            ("c2".to_owned(), "t2".to_owned(), true),
+            ("c1".to_owned(), "t1".to_owned(), false),
+        ];
+        let loud = super::human_lines(&entries, false);
+        let quiet = super::human_lines(&entries, true);
+        assert_eq!(
+            loud,
+            [
+                "c2 t2 present",
+                "c1 t1 absent",
+                "2 revisions (1 present, 1 absent)",
+            ]
+        );
+        // Quiet output is exactly the loud listing without its final summary line.
+        assert_eq!(quiet, loud[..loud.len() - 1]);
+    }
+
+    #[test]
     fn quiet_combines_with_format_and_flags_in_any_position() {
         let flagged = words(&["--quiet", "--format", "json", "0102", "--limit", "2", "song"]);
         let parsed = parse_options(&flagged).unwrap();
