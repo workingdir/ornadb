@@ -1,0 +1,11 @@
+std.encoding.utilities.unicode_scalars("e\u{301}") == ["e", "\u{301}"]
+&& std.encoding.utilities.unicode_scalar_length("e\u{301}") == 2
+&& std.encoding.utilities.unicode_scalar_length("e\u{301}\u{302}") == 3
+&& std.encoding.utilities.unicode_reverse("e\u{301}") == "\u{301}e"
+&& std.encoding.utilities.unicode_slice("e\u{301}", 0, 1) == "e"
+&& std.encoding.utilities.unicode_slice("e\u{301}", 1, 2) == "\u{301}"
+&& std.encoding.utilities.unicode_scalar_length("👨\u{200d}👩") == 3
+&& std.encoding.utilities.unicode_reverse("👨\u{200d}👩") == "👩\u{200d}👨"
+&& std.encoding.utilities.unicode_slice("👨\u{200d}👩", 1, 2) == "\u{200d}"
+&& std.encoding.utilities.unicode_scalar_length("") == 0
+&& std.encoding.utilities.unicode_reverse("") == ""
