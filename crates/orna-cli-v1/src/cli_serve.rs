@@ -979,7 +979,11 @@ fn playground_catalogue_page(root: &Path, identity: RuntimeIdentity, query: &str
             },
         ));
     }
-    render_home_document(identity, &InspectionNode::Record(sections))
+    let mut response = render_home_document(identity, &InspectionNode::Record(sections));
+    response
+        .headers
+        .push(("Cache-Control".into(), "no-store".into()));
+    response
 }
 
 fn playground_route_record_path(route_path: &str) -> Option<(ManagedPath, String)> {
