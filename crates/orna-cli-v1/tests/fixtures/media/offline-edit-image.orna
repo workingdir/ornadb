@@ -1,0 +1,1 @@
+sys.blob.capture_file(__MEDIA_ROOT__, "pixel.png", 65536)
