@@ -346,3 +346,11 @@ fn semantic_legend_table_aligns_every_row_to_the_same_columns() {
         assert_eq!(line.find(editor::token_type_sample(token_type).unwrap()), Some(sample_column), "{line}");
     }
 }
+
+#[test]
+fn semantic_legend_counts_match_the_listed_legend() {
+    let (token_types, token_modifiers) = editor::semantic_legend_counts();
+    assert_eq!(token_types, editor::legend_token_types().count());
+    assert_eq!(token_modifiers, editor::TOKEN_MODIFIERS.len());
+    assert_eq!((token_types, token_modifiers), (11, 3));
+}
