@@ -42,6 +42,7 @@ def fixture_roots(workspace_root: Path) -> list[Path]:
     return roots
 
 
+ERROR_PREFIX = "ornadb: "
 UNREADABLE_FIXTURE_PREFIX = "fixture file is unreadable: "
 
 
@@ -258,7 +259,7 @@ exit status:
         print(json.dumps({"ok": False, "scan_errors": scan_errors, "errors": []}))
         return scan_exit_status(scan_errors)
     if scan_errors:
-        print("fixture manifest scan failed:", file=sys.stderr)
+        print(f"{ERROR_PREFIX}fixture manifest scan failed:", file=sys.stderr)
         for error in scan_errors:
             print(f"  {error}", file=sys.stderr)
         return scan_exit_status(scan_errors)
@@ -270,14 +271,14 @@ exit status:
         return 0
 
     if not MANIFEST_PATH.is_file():
-        print(f"fixture manifest does not exist: {MANIFEST_PATH}", file=sys.stderr)
+        print(f"{ERROR_PREFIX}fixture manifest does not exist: {MANIFEST_PATH}", file=sys.stderr)
         return 2
     errors = validate_manifest(hashes, MANIFEST_PATH.read_text(encoding="utf-8"))
     if args.since:
         try:
             changed = changed_fixture_paths(args.since)
         except ValueError as error:
-            print(f"fixture manifest --since failed: {error}", file=sys.stderr)
+            print(f"{ERROR_PREFIX}fixture manifest --since failed: {error}", file=sys.stderr)
             return 2
         errors = only_changed(errors, changed)
     roots = fixture_roots(WORKSPACE_ROOT)
@@ -305,10 +306,10 @@ exit status:
             print(error)
         return 1
     if errors:
-        print("fixture manifest drift detected:", file=sys.stderr)
+        print(f"{ERROR_PREFIX}fixture manifest drift detected:", file=sys.stderr)
         for error in _limited(errors, args.limit):
             print(f"  {error}", file=sys.stderr)
-        print(f"fixture manifest drift total: {len(errors)}", file=sys.stderr)
+        print(f"{ERROR_PREFIX}fixture manifest drift total: {len(errors)}", file=sys.stderr)
         return 1
 
     if not args.quiet:
