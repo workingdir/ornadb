@@ -6004,10 +6004,31 @@ impl GraphError {
         )
     }
 
+    /// True when a referenced object cannot be found in the repository: git
+    /// does not know the OID, or a reference names something absent. The
+    /// index itself may be intact.
+    pub const fn is_unresolved_object(&self) -> bool {
+        matches!(
+            self,
+            Self::UnknownObjectAvailability
+                | Self::ObjectUnavailable
+                | Self::UnavailableObject
+                | Self::MissingReference
+        )
+    }
+
     /// Process exit code for `ogs stats`: 2 for a corrupt index, matching the
-    /// fixture manifest check's "could not verify" code, and 1 otherwise.
+    /// fixture manifest check's "could not verify" code; 3 for an object id
+    /// that does not resolve, so scripts can tell it from corruption; and 1
+    /// for anything else.
     pub const fn exit_code(&self) -> i32 {
-        if self.is_corrupt_index() { 2 } else { 1 }
+        if self.is_corrupt_index() {
+            2
+        } else if self.is_unresolved_object() {
+            3
+        } else {
+            1
+        }
     }
 }
 
@@ -6025,7 +6046,9 @@ mod exit_code_tests {
         }
         .exit_code(), 2);
         assert_eq!(GraphError::ReadQuotaExceeded.exit_code(), 1);
-        assert_eq!(GraphError::ObjectUnavailable.exit_code(), 1);
+        assert_eq!(GraphError::ObjectUnavailable.exit_code(), 3);
+        assert_eq!(GraphError::UnknownObjectAvailability.exit_code(), 3);
+        assert_eq!(GraphError::GitCommandFailed.exit_code(), 1);
         assert_eq!(GraphError::GitCommandFailed.exit_code(), 1);
     }
 }
