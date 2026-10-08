@@ -1,4 +1,4 @@
-//! `orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE]`:
+//! `orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]`:
 //! verifies an offline copy bundle in full and reports the rows and history an
 //! import would write. Nothing is written to the bundle or to any repository. A
 //! committing import is not wired yet, so `--dry-run` is required. `--limit N`
@@ -8,38 +8,63 @@
 //! instead of its recorded one; the bundle's stored types are not changed.
 //! Unless `--quiet` is given, one progress line per verified row goes to stderr.
 //! Progress covers every row, because `--limit` does not skip verification.
+//! `--format table` lists each reported row (key, media type, bytes) above the
+//! summary line; `--format human` prints the summary line alone.
 
 use std::path::Path;
 
-use orna_repository_v1::offline_copy::OfflineCopy;
+use orna_repository_v1::offline_copy::{OfflineCopy, OfflineImportRow};
 use orna_value_v1::normalize_media_type;
 
 use super::Diagnostic;
 
-const USAGE: &str =
-    "usage: orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE]";
+const USAGE: &str = "usage: orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]";
 
-/// Parsed import options: the bundle directory, optional row limit, output mode, and media type override.
+/// Output shape for the dry-run report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReportFormat {
+    Human,
+    Table,
+}
+
+/// Parsed import options: the bundle directory, optional row limit, output mode, media type override, and report format.
 #[derive(Debug, Eq, PartialEq)]
 struct ImportOptions<'a> {
     bundle: &'a str,
     limit: Option<usize>,
     quiet: bool,
     media_type: Option<String>,
+    format: ReportFormat,
 }
 
-/// Returns the bundle directory, row limit, quiet flag, and media type override when the arguments name one and request a dry run.
+/// Returns the bundle directory, row limit, quiet flag, media type override, and report format when the arguments name one and request a dry run.
 fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> {
     let mut bundle = None;
     let mut dry_run = false;
     let mut limit = None;
     let mut quiet = false;
     let mut media_type = None;
+    let mut format = ReportFormat::Human;
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
             "--dry-run" => dry_run = true,
             "--quiet" => quiet = true,
+            "--format" => {
+                let value = words.next().ok_or_else(|| {
+                    import_error("--format needs a value", "usage: --format <human|table>")
+                })?;
+                format = match value {
+                    "human" => ReportFormat::Human,
+                    "table" => ReportFormat::Table,
+                    _ => {
+                        return Err(import_error(
+                            "--format is not human or table",
+                            format!("got {value:?}"),
+                        ));
+                    }
+                };
+            }
             "--type" => {
                 let value = words.next().ok_or_else(|| {
                     import_error("--type needs a value", "usage: --type <MEDIA_TYPE>")
@@ -71,7 +96,9 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
             flag if flag.starts_with("--") => {
                 return Err(import_error(
                     "Unknown import flag",
-                    format!("got {flag:?}; accepted: --dry-run, --limit, --quiet, --type"),
+                    format!(
+                        "got {flag:?}; accepted: --dry-run, --limit, --quiet, --type, --format"
+                    ),
                 ));
             }
             path if bundle.is_none() => bundle = Some(path),
@@ -95,6 +122,7 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
         limit,
         quiet,
         media_type,
+        format,
     })
 }
 
@@ -105,6 +133,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         options.limit,
         options.media_type.as_deref(),
         !options.quiet,
+        options.format,
     )?;
     if !options.quiet {
         println!("{summary}");
@@ -112,14 +141,16 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-/// Verifies the bundle and returns the one-line dry-run report. With a limit,
-/// only the first rows are counted; history is bundle-wide and always counted.
-/// A media type override is named in the report; it does not alter the bundle.
+/// Verifies the bundle and returns the dry-run report. With a limit, only the
+/// first rows are counted; history is bundle-wide and always counted. A media
+/// type override is named in the report; it does not alter the bundle. The
+/// table format lists each reported row above the summary line.
 fn dry_run_summary(
     bundle: &Path,
     limit: Option<usize>,
     media_type: Option<&str>,
     progress: bool,
+    format: ReportFormat,
 ) -> Result<String, Diagnostic> {
     let plan = OfflineCopy::open(bundle)
         .and_then(|copy| {
@@ -132,12 +163,49 @@ fn dry_run_summary(
         .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?;
     let total = plan.rows.len();
     let reported = limit.map_or(total, |limit| limit.min(total));
-    let payload_bytes: u64 = plan.rows[..reported].iter().map(|row| row.length).sum();
+    let reported_rows = &plan.rows[..reported];
+    let payload_bytes: u64 = reported_rows.iter().map(|row| row.length).sum();
     let typed = media_type.map_or(String::new(), |media_type| format!(" as {media_type}"));
-    Ok(format!(
+    let summary = format!(
         "dry run: {reported} of {total} rows{typed}, {payload_bytes} payload bytes, {} history entries; nothing written",
         plan.history.len()
-    ))
+    );
+    Ok(match format {
+        ReportFormat::Human => summary,
+        ReportFormat::Table => format!("{}{summary}", render_table(reported_rows, media_type)),
+    })
+}
+
+/// Renders the reported rows as an aligned table with a header line. Every
+/// line ends in a newline, so the summary line can follow directly.
+fn render_table(rows: &[OfflineImportRow], media_type: Option<&str>) -> String {
+    let header = [
+        "key".to_owned(),
+        "media_type".to_owned(),
+        "bytes".to_owned(),
+    ];
+    let mut lines = vec![header];
+    lines.extend(rows.iter().map(|row| {
+        [
+            String::from_utf8_lossy(&row.key).into_owned(),
+            media_type.unwrap_or(row.media_type.as_str()).to_owned(),
+            row.length.to_string(),
+        ]
+    }));
+    let mut widths = [0_usize; 3];
+    for line in &lines {
+        for (width, cell) in widths.iter_mut().zip(line) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    let [key_width, type_width, bytes_width] = widths;
+    let mut out = String::new();
+    for [key, kind, bytes] in &lines {
+        out.push_str(&format!(
+            "{key:<key_width$}  {kind:<type_width$}  {bytes:>bytes_width$}\n"
+        ));
+    }
+    out
 }
 
 fn import_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
@@ -151,7 +219,7 @@ fn import_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{dry_run_summary, parse_options};
+    use super::{ReportFormat, dry_run_summary, parse_options};
     use orna_repository_v1::offline_copy::{OfflineHistoryEntry, OfflineRow, write_offline_copy};
     use sha2::{Digest, Sha256};
     use std::path::Path;
@@ -206,6 +274,22 @@ mod tests {
     }
 
     #[test]
+    fn format_accepts_human_or_table_only() {
+        let table_words = words(&["bundle", "--dry-run", "--format", "table"]);
+        assert_eq!(
+            parse_options(&table_words).unwrap().format,
+            ReportFormat::Table
+        );
+        let default_words = words(&["bundle", "--dry-run"]);
+        assert_eq!(
+            parse_options(&default_words).unwrap().format,
+            ReportFormat::Human
+        );
+        assert!(parse_options(&words(&["bundle", "--dry-run", "--format", "json"])).is_err());
+        assert!(parse_options(&words(&["bundle", "--dry-run", "--format"])).is_err());
+    }
+
+    #[test]
     fn dry_run_reports_only_the_limited_rows() {
         let directory = TempDir::new().unwrap();
         let bundle = directory.path().join("bundle");
@@ -217,17 +301,32 @@ mod tests {
         write_offline_copy(&bundle, &rows, &history).unwrap();
 
         assert_eq!(
-            dry_run_summary(&bundle, None, None, false).unwrap(),
+            dry_run_summary(&bundle, None, None, false, ReportFormat::Human).unwrap(),
             "dry run: 2 of 2 rows, 16 payload bytes, 1 history entries; nothing written"
         );
         assert_eq!(
-            dry_run_summary(&bundle, Some(1), None, false).unwrap(),
+            dry_run_summary(&bundle, Some(1), None, false, ReportFormat::Human).unwrap(),
             "dry run: 1 of 2 rows, 6 payload bytes, 1 history entries; nothing written"
         );
         assert!(
-            dry_run_summary(&bundle, Some(9), None, false)
+            dry_run_summary(&bundle, Some(9), None, false, ReportFormat::Human)
                 .unwrap()
                 .starts_with("dry run: 2 of 2")
+        );
+    }
+
+    #[test]
+    fn table_lists_only_the_reported_rows_above_the_summary() {
+        let directory = TempDir::new().unwrap();
+        let bundle = directory.path().join("bundle");
+        let rows = [row("image", b"pixels"), row("song", b"tone-bytes")];
+        write_offline_copy(&bundle, &rows, &[]).unwrap();
+
+        assert_eq!(
+            dry_run_summary(&bundle, Some(1), None, false, ReportFormat::Table).unwrap(),
+            "key    media_type  bytes\n\
+             image  text/plain      6\n\
+             dry run: 1 of 2 rows, 6 payload bytes, 0 history entries; nothing written"
         );
     }
 
@@ -239,8 +338,8 @@ mod tests {
         write_offline_copy(&bundle, &rows, &[]).unwrap();
 
         assert_eq!(
-            dry_run_summary(&bundle, Some(1), None, true).unwrap(),
-            dry_run_summary(&bundle, Some(1), None, false).unwrap(),
+            dry_run_summary(&bundle, Some(1), None, true, ReportFormat::Human).unwrap(),
+            dry_run_summary(&bundle, Some(1), None, false, ReportFormat::Human).unwrap(),
         );
     }
 
@@ -256,7 +355,7 @@ mod tests {
         let bundle = directory.path().join("bundle");
         write_offline_copy(&bundle, &[row("song", b"tone-bytes")], &[]).unwrap();
         assert_eq!(
-            dry_run_summary(&bundle, None, Some("audio/wav"), false).unwrap(),
+            dry_run_summary(&bundle, None, Some("audio/wav"), false, ReportFormat::Human).unwrap(),
             "dry run: 1 of 1 rows as audio/wav, 10 payload bytes, 0 history entries; nothing written"
         );
     }
@@ -264,6 +363,6 @@ mod tests {
     #[test]
     fn dry_run_refuses_a_missing_bundle_without_writing() {
         let missing = Path::new("/nonexistent/orna-import-dry-run-bundle");
-        assert!(dry_run_summary(missing, None, None, true).is_err());
+        assert!(dry_run_summary(missing, None, None, true, ReportFormat::Human).is_err());
     }
 }
