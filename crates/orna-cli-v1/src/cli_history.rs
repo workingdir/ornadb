@@ -27,6 +27,7 @@ struct HistoryOptions<'a> {
     since: Option<&'a str>,
     format: HistoryFormat,
     reverse: bool,
+    quiet: bool,
     count: bool,
     author: Option<&'a str>,
 }
@@ -37,6 +38,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     let mut since = None;
     let mut format = HistoryFormat::Human;
     let mut reverse = false;
+    let mut quiet = false;
     let mut count = false;
     let mut author = None;
     let mut words = arguments.iter().map(String::as_str);
@@ -64,6 +66,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
                 since = Some(value);
             }
             "--reverse" => reverse = true,
+            "--quiet" => quiet = true,
             "--count" => count = true,
             "--author" => {
                 let value = words.next().ok_or_else(|| {
@@ -89,7 +92,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             flag if flag.starts_with("--") => {
                 return Err(history_error(
                     "Unknown history flag",
-                    format!("got {flag:?}; accepted: --limit, --since, --format, --reverse, --author, --count"),
+                    format!("got {flag:?}; accepted: --limit, --since, --format, --reverse, --author, --count, --quiet"),
                 ));
             }
             _ => positional.push(word),
@@ -108,6 +111,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
         since,
         format,
         reverse,
+        quiet,
         count,
         author,
     })
@@ -187,7 +191,10 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
                     revision.tree().to_hex()
                 );
             }
-            println!("{}", summary_line(revisions.len(), present));
+            // `--quiet` drops only the summary line; the listing is unchanged.
+            if !options.quiet {
+                println!("{}", summary_line(revisions.len(), present));
+            }
         }
         HistoryFormat::Json => {
             let entries: Vec<serde_json::Value> = revisions
@@ -307,6 +314,13 @@ mod tests {
     }
 
     #[test]
+    fn quiet_is_a_bare_flag_and_defaults_off() {
+        let plain = words(&["0102", "song"]);
+        assert!(!parse_options(&plain).unwrap().quiet);
+        let flagged = words(&["0102", "--quiet", "song"]);
+        assert!(parse_options(&flagged).unwrap().quiet);
+    }
+
     fn count_is_a_bare_flag_and_defaults_off() {
         let plain = words(&["0102", "song"]);
         assert!(!parse_options(&plain).unwrap().count);
