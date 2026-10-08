@@ -43,6 +43,10 @@ const PROJECTION_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-projection.orna"
 );
+const IMAGE_JSON_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-image-json.orna"
+);
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
 /// One committed media row, as its listing query sees it.
@@ -692,6 +696,64 @@ async fn deleting_a_committed_media_row_removes_it_from_listing_and_filters() {
     assert_eq!(keys, vec![b"image".to_vec()]);
     assert!(filter_media(&state, &song_filter).await.is_empty());
     assert_eq!(filter_media(&state, &image_filter).await, vec![b"image".to_vec()]);
+}
+
+#[tokio::test]
+async fn history_json_lists_each_revision_with_exactly_the_four_keys() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let image = import_expression(IMAGE_JSON_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    drop(bindings);
+    drop(state);
+
+    let head = git_output(directory.path(), &["rev-parse", "HEAD"], None);
+    let head = String::from_utf8(head).unwrap().trim().to_owned();
+    let entries = history_json(directory.path(), relation_id, "image");
+    assert!(!entries.is_empty(), "the image row has revisions");
+    for entry in &entries {
+        let object = entry.as_object().expect("each revision is a JSON object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["author", "commit", "present", "tree"]);
+        for field in ["commit", "tree"] {
+            let hex = object[field].as_str().expect("hex id is a string");
+            assert_eq!(hex.len(), 40, "{field} is a full object id");
+            assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
+        assert!(object["present"].is_boolean(), "present is a JSON boolean");
+        assert!(object["author"].as_str().unwrap().contains('<'));
+    }
+    // Newest first: the head commit carries the image; older revisions do not.
+    assert_eq!(entries[0]["commit"], head.as_str());
+    assert_eq!(entries[0]["present"], true);
+    assert!(entries.iter().any(|entry| entry["present"] == false));
+    drop(directory);
 }
 
 /// Deletes one committed media row through an admitted request, the same path
