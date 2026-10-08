@@ -902,6 +902,15 @@ pub(crate) fn normalized_identifier(text: &str) -> String {
         .unwrap_or_else(|| text.to_owned())
 }
 
+fn keyword_at(text: &str, byte: usize) -> Option<Keyword> {
+    lex(text).ok()?.into_iter().find_map(|token| match token.kind {
+        TokenKind::Keyword(keyword) if token.span.start <= byte && byte < token.span.end => {
+            Some(keyword)
+        }
+        _ => None,
+    })
+}
+
 fn token_at(text: &str, byte: usize) -> Option<Token> {
     lex(text).ok()?.into_iter().find(|token| {
         matches!(token.kind, TokenKind::Identifier { .. })
@@ -938,10 +947,9 @@ pub fn hover(
     mapper: &PositionMapper<'_>,
 ) -> Option<Hover> {
     let byte = mapper.byte_offset(position);
-    let token = token_at(&document.text, byte)?;
     // Reserved words cannot name a binding or symbol, so the lexer's keyword
-    // table decides the card before any scope lookup.
-    if let Some(keyword) = Keyword::from_text(&token.text) {
+    // table decides the card before any identifier or scope lookup.
+    if let Some(keyword) = keyword_at(&document.text, byte) {
         return Some(crate::hover::declaration(
             "keyword",
             keyword.spelling(),
@@ -950,6 +958,7 @@ pub fn hover(
             Some("Reserved word of the Orna language (ORNA-LEX-007)."),
         ));
     }
+    let token = token_at(&document.text, byte)?;
     if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
         let kind = match binding.kind {
             crate::locals::LocalBindingKind::Parameter => "parameter",
