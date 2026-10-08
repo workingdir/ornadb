@@ -21,6 +21,8 @@ MANIFEST_HEADER = (
     "# SHA-256  workspace-relative fixture path\n"
 )
 HASH_PATTERN = re.compile(r"[0-9a-f]{64}")
+# Bump when the checker's flags or output formats change, so CI logs show which interface ran.
+CHECKER_VERSION = "1"
 IGNORED_WORKSPACE_DIRS = {".git", ".beads", ".scratch", "node_modules", "target"}
 
 
@@ -220,6 +222,11 @@ exit status:
         "--quiet",
         action="store_true",
         help="suppress success output; drift and scan errors are still reported",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {CHECKER_VERSION}",
     )
     parser.add_argument(
         "--roots",
