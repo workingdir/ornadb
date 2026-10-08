@@ -911,7 +911,33 @@ impl NativeGraphContext {
     pub fn object_stats(&self, scope: &RepositoryReadScope) -> Result<ObjectStats, GraphError> {
         scope.authorize(self)?;
         let mut objects = self.stats_budget(scope);
-        let (stats, _) = self.walk_stats(&self.store_root, scope, &mut objects, &Reachable::default())?;
+        let (stats, _) = self.walk_stats(
+            &self.store_root,
+            scope,
+            &mut objects,
+            &Reachable::default(),
+            u64::MAX,
+        )?;
+        Ok(stats)
+    }
+
+    /// Like [`Self::object_stats`], but fails with `InventoryQuotaExceeded`
+    /// before reading a node beyond `max_nodes`, so a caller can bound the
+    /// walk. A walk of exactly `max_nodes` nodes succeeds.
+    pub fn object_stats_limited(
+        &self,
+        scope: &RepositoryReadScope,
+        max_nodes: u64,
+    ) -> Result<ObjectStats, GraphError> {
+        scope.authorize(self)?;
+        let mut objects = self.stats_budget(scope);
+        let (stats, _) = self.walk_stats(
+            &self.store_root,
+            scope,
+            &mut objects,
+            &Reachable::default(),
+            max_nodes,
+        )?;
         Ok(stats)
     }
 
@@ -925,8 +951,10 @@ impl NativeGraphContext {
     ) -> Result<ObjectStats, GraphError> {
         scope.authorize(self)?;
         let mut objects = self.stats_budget(scope);
-        let (_, earlier) = self.walk_stats(since_root, scope, &mut objects, &Reachable::default())?;
-        let (stats, _) = self.walk_stats(&self.store_root, scope, &mut objects, &earlier)?;
+        let (_, earlier) =
+            self.walk_stats(since_root, scope, &mut objects, &Reachable::default(), u64::MAX)?;
+        let (stats, _) =
+            self.walk_stats(&self.store_root, scope, &mut objects, &earlier, u64::MAX)?;
         Ok(stats)
     }
 
@@ -949,14 +977,20 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
         objects: &mut ObjectBudget,
         skip: &Reachable,
+        max_nodes: u64,
     ) -> Result<(ObjectStats, Reachable), GraphError> {
         let mut stats = ObjectStats::default();
         let mut reached = Reachable::default();
         let mut pending = vec![root.clone()];
+        let mut visited = 0u64;
         while let Some(oid) = pending.pop() {
             if skip.trees.contains(&oid) || !reached.trees.insert(oid.clone()) {
                 continue;
             }
+            if visited == max_nodes {
+                return Err(GraphError::InventoryQuotaExceeded);
+            }
+            visited += 1;
             let node = self.read_native_node(&oid, scope, objects)?;
             *stats.nodes.entry(node.kind()).or_insert(0) += 1;
             for dependency in node.dependencies()? {
