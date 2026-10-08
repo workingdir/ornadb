@@ -3239,6 +3239,7 @@ cc65b25177b4a62dfcef28ef1da7fe88ca7bf533e227285882d13eb032405b36  crates/orna-ls
 2ac7143a5dcab472864d2d6820c6236939d21476a980df28c267024f3f656171  crates/orna-lsp/src/analysis/fixtures/standard-missing-import.orna
 7448019e1215ea705ad3416bc881c489dfcc1720400162ff0b5ef39c83acfeff  crates/orna-lsp/src/browser/fixtures/browser-intelligence.orna
 9217afe5354b9d31db8467723528fc99b7ca08977dd1d0d0e82677e9853e472f  crates/orna-lsp/src/browser/fixtures/standard-completion-ranking.orna
+3f1e19c1fca9f9e6d1da0a8902c6d64dc87622c62b8547f2a643e0f90a51b8de  crates/orna-lsp/src/browser/fixtures/standard-definition.orna
 53f2d49f982abd7ade14ec9c879664066e0f29caea747da100e2dbecfc01f113  crates/orna-lsp/src/browser/fixtures/standard-document-symbols.orna
 11aa3d9691dc679777f093cf3ae7369ccb8b4b9160a235cb6894fb8a5bed840d  crates/orna-lsp/src/browser/fixtures/standard-inlay-hints.orna
 02f372407ed86c6c12d749f66890dbb378cd4a08201cec7ea64af6ee0bdc2dd0  crates/orna-lsp/src/browser/fixtures/standard-signature-help.orna
