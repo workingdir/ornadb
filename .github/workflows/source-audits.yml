@@ -75,6 +75,8 @@ jobs:
 
       - name: Prove std string helper behavior
         run: cargo test --locked -p orna-evaluator-v1 --test standard_library_format_strings_si45g
+      - name: Prove std map merge and conflict behavior
+        run: cargo test --locked -p orna-evaluator-v1 --test standard_library_map_conflicts_ln4y7
 
       - name: Prove hash-pinned runtime historical snapshot behavior
         run: cargo test --locked -p orna-runtime-v1 --test historical_snapshots
