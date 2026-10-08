@@ -910,35 +910,68 @@ impl NativeGraphContext {
     /// and blob contents are never read, so the stats cost only metadata.
     pub fn object_stats(&self, scope: &RepositoryReadScope) -> Result<ObjectStats, GraphError> {
         scope.authorize(self)?;
-        let mut objects = ObjectBudget::new(
+        let mut objects = self.stats_budget(scope);
+        let (stats, _) = self.walk_stats(&self.store_root, scope, &mut objects, &Reachable::default())?;
+        Ok(stats)
+    }
+
+    /// Counts only the objects reachable from the store root that were not
+    /// already reachable from `since_root`, an earlier store root of this
+    /// graph. Subtrees shared with `since_root` are pruned, not walked.
+    pub fn object_stats_since(
+        &self,
+        scope: &RepositoryReadScope,
+        since_root: &NativeOid,
+    ) -> Result<ObjectStats, GraphError> {
+        scope.authorize(self)?;
+        let mut objects = self.stats_budget(scope);
+        let (_, earlier) = self.walk_stats(since_root, scope, &mut objects, &Reachable::default())?;
+        let (stats, _) = self.walk_stats(&self.store_root, scope, &mut objects, &earlier)?;
+        Ok(stats)
+    }
+
+    fn stats_budget(&self, scope: &RepositoryReadScope) -> ObjectBudget {
+        ObjectBudget::new(
             scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
             scope.max_objects,
             Arc::clone(&scope.objects_used),
             scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
             Arc::clone(&scope.metadata_used),
-        );
+        )
+    }
+
+    /// Walks the trees reachable from `root`, skipping any tree or blob in
+    /// `skip`, and returns the counts together with every tree and blob the
+    /// walk reached (skipped objects are not reached).
+    fn walk_stats(
+        &self,
+        root: &NativeOid,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+        skip: &Reachable,
+    ) -> Result<(ObjectStats, Reachable), GraphError> {
         let mut stats = ObjectStats::default();
-        let mut seen_trees = BTreeSet::new();
-        let mut seen_blobs = BTreeSet::new();
-        let mut pending = vec![self.store_root.clone()];
+        let mut reached = Reachable::default();
+        let mut pending = vec![root.clone()];
         while let Some(oid) = pending.pop() {
-            if !seen_trees.insert(oid.clone()) {
+            if skip.trees.contains(&oid) || !reached.trees.insert(oid.clone()) {
                 continue;
             }
-            let node = self.read_native_node(&oid, scope, &mut objects)?;
+            let node = self.read_native_node(&oid, scope, objects)?;
             *stats.nodes.entry(node.kind()).or_insert(0) += 1;
             for dependency in node.dependencies()? {
                 match dependency.kind() {
                     NativeObjectKind::Tree => pending.push(dependency.oid().clone()),
                     NativeObjectKind::Blob => {
-                        if seen_blobs.insert(dependency.oid().clone()) {
+                        let blob = dependency.oid().clone();
+                        if !skip.blobs.contains(&blob) && reached.blobs.insert(blob) {
                             stats.blob_references += 1;
                         }
                     }
                 }
             }
         }
-        Ok(stats)
+        Ok((stats, reached))
     }
 
     /// Lists up to `max_commits` commits reachable from `HEAD`, newest first,
@@ -3506,6 +3539,13 @@ impl NativeRefEntry {
     pub const fn kind(&self) -> NativeObjectKind {
         self.kind
     }
+}
+
+/// Trees and blobs a stats walk reached, used to prune a later walk.
+#[derive(Default)]
+struct Reachable {
+    trees: BTreeSet<NativeOid>,
+    blobs: BTreeSet<NativeOid>,
 }
 
 /// Object counts reachable from one admitted store root, produced by
