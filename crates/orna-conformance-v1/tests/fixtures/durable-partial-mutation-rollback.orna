@@ -1,0 +1,10 @@
+pub table Note(id: Int) { text: Str, }
+
+fn child() {
+    Note.insert({ id: 8, text: "partial" });
+}
+
+fn parent() {
+    child();
+    assert false;
+}
