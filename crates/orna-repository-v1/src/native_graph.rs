@@ -3708,6 +3708,16 @@ impl ObjectStats {
     }
 }
 
+/// Help text for the exit codes of `ogs stats`. Each line names one code the
+/// stats exit with; the codes come from [`ObjectStats::exit_code`] and
+/// [`GraphError::exit_code`].
+pub const OGS_STATS_EXIT_CODES_HELP: &str = "\
+Exit codes:
+  0  the store has at least one reachable node
+  1  any other failure
+  2  corrupt index: bytes on disk do not match the format
+  3  empty store, or an object id that does not resolve";
+
 /// Output schema version for [`ObjectStats::to_json`].
 pub const STATS_SCHEMA_VERSION: u32 = 1;
 
@@ -6035,6 +6045,20 @@ impl GraphError {
 #[cfg(test)]
 mod exit_code_tests {
     use super::GraphError;
+
+    #[test]
+    fn help_documents_every_exit_code_the_stats_return() {
+        let help = super::OGS_STATS_EXIT_CODES_HELP;
+        assert_eq!(super::ObjectStats::default().exit_code(), 3);
+        assert_eq!(GraphError::GitObjectHashMismatch.exit_code(), 2);
+        assert_eq!(GraphError::ReadQuotaExceeded.exit_code(), 1);
+        for code in [0, 1, 2, 3] {
+            assert!(
+                help.lines().any(|line| line.starts_with(&format!("  {code}  "))),
+                "help must document exit code {code}: {help}"
+            );
+        }
+    }
 
     #[test]
     fn corrupt_index_exits_2_and_other_failures_exit_1() {
