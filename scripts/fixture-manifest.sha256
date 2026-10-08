@@ -2318,6 +2318,7 @@ c3a059401efb36836ff567b3b73edc47c9cc268f2b8f9199a228561bfb44c40f  crates/orna-ev
 1d562e16f8fe9110130bf49b2d793ae330d369ddc5f9e5c5bfe8be731aa0477b  crates/orna-evaluator-v1/tests/fixtures/stdlib-error-combinators-matches-chain-order-wt345.orna
 8a0738e44bf8f5149920fc8a954a41dabe64fd59892c6267a9768dbe1b09a945  crates/orna-evaluator-v1/tests/fixtures/stdlib-error-matches-code-6mwfw.orna
 68df030cd8e01ad54797869537ae5a91f7d7a29956c555801316ef7611229b6a  crates/orna-evaluator-v1/tests/fixtures/stdlib-error-without-snapshot-typdl.orna
+1f75110fb942939ba9ec3dcec94e07a9f652c2ea7b6c264a636d10782ad11617  crates/orna-evaluator-v1/tests/fixtures/stdlib-float-compare-signed-zero-ln4y7.orna
 581e0215bff636434b876b12bb5fcfa44dbab24237259597905409e574cfb0e8  crates/orna-evaluator-v1/tests/fixtures/stdlib-format-contract-booleans-wi489.orna
 8a54d4551c00853d82ba9d966471d8b7cce7d25300952cd7d500d93a8b335b60  crates/orna-evaluator-v1/tests/fixtures/stdlib-format-contract-integers-wi489.orna
 cdae1f5316efd76da167aabf4bc0a399cd668dd25f4b7ccecbda076b1f246866  crates/orna-evaluator-v1/tests/fixtures/stdlib-format-contract-marker-wi489.orna
