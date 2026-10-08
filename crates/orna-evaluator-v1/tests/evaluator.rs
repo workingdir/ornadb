@@ -4184,6 +4184,28 @@ fn std_collection_float_sum_folds_left_to_right_and_propagates_canonical_nan() {
 }
 
 #[test]
+fn std_collection_float_sum_keeps_the_sign_of_zero_from_a_left_to_right_fold() {
+    let sum = include_str!("fixtures/evaluator_source_75f9858c5500f123.orna");
+    let negative_zero = (-0.0f64).to_bits();
+    let positive_zero = 0.0f64.to_bits();
+    // The fold starts at the first element, so only a -0.0 start stays -0.0;
+    // any +0.0 addend turns the sum into +0.0.
+    for (rows, expected) in [
+        (vec![negative_zero], negative_zero),
+        (vec![negative_zero, negative_zero], negative_zero),
+        (vec![negative_zero, positive_zero], positive_zero),
+        (vec![positive_zero, negative_zero], positive_zero),
+    ] {
+        let environment = Environment::from([("rows".into(), float_rows(&rows))]);
+        assert_eq!(
+            evaluate_expression(sum, &environment, Limits::default()).unwrap(),
+            Value::float_bits(expected),
+            "rows {rows:?}"
+        );
+    }
+}
+
+#[test]
 fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separately() {
     let negative_zero = Value::float_bits((-0.0f64).to_bits());
     let positive_zero = Value::float_bits(0.0f64.to_bits());
