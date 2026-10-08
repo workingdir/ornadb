@@ -48137,4 +48137,73 @@ mod tests {
             Err(RuntimeError::EmptyMutationBatch)
         ));
     }
+
+    #[tokio::test]
+    async fn empty_table_activation_is_refused_and_the_same_context_still_commits() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let before = state.capture().await.unwrap();
+
+        // An empty batch is refused before any row, digest or checkpoint moves.
+        assert_eq!(
+            state
+                .commit_table_activation(lease, &context, &[], digest(6), &NoFault)
+                .await,
+            Err(RuntimeError::EmptyMutationBatch)
+        );
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), None);
+
+        // The refusal does not consume the context: a real batch still commits.
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(5, 1, Some(9))],
+                digest(6),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_validated_activation_fails_before_the_validator_runs() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+        let before = state.capture().await.unwrap();
+
+        let result = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation: activation_test_cwd_generation(0),
+                mutations: &[],
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(TableActivationError::Runtime(RuntimeError::EmptyMutationBatch))
+        ));
+        assert_eq!(validator.calls, 0, "validation must not run for an empty batch");
+        assert_eq!(state.capture().await.unwrap(), before);
+    }
 }
