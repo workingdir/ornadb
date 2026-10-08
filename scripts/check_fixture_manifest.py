@@ -233,7 +233,7 @@ def main() -> int:
 
     if not MANIFEST_PATH.is_file():
         print(f"fixture manifest does not exist: {MANIFEST_PATH}", file=sys.stderr)
-        return 1
+        return 2
     errors = validate_manifest(hashes, MANIFEST_PATH.read_text(encoding="utf-8"))
     if args.since:
         try:
