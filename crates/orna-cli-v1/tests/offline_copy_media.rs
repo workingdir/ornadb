@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use orna_repository_v1::offline_copy::{
-    OfflineCopy, OfflineCopyError, OfflineHistoryEntry, OfflineImportOutput, OfflineRow,
-    write_offline_copy, write_offline_copy_limited,
+    OfflineCopy, OfflineCopyError, OfflineExportOutput, OfflineHistoryEntry, OfflineImportOutput,
+    OfflineRow, write_offline_copy, write_offline_copy_limited, write_offline_copy_to_writer,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -350,4 +350,43 @@ fn offline_export_limit_writes_only_the_first_rows_and_keeps_history() {
     let none = directory.path().join("none");
     write_offline_copy_limited(&none, &rows, &[], 0).unwrap();
     assert!(OfflineCopy::open(&none).unwrap().rows().is_empty());
+}
+
+#[test]
+fn offline_export_quiet_writes_nothing_and_verbose_reports_each_written_row() {
+    let directory = TempDir::new().unwrap();
+    let rows = [
+        committed_row("image", "image/png", "pixel.png"),
+        committed_row("song", "audio/wav", "tone.wav"),
+    ];
+
+    let quiet_bundle = directory.path().join("quiet");
+    let mut quiet = Vec::new();
+    write_offline_copy_to_writer(
+        &quiet_bundle,
+        &rows,
+        &[],
+        2,
+        OfflineExportOutput::Quiet,
+        &mut quiet,
+    )
+    .unwrap();
+    assert!(quiet.is_empty());
+    assert_eq!(OfflineCopy::open(&quiet_bundle).unwrap().rows().len(), 2);
+
+    let verbose_bundle = directory.path().join("verbose");
+    let mut verbose = Vec::new();
+    write_offline_copy_to_writer(
+        &verbose_bundle,
+        &rows,
+        &[],
+        1,
+        OfflineExportOutput::Verbose,
+        &mut verbose,
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(verbose).unwrap(),
+        "exported 1/1 image (73 bytes)\n"
+    );
 }

@@ -109,6 +109,41 @@ pub fn write_offline_copy(
     write_offline_copy_limited(directory, rows, history, rows.len())
 }
 
+/// Whether an export writes its progress lines to the output stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfflineExportOutput {
+    Quiet,
+    Verbose,
+}
+
+/// Writes the first `limit` rows like `write_offline_copy_limited`. In
+/// `Verbose` mode one line per written row is written to `out`, only after
+/// the whole bundle has been written; a failed export writes no lines.
+pub fn write_offline_copy_to_writer(
+    directory: &Path,
+    rows: &[OfflineRow],
+    history: &[OfflineHistoryEntry],
+    limit: usize,
+    output: OfflineExportOutput,
+    out: &mut impl Write,
+) -> Result<(), OfflineCopyError> {
+    let written = &rows[..rows.len().min(limit)];
+    write_offline_copy_limited(directory, rows, history, limit)?;
+    if output == OfflineExportOutput::Verbose {
+        for (index, row) in written.iter().enumerate() {
+            writeln!(
+                out,
+                "exported {}/{} {} ({} bytes)",
+                index + 1,
+                written.len(),
+                String::from_utf8_lossy(&row.key),
+                row.length
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Writes the first `limit` rows, in the order given, with their payloads.
 /// The history is written in full, because the bundle does not record which
 /// commit produced which row.
