@@ -1759,6 +1759,15 @@ mod graph_bridge_tests {
             .expect("count objects added since the current root");
         assert!(since_self.nodes().is_empty(), "nothing is added since the current root");
         assert_eq!(since_self.blob_references(), 0);
+        let total_nodes = stats.nodes().values().sum::<u64>();
+        let limited = graph
+            .object_stats_limited(&scope, total_nodes)
+            .expect("a limit equal to the node count admits the walk");
+        assert_eq!(limited, stats);
+        assert!(matches!(
+            graph.object_stats_limited(&scope, total_nodes - 1),
+            Err(crate::native_graph::GraphError::InventoryQuotaExceeded)
+        ));
         let json = stats.to_json();
         assert!(
             json.starts_with("{\"nodes\":{\"StoreRoot\":1,"),
