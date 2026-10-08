@@ -393,6 +393,7 @@ fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Resp
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/examples") => playground_examples(root),
         ("GET", "/api/playground/revision") => playground_revision(root),
+        ("GET", "/api/playground/catalogue") => playground_catalogue_json(root),
         ("GET", "/api/clone") => match clone_report(root, identity) {
             Ok(report) => Response::new(200, "application/json", report),
             Err(_) => unavailable_response(),
@@ -873,6 +874,28 @@ fn playground_catalogue_routes(root: &Path) -> Result<Vec<String>, ()> {
     routes.sort();
     routes.dedup();
     Ok(routes)
+}
+
+/// JSON rows for the playground catalogue: the committed route paths, read from
+/// the DB-resident `playground/Route` rows and sorted.
+fn playground_catalogue_json(root: &Path) -> Response {
+    let Ok(routes) = playground_catalogue_routes(root) else {
+        return unavailable_response();
+    };
+    let rows = routes
+        .iter()
+        .map(|route| json_string(route))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut response = Response::new(
+        200,
+        "application/json",
+        format!("{{\"routes\":[{rows}]}}").into_bytes(),
+    );
+    response
+        .headers
+        .push(("Cache-Control".into(), "no-store".into()));
+    response
 }
 
 fn playground_catalogue_page(root: &Path, identity: RuntimeIdentity) -> Response {
@@ -2998,6 +3021,52 @@ mod tests {
         assert_eq!(
             playground_catalogue_routes(directory.path()),
             Ok(vec!["/playground/assets/examples.css".to_owned()])
+        );
+    }
+
+    #[test]
+    fn playground_catalogue_json_returns_committed_route_rows_from_fixtures() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git_succeeds(directory.path(), &["init", "--quiet"]);
+        let route_directory = directory.path().join("playground/Route");
+        std::fs::create_dir_all(&route_directory).expect("create route rows");
+        for (file, source) in [
+            (
+                "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373.orna",
+                include_str!("../tests/fixtures/playground-route-example-catalog-style.orna"),
+            ),
+            (
+                "route-2f706c617967726f756e642f6173736574732f6578616d706c65732e6d6a73.orna",
+                include_str!("../tests/fixtures/playground-route-catalogue-script.orna"),
+            ),
+            (
+                "route-0000000000000000.orna",
+                include_str!("../tests/fixtures/playground-route-catalogue-invalid.orna"),
+            ),
+        ] {
+            std::fs::write(route_directory.join(file), source).expect("write route row");
+        }
+        git_succeeds(directory.path(), &["add", "playground/Route"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add catalogue routes",
+            ],
+        );
+
+        let response = playground_catalogue_json(directory.path());
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "application/json");
+        assert_eq!(
+            String::from_utf8(response.body).expect("JSON body is UTF-8"),
+            r#"{"routes":["/playground/assets/examples.css","/playground/assets/examples.mjs"]}"#
         );
     }
 
