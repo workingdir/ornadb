@@ -465,3 +465,30 @@ fn signature_help_round_trips_through_a_reserved_word_argument() {
         .expect("signature help on the second argument");
     assert_eq!(literal_help.active_parameter, Some(1));
 }
+
+const DIAGNOSTIC_KEYWORD_NAME_SOURCE: &str =
+    include_str!("../../tests/fixtures/diagnostic-keyword-name-v1.orna");
+
+#[test]
+fn reserved_word_declaration_name_reports_a_syntax_v1_error_anchor() {
+    let document = document(DIAGNOSTIC_KEYWORD_NAME_SOURCE);
+    let mapper = PositionMapper::new(&document.text);
+    let diagnostics = check_document(&document, &mapper);
+    assert!(!diagnostics.is_empty(), "a reserved word cannot name a declaration");
+
+    let keyword_start = document.text.find("in(").unwrap();
+    let keyword_end = keyword_start + "in".len();
+    for diagnostic in &diagnostics {
+        assert_eq!(diagnostic.source.as_deref(), Some("orna-syntax-v1"));
+        let Some(lsp_types::NumberOrString::String(code)) = &diagnostic.code else {
+            panic!("syntax diagnostics carry the ORNA error code: {diagnostic:?}");
+        };
+        assert!(code.starts_with("ORNA"), "{code}");
+        assert!(!diagnostic.message.trim().is_empty());
+        let start = mapper.byte_offset(diagnostic.range.start);
+        assert!(
+            keyword_start <= start && start <= keyword_end,
+            "diagnostic {code} starts at byte {start}, outside the reserved word"
+        );
+    }
+}
