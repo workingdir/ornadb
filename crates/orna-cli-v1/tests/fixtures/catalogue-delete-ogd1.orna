@@ -1,0 +1,3 @@
+pub fn kept(): Text = "kept";
+
+pub fn removed(): Text = "removed";
