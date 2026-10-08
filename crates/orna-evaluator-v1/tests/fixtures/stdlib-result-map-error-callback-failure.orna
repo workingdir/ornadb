@@ -1,1 +1,0 @@
-std.result.map_error(err_value, failure => fail(error(code: "result.callback.failure", message: "selected callback failed")))
