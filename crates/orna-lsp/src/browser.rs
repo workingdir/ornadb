@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn browser_standard_definition_keeps_local_shadowing_in_the_document() {
-        let shadowed_use = offset_of(STANDARD_DEFINITION_SOURCE, "    clamp\n}");
+        let shadowed_use = offset_of(STANDARD_DEFINITION_SOURCE, "= clamp;") + "= ".len();
         let (line, character) = position(STANDARD_DEFINITION_SOURCE, shadowed_use + 1);
         let location: serde_json::Value = serde_json::from_str(&definition(
             STANDARD_DEFINITION_SOURCE.to_owned(),
