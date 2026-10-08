@@ -1,0 +1,2 @@
+pub fn clamp(value: Int, limit: Int): Int = value;
+pub fn run(): Int = clamp(1, 2);
