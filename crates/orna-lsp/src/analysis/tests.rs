@@ -371,3 +371,31 @@ fn local_definitions_and_references_respect_shadowing_scopes() {
         );
     }
 }
+
+const KEYWORD_COVERAGE_SOURCE: &str = include_str!("../../tests/fixtures/keyword-coverage-v1.orna");
+
+#[test]
+fn every_lex_007_keyword_hovers_from_the_lexer_table() {
+    let document = document(KEYWORD_COVERAGE_SOURCE);
+    let parse = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    let mut hovered = Vec::new();
+    for token in orna_syntax_v1::lex(&document.text).expect("keyword fixture lexes") {
+        let orna_syntax_v1::TokenKind::Keyword(keyword) = token.kind else {
+            continue;
+        };
+        let position = mapper.position(token.span.start);
+        let card = hover(&document, &parse, position, &mapper).expect("keyword hover");
+        let text = match card.contents {
+            lsp_types::HoverContents::Markup(content) => content.value,
+            _ => panic!("expected markdown hover"),
+        };
+        assert!(
+            text.starts_with(&format!("**keyword** `{}`", keyword.spelling())),
+            "{text}"
+        );
+        assert!(text.contains("ORNA-LEX-007"), "{text}");
+        hovered.push(keyword);
+    }
+    assert_eq!(hovered, Keyword::ALL.to_vec(), "every reserved word hovers");
+}
