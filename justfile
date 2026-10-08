@@ -15,6 +15,7 @@ fixture-audit:
     cargo test --locked -p orna-runtime-v1 --test checkpoints_conformance_audit
     cargo test --locked -p orna-evaluator-v1 --test standard_snapshot_replay
     cargo test --locked -p orna-evaluator-v1 --test standard_library_hash_snapshot_27d5k --test standard_library_random_snapshot_27d5k
+    cargo test --locked -p orna-evaluator-v1 --test standard_library_list_concat_identity_ln4y7
     cargo test --locked -p orna-evaluator-v1 --test standard_library_map_conflict_chain_ln4y7
     cargo test --locked -p orna-evaluator-v1 --test standard_library_map_empty_side_ln4y7
     cargo test --locked -p orna-evaluator-v1 --test standard_library_map_boundary_pins_ln4y7
