@@ -339,6 +339,20 @@ fn assert_song_revision_history(
     // The author filter keeps revisions whose `Name <email>` contains the text.
     assert_eq!(filter_by_author(&revisions, "kierandrewett"), revisions);
     assert!(filter_by_author(&revisions, "no-such-author").is_empty());
+    // `--since <commit>` keeps only the revisions newer than that commit.
+    let since = revisions[2].commit().to_hex();
+    assert_eq!(revisions_since(&revisions, &since), Some(revisions[..2].to_vec()));
+    assert_eq!(revisions_since(&revisions, "no-such-commit"), None);
+}
+
+/// Keeps the revisions newer than `since`, the same cut `orna history --since`
+/// applies: the named commit and everything older are dropped. `None` when the
+/// commit is not in the walk.
+fn revisions_since(revisions: &[RowRevision], since: &str) -> Option<Vec<RowRevision>> {
+    let position = revisions
+        .iter()
+        .position(|revision| revision.commit().to_hex() == since)?;
+    Some(revisions[..position].to_vec())
 }
 
 /// Keeps the revisions whose commit author contains `needle`, the same
