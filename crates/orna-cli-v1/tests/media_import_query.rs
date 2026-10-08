@@ -15,6 +15,11 @@ mod format3;
 use format3::*;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
+const IMAGE_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-image.orna"
+);
+const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
 /// One committed media row, as its listing query sees it.
 #[derive(Debug, PartialEq, Eq)]
@@ -32,7 +37,11 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     // Import from a scratch copy so the source files can be removed afterwards.
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
-        std::fs::copy(Path::new(MEDIA_FIXTURES).join(name), source.path().join(name)).unwrap();
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
     }
 
     let runtime_identity = RuntimeIdentity {
@@ -50,18 +59,20 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
 
-    let imports = [("song", "tone.wav", 0x70_u8), ("image", "pixel.png", 0x80_u8)];
+    let imports = [
+        ("song", "tone.wav", 0x70_u8),
+        ("image", "pixel.png", 0x80_u8),
+    ];
     for (key, file, ordinal) in imports {
-        import_media(
-            &state,
-            writer,
-            &mut bindings,
-            source.path(),
-            key,
-            file,
-            ordinal,
-        )
-        .await;
+        let expression = match key {
+            // The image import runs from the committed .orna fixture.
+            "image" => image_import_expression(source.path()),
+            _ => format!(
+                "sys.blob.capture_file({root:?}, {file:?}, 65536)",
+                root = source.path().to_string_lossy().as_ref()
+            ),
+        };
+        import_media(&state, writer, &mut bindings, &expression, key, ordinal).await;
     }
 
     // Source files are gone; listing must still answer from committed rows.
@@ -142,15 +153,22 @@ fn assert_song_revision_history(
     assert_eq!(newest, revisions[..1]);
 }
 
+/// Loads the image import expression from its committed .orna fixture, with the
+/// scratch media root written in as a quoted string literal.
+fn image_import_expression(root: &Path) -> String {
+    let fixture = std::fs::read_to_string(IMAGE_IMPORT_FIXTURE).unwrap();
+    let root = format!("{:?}", root.to_string_lossy().as_ref());
+    fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root)
+}
+
 /// Captures one file through `sys.blob.capture_file` and commits its row in an
 /// admitted request. The row stores the annotated Blob reference.
 async fn import_media(
     state: &RuntimeState,
     writer: orna_runtime_v1::WriterLease,
     bindings: &mut SysHostBindingRegistry,
-    root: &Path,
+    expression: &str,
     key: &str,
-    file: &str,
     ordinal: u8,
 ) {
     let request_identity = RequestIdentity {
@@ -173,12 +191,8 @@ async fn import_media(
         .unwrap();
     let context = state.begin_activation().await.unwrap();
 
-    let source = format!(
-        "sys.blob.capture_file({root:?}, {file:?}, 65536)",
-        root = root.to_string_lossy().as_ref()
-    );
     let value = evaluate_expression_ovb2_with_effects(
-        &source,
+        expression,
         &Default::default(),
         Limits::default(),
         bindings,
