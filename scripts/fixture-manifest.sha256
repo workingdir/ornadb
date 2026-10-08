@@ -174,6 +174,7 @@ cd626bdd714dc3c2e1c69489ec753104ee212a829b3494f1044cff3ba849737f  crates/orna-cl
 89df267ab78c2548cff59977bdadf222cfd24fcc0345665951400e522ac6ffca  crates/orna-cli-v1/tests/fixtures/playground-layout.orna
 94331a5dd3d83c05244e86e760109d159b8d60c6e7c507f0a5644f2b0eb7c1c8  crates/orna-cli-v1/tests/fixtures/playground-presentation.mjs
 70f485a3b2d7645e9e4f402dd70dd9fdef0063e105d06676e6371deaf2c51830  crates/orna-cli-v1/tests/fixtures/playground-route-app.orna
+07788a7921adf9478be9b93e6e919d24611366074cd7e4cacab9f5450d144ab6  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-bounds.orna
 07788a7921adf9478be9b93e6e919d24611366074cd7e4cacab9f5450d144ab6  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-count.orna
 32aa4b201a98b3c1abcdf29654b39e848a2fb3366115c405974ea7712e2e8680  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-invalid.orna
 07788a7921adf9478be9b93e6e919d24611366074cd7e4cacab9f5450d144ab6  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-page.orna
@@ -5980,4 +5981,3 @@ b48369756a137544a9d3888f17ad10a97e7a2010618ec084a5b8b3b603844095  crates/orna-va
 3eef68f03fdc30a0743384484a2a9b2137b5e15a7805b2e344afff0fa691d9de  crates/orna-value-v1/tests/fixtures/blob-role-dispatch.orna
 cd36ebb657d074e7093e5e50c002fdee04cb65c9b726da6c072698d793e36441  crates/orna-value-v1/tests/fixtures/error-trace-secret.orna
 953db2cefdcc80db9f15250c696afba8defd1458875a8262019bbf1d8465a3df  crates/orna-value-v1/tests/fixtures/secret-surface.orna
-07788a7921adf9478be9b93e6e919d24611366074cd7e4cacab9f5450d144ab6  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-bounds.orna
