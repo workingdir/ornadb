@@ -3637,6 +3637,12 @@ impl ObjectStats {
         if self.nodes.is_empty() { 3 } else { 0 }
     }
 
+    /// Number of distinct node kinds reached, the `--count` form. Unlike
+    /// [`Self::total_nodes`], each kind counts once however many nodes it has.
+    pub fn kind_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     /// Total reachable nodes across every kind.
     pub fn total_nodes(&self) -> u64 {
         self.nodes.values().sum()
