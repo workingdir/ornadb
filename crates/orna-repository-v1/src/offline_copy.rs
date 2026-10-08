@@ -457,6 +457,26 @@ impl OfflineCopy {
     }
 }
 
+impl OfflineRow {
+    /// Builds the export row for one committed Blob. Metadata comes from the
+    /// Blob's descriptor; the payload is read in full and must match that
+    /// descriptor's length and SHA-256 when the bundle is written.
+    pub fn from_blob(key: &[u8], blob: &orna_value_v1::Blob) -> Result<Self, OfflineCopyError> {
+        let metadata = blob.metadata();
+        let payload = blob
+            .read_to_end()
+            .map_err(|_| OfflineCopyError::InvalidRow("blob payload is not readable"))?;
+        Ok(Self {
+            key: key.to_vec(),
+            media_type: metadata.media_type().to_owned(),
+            suffix: metadata.suffix().map(str::to_owned),
+            length: metadata.length(),
+            sha256: metadata.sha256(),
+            payload: Some(payload),
+        })
+    }
+}
+
 /// What an import would write, reported after full verification. Payload
 /// bytes are not kept.
 #[derive(Clone, Debug, Eq, PartialEq)]
