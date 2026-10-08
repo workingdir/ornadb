@@ -506,3 +506,22 @@ fn clean_syntax_v1_fixture_renders_an_empty_diagnostic_list() {
         serde_json::json!([])
     );
 }
+
+const DIAGNOSTIC_SEVERITY_SOURCE: &str =
+    include_str!("../../tests/fixtures/diagnostic-severity-v1.orna");
+
+#[test]
+fn every_syntax_v1_error_maps_to_an_error_severity_diagnostic() {
+    let document = document(DIAGNOSTIC_SEVERITY_SOURCE);
+    let mapper = PositionMapper::new(&document.text);
+    let diagnostics = check_document(&document, &mapper);
+    assert!(!diagnostics.is_empty(), "the fixture has a syntax error");
+    for diagnostic in &diagnostics {
+        assert_eq!(
+            diagnostic.severity,
+            Some(lsp_types::DiagnosticSeverity::ERROR),
+            "{diagnostic:?}"
+        );
+        assert_eq!(diagnostic.source.as_deref(), Some("orna-syntax-v1"));
+    }
+}
