@@ -524,6 +524,11 @@ fn revisions_since(revisions: &[RowRevision], since: &str) -> Option<Vec<RowRevi
 }
 
 
+/// The 16-byte relation id as the 32-digit hex the `orna history` CLI takes.
+fn relation_hex(relation_id: [u8; 16]) -> String {
+    relation_id.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Runs `orna history` with `arguments` as a child process inside the repository
 /// and returns its raw output, whatever the exit status.
 fn run_history(directory: &Path, arguments: &[&str]) -> std::process::Output {
@@ -538,8 +543,7 @@ fn run_history(directory: &Path, arguments: &[&str]) -> std::process::Output {
 /// Runs `orna history <relation> <key> --format json` as a child process inside
 /// the repository and parses its stdout as the revision array.
 fn history_json(directory: &Path, relation_id: [u8; 16], key: &str) -> Vec<serde_json::Value> {
-    let relation: String = relation_id.iter().map(|byte| format!("{byte:02x}")).collect();
-    let output = run_history(directory, &[&relation, key, "--format", "json"]);
+    let output = run_history(directory, &[&relation_hex(relation_id), key, "--format", "json"]);
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -805,7 +809,7 @@ async fn history_rejects_negative_and_out_of_range_limits_before_listing() {
     drop(bindings);
     drop(state);
 
-    let relation: String = relation_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    let relation = relation_hex(relation_id);
     // Each value is outside 1..=4096 or not a number; `-1` is the negative case.
     for value in ["-1", "0", "4097", "x"] {
         let output = run_history(directory.path(), &[&relation, "song", "--limit", value]);
