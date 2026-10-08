@@ -221,8 +221,38 @@ impl OfflineCopy {
         let row = self
             .metadata(key)
             .ok_or_else(|| OfflineCopyError::NotFound { key: key.to_vec() })?;
+        self.read_payload(row)
+    }
+
+    /// Hydrates every row back into full rows, in bundle order. Each payload
+    /// is verified against its recorded digest, so the result can be written
+    /// into another bundle or committed to a repository without re-reading
+    /// the original copy.
+    pub fn import_rows(&self) -> Result<Vec<OfflineRow>, OfflineCopyError> {
+        self.rows
+            .iter()
+            .map(|row| {
+                let payload = row
+                    .has_payload
+                    .then(|| self.read_payload(row))
+                    .transpose()?;
+                Ok(OfflineRow {
+                    key: row.key.clone(),
+                    media_type: row.media_type.clone(),
+                    suffix: row.suffix.clone(),
+                    length: row.length,
+                    sha256: row.sha256,
+                    payload,
+                })
+            })
+            .collect()
+    }
+
+    fn read_payload(&self, row: &OfflineRowMetadata) -> Result<Vec<u8>, OfflineCopyError> {
         if !row.has_payload {
-            return Err(OfflineCopyError::NoPayload { key: key.to_vec() });
+            return Err(OfflineCopyError::NoPayload {
+                key: row.key.clone(),
+            });
         }
         let payload = fs::read(self.directory.join(MEDIA_DIR).join(hex(&row.sha256)))?;
         let probe = OfflineRow {
@@ -268,7 +298,9 @@ impl OfflineCopy {
             .windows(2)
             .any(|pair| pair[0].sequence >= pair[1].sequence)
         {
-            return Err(OfflineCopyError::InvalidBundle("history is not strictly ordered"));
+            return Err(OfflineCopyError::InvalidBundle(
+                "history is not strictly ordered",
+            ));
         }
         let mut rows = Vec::with_capacity(self.rows.len());
         for metadata in &self.rows {
