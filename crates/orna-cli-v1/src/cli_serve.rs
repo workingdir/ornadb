@@ -940,7 +940,13 @@ fn playground_catalogue_page(root: &Path, identity: RuntimeIdentity, query: &str
     } else {
         InspectionNode::List(rows)
     };
-    let mut sections = vec![("Catalogue".into(), content)];
+    let mut sections = vec![
+        (
+            "Total routes".into(),
+            InspectionNode::Text(routes.len().to_string()),
+        ),
+        ("Catalogue".into(), content),
+    ];
     if has_next {
         sections.push((
             "More".into(),
@@ -3231,6 +3237,43 @@ mod tests {
         let page = String::from_utf8(page.body).expect("HTML body is UTF-8");
         assert!(page.contains("No playground catalogue entries are committed."));
         assert!(!page.contains("Next page"));
+    }
+
+    #[test]
+    fn playground_catalogue_page_reports_the_total_route_count_from_one_fixture() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git_succeeds(directory.path(), &["init", "--quiet"]);
+        let route_directory = directory.path().join("playground/Route");
+        std::fs::create_dir_all(&route_directory).expect("create route rows");
+        std::fs::write(
+            route_directory
+                .join("route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373.orna"),
+            include_str!("../tests/fixtures/playground-route-catalogue-count.orna"),
+        )
+        .expect("write route row");
+        git_succeeds(directory.path(), &["add", "playground/Route"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add one catalogue route for the count",
+            ],
+        );
+        let identity = RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        };
+
+        let page = playground_catalogue_page(directory.path(), identity, "");
+        assert_eq!(page.status, 200);
+        let page = String::from_utf8(page.body).expect("HTML body is UTF-8");
+        assert!(page.contains("<dt>Total routes</dt><dd>1</dd>"));
     }
 
     #[test]
