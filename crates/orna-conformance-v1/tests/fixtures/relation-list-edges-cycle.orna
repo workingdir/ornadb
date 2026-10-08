@@ -1,0 +1,7 @@
+pub table Edge(id: Int) { from: Int, to: Int, }
+
+fn main() {
+    Edge.insert({ id: 1, from: 1, to: 2 });
+    Edge.insert({ id: 2, from: 2, to: 1 });
+    Edge.insert({ id: 3, from: 2, to: 2 });
+}
