@@ -259,14 +259,8 @@ fn mime1_annotations_reject_noncanonical_and_unsafe_inputs() {
     assert_eq!(blob.content_identity(), annotated.content_identity());
     assert!(blob.same_content(&annotated).unwrap());
     assert!(!blob.value_eq(&annotated).unwrap());
-    assert_ne!(
-        encode_rov3(&blob).unwrap(),
-        encode_rov3(&annotated).unwrap()
-    );
-    assert_ne!(
-        encode_sov3(&blob).unwrap(),
-        encode_sov3(&annotated).unwrap()
-    );
+    assert_ne!(encode_rov3(&blob).unwrap(), encode_rov3(&annotated).unwrap());
+    assert_ne!(encode_sov3(&blob).unwrap(), encode_sov3(&annotated).unwrap());
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
     assert_eq!(
         Blob::from_semantic_commitment_in_context(identity, &context, "image/jpeg", Some("png")),
@@ -390,11 +384,7 @@ fn annotate_canonicalizes_mime_and_suffix_without_hydrating_content() {
         .annotate("Application/JavaScript;CHARSET=\"UTF-8\"", Some("JS"))
         .unwrap();
     assert_eq!(javascript.media_type(), "text/javascript;charset=utf-8");
-    assert_eq!(
-        javascript.suffix(),
-        None,
-        "preferred suffix is stored as no hint"
-    );
+    assert_eq!(javascript.suffix(), None, "preferred suffix is stored as no hint");
     assert_eq!(javascript.content_identity(), identity);
 
     let gzip = blob.annotate("application/gzip", Some("TAR.GZ")).unwrap();
