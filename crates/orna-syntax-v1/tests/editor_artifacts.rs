@@ -289,3 +289,17 @@ fn semantic_legend_markdown_lists_every_token_type_and_modifier_bit() {
         assert!(markdown.contains(&format!("| 1 << {index} | {modifier} |")));
     }
 }
+
+#[test]
+fn every_legend_token_type_has_a_hover_sample_in_markdown() {
+    let markdown = editor::semantic_legend_markdown();
+    for token_type in editor::legend_token_types() {
+        let sample = editor::token_type_sample(token_type)
+            .unwrap_or_else(|| panic!("no hover sample for {token_type}"));
+        assert!(
+            markdown.contains(&format!("| {token_type} | `{sample}` |")),
+            "markdown row for {token_type} lacks its sample"
+        );
+    }
+    assert!(markdown.contains("| Index | Token type | Hover sample |"));
+}
