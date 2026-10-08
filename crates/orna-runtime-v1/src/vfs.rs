@@ -551,6 +551,16 @@ impl<S> ManagedFileStat<S> {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+
+    /// Renders size and generation as a JSON object. The pin is not emitted:
+    /// `S` is the repository's opaque snapshot type, so its encoding belongs
+    /// to the caller. Both fields are integers, so no escaping is needed.
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"size\":{},\"generation\":{}}}",
+            self.size, self.generation
+        )
+    }
 }
 
 /// One already-managed destination. New opens observe its latest accepted
@@ -1656,6 +1666,16 @@ mod tests {
 
         managed.state.lock().await.unlinked = true;
         assert!(managed.stat().await.is_none());
+    }
+
+    #[test]
+    fn stat_json_renders_size_and_generation_without_pin() {
+        let stat = ManagedFileStat {
+            size: 5,
+            pin: SnapshotPin::capture(Arc::new(7_u64)),
+            generation: 3,
+        };
+        assert_eq!(stat.to_json(), r#"{"size":5,"generation":3}"#);
     }
 
     #[tokio::test]
