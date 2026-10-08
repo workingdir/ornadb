@@ -140,6 +140,14 @@ pub fn write_offline_copy_to_writer(
                 row.length
             )?;
         }
+        let payload_bytes: u64 = written.iter().map(|row| row.length).sum();
+        writeln!(
+            out,
+            "exported {} rows, {} payload bytes, {} history entries",
+            written.len(),
+            payload_bytes,
+            history.len()
+        )?;
     }
     Ok(())
 }
