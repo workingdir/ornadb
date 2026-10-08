@@ -379,3 +379,30 @@ class FixtureManifestJsonFormatTests(unittest.TestCase):
         self.assertEqual(by_format, by_alias)
         self.assertEqual(by_format[0], 0)
         self.assertTrue(json.loads(by_format[1])["ok"])
+
+
+class FixtureManifestListModeTests(unittest.TestCase):
+    def test_list_prints_only_drift_entries_on_stdout(self) -> None:
+        path = "crates/example/tests/fixtures/input.orna"
+        pinned = hashlib.sha256(b"original\n").hexdigest()
+        changed = hashlib.sha256(b"changed\n").hexdigest()
+        with TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "fixture-manifest.sha256"
+            manifest_path.write_text(render_manifest({path: pinned}), encoding="utf-8")
+            stdout = StringIO()
+            with (
+                mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(
+                    check_fixture_manifest, "fixture_hashes", return_value=({path: changed}, [])
+                ),
+                mock.patch("sys.argv", ["check_fixture_manifest.py", "--list"]),
+                redirect_stdout(stdout),
+            ):
+                status = check_fixture_manifest.main()
+
+        self.assertEqual(status, 1)
+        lines = stdout.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("scripts/fixture-manifest.sha256:3: "))
+        self.assertIn(path, lines[0])
+        self.assertNotIn("drift total", stdout.getvalue())
