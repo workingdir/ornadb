@@ -84,6 +84,42 @@ pub fn document_symbols(source: String) -> String {
     json(&analysis::document_symbols(&parsed, &document.text, &mapper))
 }
 
+/// Returns the declaration Location for the symbol at a position, including
+/// imported and qualified standard-library declarations, as LSP JSON.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn definition(source: String, line: u32, character: u32) -> String {
+    let document = document(source);
+    let parsed = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    json(&analysis::definition(
+        &document,
+        &parsed,
+        Position { line, character },
+        &mapper,
+    ))
+}
+
+/// Returns every reference Location for the symbol at a position as an LSP
+/// JSON array. Locals that shadow a standard name are never included.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn references(
+    source: String,
+    line: u32,
+    character: u32,
+    include_declaration: bool,
+) -> String {
+    let document = document(source);
+    let parsed = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    json(&analysis::references(
+        &document,
+        &parsed,
+        Position { line, character },
+        &mapper,
+        include_declaration,
+    ))
+}
+
 /// Returns inlay hints for the requested document range as an LSP JSON array.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
 pub fn inlay_hints(
