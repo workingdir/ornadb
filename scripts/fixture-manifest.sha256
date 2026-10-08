@@ -173,6 +173,7 @@ cd626bdd714dc3c2e1c69489ec753104ee212a829b3494f1044cff3ba849737f  crates/orna-cl
 89df267ab78c2548cff59977bdadf222cfd24fcc0345665951400e522ac6ffca  crates/orna-cli-v1/tests/fixtures/playground-layout.orna
 94331a5dd3d83c05244e86e760109d159b8d60c6e7c507f0a5644f2b0eb7c1c8  crates/orna-cli-v1/tests/fixtures/playground-presentation.mjs
 70f485a3b2d7645e9e4f402dd70dd9fdef0063e105d06676e6371deaf2c51830  crates/orna-cli-v1/tests/fixtures/playground-route-app.orna
+07788a7921adf9478be9b93e6e919d24611366074cd7e4cacab9f5450d144ab6  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-count.orna
 32aa4b201a98b3c1abcdf29654b39e848a2fb3366115c405974ea7712e2e8680  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-invalid.orna
 07788a7921adf9478be9b93e6e919d24611366074cd7e4cacab9f5450d144ab6  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-page.orna
 40a483fe75ff1e47621b58d28c13b62f078ece3643e8ac8c7b1a5e5d7ded5a4f  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-script.orna
@@ -2449,6 +2450,7 @@ d804e035dcb3a70dc2a6e006f9f0120938d3607b3f437e1a83762bf4e674b27f  crates/orna-ev
 81946e3fa4fbb5137cbf435eea5ca3067d05f85c5909ad903d235cb586895efc  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-signed-zero-ovb-o3yue.orna
 fa4756701e285de2b6943fc241c6d368c932e5198b002250d03d399f26f6b699  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-size-fourth-duplicate-o3yue.orna
 de5fa2e7b766cb096ee83939386d74c0a9428383803a2919f28c195d99ebc210  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-without-snapshot-i7bat.orna
+ae40ad52da84519f864917487645fc885f87798e3720c5261d55d6a59ddd4fda  crates/orna-evaluator-v1/tests/fixtures/stdlib-math-clamp-inverted-bounds-ln4y7.orna
 1d0d167bb801e52807fcc2ce1f5a8451716e30699beaeae1b94a9190b2783b97  crates/orna-evaluator-v1/tests/fixtures/stdlib-math-contract-t7auz.orna
 0363b85d90e0f826e6baa53bac6a19fb7a62f0f749b68ab80defa3b85dbb9d17  crates/orna-evaluator-v1/tests/fixtures/stdlib-math-intrinsics-2189.orna
 df975369411e0ce72ad490fe2121537485a71fb9ef67df4ceac16a955ae65c2e  crates/orna-evaluator-v1/tests/fixtures/stdlib-math-large-precision-mcqjg.orna
@@ -5975,4 +5977,3 @@ b48369756a137544a9d3888f17ad10a97e7a2010618ec084a5b8b3b603844095  crates/orna-va
 3eef68f03fdc30a0743384484a2a9b2137b5e15a7805b2e344afff0fa691d9de  crates/orna-value-v1/tests/fixtures/blob-role-dispatch.orna
 cd36ebb657d074e7093e5e50c002fdee04cb65c9b726da6c072698d793e36441  crates/orna-value-v1/tests/fixtures/error-trace-secret.orna
 953db2cefdcc80db9f15250c696afba8defd1458875a8262019bbf1d8465a3df  crates/orna-value-v1/tests/fixtures/secret-surface.orna
-07788a7921adf9478be9b93e6e919d24611366074cd7e4cacab9f5450d144ab6  crates/orna-cli-v1/tests/fixtures/playground-route-catalogue-count.orna
