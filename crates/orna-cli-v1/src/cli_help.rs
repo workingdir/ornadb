@@ -26,6 +26,9 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  semantic-legend --quiet          bare names, one per line, for scripts",
     "  semantic-legend --markdown       legend table with hover samples",
     "  semantic-legend --format csv     kind,index,name,sample rows",
+    "Exit status:",
+    "  0 success            1 target             2 usage              3 connection",
+    "  4 authorisation      5 presentation       6 cancelled          7 protocol",
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];
 
