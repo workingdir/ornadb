@@ -266,9 +266,11 @@ mod tests {
 
     #[test]
     fn quiet_is_accepted_in_any_position_and_still_requires_dry_run() {
-        let quiet = parse_options(&words(&["--quiet", "bundle", "--dry-run"])).unwrap();
+        let quiet_words = words(&["--quiet", "bundle", "--dry-run"]);
+        let quiet = parse_options(&quiet_words).unwrap();
         assert_eq!((quiet.bundle, quiet.quiet), ("bundle", true));
-        let trailing = parse_options(&words(&["bundle", "--dry-run", "--quiet"])).unwrap();
+        let trailing_words = words(&["bundle", "--dry-run", "--quiet"]);
+        let trailing = parse_options(&trailing_words).unwrap();
         assert!(trailing.quiet);
         assert!(parse_options(&words(&["bundle", "--quiet"])).is_err());
     }
