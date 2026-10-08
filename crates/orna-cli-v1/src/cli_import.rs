@@ -136,9 +136,11 @@ mod tests {
 
     #[test]
     fn options_take_one_bundle_and_require_dry_run() {
-        let plain = parse_options(&words(&["bundle", "--dry-run"])).unwrap();
+        let plain_arguments = words(&["bundle", "--dry-run"]);
+        let plain = parse_options(&plain_arguments).unwrap();
         assert_eq!((plain.bundle, plain.limit), ("bundle", None));
-        let reordered = parse_options(&words(&["--dry-run", "bundle"])).unwrap();
+        let reordered_arguments = words(&["--dry-run", "bundle"]);
+        let reordered = parse_options(&reordered_arguments).unwrap();
         assert_eq!(reordered.bundle, "bundle");
         assert!(parse_options(&words(&["bundle"])).is_err());
         assert!(parse_options(&words(&["--dry-run"])).is_err());
@@ -148,7 +150,8 @@ mod tests {
 
     #[test]
     fn limit_takes_a_positive_count_in_any_position() {
-        let limited = parse_options(&words(&["--limit", "2", "bundle", "--dry-run"])).unwrap();
+        let limited_arguments = words(&["--limit", "2", "bundle", "--dry-run"]);
+        let limited = parse_options(&limited_arguments).unwrap();
         assert_eq!((limited.bundle, limited.limit), ("bundle", Some(2)));
         assert!(parse_options(&words(&["bundle", "--dry-run", "--limit"])).is_err());
         assert!(parse_options(&words(&["bundle", "--dry-run", "--limit", "0"])).is_err());
@@ -157,9 +160,11 @@ mod tests {
 
     #[test]
     fn quiet_is_accepted_in_any_position_and_still_requires_dry_run() {
-        let quiet = parse_options(&words(&["--quiet", "bundle", "--dry-run"])).unwrap();
+        let quiet_arguments = words(&["--quiet", "bundle", "--dry-run"]);
+        let quiet = parse_options(&quiet_arguments).unwrap();
         assert_eq!((quiet.bundle, quiet.quiet), ("bundle", true));
-        let trailing = parse_options(&words(&["bundle", "--dry-run", "--quiet"])).unwrap();
+        let trailing_arguments = words(&["bundle", "--dry-run", "--quiet"]);
+        let trailing = parse_options(&trailing_arguments).unwrap();
         assert!(trailing.quiet);
         assert!(parse_options(&words(&["bundle", "--quiet"])).is_err());
     }
