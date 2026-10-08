@@ -1,0 +1,3 @@
+pub fn retired(): Bool = false;
+
+pub fn version(): Int = 7;
