@@ -496,3 +496,41 @@ class FixtureManifestMissingManifestTests(unittest.TestCase):
 
         self.assertEqual(status, 2)
         self.assertIn("fixture manifest does not exist", stderr.getvalue())
+
+
+class FixtureManifestTsvFormatTests(unittest.TestCase):
+    def run_check(self, extra_args: list[str], hashes: dict[str, str], manifest: str) -> tuple[int, str]:
+        with TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "fixture-manifest.sha256"
+            manifest_path.write_text(manifest, encoding="utf-8")
+            stdout = StringIO()
+            with (
+                mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(check_fixture_manifest, "fixture_hashes", return_value=(hashes, [])),
+                mock.patch("sys.argv", ["check_fixture_manifest.py", "--check", *extra_args]),
+                redirect_stdout(stdout),
+            ):
+                status = check_fixture_manifest.main()
+        return status, stdout.getvalue()
+
+    def test_tsv_clean_tree_has_header_and_ok_row(self) -> None:
+        path = "crates/example/tests/fixtures/input.orna"
+        pinned = hashlib.sha256(b"original\n").hexdigest()
+        status, output = self.run_check(["--format", "tsv"], {path: pinned}, render_manifest({path: pinned}))
+
+        self.assertEqual(status, 0)
+        rows = output.splitlines()
+        self.assertEqual(rows[0], "ok\tfiles\ttrees\terrors")
+        self.assertEqual(rows[1].split("\t")[::3], ["true", "0"])
+
+    def test_tsv_drift_row_reports_error_count(self) -> None:
+        path = "crates/example/tests/fixtures/input.orna"
+        pinned = hashlib.sha256(b"original\n").hexdigest()
+        changed = hashlib.sha256(b"changed\n").hexdigest()
+        status, output = self.run_check(["--format", "tsv"], {path: changed}, render_manifest({path: pinned}))
+
+        self.assertEqual(status, 1)
+        rows = output.splitlines()
+        self.assertEqual(rows[0], "ok\tfiles\ttrees\terrors")
+        self.assertEqual(rows[1].split("\t")[0], "false")
+        self.assertEqual(rows[1].split("\t")[3], "1")
