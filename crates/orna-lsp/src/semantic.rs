@@ -212,6 +212,25 @@ mod tests {
     const SOURCE: &str = include_str!("../tests/fixtures/editor-lsp-hints.orna");
 
     #[test]
+    fn advertised_legend_matches_checked_in_editor_attach_legend() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../editors/semantic-token-legend.json"
+        ))
+        .expect("editor legend artifact is JSON");
+        let editor_types = artifact["tokenTypes"]
+            .as_array()
+            .expect("tokenTypes is an array")
+            .iter()
+            .map(|value| value.as_str().expect("token type is a string"))
+            .collect::<Vec<_>>();
+        let advertised = TOKEN_TYPES.to_vec();
+        assert_eq!(
+            advertised, editor_types,
+            "editor attach legend must declare every token type the LSP advertises"
+        );
+    }
+
+    #[test]
     fn semantic_tokens_refine_lexical_classes_with_declarations_and_scoped_names() {
         assert_eq!(
             legend(),
