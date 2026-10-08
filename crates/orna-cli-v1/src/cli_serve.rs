@@ -677,6 +677,9 @@ fn is_committed_row_path(path: &Path) -> bool {
 
 const MAX_PLAYGROUND_CATALOGUE_ENTRIES: usize = 4096;
 const PLAYGROUND_CATALOGUE_PAGE_SIZE: usize = 25;
+/// Pages past this bound are a bad request, so a query cannot ask for an
+/// arbitrarily deep window of the catalogue.
+const PLAYGROUND_CATALOGUE_MAX_PAGE: usize = 10_000;
 const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PLAYGROUND_STYLE_BYTES: usize = 256 * 1024;
@@ -927,7 +930,9 @@ fn playground_catalogue_params(query: &str) -> Result<(Option<&str>, usize), ()>
                     && value.bytes().all(|byte| byte.is_ascii_digit()) =>
             {
                 match value.parse::<usize>() {
-                    Ok(number) if number > 0 => page = Some(number),
+                    Ok(number) if (1..=PLAYGROUND_CATALOGUE_MAX_PAGE).contains(&number) => {
+                        page = Some(number);
+                    }
                     _ => return Err(()),
                 }
             }
