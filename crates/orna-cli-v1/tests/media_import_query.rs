@@ -532,6 +532,21 @@ fn revisions_since(revisions: &[RowRevision], since: &str) -> Option<Vec<RowRevi
 }
 
 
+/// Asserts an `orna history` run was refused: exit 1 and no revisions printed.
+fn assert_history_refused(output: &std::process::Output, what: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{what} must exit 1: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "{what} must list no revisions: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
 /// The 16-byte relation id as the 32-digit hex the `orna history` CLI takes.
 fn relation_hex(relation_id: [u8; 16]) -> String {
     relation_id.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -821,17 +836,7 @@ async fn history_rejects_negative_and_out_of_range_limits_before_listing() {
     // Each value is outside 1..=4096 or not a number; `-1` is the negative case.
     for value in ["-1", "0", "4097", "x"] {
         let output = run_history(directory.path(), &[&relation, "song", "--limit", value]);
-        assert_eq!(
-            output.status.code(),
-            Some(1),
-            "--limit {value} must exit 1: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "--limit {value} must list no revisions: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+        assert_history_refused(&output, &format!("--limit {value}"));
     }
     drop(directory);
 }
