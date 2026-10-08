@@ -19,6 +19,10 @@ const SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song.orna"
 );
+const PAGED_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-paged.orna"
+);
 const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
@@ -158,6 +162,70 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         "re-importing the same fixture must not change the listing"
     );
 
+    drop(directory);
+}
+
+#[tokio::test]
+async fn history_pages_cover_every_revision_once_across_imported_rows() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    // Two imported rows, from two fixtures, so the walk spans more than one row.
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let paged = import_expression(PAGED_SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &paged, "song-again", 0x80, true).await;
+
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let rows = graph
+        .range_rows(&KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+    let head = git_output(directory.path(), &["rev-parse", "HEAD"], None);
+    let head = String::from_utf8(head).unwrap().trim().to_owned();
+
+    for key in ["song", "song-again"] {
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.key() == &TypedKey::Bytes(key.as_bytes().to_vec())
+                    || row.key() == &TypedKey::Text(key.to_owned())
+            })
+            .unwrap_or_else(|| panic!("the {key} row is committed"));
+        let revisions = graph.list_row_revisions(row, 64, &scope).unwrap();
+        assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
+        // One revision per page: every page is exactly the next commit.
+        let pages = revision_pages(
+            |max| graph.list_row_revisions(row, max, &scope).unwrap(),
+            1,
+            revisions.len(),
+        );
+        assert_eq!(pages.len(), revisions.len(), "{key}: one page per revision");
+        assert!(pages.iter().all(|page| page.len() == 1), "{key}: page size");
+        assert_eq!(pages.concat(), revisions, "{key}: pages cover the walk once");
+    }
     drop(directory);
 }
 
