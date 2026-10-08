@@ -22,6 +22,10 @@ use crate::documents::{Document, PositionMapper};
 
 pub type EditorParse = Parse<SyntaxTree>;
 
+/// orna-syntax-v1 carries no severity on its diagnostics; every parser error is
+/// a hard error, so the editor maps all of them to ERROR.
+const SYNTAX_DIAGNOSTIC_SEVERITY: DiagnosticSeverity = DiagnosticSeverity::ERROR;
+
 /// Syntax diagnostics emitted by the 1.0 parser with their original byte spans.
 pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
     let parse = parse_document(document);
@@ -49,7 +53,7 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
                 .collect::<Vec<_>>();
             Diagnostic {
                 range: mapper.range(&diagnostic.span),
-                severity: Some(DiagnosticSeverity::ERROR),
+                severity: Some(SYNTAX_DIAGNOSTIC_SEVERITY),
                 code: Some(NumberOrString::String(diagnostic.code.to_owned())),
                 code_description: None,
                 source: Some("orna-syntax-v1".to_owned()),
