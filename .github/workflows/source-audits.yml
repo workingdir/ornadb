@@ -86,6 +86,8 @@ jobs:
 
       - name: Prove std map keys order stability
         run: cargo test --locked -p orna-evaluator-v1 --test standard_library_map_keys_stable_ln4y7
+      - name: Prove std map entries insertion order
+        run: cargo test --locked -p orna-evaluator-v1 --test standard_library_map_entries_order_ln4y7
 
       - name: Prove std list concat identity
         run: cargo test --locked -p orna-evaluator-v1 --test standard_library_list_concat_identity_ln4y7
