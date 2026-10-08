@@ -73,6 +73,9 @@ jobs:
           --test standard_library_hash_snapshot_27d5k
           --test standard_library_random_snapshot_27d5k
 
+      - name: Prove std string helper behavior
+        run: cargo test --locked -p orna-evaluator-v1 --test standard_library_format_strings_si45g
+
       - name: Prove hash-pinned runtime historical snapshot behavior
         run: cargo test --locked -p orna-runtime-v1 --test historical_snapshots
 
