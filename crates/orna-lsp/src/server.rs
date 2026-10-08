@@ -1067,6 +1067,8 @@ fn persistent_declaration_ranges(
     declarations
 }
 
+/// A rename target must parse as a declaration name under orna-syntax-v1, so a
+/// reserved word (ORNA-LEX-007) is rejected before any edit is produced.
 fn valid_rename_identifier(new_name: &str) -> bool {
     let source = format!("fn {new_name}() = 0;");
     let parse = orna_syntax_v1::parse_module(&source);
