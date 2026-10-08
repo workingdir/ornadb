@@ -1450,6 +1450,66 @@ mod graph_bridge_tests {
     }
 
     #[test]
+    fn object_stats_counts_each_reachable_tree_once_against_git_enumeration() {
+        let directory = repository();
+        let root = directory.path();
+        let context = context(root);
+        let (schema, digest) = schema_node(root, &context);
+        let rows = sealed_rows(&context, &schema, digest);
+        let graph = context
+            .open_native_graph(&rows)
+            .expect("admit the fixture graph");
+        let scope = graph.open_read_scope().expect("read scope");
+        let stats = graph
+            .object_stats(&scope)
+            .expect("walk the fixture graph once");
+        let again = graph
+            .object_stats(&graph.open_read_scope().unwrap())
+            .expect("repeat the walk");
+        assert_eq!(again, stats, "a repeated walk visits the same nodes");
+
+        // Git enumerates every object reachable from the store root exactly
+        // once. Count its trees by type and compare with the node walk, which
+        // must also visit each tree once even when subtrees are shared.
+        let store_root = graph.store_root().to_hex();
+        let listing = Command::new("git")
+            .current_dir(root)
+            .args(["rev-list", "--objects", &store_root])
+            .output()
+            .expect("list objects reachable from the store root");
+        assert!(listing.status.success(), "rev-list failed");
+        let oids: Vec<String> = String::from_utf8(listing.stdout)
+            .expect("rev-list output is UTF-8")
+            .lines()
+            .filter_map(|line| line.split_whitespace().next().map(str::to_owned))
+            .collect();
+        let mut check = Command::new("git")
+            .current_dir(root)
+            .args(["cat-file", "--batch-check=%(objecttype)"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn cat-file --batch-check");
+        check
+            .stdin
+            .take()
+            .expect("cat-file stdin")
+            .write_all(format!("{}\n", oids.join("\n")).as_bytes())
+            .expect("write object ids");
+        let types = check.wait_with_output().expect("read object types");
+        let trees = String::from_utf8(types.stdout)
+            .expect("types are UTF-8")
+            .lines()
+            .filter(|kind| *kind == "tree")
+            .count() as u64;
+        let walked: u64 = stats.nodes().values().sum();
+        assert_eq!(
+            walked, trees,
+            "the node walk visits each reachable tree exactly once"
+        );
+    }
+
+    #[test]
     fn native_graph_bridge_rejects_tampered_schema_payload_length_and_digest() {
         let directory = repository();
         let root = directory.path();
