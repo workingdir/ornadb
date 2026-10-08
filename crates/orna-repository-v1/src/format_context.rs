@@ -1737,6 +1737,17 @@ mod graph_bridge_tests {
             graph.list_revision_snapshots(4097),
             Err(crate::native_graph::GraphError::InventoryQuotaExceeded)
         ));
+
+        let scope = graph.open_read_scope().unwrap();
+        let stats = graph
+            .object_stats(&scope)
+            .expect("count objects reachable from the admitted store root");
+        assert_eq!(stats.node_count(crate::native_graph::NodeKind::StoreRoot), 1);
+        assert!(stats.node_count(crate::native_graph::NodeKind::OrderedLeaf) >= 1);
+        let total: u64 = stats.nodes().values().sum();
+        assert!(total >= 3, "store root, relation map, and row leaf are reachable");
+        let again = graph.object_stats(&graph.open_read_scope().unwrap()).unwrap();
+        assert_eq!(again, stats, "object counts are deterministic");
     }
 }
 
