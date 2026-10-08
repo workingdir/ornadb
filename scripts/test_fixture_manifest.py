@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import re
+from contextlib import redirect_stderr
 from contextlib import redirect_stdout
 from io import StringIO
 import json
@@ -406,3 +407,48 @@ class FixtureManifestListModeTests(unittest.TestCase):
         self.assertTrue(lines[0].startswith("scripts/fixture-manifest.sha256:3: "))
         self.assertIn(path, lines[0])
         self.assertNotIn("drift total", stdout.getvalue())
+
+
+class FixtureManifestLimitTests(unittest.TestCase):
+    def drift_hashes(self) -> tuple[dict[str, str], str]:
+        paths = [f"crates/example/tests/fixtures/input-{index}.orna" for index in range(3)]
+        pinned = {path: hashlib.sha256(b"original\n").hexdigest() for path in paths}
+        changed = {path: hashlib.sha256(b"changed\n").hexdigest() for path in paths}
+        return changed, render_manifest(pinned)
+
+    def run_main(self, argv: list[str], hashes: dict[str, str], manifest: str) -> tuple[int, str, str]:
+        with TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "fixture-manifest.sha256"
+            manifest_path.write_text(manifest, encoding="utf-8")
+            stdout, stderr = StringIO(), StringIO()
+            with (
+                mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(check_fixture_manifest, "fixture_hashes", return_value=(hashes, [])),
+                mock.patch("sys.argv", ["check_fixture_manifest.py", *argv]),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                status = check_fixture_manifest.main()
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_limit_caps_text_entries_but_keeps_the_total(self) -> None:
+        hashes, manifest = self.drift_hashes()
+        status, _, stderr = self.run_main(["--check", "--limit", "1"], hashes, manifest)
+
+        self.assertEqual(status, 1)
+        entries = [line for line in stderr.splitlines() if line.startswith("  ")]
+        self.assertEqual(len(entries), 1)
+        self.assertIn("fixture manifest drift total: 3", stderr)
+
+    def test_limit_caps_list_entries(self) -> None:
+        hashes, manifest = self.drift_hashes()
+        status, stdout, _ = self.run_main(["--list", "--limit", "2"], hashes, manifest)
+
+        self.assertEqual(status, 1)
+        self.assertEqual(len(stdout.splitlines()), 2)
+
+    def test_limit_rejects_values_below_one(self) -> None:
+        with mock.patch("sys.argv", ["check_fixture_manifest.py", "--limit", "0"]):
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
+                check_fixture_manifest.main()
+        self.assertEqual(raised.exception.code, 2)
