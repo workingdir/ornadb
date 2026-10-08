@@ -561,6 +561,20 @@ impl<S> ManagedFileStat<S> {
             self.size, self.generation
         )
     }
+
+    /// Renders the size for people: plain bytes below 1 KiB, then KiB and MiB
+    /// with one decimal place. Sizes of 1 MiB and above are shown in MiB.
+    pub fn human_size(&self) -> String {
+        const KIB: u64 = 1024;
+        const MIB: u64 = KIB * KIB;
+        if self.size < KIB {
+            format!("{} B", self.size)
+        } else if self.size < MIB {
+            format!("{:.1} KiB", self.size as f64 / KIB as f64)
+        } else {
+            format!("{:.1} MiB", self.size as f64 / MIB as f64)
+        }
+    }
 }
 
 /// One already-managed destination. New opens observe its latest accepted
@@ -1676,6 +1690,22 @@ mod tests {
             generation: 3,
         };
         assert_eq!(stat.to_json(), r#"{"size":5,"generation":3}"#);
+    }
+
+    #[test]
+    fn stat_human_size_switches_units_at_kib_and_mib_boundaries() {
+        let sized = |size: u64| ManagedFileStat {
+            size,
+            pin: SnapshotPin::capture(Arc::new(7_u64)),
+            generation: 0,
+        };
+        assert_eq!(sized(0).human_size(), "0 B");
+        assert_eq!(sized(1023).human_size(), "1023 B");
+        assert_eq!(sized(1024).human_size(), "1.0 KiB");
+        assert_eq!(sized(1536).human_size(), "1.5 KiB");
+        assert_eq!(sized(1024 * 1024 - 1).human_size(), "1024.0 KiB");
+        assert_eq!(sized(1024 * 1024).human_size(), "1.0 MiB");
+        assert_eq!(sized(3 * 1024 * 1024 + 512 * 1024).human_size(), "3.5 MiB");
     }
 
     #[tokio::test]
