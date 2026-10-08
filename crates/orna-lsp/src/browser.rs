@@ -84,6 +84,42 @@ pub fn document_symbols(source: String) -> String {
     json(&analysis::document_symbols(&parsed, &document.text, &mapper))
 }
 
+/// Returns the declaration Location for the symbol at a position, including
+/// imported and qualified standard-library declarations, as LSP JSON.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn definition(source: String, line: u32, character: u32) -> String {
+    let document = document(source);
+    let parsed = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    json(&analysis::definition(
+        &document,
+        &parsed,
+        Position { line, character },
+        &mapper,
+    ))
+}
+
+/// Returns every reference Location for the symbol at a position as an LSP
+/// JSON array. Locals that shadow a standard name are never included.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
+pub fn references(
+    source: String,
+    line: u32,
+    character: u32,
+    include_declaration: bool,
+) -> String {
+    let document = document(source);
+    let parsed = parse_document(&document);
+    let mapper = PositionMapper::new(&document.text);
+    json(&analysis::references(
+        &document,
+        &parsed,
+        Position { line, character },
+        &mapper,
+        include_declaration,
+    ))
+}
+
 /// Returns inlay hints for the requested document range as an LSP JSON array.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
 pub fn inlay_hints(
@@ -115,7 +151,10 @@ pub fn inlay_hints(
 
 #[cfg(test)]
 mod tests {
-    use super::{completions, diagnostics, document_symbols, hover, inlay_hints, signature_help};
+    use super::{
+        completions, definition, diagnostics, document_symbols, hover, inlay_hints, references,
+        signature_help,
+    };
 
     const SOURCE: &str = include_str!("browser/fixtures/browser-intelligence.orna");
     const STANDARD_SOURCE: &str = include_str!("analysis/fixtures/standard-math-import.orna");
@@ -124,6 +163,8 @@ mod tests {
     const STANDARD_SIGNATURE_SOURCE: &str =
         include_str!("browser/fixtures/standard-signature-help.orna");
     const STANDARD_INLAY_SOURCE: &str = include_str!("browser/fixtures/standard-inlay-hints.orna");
+    const STANDARD_DEFINITION_SOURCE: &str =
+        include_str!("browser/fixtures/standard-definition.orna");
 
     fn position(source: &str, byte: usize) -> (u32, u32) {
         let prefix = &source[..byte];
@@ -443,5 +484,103 @@ mod tests {
             .map(|child| child["name"].as_str().expect("child name"))
             .collect();
         assert_eq!(children, ["success", "failed"], "{outcome:#}");
+    }
+
+    fn offset_of(source: &str, needle: &str) -> usize {
+        source.find(needle).expect("fixture contains the probed call")
+    }
+
+    #[test]
+    fn browser_standard_definition_resolves_imported_and_qualified_calls() {
+        let imported = offset_of(STANDARD_DEFINITION_SOURCE, "clamp(value, lower, upper)");
+        let (line, character) = position(STANDARD_DEFINITION_SOURCE, imported + 1);
+        let location: serde_json::Value = serde_json::from_str(&definition(
+            STANDARD_DEFINITION_SOURCE.to_owned(),
+            line,
+            character,
+        ))
+        .expect("definition JSON");
+        assert_eq!(location["uri"], "orna-std:///std/math.orna");
+        assert_standard_declares_clamp(&location);
+
+        let qualified = offset_of(STANDARD_DEFINITION_SOURCE, "std.math.clamp") + "std.math.".len();
+        let (line, character) = position(STANDARD_DEFINITION_SOURCE, qualified + 1);
+        let location: serde_json::Value = serde_json::from_str(&definition(
+            STANDARD_DEFINITION_SOURCE.to_owned(),
+            line,
+            character,
+        ))
+        .expect("qualified definition JSON");
+        assert_eq!(location["uri"], "orna-std:///std/math.orna");
+        assert_standard_declares_clamp(&location);
+    }
+
+    #[test]
+    fn browser_standard_definition_keeps_local_shadowing_in_the_document() {
+        let shadowed_use = offset_of(STANDARD_DEFINITION_SOURCE, "= clamp;") + "= ".len();
+        let (line, character) = position(STANDARD_DEFINITION_SOURCE, shadowed_use + 1);
+        let location: serde_json::Value = serde_json::from_str(&definition(
+            STANDARD_DEFINITION_SOURCE.to_owned(),
+            line,
+            character,
+        ))
+        .expect("local definition JSON");
+        assert_eq!(location["uri"], "file:///playground/main.orna");
+        let local_declaration = offset_of(STANDARD_DEFINITION_SOURCE, "let clamp");
+        let (declared_line, _) = position(STANDARD_DEFINITION_SOURCE, local_declaration);
+        assert_eq!(location["range"]["start"]["line"], declared_line);
+    }
+
+    #[test]
+    fn browser_standard_references_exclude_shadowed_locals() {
+        let imported = offset_of(STANDARD_DEFINITION_SOURCE, "clamp(value, lower, upper)");
+        let (line, character) = position(STANDARD_DEFINITION_SOURCE, imported + 1);
+        let found: serde_json::Value = serde_json::from_str(&references(
+            STANDARD_DEFINITION_SOURCE.to_owned(),
+            line,
+            character,
+            false,
+        ))
+        .expect("references JSON");
+        let found = found.as_array().expect("reference list");
+        let lines = found
+            .iter()
+            .map(|location| location["range"]["start"]["line"].as_u64().expect("line"))
+            .collect::<Vec<_>>();
+        let bounded_line = position(STANDARD_DEFINITION_SOURCE, imported).0 as u64;
+        let qualified_line = position(
+            STANDARD_DEFINITION_SOURCE,
+            offset_of(STANDARD_DEFINITION_SOURCE, "std.math.clamp"),
+        )
+        .0 as u64;
+        assert_eq!(lines, vec![bounded_line, qualified_line], "{found:?}");
+        assert!(found.iter().all(|location| location["uri"] == "file:///playground/main.orna"));
+
+        let with_declaration: serde_json::Value = serde_json::from_str(&references(
+            STANDARD_DEFINITION_SOURCE.to_owned(),
+            line,
+            character,
+            true,
+        ))
+        .expect("references with declaration JSON");
+        let with_declaration = with_declaration.as_array().expect("reference list");
+        assert_eq!(with_declaration.len(), found.len() + 1);
+        assert_eq!(
+            with_declaration.last().expect("declaration location")["uri"],
+            "orna-std:///std/math.orna"
+        );
+    }
+
+    fn assert_standard_declares_clamp(location: &serde_json::Value) {
+        let (_, source) = orna_standard_sources::reference_standard_sources_v1()
+            .into_iter()
+            .find(|(path, _)| path == "std/math.orna")
+            .expect("pinned math standard source");
+        let start = &location["range"]["start"];
+        let end = &location["range"]["end"];
+        let line_start = |line: u64| source.split_inclusive('\n').take(line as usize).map(str::len).sum::<usize>();
+        let from = line_start(start["line"].as_u64().unwrap()) + start["character"].as_u64().unwrap() as usize;
+        let to = line_start(end["line"].as_u64().unwrap()) + end["character"].as_u64().unwrap() as usize;
+        assert_eq!(&source[from..to], "clamp");
     }
 }
