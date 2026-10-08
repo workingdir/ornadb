@@ -3604,6 +3604,18 @@ impl ObjectStats {
         &self.nodes
     }
 
+    /// True when no node was reached: the store has nothing to report.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Process exit code for `ogs stats`: 3 for an empty object store, so a
+    /// script can tell "nothing stored" from a corrupt index (2) or a
+    /// failure (1). Zero when the walk reached at least one node.
+    pub const fn exit_code(&self) -> i32 {
+        if self.nodes.is_empty() { 3 } else { 0 }
+    }
+
     /// Total reachable nodes across every kind.
     pub fn total_nodes(&self) -> u64 {
         self.nodes.values().sum()
