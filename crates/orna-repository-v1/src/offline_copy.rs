@@ -352,6 +352,37 @@ impl OfflineCopy {
     }
 }
 
+/// Whether an import writes its progress lines to the output stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfflineImportOutput {
+    Quiet,
+    Verbose,
+}
+
+impl OfflineCopy {
+    /// Verifies the whole bundle like `import_plan`. In `Verbose` mode, each
+    /// verified row's progress line is written to `out`; in `Quiet` mode
+    /// nothing is written.
+    pub fn import_plan_to_writer(
+        &self,
+        output: OfflineImportOutput,
+        out: &mut impl Write,
+    ) -> Result<OfflineImportPlan, OfflineCopyError> {
+        let mut write_error = None;
+        let plan = self.import_plan_with_progress(|progress| {
+            if output == OfflineImportOutput::Verbose && write_error.is_none() {
+                if let Err(error) = writeln!(out, "{progress}") {
+                    write_error = Some(error);
+                }
+            }
+        })?;
+        match write_error {
+            Some(error) => Err(error.into()),
+            None => Ok(plan),
+        }
+    }
+}
+
 /// What an import would write, reported after full verification. Payload
 /// bytes are not kept.
 #[derive(Clone, Debug, Eq, PartialEq)]
