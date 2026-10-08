@@ -445,7 +445,7 @@ fn git_listing_route(
             &request.query,
         )),
         "/playground/catalogue" | "/playground/catalogue/" => {
-            Some(playground_catalogue_page(root, identity))
+            Some(playground_catalogue_page(root, identity, &request.query))
         }
         "/playground" => Some(playground_asset(root, identity, &request.path)),
         path if path.starts_with("/playground/") => {
@@ -676,6 +676,7 @@ fn is_committed_row_path(path: &Path) -> bool {
 }
 
 const MAX_PLAYGROUND_CATALOGUE_ENTRIES: usize = 4096;
+const PLAYGROUND_CATALOGUE_PAGE_SIZE: usize = 25;
 const MAX_PLAYGROUND_ASSET_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PLAYGROUND_ASSET_ROW_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PLAYGROUND_STYLE_BYTES: usize = 256 * 1024;
@@ -898,26 +899,58 @@ fn playground_catalogue_json(root: &Path) -> Response {
     response
 }
 
-fn playground_catalogue_page(root: &Path, identity: RuntimeIdentity) -> Response {
+/// Parses the optional `page=N` parameter for the catalogue page. Pages are
+/// 1-based; an absent parameter is the first page.
+fn playground_catalogue_page_number(query: &str) -> Result<usize, ()> {
+    if query.is_empty() {
+        return Ok(1);
+    }
+    let Some(number) = query.strip_prefix("page=") else {
+        return Err(());
+    };
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(());
+    }
+    match number.parse::<usize>() {
+        Ok(page) if page > 0 => Ok(page),
+        _ => Err(()),
+    }
+}
+
+fn playground_catalogue_page(root: &Path, identity: RuntimeIdentity, query: &str) -> Response {
+    let Ok(page) = playground_catalogue_page_number(query) else {
+        return bad_request_response();
+    };
     let Ok(routes) = playground_catalogue_routes(root) else {
         return unavailable_response();
     };
+    let start = (page - 1).saturating_mul(PLAYGROUND_CATALOGUE_PAGE_SIZE);
     let rows = routes
         .iter()
+        .skip(start)
+        .take(PLAYGROUND_CATALOGUE_PAGE_SIZE)
         .map(|route| InspectionNode::Link {
             label: route.clone(),
             href: route.clone(),
         })
         .collect::<Vec<_>>();
+    let has_next = routes.len() > start.saturating_add(PLAYGROUND_CATALOGUE_PAGE_SIZE);
     let content = if rows.is_empty() {
         InspectionNode::Text("No playground catalogue entries are committed.".into())
     } else {
         InspectionNode::List(rows)
     };
-    render_home_document(
-        identity,
-        &InspectionNode::Record(vec![("Catalogue".into(), content)]),
-    )
+    let mut sections = vec![("Catalogue".into(), content)];
+    if has_next {
+        sections.push((
+            "More".into(),
+            InspectionNode::Link {
+                label: "Next page".into(),
+                href: format!("/playground/catalogue?page={}", page + 1),
+            },
+        ));
+    }
+    render_home_document(identity, &InspectionNode::Record(sections))
 }
 
 fn playground_route_record_path(route_path: &str) -> Option<(ManagedPath, String)> {
@@ -3103,6 +3136,57 @@ mod tests {
             String::from_utf8(response.body).expect("JSON body is UTF-8"),
             r#"{"routes":["/playground/assets/examples.css"]}"#
         );
+    }
+
+    #[test]
+    fn playground_catalogue_pages_one_fixture_row_and_rejects_bad_pages() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git_succeeds(directory.path(), &["init", "--quiet"]);
+        let route_directory = directory.path().join("playground/Route");
+        std::fs::create_dir_all(&route_directory).expect("create route rows");
+        std::fs::write(
+            route_directory
+                .join("route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373.orna"),
+            include_str!("../tests/fixtures/playground-route-catalogue-page.orna"),
+        )
+        .expect("write route row");
+        git_succeeds(directory.path(), &["add", "playground/Route"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add one catalogue route for paging",
+            ],
+        );
+        let identity = RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        };
+
+        let first = playground_catalogue_page(directory.path(), identity, "");
+        assert_eq!(first.status, 200);
+        let first = String::from_utf8(first.body).expect("HTML body is UTF-8");
+        assert!(first.contains("/playground/assets/examples.css"));
+        assert!(!first.contains("Next page"));
+
+        let past_end = playground_catalogue_page(directory.path(), identity, "page=2");
+        assert_eq!(past_end.status, 200);
+        let past_end = String::from_utf8(past_end.body).expect("HTML body is UTF-8");
+        assert!(!past_end.contains("/playground/assets/examples.css"));
+
+        for query in ["page=0", "page=", "page=x", "size=2"] {
+            assert_eq!(
+                playground_catalogue_page(directory.path(), identity, query).status,
+                400,
+                "{query}"
+            );
+        }
     }
 
     #[test]
