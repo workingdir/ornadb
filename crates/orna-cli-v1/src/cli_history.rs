@@ -1,21 +1,80 @@
-//! `orna history <relation-hex> <key>`: lists the revision history of one
-//! committed row through the OGS-1 commit-graph walk. Only commit headers and
-//! tree listings are read; no blob payload is opened or hydrated.
+//! `orna history <relation-hex> <key> [--limit N] [--since <commit-hex>]`:
+//! lists the revision history of one committed row through the OGS-1
+//! commit-graph walk. Only commit headers and tree listings are read; no blob
+//! payload is opened or hydrated.
 
 use super::*;
 use orna_repository_v1::{Repository, TypedKey};
 
-/// Most revisions one history listing reports, newest first.
-const HISTORY_LIMIT: usize = 64;
+/// Most revisions one history listing reports when `--limit` is not given.
+const DEFAULT_HISTORY_LIMIT: usize = 64;
+/// Largest `--limit` accepted; matches the repository walk bound.
+const MAX_HISTORY_LIMIT: usize = 4096;
 
-pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
-    let [relation, key] = arguments else {
+/// Parsed history options: positional `<relation-hex> <key>` plus flags.
+#[derive(Debug, Eq, PartialEq)]
+struct HistoryOptions<'a> {
+    relation: &'a str,
+    key: &'a str,
+    limit: usize,
+    since: Option<&'a str>,
+}
+
+fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic> {
+    let mut positional = Vec::new();
+    let mut limit = DEFAULT_HISTORY_LIMIT;
+    let mut since = None;
+    let mut words = arguments.iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        match word {
+            "--limit" => {
+                let value = words.next().ok_or_else(|| {
+                    history_error("--limit needs a value", "usage: --limit <1..=4096>")
+                })?;
+                limit = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|limit| (1..=MAX_HISTORY_LIMIT).contains(limit))
+                    .ok_or_else(|| {
+                        history_error(
+                            "--limit is not in 1..=4096",
+                            format!("got {value:?}"),
+                        )
+                    })?;
+            }
+            "--since" => {
+                let value = words.next().ok_or_else(|| {
+                    history_error("--since needs a commit id", "usage: --since <commit-hex>")
+                })?;
+                since = Some(value);
+            }
+            flag if flag.starts_with("--") => {
+                return Err(history_error(
+                    "Unknown history flag",
+                    format!("got {flag:?}; accepted: --limit, --since"),
+                ));
+            }
+            _ => positional.push(word),
+        }
+    }
+    let [relation, key] = positional[..] else {
         return Err(history_error(
             "History expects a relation and a row key",
-            "usage: orna history <relation-hex> <key>",
+            "usage: orna history <relation-hex> <key> [--limit N] [--since <commit-hex>]",
         ));
     };
-    let relation = parse_relation_id(relation)?;
+    Ok(HistoryOptions {
+        relation,
+        key,
+        limit,
+        since,
+    })
+}
+
+pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
+    let options = parse_options(arguments)?;
+    let relation = parse_relation_id(options.relation)?;
+    let key = options.key;
     let repository = Repository::discover(
         std::env::current_dir()
             .map_err(|error| history_error("Current directory is unavailable", error.to_string()))?,
@@ -34,14 +93,34 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         .open_read_scope()
         .map_err(|error| history_error("Read scope could not be opened", format!("{error:?}")))?;
     let row = graph
-        .lookup_row(&TypedKey::Text(key.clone()), &scope)
+        .lookup_row(&TypedKey::Text(key.to_owned()), &scope)
         .map_err(|error| history_error("Row lookup failed", format!("{error:?}")))?
         .ok_or_else(|| {
             history_error("Row is not committed", format!("no row with key {key:?}"))
         })?;
-    let revisions = graph
-        .list_row_revisions(&row, HISTORY_LIMIT, &scope)
+    // `--since` needs the walk far enough to reach its commit, so walk the
+    // full bound and cut afterwards; otherwise walk only what is printed.
+    let walk = if options.since.is_some() {
+        MAX_HISTORY_LIMIT
+    } else {
+        options.limit
+    };
+    let mut revisions = graph
+        .list_row_revisions(&row, walk, &scope)
         .map_err(|error| history_error("Revision history could not be listed", format!("{error:?}")))?;
+    if let Some(since) = options.since {
+        let position = revisions
+            .iter()
+            .position(|revision| revision.commit().to_hex() == since)
+            .ok_or_else(|| {
+                history_error(
+                    "--since commit is not in the revision history",
+                    format!("no revision {since:?} within the {walk} newest commits"),
+                )
+            })?;
+        revisions.truncate(position);
+    }
+    revisions.truncate(options.limit);
     for revision in revisions {
         let state = if revision.present() { "present" } else { "absent" };
         println!(
@@ -80,7 +159,11 @@ fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_relation_id;
+    use super::{DEFAULT_HISTORY_LIMIT, parse_options, parse_relation_id};
+
+    fn words(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
 
     #[test]
     fn relation_id_parses_sixteen_bytes_and_rejects_bad_input() {
@@ -89,5 +172,25 @@ mod tests {
         assert_eq!(parsed[15], 0x0f);
         assert!(parse_relation_id("0123").is_err());
         assert!(parse_relation_id(&"zz".repeat(16)).is_err());
+    }
+
+    #[test]
+    fn options_default_limit_and_accept_flags_in_any_position() {
+        let parsed = parse_options(&words(&["0102", "song"])).unwrap();
+        assert_eq!((parsed.limit, parsed.since), (DEFAULT_HISTORY_LIMIT, None));
+        let parsed =
+            parse_options(&words(&["--limit", "3", "0102", "--since", "abc", "song"])).unwrap();
+        assert_eq!((parsed.relation, parsed.key), ("0102", "song"));
+        assert_eq!((parsed.limit, parsed.since), (3, Some("abc")));
+    }
+
+    #[test]
+    fn options_reject_bad_limits_unknown_flags_and_missing_values() {
+        assert!(parse_options(&words(&["r", "k", "--limit", "0"])).is_err());
+        assert!(parse_options(&words(&["r", "k", "--limit", "4097"])).is_err());
+        assert!(parse_options(&words(&["r", "k", "--limit", "x"])).is_err());
+        assert!(parse_options(&words(&["r", "k", "--since"])).is_err());
+        assert!(parse_options(&words(&["r", "k", "--bogus"])).is_err());
+        assert!(parse_options(&words(&["r"])).is_err());
     }
 }
