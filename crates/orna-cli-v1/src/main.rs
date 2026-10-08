@@ -6,6 +6,7 @@
 mod cli_args;
 mod cli_dispatch;
 mod cli_help;
+mod cli_history;
 mod cli_status;
 mod cli_serve;
 mod media_range;
