@@ -479,3 +479,20 @@ class FixtureManifestSinceTests(unittest.TestCase):
         longer = "crates/example/tests/fixtures/input.orna.bak"
         errors = [f"{longer}:1: fixture is missing from manifest: {longer}"]
         self.assertEqual(only_changed(errors, {short}), [])
+
+
+class FixtureManifestMissingManifestTests(unittest.TestCase):
+    def test_missing_manifest_exits_2_not_drift_1(self) -> None:
+        with TemporaryDirectory() as directory:
+            missing = Path(directory) / "fixture-manifest.sha256"
+            stderr = StringIO()
+            with (
+                mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", missing),
+                mock.patch.object(check_fixture_manifest, "fixture_hashes", return_value=({}, [])),
+                mock.patch("sys.argv", ["check_fixture_manifest.py", "--check"]),
+                redirect_stderr(stderr),
+            ):
+                status = check_fixture_manifest.main()
+
+        self.assertEqual(status, 2)
+        self.assertIn("fixture manifest does not exist", stderr.getvalue())
