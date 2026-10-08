@@ -1872,15 +1872,7 @@ impl PackageResolver {
         rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
         omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
-        for chain in omission_chains {
-            for round in *chain {
-                for entry in round.iter() {
-                    if matches!(entry.1, Some(replacements) if !replacements.is_empty()) {
-                        return Err(AttachmentError::RetainedSnapshotUnavailable);
-                    }
-                }
-            }
-        }
+        reject_omission_replacement_waves(omission_chains)?;
 
         let rebound_route = self
             .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
@@ -1907,6 +1899,7 @@ impl PackageResolver {
         expected_rebound_terminal_identity: &NestedPairTerminalRouteIdentity,
         omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
+        reject_omission_replacement_waves(omission_chains)?;
         let rebound_route = self
             .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
                 previous,
@@ -13127,4 +13120,22 @@ mod tests {
         assert_eq!(sources[1].commit().as_str(), archive_commit);
         assert!(sources[1].row().source().contains("value: 42"));
     }
+}
+
+/// Omission chains may only drop nested rebinds. A non-empty replacement wave
+/// would re-attach snapshots, so the omission phase rejects it before any
+/// route work starts.
+fn reject_omission_replacement_waves(
+    omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+) -> Result<(), AttachmentError> {
+    for chain in omission_chains {
+        for round in *chain {
+            for entry in round.iter() {
+                if matches!(entry.1, Some(replacements) if !replacements.is_empty()) {
+                    return Err(AttachmentError::RetainedSnapshotUnavailable);
+                }
+            }
+        }
+    }
+    Ok(())
 }
