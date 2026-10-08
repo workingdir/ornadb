@@ -1,0 +1,6 @@
+map.merge([("a", 1), ("b", 2)], empty_pairs) == [("a", 1), ("b", 2)]
+&& map.merge(empty_pairs, [("a", 1), ("b", 2)]) == [("a", 1), ("b", 2)]
+&& map.merge(empty_pairs, empty_pairs) == empty_pairs
+&& map.is_empty(map.merge(empty_pairs, empty_pairs))
+&& map.merge(empty_pairs, [("a", 1), ("a", 2)]) == [("a", 2)]
+&& map.keys(map.merge([("x", 1)], empty_pairs)) == ["x"]
