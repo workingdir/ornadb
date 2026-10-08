@@ -1,0 +1,5 @@
+pub table Author(id: Int) { name: Str, }
+
+fn main() {
+    Author.delete(99);
+}
