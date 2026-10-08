@@ -84,6 +84,9 @@ jobs:
       - name: Prove std map empty-side identity
         run: cargo test --locked -p orna-evaluator-v1 --test standard_library_map_empty_side_ln4y7
 
+      - name: Prove std list reverse multiset
+        run: cargo test --locked -p orna-evaluator-v1 --test standard_library_list_reverse_multiset_ln4y7
+
       - name: Prove std map keys order stability
         run: cargo test --locked -p orna-evaluator-v1 --test standard_library_map_keys_stable_ln4y7
 
