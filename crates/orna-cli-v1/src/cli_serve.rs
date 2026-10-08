@@ -3528,6 +3528,10 @@ mod tests {
             directory.path(),
             &["init", "--quiet", "--initial-branch=publish"],
         );
+        // Commits made by the publication path need an identity that does not
+        // depend on the host's global Git configuration.
+        git_succeeds(directory.path(), &["config", "user.name", "kierandrewett"]);
+        git_succeeds(directory.path(), &["config", "user.email", "kieran@drewett.dev"]);
         std::fs::write(directory.path().join("main.orna"), SERVE_FIXTURE)
             .expect("crate-local Orna source fixture");
         git_succeeds(directory.path(), &["add", "--", "main.orna"]);
