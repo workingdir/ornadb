@@ -2057,6 +2057,8 @@ fn collect_header(
             )
             .is_some()
         {
+            // A second declaration under one name is an identity collision: the
+            // symbol table keeps the first and the second is rejected.
             diagnostics.push(diag(DIAG_DUPLICATE, "duplicate declaration name"));
         }
     }
