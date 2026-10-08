@@ -712,3 +712,47 @@ class FixtureManifestCountTests(unittest.TestCase):
         pinned = {first: hashlib.sha256(b"a\n").hexdigest(), second: hashlib.sha256(b"b\n").hexdigest()}
         changed = {first: hashlib.sha256(b"x\n").hexdigest(), second: hashlib.sha256(b"y\n").hexdigest()}
         self.assertEqual(self.run_count(changed, pinned), (1, "2\n"))
+
+
+
+class FixtureManifestRowEditTests(unittest.TestCase):
+    def run_main(self, argv: list[str], hashes: dict[str, str], manifest_path: Path) -> tuple[int, str, str]:
+        stdout, stderr = StringIO(), StringIO()
+        with (
+            mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", manifest_path),
+            mock.patch.object(check_fixture_manifest, "fixture_hashes", return_value=(hashes, [])),
+            mock.patch.object(check_fixture_manifest, "fixture_roots", return_value=[manifest_path.parent]),
+            mock.patch("sys.argv", ["check_fixture_manifest.py", *argv]),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            status = check_fixture_manifest.main()
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_edited_row_drifts_then_update_pins_it_and_is_idempotent(self) -> None:
+        kept = "crates/example/tests/fixtures/a.orna"
+        edited = "crates/example/tests/fixtures/b.orna"
+        original = {kept: hashlib.sha256(b"a\n").hexdigest(), edited: hashlib.sha256(b"b\n").hexdigest()}
+        after_edit = {kept: original[kept], edited: hashlib.sha256(b"b, edited\n").hexdigest()}
+        with TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "fixture-manifest.sha256"
+            manifest_path.write_text(render_manifest(original), encoding="utf-8")
+
+            status, stdout, _ = self.run_main(["--check", "--list"], after_edit, manifest_path)
+            self.assertEqual(status, 1)
+            drift_lines = stdout.splitlines()
+            self.assertEqual(len(drift_lines), 1)
+            self.assertIn(edited, drift_lines[0])
+            self.assertNotIn(kept, drift_lines[0])
+
+            status, _, _ = self.run_main(["--update", "--quiet"], after_edit, manifest_path)
+            self.assertEqual(status, 0)
+            pinned = manifest_path.read_bytes()
+            self.assertIn(after_edit[edited].encode(), pinned)
+            self.assertNotIn(original[edited].encode(), pinned)
+
+            status, stdout, stderr = self.run_main(["--check"], after_edit, manifest_path)
+            self.assertEqual((status, stderr), (0, ""))
+
+            self.run_main(["--update", "--quiet"], after_edit, manifest_path)
+            self.assertEqual(manifest_path.read_bytes(), pinned)
