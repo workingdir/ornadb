@@ -3139,6 +3139,57 @@ mod tests {
     }
 
     #[test]
+    fn playground_catalogue_pages_one_fixture_row_and_rejects_bad_pages() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git_succeeds(directory.path(), &["init", "--quiet"]);
+        let route_directory = directory.path().join("playground/Route");
+        std::fs::create_dir_all(&route_directory).expect("create route rows");
+        std::fs::write(
+            route_directory
+                .join("route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373.orna"),
+            include_str!("../tests/fixtures/playground-route-catalogue-page.orna"),
+        )
+        .expect("write route row");
+        git_succeeds(directory.path(), &["add", "playground/Route"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add one catalogue route for paging",
+            ],
+        );
+        let identity = RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        };
+
+        let first = playground_catalogue_page(directory.path(), identity, "");
+        assert_eq!(first.status, 200);
+        let first = String::from_utf8(first.body).expect("HTML body is UTF-8");
+        assert!(first.contains("/playground/assets/examples.css"));
+        assert!(!first.contains("Next page"));
+
+        let past_end = playground_catalogue_page(directory.path(), identity, "page=2");
+        assert_eq!(past_end.status, 200);
+        let past_end = String::from_utf8(past_end.body).expect("HTML body is UTF-8");
+        assert!(!past_end.contains("/playground/assets/examples.css"));
+
+        for query in ["page=0", "page=", "page=x", "size=2"] {
+            assert_eq!(
+                playground_catalogue_page(directory.path(), identity, query).status,
+                400,
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn playground_example_catalog_rows_decode_for_asset_namespace() {
         const ROUTE: &str =
             include_str!("../tests/fixtures/playground-route-example-catalog-style.orna");
