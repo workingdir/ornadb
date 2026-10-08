@@ -1,0 +1,1 @@
+sys.blob.capture_file("/scratch-root", "pixel.png", 65536)
