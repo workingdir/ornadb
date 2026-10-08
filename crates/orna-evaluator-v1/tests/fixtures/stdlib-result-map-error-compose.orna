@@ -1,0 +1,4 @@
+std.result.contains_error(std.result.map_error(err_value, failure => "mapped"), "mapped")
+&& !std.result.contains_error(std.result.map_error(err_value, failure => "mapped"), "failure")
+&& !std.result.contains_error(std.result.map_error(ok_value, failure => "mapped"), "mapped")
+&& std.result.ok(std.result.map_error(ok_value, failure => "mapped")) == Some(4)
