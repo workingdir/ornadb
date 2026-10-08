@@ -300,6 +300,21 @@ impl OfflineCopy {
     /// payload has been verified. Progress is reported in bundle order.
     pub fn import_plan_with_progress(
         &self,
+        progress: impl FnMut(OfflineImportProgress),
+    ) -> Result<OfflineImportPlan, OfflineCopyError> {
+        self.import_plan_limited_with_progress(self.rows.len(), progress)
+    }
+
+    /// Verifies and plans only the first `limit` rows, in bundle order. The
+    /// history is checked and returned in full, because the bundle does not
+    /// record which commit produced which row.
+    pub fn import_plan_limited(&self, limit: usize) -> Result<OfflineImportPlan, OfflineCopyError> {
+        self.import_plan_limited_with_progress(limit, |_| {})
+    }
+
+    fn import_plan_limited_with_progress(
+        &self,
+        limit: usize,
         mut progress: impl FnMut(OfflineImportProgress),
     ) -> Result<OfflineImportPlan, OfflineCopyError> {
         if self
@@ -311,12 +326,13 @@ impl OfflineCopy {
                 "history is not strictly ordered",
             ));
         }
-        let mut rows = Vec::with_capacity(self.rows.len());
-        for (index, metadata) in self.rows.iter().enumerate() {
+        let selected = &self.rows[..self.rows.len().min(limit)];
+        let mut rows = Vec::with_capacity(selected.len());
+        for (index, metadata) in selected.iter().enumerate() {
             let payload = self.hydrate(&metadata.key)?;
             progress(OfflineImportProgress {
                 verified: index + 1,
-                total: self.rows.len(),
+                total: selected.len(),
                 key: metadata.key.clone(),
                 bytes: metadata.length,
             });
