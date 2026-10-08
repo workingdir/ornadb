@@ -439,6 +439,33 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
 }
 
 #[tokio::test]
+async fn partial_mutation_rollback_keeps_the_empty_batch_for_a_failed_request() {
+    let (_temp, repository) = durable_repository();
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let identity = RuntimeIdentity {
+        database_id: [61; 16],
+        repository_id: [62; 16],
+    };
+    let outcome = evaluator
+        .execute_source(
+            &repository,
+            identity,
+            [63; 16],
+            [64; 32],
+            &durable_source(
+                "TXN-PARTIAL",
+                include_str!("fixtures/durable-partial-mutation-rollback.orna"),
+            ),
+        )
+        .await
+        .expect("durable partial rollback execution");
+    assert!(
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+    );
+    assert_failed_request_left_no_rows(&repository, identity, "Note", [64; 32]).await;
+}
+
+#[tokio::test]
 async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate_rows() {
     let valid_source = durable_source(
         "ASSERT-FUNCTION-VALUE-VALID",
