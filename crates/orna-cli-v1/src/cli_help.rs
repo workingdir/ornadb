@@ -19,6 +19,13 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  fetch [REMOTE] [BRANCH]",
     "  serve [--port PORT]",
     "  diff [GIT_DIFF_ARGS...]",
+    "Editor tooling:",
+    "  semantic-legend [--json|--markdown|--format csv|--quiet] [--limit N]",
+    "  semantic-legend                  token types and modifiers as text",
+    "  semantic-legend --limit 5        first five token types",
+    "  semantic-legend --quiet          bare names, one per line, for scripts",
+    "  semantic-legend --markdown       legend table with hover samples",
+    "  semantic-legend --format csv     kind,index,name,sample rows",
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];
 
@@ -40,5 +47,20 @@ mod tests {
         assert!(HELP_LINES.contains(&"  fetch [REMOTE] [BRANCH]"));
         assert!(HELP_LINES.contains(&"  diff [GIT_DIFF_ARGS...]"));
         assert!(HELP_LINES.contains(&"  status [--porcelain|--short|--format human|short|json]"));
+    }
+
+    #[test]
+    fn help_documents_every_semantic_legend_mode_with_an_example() {
+        let index = HELP_LINES
+            .iter()
+            .position(|line| *line == "Editor tooling:")
+            .expect("editor tooling group");
+        let group = &HELP_LINES[index + 1..];
+        for mode in ["--json", "--markdown", "--format csv", "--quiet", "--limit"] {
+            assert!(
+                group.iter().any(|line| line.contains(mode)),
+                "help lacks an example for {mode}"
+            );
+        }
     }
 }
