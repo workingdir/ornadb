@@ -1748,6 +1748,15 @@ mod graph_bridge_tests {
         assert!(total >= 3, "store root, relation map, and row leaf are reachable");
         let again = graph.object_stats(&graph.open_read_scope().unwrap()).unwrap();
         assert_eq!(again, stats, "object counts are deterministic");
+        let json = stats.to_json();
+        assert!(
+            json.starts_with("{\"nodes\":{\"StoreRoot\":1,"),
+            "store root sorts first: {json}"
+        );
+        assert!(json.ends_with(&format!(
+            "}},\"blob_references\":{}}}",
+            stats.blob_references()
+        )));
     }
 }
 
