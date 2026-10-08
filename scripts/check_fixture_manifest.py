@@ -221,6 +221,11 @@ exit status:
         help="suppress success output; drift and scan errors are still reported",
     )
     parser.add_argument(
+        "--roots",
+        action="store_true",
+        help="after the success summary, print each fixture root path, one per line",
+    )
+    parser.add_argument(
         "--format",
         choices=("text", "json", "tsv"),
         default="text",
@@ -275,7 +280,8 @@ exit status:
             print(f"fixture manifest --since failed: {error}", file=sys.stderr)
             return 2
         errors = only_changed(errors, changed)
-    trees = len(fixture_roots(WORKSPACE_ROOT))
+    roots = fixture_roots(WORKSPACE_ROOT)
+    trees = len(roots)
     if args.format == "tsv":
         print("ok\tfiles\ttrees\terrors")
         print(f"{str(not errors).lower()}\t{len(hashes)}\t{trees}\t{len(errors)}")
@@ -307,6 +313,9 @@ exit status:
 
     if not args.quiet:
         print(f"fixture manifest matches {len(hashes)} files across {trees} trees")
+        if args.roots:
+            for root in roots:
+                print(root.relative_to(WORKSPACE_ROOT).as_posix())
     return 0
 
 
