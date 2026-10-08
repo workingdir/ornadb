@@ -74,7 +74,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
             _ => SONG_IMPORT_FIXTURE,
         };
         let expression = import_expression(fixture, source.path());
-        import_media(&state, writer, &mut bindings, &expression, key, ordinal).await;
+        import_media(&state, writer, &mut bindings, &expression, key, ordinal, true).await;
     }
 
     // Source files are gone; listing must still answer from committed rows.
@@ -124,6 +124,21 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     assert!(listing.iter().all(|row| !row.hydrated));
 
     assert_song_revision_history(&repository, &directory, relation_id);
+
+    // Edit: commit the song key again with the pixel payload. The next listing
+    // reads the replacement row at once, still without fetching media bytes.
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("pixel.png"),
+        source.path().join("pixel.png"),
+    )
+    .unwrap();
+    let edit = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &edit, "song", 0x90, false).await;
+    let edited = list_media(&state).await;
+    let song = edited.iter().find(|row| row.key == b"song").unwrap();
+    assert_eq!(song.media_type, "image/png");
+    assert_eq!(song.length, 73);
+    assert!(!song.hydrated, "edited listing must not hydrate the song");
 
     drop(directory);
 }
@@ -182,6 +197,7 @@ async fn import_media(
     expression: &str,
     key: &str,
     ordinal: u8,
+    insert_only: bool,
 ) {
     let request_identity = RequestIdentity {
         session_id: [ordinal; 16],
@@ -211,12 +227,12 @@ async fn import_media(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let mutation = TableMutation::insert(
-        [ordinal + 3; 16],
-        "media",
-        key.as_bytes().to_vec(),
-        Vec::new(),
-    )
+    let (id, key, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
+    let mutation = if insert_only {
+        TableMutation::insert(id, "media", key, row)
+    } else {
+        TableMutation::new(id, "media", key, Some(row))
+    }
     .unwrap()
     .with_orp_blob_binding(binding)
     .unwrap();
