@@ -3,7 +3,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use lsp_types::{
@@ -189,6 +189,10 @@ pub(crate) struct EditorSymbol {
 struct StandardSymbol {
     module: String,
     symbol: EditorSymbol,
+    /// Workspace-relative standard source path, used to build its Location URI.
+    path: String,
+    /// The declaring standard source text, shared by every symbol in the file.
+    source: Arc<str>,
 }
 
 #[derive(Debug, Default)]
@@ -210,6 +214,7 @@ fn standard_library() -> &'static StandardLibraryIndex {
             let Ok(tokens) = lex(&source) else {
                 continue;
             };
+            let shared_source: Arc<str> = Arc::from(source.as_str());
             let mut prefix = String::new();
             for segment in module.split('.') {
                 if !prefix.is_empty() {
@@ -228,6 +233,8 @@ fn standard_library() -> &'static StandardLibraryIndex {
                         symbol_for_item(item, &source, &tokens).map(|symbol| StandardSymbol {
                             module: module.clone(),
                             symbol,
+                            path: path.clone(),
+                            source: Arc::clone(&shared_source),
                         })
                     }),
             );
@@ -1283,11 +1290,69 @@ pub fn definition(
         });
     }
     let symbols = declaration_symbols(parse, &document.text);
-    let symbol = symbol_for_name(&symbols, &token.text)?;
-    Some(Location {
-        uri: document.uri.clone(),
-        range: mapper.range(&symbol.selection),
-    })
+    if let Some(symbol) = symbol_for_name(&symbols, &token.text) {
+        return Some(Location {
+            uri: document.uri.clone(),
+            range: mapper.range(&symbol.selection),
+        });
+    }
+    let standard = standard_symbol_at(parse, &document.text, &token)?;
+    Some(standard_location(standard))
+}
+
+/// Returns the declaration Location of a standard-library symbol in its own
+/// pinned source. The URI is the stable `orna-std:` path, not a host file.
+fn standard_location(standard: &StandardSymbol) -> Location {
+    let mapper = PositionMapper::new(&standard.source);
+    Location {
+        uri: standard_uri(&standard.path),
+        range: mapper.range(&standard.symbol.selection),
+    }
+}
+
+fn standard_uri(path: &str) -> Uri {
+    format!("orna-std:///{path}")
+        .parse()
+        .expect("standard source paths form valid orna-std URIs")
+}
+
+/// References to an imported or qualified standard-library symbol: every
+/// unshadowed occurrence in this document that resolves to the same
+/// declaration. A local binding of the same name is never a reference.
+fn standard_references(
+    document: &Document,
+    parse: &EditorParse,
+    mapper: &PositionMapper<'_>,
+    token: &Token,
+    include_declaration: bool,
+) -> Vec<Location> {
+    let Some(target) = standard_symbol_at(parse, &document.text, token) else {
+        return Vec::new();
+    };
+    let local_references = crate::locals::resolved_reference_spans(&parse.value);
+    let mut locations = Vec::new();
+    for (occurrence, span) in reference_occurrences(&parse.value, &document.text) {
+        if local_references.contains(&(span.start, span.end)) {
+            continue;
+        }
+        let occurrence_token = Token {
+            kind: token.kind.clone(),
+            text: occurrence.clone(),
+            span: span.clone(),
+        };
+        let resolves_here = standard_symbol_at(parse, &document.text, &occurrence_token)
+            .is_some_and(|found| found.module == target.module && found.symbol.name == target.symbol.name);
+        if resolves_here {
+            locations.push(Location {
+                uri: document.uri.clone(),
+                range: mapper.range(&span),
+            });
+        }
+    }
+    if include_declaration {
+        locations.push(standard_location(target));
+    }
+    locations
 }
 
 pub fn references(
@@ -1318,7 +1383,13 @@ pub fn references(
     }
     let symbols = declaration_symbols(parse, &document.text);
     let Some(symbol) = symbol_for_name(&symbols, &token.text) else {
-        return Vec::new();
+        return standard_references(
+            document,
+            parse,
+            mapper,
+            &token,
+            include_declaration,
+        );
     };
     let name = normalized_identifier(&symbol.name);
     let local_references = crate::locals::resolved_reference_spans(&parse.value);
