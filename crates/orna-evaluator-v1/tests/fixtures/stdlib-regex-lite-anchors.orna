@@ -1,0 +1,5 @@
+pub fn anchored_pattern(): Str = "^ab$";
+
+pub fn anchored_text(): Str = "ab";
+
+pub fn embedded_text(): Str = "xab";
