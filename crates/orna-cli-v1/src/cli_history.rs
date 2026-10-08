@@ -200,18 +200,28 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
             let entries: Vec<serde_json::Value> = revisions
                 .iter()
                 .map(|revision| {
-                    serde_json::json!({
-                        "commit": revision.commit().to_hex(),
-                        "tree": revision.tree().to_hex(),
-                        "present": revision.present(),
-                        "author": revision.author(),
-                    })
+                    revision_json(
+                        &revision.commit().to_hex(),
+                        &revision.tree().to_hex(),
+                        revision.present(),
+                        revision.author(),
+                    )
                 })
                 .collect();
             println!("{}", serde_json::Value::Array(entries));
         }
     }
     Ok(())
+}
+
+/// One revision as a JSON object: commit, root tree, presence and author.
+fn revision_json(commit: &str, tree: &str, present: bool, author: &str) -> serde_json::Value {
+    serde_json::json!({
+        "commit": commit,
+        "tree": tree,
+        "present": present,
+        "author": author,
+    })
 }
 
 /// Final human line: total revisions and how many carry the row.
