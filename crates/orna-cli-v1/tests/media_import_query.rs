@@ -6,7 +6,7 @@ use orna_runtime_v1::{
     RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use orna_value_v1::decode_rov3_blob_metadata;
+use orna_value_v1::{BlobMetadataFilter, decode_rov3_blob_metadata};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -83,6 +83,22 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         let bytes = std::fs::read(Path::new(MEDIA_FIXTURES).join(file)).unwrap();
         assert_eq!(row.sha256, <[u8; 32]>::from(Sha256::digest(&bytes)));
     }
+
+    // Filters select rows from payload-free metadata; nothing is hydrated.
+    let song = || vec![b"song".to_vec()];
+    let by_type = BlobMetadataFilter::new().with_media_type("audio/wav");
+    assert_eq!(filter_media(&state, &by_type).await, song());
+    let by_size = BlobMetadataFilter::new().with_min_length(1000);
+    assert_eq!(filter_media(&state, &by_size).await, song());
+    let small_png = BlobMetadataFilter::new()
+        .with_media_type("image/png")
+        .with_max_length(100);
+    assert_eq!(
+        filter_media(&state, &small_png).await,
+        vec![b"image".to_vec()]
+    );
+    let too_small = BlobMetadataFilter::new().with_max_length(10);
+    assert!(filter_media(&state, &too_small).await.is_empty());
 
     assert_song_revision_history(&repository, &directory, relation_id);
 
@@ -192,6 +208,17 @@ async fn import_media(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
+}
+
+async fn filter_media(state: &RuntimeState, filter: &BlobMetadataFilter) -> Vec<Vec<u8>> {
+    state
+        .committed_table_rows("media")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|(_, row)| filter.matches(&decode_rov3_blob_metadata(row).unwrap()))
+        .map(|(key, _)| key)
+        .collect()
 }
 
 /// Lists every committed media row as payload-free metadata. Rows are decoded

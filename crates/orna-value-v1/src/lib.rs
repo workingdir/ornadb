@@ -1829,6 +1829,48 @@ pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
     })
 }
 
+/// Listing filter over payload-free Blob metadata. Unset fields match every
+/// row. The media type is compared exactly against the canonical MIME-1 form
+/// that `BlobMetadata::media_type` reports.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BlobMetadataFilter {
+    media_type: Option<String>,
+    min_length: Option<u64>,
+    max_length: Option<u64>,
+}
+
+impl BlobMetadataFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_media_type(mut self, media_type: impl Into<String>) -> Self {
+        self.media_type = Some(media_type.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn with_min_length(mut self, bytes: u64) -> Self {
+        self.min_length = Some(bytes);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_length(mut self, bytes: u64) -> Self {
+        self.max_length = Some(bytes);
+        self
+    }
+
+    pub fn matches(&self, metadata: &BlobMetadata) -> bool {
+        self.media_type
+            .as_deref()
+            .is_none_or(|media_type| metadata.media_type() == media_type)
+            && self.min_length.is_none_or(|min| metadata.length() >= min)
+            && self.max_length.is_none_or(|max| metadata.length() <= max)
+    }
+}
+
 pub fn encode_rov3(blob: &Blob) -> Result<Vec<u8>> {
     blob.to_context_value(ValueFormat::Rov3)?.encode()
 }
