@@ -118,6 +118,47 @@ pub fn describe_pins_csv<'a>(pins: impl IntoIterator<Item = &'a ProtectedContent
     out
 }
 
+/// The column names for `describe_pins_tsv`, in the order each row prints
+/// them.
+pub const PIN_TSV_HEADER: &str = "pin_id\trepository_id\tdatabase_id\towner_id\tdescriptor_algorithm\tdescriptor_oid\tcontent_length\tcontent_sha256";
+
+/// Describes one protected pin as a single TSV row with the columns in
+/// `PIN_TSV_HEADER`. Every value is a hex string, a decimal number, or a fixed
+/// algorithm name, so no escaping is needed.
+pub fn describe_pin_tsv(pin: &ProtectedContentPin) -> String {
+    describe_transfer_tsv(&pin.transfer_record())
+}
+
+/// Describes the transfer record as one TSV row with the same fields as
+/// `describe_transfer`.
+pub fn describe_transfer_tsv(transfer: &ProtectedContentTransfer) -> String {
+    let identity = transfer.content_identity();
+    format!(
+        "{}\t{}\t{}\t{}\t{:?}\t{}\t{}\t{}",
+        hex(transfer.pin_id()),
+        hex(transfer.repository_id()),
+        hex(transfer.database_id()),
+        hex(transfer.owner_id()),
+        transfer.descriptor_oid().algorithm(),
+        transfer.descriptor_oid().to_hex(),
+        identity.length(),
+        hex(&identity.sha256()),
+    )
+}
+
+/// Describes every pin as TSV: the header row followed by one row per pin, in
+/// order, each terminated by a newline.
+pub fn describe_pins_tsv<'a>(pins: impl IntoIterator<Item = &'a ProtectedContentPin>) -> String {
+    let mut out = String::new();
+    out.push_str(PIN_TSV_HEADER);
+    out.push('\n');
+    for pin in pins {
+        out.push_str(&describe_pin_tsv(pin));
+        out.push('\n');
+    }
+    out
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
