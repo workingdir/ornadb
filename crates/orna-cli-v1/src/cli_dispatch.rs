@@ -97,7 +97,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         }
         Command::Serve { port } => cli_serve::run(&parsed.endpoint, port),
         Command::Diff(ref arguments) => run_git_diff(arguments),
-        Command::History(ref arguments) => cli_history::run(arguments),
+        Command::History(arguments) => cli_history::run(&parsed.endpoint, &arguments),
         Command::Import(ref arguments) => cli_import::run(arguments),
         Command::Status {
             format: StatusFormat::Human,
