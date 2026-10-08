@@ -74,7 +74,16 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
             _ => SONG_IMPORT_FIXTURE,
         };
         let expression = import_expression(fixture, source.path());
-        import_media(&state, writer, &mut bindings, &expression, key, ordinal, true).await;
+        import_media(
+            &state,
+            writer,
+            &mut bindings,
+            &expression,
+            key,
+            ordinal,
+            true,
+        )
+        .await;
     }
 
     // Source files are gone; listing must still answer from committed rows.
