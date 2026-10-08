@@ -103,6 +103,7 @@ impl Blob {
                 role,
                 family: MediaFamily::of(self.annotation()),
                 length: self.length(),
+                expected: BlobRole::for_annotation(self.annotation()),
             })
         }
     }
@@ -205,7 +206,7 @@ mod tests {
         let error = value.blob_as(BlobRole::Video).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "OVB-2 Blob role Video does not admit MIME family image (7 bytes)"
+            "OVB-2 Blob role Video does not admit MIME family image (7 bytes); admit as Image or Opaque"
         );
     }
 
