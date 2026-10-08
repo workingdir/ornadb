@@ -189,9 +189,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--format",
-        choices=("text", "json"),
+        choices=("text", "json", "tsv"),
         default="text",
-        help="with --check, output format; json writes one result object to stdout",
+        help="with --check, output format; json writes one object, tsv writes a header and one row",
     )
     parser.add_argument(
         "--json",
@@ -243,6 +243,10 @@ def main() -> int:
             return 2
         errors = only_changed(errors, changed)
     trees = len(fixture_roots(WORKSPACE_ROOT))
+    if args.format == "tsv":
+        print("ok\tfiles\ttrees\terrors")
+        print(f"{str(not errors).lower()}\t{len(hashes)}\t{trees}\t{len(errors)}")
+        return 1 if errors else 0
     if args.format == "json":
         print(
             json.dumps(
