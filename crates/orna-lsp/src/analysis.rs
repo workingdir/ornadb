@@ -902,6 +902,9 @@ pub(crate) fn normalized_identifier(text: &str) -> String {
         .unwrap_or_else(|| text.to_owned())
 }
 
+/// Documentation shared by keyword hover cards and keyword completion items.
+const KEYWORD_DOCUMENTATION: &str = "Reserved word of the Orna language (ORNA-LEX-007).";
+
 fn keyword_at(text: &str, byte: usize) -> Option<Keyword> {
     lex(text).ok()?.into_iter().find_map(|token| match token.kind {
         TokenKind::Keyword(keyword) if token.span.start <= byte && byte < token.span.end => {
@@ -955,7 +958,7 @@ pub fn hover(
             keyword.spelling(),
             None,
             &[],
-            Some("Reserved word of the Orna language (ORNA-LEX-007)."),
+            Some(KEYWORD_DOCUMENTATION),
         ));
     }
     let token = token_at(&document.text, byte)?;
@@ -1654,7 +1657,10 @@ pub fn completion_at(
                 completions.push(CompletionItem {
                     label: name.to_owned(),
                     kind: Some(CompletionItemKind::KEYWORD),
-                    detail: Some("Orna 1.0 keyword".to_owned()),
+                    detail: Some("keyword".to_owned()),
+                    documentation: Some(lsp_types::Documentation::String(
+                        KEYWORD_DOCUMENTATION.to_owned(),
+                    )),
                     insert_text: Some(name.to_owned()),
                     sort_text: Some(completion_sort_text(&prefix_key, 2, &key)),
                     ..CompletionItem::default()
