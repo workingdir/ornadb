@@ -2440,6 +2440,7 @@ a2e9d3b162aa79a4c4b6b3badc7fcc508bc602d5468ad022035504ec57fa73c9  crates/orna-ev
 602352fa36c9bf07e23b35d81406cc3353edc6350a013437048b1a86e961827d  crates/orna-evaluator-v1/tests/fixtures/stdlib-lazy-zip-with-xef6t.orna
 66e60288a0f14f9f9faa766adf6557551c2e11af35d69f22f559923b72cca6f4  crates/orna-evaluator-v1/tests/fixtures/stdlib-list-contract-i7bat.orna
 300d3c76483e316f921d67af5140a5dc43a1fb53c2c91b099b575bad8bb3b8b3  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-boundary-pins-ln4y7.orna
+d0f433c44de5a4cb18f50181177eca0ce2096de8dfcf1436aaf3ebce8649e4ad  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-conflict-chain-ln4y7.orna
 914b918806ea7d6730cb1a9380b42b5928917cc4ec680e3e3b501c17827e8000  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-conflicts-ln4y7.orna
 df3d028daf2148cf175c3e73bc06468771b0f1ffe0e0cbaf9bc543defc5cd68c  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-contract-i7bat.orna
 bd27c37e3abf5adaa3f80779d7efe2f4708234f0793860bbe435e37d31c9ea30  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-empty-side-ln4y7.orna
@@ -2582,6 +2583,7 @@ f5251c5ed3a57c1c4e675c0a7ae77c9a87952a1b86150f8b98e7749dd3f9984f  crates/orna-ev
 46e8f4dc56cc27c44734d20b18e41b9e86c582c7055e5ea14ee4a7906a8a3255  crates/orna-evaluator-v1/tests/fixtures/stdlib-record-order-roundtrip-o3yue.orna
 6149c88096f051cfa9de7081f850959eadd46882fc58edaef7c1511dc514dfa7  crates/orna-evaluator-v1/tests/fixtures/stdlib-reflection-without-snapshot-y3xo7.orna
 f8cd986ec60ba51abd320d83ce4af984351b65a396ac5e31941b78d319982263  crates/orna-evaluator-v1/tests/fixtures/stdlib-regex-compile-g8rd3.orna
+cb99939043691b91ade0a1fff3a3050c1bf37ea50bbf82de8b4a853685ef03c1  crates/orna-evaluator-v1/tests/fixtures/stdlib-regex-lite-anchors.orna
 43e41eca0c3548530c710ae933ad0df846692828372c12d41d2c9a95f128683d  crates/orna-evaluator-v1/tests/fixtures/stdlib-regex-lite-bounded-class.orna
 d49568e97f01c506ee79145333bdbe46d3eeb07d175d8898426604de5434f47a  crates/orna-evaluator-v1/tests/fixtures/stdlib-regex-utility-capture-column-w3f7m.orna
 c083ae391fbb8b3ac896d9c2d9a36845d86893deff2725e12b05b6f9bde442ae  crates/orna-evaluator-v1/tests/fixtures/stdlib-regex-utility-captures-w3f7m.orna
@@ -3305,6 +3307,7 @@ c760f77a909070dfef8bd78019889c88aee5f22a5139ab0865ae074bd2f6da88  crates/orna-ls
 cd04e763ea6bd21a7201fc468207f68dd3de91ad4ce1e1841288aab86c0d0fe9  crates/orna-lsp/tests/fixtures/call-hierarchy-depth-malformed-v1.orna
 1d2303e0fa156558894a9ef7821e053c9e4658428b32c80df2c6c2fabfbce76c  crates/orna-lsp/tests/fixtures/call-hierarchy-depth-provider-v1.orna
 c75bbee709cc649cc9025108885f1ffae279b05b13edfd66647c6f56003b77d3  crates/orna-lsp/tests/fixtures/call-v1.orna
+48192399bc07aec2a77ce8acb9f810d4427fbdbd1b282141564bc9f442388859  crates/orna-lsp/tests/fixtures/diagnostic-clean-v1.orna
 c495e288bad67eb7ccd2a0f52580b2dde835d84c45bb85ab675aab178b59654d  crates/orna-lsp/tests/fixtures/diagnostic-keyword-name-v1.orna
 415bdfd6d8187cea64dccd750f93055025db74f13f49919190ce0ae830014460  crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna
 e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/document-link-target-v1.orna
