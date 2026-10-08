@@ -698,6 +698,7 @@ bbda38941cbd15e87f0a2fcddabced4509e424abcef154abf58217989cefd1ba  crates/orna-co
 a25f206ab52b5501768e9686f46e848dd081a4f93812afe8e5962bbbbb18f087  crates/orna-conformance-v1/tests/fixtures/relation-join-order-reversed.orna
 1bc40e19fc96ef306ea38fcc03cdf7fc0b305748b8545e2a87c7909b33bd8bdf  crates/orna-conformance-v1/tests/fixtures/relation-list-edges-cycle.orna
 a25f206ab52b5501768e9686f46e848dd081a4f93812afe8e5962bbbbb18f087  crates/orna-conformance-v1/tests/fixtures/relation-list-edges-reversed.orna
+c8ed19ca4b781dc329eabf6f217b9111c5dd9db977ed2dfbbd8b0ddc200b374c  crates/orna-conformance-v1/tests/fixtures/relation-many-edges.orna
 071e596f6d851fdd4cc9d8ccdacfff17de3d6d9483206afa1793ad016930ea6f  crates/orna-conformance-v1/tests/fixtures/relation-one-absence-rollback.orna
 2d2fdad3b695b7eec8bbfa71439b9c034002fc9ee4b12adcdb3243e7f0cf3ac8  crates/orna-conformance-v1/tests/fixtures/relation-one-candidate-row.orna
 f6d45ef49f78362ef10687de44e6b32a355529ba63a81785b15c18e67f2d2a76  crates/orna-conformance-v1/tests/fixtures/relation-one-filtered-multiple.orna
