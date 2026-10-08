@@ -62,8 +62,8 @@ pub enum Error {
     InvalidRange,
     MissingDescriptor,
     InvalidContext,
-    /// The Blob's MIME family is closed (see `MediaFamily`), so it may be named
-    /// here without echoing any caller-supplied media type.
+    /// The Blob's MIME family is a closed set (see `MediaFamily`), so naming it
+    /// does not echo any caller-supplied media type.
     RoleMismatch {
         role: BlobRole,
         family: Option<MediaFamily>,
@@ -78,10 +78,7 @@ impl fmt::Display for Error {
         match self {
             Self::RoleMismatch { role, family } => {
                 let family = family.map_or("unknown", MediaFamily::name);
-                write!(
-                    f,
-                    "OVB-2 Blob role {role:?} does not admit MIME family {family}"
-                )
+                write!(f, "OVB-2 Blob role {role:?} does not admit MIME family {family}")
             }
             _ => write!(f, "OVB-1 {self:?}"),
         }
@@ -158,7 +155,10 @@ impl fmt::Debug for Value {
         match raw_debug_value(&self.0, 0, false) {
             Ok(raw) => formatter.debug_tuple("Value").field(&raw).finish(),
             // Invalid internal markers are never printed with their payload.
-            Err(_) => formatter.debug_tuple("Value").field(&"<redacted>").finish(),
+            Err(_) => formatter
+                .debug_tuple("Value")
+                .field(&"<redacted>")
+                .finish(),
         }
     }
 }
@@ -434,8 +434,12 @@ impl ContentReference {
 /// is retained only inside an owner-issued [`Format3Context`]; callers cannot
 /// attach one to a raw OID or digest.
 pub trait BlobResolver: Send + Sync {
-    fn read_range(&self, reference: &ContentReference, offset: u64, length: u64)
-    -> Result<Vec<u8>>;
+    fn read_range(
+        &self,
+        reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>>;
 }
 
 /// The single published format-3 coordinate set. It is intentionally closed:
@@ -779,9 +783,9 @@ fn validate_snapshot_pin(snapshot: &Snapshot) -> Result<()> {
                 return Err(Error::InvalidContext);
             }
         }
-        Snapshot::Commit { algorithm, oid, .. } if oid.len() != algorithm.oid_width() => {
-            return Err(Error::InvalidContext);
-        }
+        Snapshot::Commit {
+            algorithm, oid, ..
+        } if oid.len() != algorithm.oid_width() => return Err(Error::InvalidContext),
         Snapshot::Commit { .. } => {}
     }
     Ok(())
@@ -1095,7 +1099,9 @@ impl Blob {
         match &self.content {
             BlobContent::Inline(bytes) => {
                 let start = usize::try_from(offset).map_err(|_| Error::Limit)?;
-                let end = start.checked_add(expected as usize).ok_or(Error::Limit)?;
+                let end = start
+                    .checked_add(expected as usize)
+                    .ok_or(Error::Limit)?;
                 Ok(bytes
                     .get(start..end)
                     .ok_or(Error::ContentDigestMismatch)?
@@ -1116,9 +1122,7 @@ impl Blob {
     pub fn read_to_end(&self) -> Result<Vec<u8>> {
         let capacity = usize::try_from(self.length()).map_err(|_| Error::Limit)?;
         let mut result = Vec::new();
-        result
-            .try_reserve_exact(capacity)
-            .map_err(|_| Error::Limit)?;
+        result.try_reserve_exact(capacity).map_err(|_| Error::Limit)?;
         let mut offset = 0_u64;
         let chunk_limit = self.read_chunk_limit();
         while offset < self.length() {
@@ -1284,9 +1288,7 @@ pub fn encode_ovb2_bounded(blob: &Blob, max_encoded_bytes: u64) -> Result<Vec<u8
     blob.preflight_ovb2(encoded_len, max_encoded_bytes)?;
     let capacity = usize::try_from(encoded_len).map_err(|_| Error::Limit)?;
     let mut encoded = Vec::new();
-    encoded
-        .try_reserve_exact(capacity)
-        .map_err(|_| Error::Limit)?;
+    encoded.try_reserve_exact(capacity).map_err(|_| Error::Limit)?;
     blob.write_ovb2_preflighted(&mut encoded, &prefix, &suffix, encoded_len)?;
     Ok(encoded)
 }
@@ -1402,7 +1404,10 @@ impl MediaAnnotation {
         } else {
             None
         };
-        Ok(Self { media_type, suffix })
+        Ok(Self {
+            media_type,
+            suffix,
+        })
     }
 
     pub fn media_type(&self) -> &str {
@@ -1415,13 +1420,7 @@ impl MediaAnnotation {
 
     pub fn selected_suffix(&self) -> &str {
         self.suffix.as_deref().unwrap_or_else(|| {
-            media_suffixes(
-                self.media_type
-                    .split(';')
-                    .next()
-                    .unwrap_or(&self.media_type),
-            )
-            .0
+            media_suffixes(self.media_type.split(';').next().unwrap_or(&self.media_type)).0
         })
     }
 }
@@ -1543,9 +1542,7 @@ pub fn normalize_media_type(media_type: &str) -> Result<String> {
 }
 
 pub fn selected_suffix(media_type: &str, suffix: Option<&str>) -> Result<String> {
-    Ok(MediaAnnotation::new(media_type, suffix)?
-        .selected_suffix()
-        .to_owned())
+    Ok(MediaAnnotation::new(media_type, suffix)?.selected_suffix().to_owned())
 }
 
 fn mime_token_end(bytes: &[u8], start: usize) -> Option<usize> {
@@ -1560,24 +1557,7 @@ fn mime_token_end(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 fn is_mime_token(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(
-            byte,
-            b'!' | b'#'
-                | b'$'
-                | b'%'
-                | b'&'
-                | b'\''
-                | b'*'
-                | b'+'
-                | b'-'
-                | b'.'
-                | b'^'
-                | b'_'
-                | b'`'
-                | b'|'
-                | b'~'
-        )
+    byte.is_ascii_alphanumeric() || matches!(byte, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
 }
 
 fn valid_mime_token(bytes: &[u8]) -> bool {
@@ -1586,13 +1566,9 @@ fn valid_mime_token(bytes: &[u8]) -> bool {
 
 fn valid_suffix(value: &str) -> bool {
     !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || byte == b'_'
-                || byte == b'-'
-                || byte == b'.'
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-' || byte == b'.')
         && !value.split('.').any(str::is_empty)
 }
 
@@ -1678,7 +1654,11 @@ impl ContextValue {
         Self::new_with_context(format, blob.to_raw(format)?, context)
     }
 
-    pub fn new_in_context(context: &Format3Context, format: ValueFormat, raw: Raw) -> Result<Self> {
+    pub fn new_in_context(
+        context: &Format3Context,
+        format: ValueFormat,
+        raw: Raw,
+    ) -> Result<Self> {
         Self::new_with_context(format, raw, Some(context.clone()))
     }
 
@@ -1843,19 +1823,14 @@ pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
         return Err(Error::InvalidProfile);
     };
     let fields = array(&payload)?;
-    let [
-        length,
-        sha,
-        Raw::Text(media_type),
-        suffix,
-        Raw::Bytes(_descriptor),
-    ] = fields.as_slice()
+    let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(_descriptor)] = fields.as_slice()
     else {
         return Err(Error::InvalidTag);
     };
     let identity = ContentIdentity::new(int_u64(length)?, bytes32(sha)?)?;
     let suffix = raw_suffix(suffix)?;
-    let annotation = MimeRegistry::mime1().canonical_annotation(media_type, suffix.as_deref())?;
+    let annotation =
+        MimeRegistry::mime1().canonical_annotation(media_type, suffix.as_deref())?;
     Ok(BlobMetadata {
         media_type: annotation.media_type().to_owned(),
         suffix: annotation.suffix().map(str::to_owned),
@@ -1932,7 +1907,10 @@ pub fn decode_sov3_in_context(bytes: &[u8], context: &Format3Context) -> Result<
 }
 
 pub fn semantic_digest(domain: &str, value: &ContextValue) -> Result<[u8; 32]> {
-    if value.format != ValueFormat::Sov3 || domain.as_bytes().contains(&0) || !domain.is_ascii() {
+    if value.format != ValueFormat::Sov3
+        || domain.as_bytes().contains(&0)
+        || !domain.is_ascii()
+    {
         return Err(Error::InvalidProfile);
     }
     let payload = value.encode()?;
@@ -2017,14 +1995,7 @@ fn decode_blob_raw(
         }
         (ValueFormat::Rov3, Raw::Tag(ROV3_BLOB_TAG, payload)) => {
             let fields = array(payload)?;
-            let [
-                length,
-                sha,
-                Raw::Text(media_type),
-                suffix,
-                Raw::Bytes(descriptor),
-            ] = fields.as_slice()
-            else {
+            let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice() else {
                 return Err(Error::InvalidTag);
             };
             let identity = ContentIdentity::new(int_u64(length)?, bytes32(sha)?)?;
@@ -2084,20 +2055,14 @@ fn validate_context_raw(
                 validate_context_raw(key, depth + 1, format, oid_algorithm, mime_registry)?;
                 validate_context_raw(value, depth + 1, format, oid_algorithm, mime_registry)?;
                 let encoded = encode_context_raw(key, format, oid_algorithm, mime_registry)?;
-                if previous
-                    .as_ref()
-                    .is_some_and(|prior: &Vec<u8>| encoded <= *prior)
-                {
+                if previous.as_ref().is_some_and(|prior: &Vec<u8>| encoded <= *prior) {
                     return Err(Error::DuplicateOrUnorderedMapKey);
                 }
                 previous = Some(encoded);
             }
         }
         Raw::Tag(number, payload)
-            if matches!(
-                *number,
-                OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG | ROV3_OVERFLOW_TAG
-            ) =>
+            if matches!(*number, OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG | ROV3_OVERFLOW_TAG) =>
         {
             validate_context_tag(*number, payload, format, oid_algorithm, mime_registry)?;
         }
@@ -2137,9 +2102,7 @@ fn validate_context_tag(
             validate_annotation_fields(media_type, suffix, mime_registry)
         }
         ROV3_BLOB_TAG => {
-            let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(oid)] =
-                array(payload)?.as_slice()
-            else {
+            let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(oid)] = array(payload)?.as_slice() else {
                 return Err(Error::InvalidTag);
             };
             validate_length(length)?;
@@ -3235,12 +3198,10 @@ fn redact_trace_values(raw: &Raw, depth: usize, hide_wrappers: bool) -> Result<R
         return Ok(Raw::Text("<redacted>".into()));
     }
     Ok(match raw {
-        Raw::Tag(60016, _) => {
-            ErrorValue::from_value(Value::new(raw.clone())?)?
-                .redacted_for_trace()
-                .0
-                .0
-        }
+        Raw::Tag(60016, _) => ErrorValue::from_value(Value::new(raw.clone())?)?
+            .redacted_for_trace()
+            .0
+            .0,
         Raw::Array(values) => Raw::Array(
             values
                 .iter()
@@ -5813,9 +5774,10 @@ mod tests {
 
     #[test]
     fn values_match_supplied_vectors() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("fixtures/reference/tests/value-vectors.json"))
-                .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "fixtures/reference/tests/value-vectors.json"
+        ))
+        .unwrap();
         for vector in fixture.as_array().unwrap() {
             let x = vector["hex"].as_str().unwrap();
             let b = h(x);
@@ -5952,9 +5914,10 @@ mod tests {
     }
     #[test]
     fn float_vectors() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("fixtures/reference/tests/float-vectors.json"))
-                .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "fixtures/reference/tests/float-vectors.json"
+        ))
+        .unwrap();
         let parse = |text: &str| u64::from_str_radix(text, 16).unwrap();
         let ordered: Vec<u64> = fixture["ascending_total_order"]
             .as_array()
@@ -6187,16 +6150,10 @@ mod tests {
             ]),
         );
 
-        assert_eq!(
-            Value::new(row_reference.clone()),
-            Err(Error::ProtectedValue)
-        );
+        assert_eq!(Value::new(row_reference.clone()), Err(Error::ProtectedValue));
         let mut unvalidated_bytes = Vec::new();
         write_raw(&row_reference, &mut unvalidated_bytes).unwrap();
-        assert_eq!(
-            Value::decode(&unvalidated_bytes),
-            Err(Error::ProtectedValue)
-        );
+        assert_eq!(Value::decode(&unvalidated_bytes), Err(Error::ProtectedValue));
         assert!(!Error::ProtectedValue.to_string().contains(fixture));
     }
 
@@ -6205,7 +6162,10 @@ mod tests {
         let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
         let raw = Raw::Map(vec![(
             Raw::Text("credential".into()),
-            Raw::Array(vec![Raw::Tag(0, Box::new(Raw::Text(fixture.to_owned())))]),
+            Raw::Array(vec![Raw::Tag(
+                0,
+                Box::new(Raw::Text(fixture.to_owned())),
+            )]),
         )]);
 
         let debug = format!("{raw:?}");
@@ -6270,10 +6230,7 @@ mod tests {
                 (Raw::Int(1.into()), Raw::Int(3.into())),
                 (Raw::Int(2.into()), Raw::Text(fixture.into())),
                 (Raw::Int(3.into()), Raw::Array(vec![])),
-                (
-                    Raw::Int(4.into()),
-                    Raw::Array(vec![Raw::Text(fixture.into())]),
-                ),
+                (Raw::Int(4.into()), Raw::Array(vec![Raw::Text(fixture.into())])),
                 (Raw::Int(5.into()), Raw::Array(vec![])),
                 (Raw::Int(6.into()), Raw::Bool(false)),
             ]),
@@ -6301,11 +6258,9 @@ mod tests {
             .expect("generic wrapper fixture is canonical");
 
         let trace_bytes = value.redacted_for_trace().unwrap().encode().unwrap();
-        assert!(
-            !trace_bytes
-                .windows(fixture.len())
-                .any(|part| part == fixture.as_bytes())
-        );
+        assert!(!trace_bytes
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
         assert_eq!(
             Value::decode(&trace_bytes).unwrap().raw(),
             &Raw::Array(vec![
@@ -6315,8 +6270,11 @@ mod tests {
             ])
         );
 
-        let keyed = Value::new(Raw::Map(vec![(diagnostic, Raw::Text(fixture.into()))]))
-            .expect("a typed wrapper can be a canonical map key");
+        let keyed = Value::new(Raw::Map(vec![(
+            diagnostic,
+            Raw::Text(fixture.into()),
+        )]))
+        .expect("a typed wrapper can be a canonical map key");
         assert_eq!(
             keyed.redacted_for_trace().unwrap().raw(),
             &Raw::Text("<redacted>".into())
@@ -6388,19 +6346,15 @@ mod tests {
 
         // Local recovery remains lossless; trace serialization has its own
         // fail-closed projection because OVB cannot classify caller text.
-        assert!(
-            error
-                .encode()
-                .unwrap()
-                .windows(fixture.len())
-                .any(|part| part == fixture.as_bytes())
-        );
+        assert!(error
+            .encode()
+            .unwrap()
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
         let trace_bytes = error.encode_for_trace().unwrap();
-        assert!(
-            !trace_bytes
-                .windows(fixture.len())
-                .any(|part| part == fixture.as_bytes())
-        );
+        assert!(!trace_bytes
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
         let traced = ErrorValue::decode(&trace_bytes).unwrap();
         assert_eq!(traced.code(), "<redacted>");
         assert_eq!(traced.message(), "<redacted>");
@@ -6413,11 +6367,9 @@ mod tests {
 
         let nested = Value::new(Raw::Array(vec![error.value().raw().clone()])).unwrap();
         let nested_bytes = nested.redacted_for_trace().unwrap().encode().unwrap();
-        assert!(
-            !nested_bytes
-                .windows(fixture.len())
-                .any(|part| part == fixture.as_bytes())
-        );
+        assert!(!nested_bytes
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
         assert!(!format!("{nested:?}").contains(fixture));
     }
 
@@ -7095,9 +7047,10 @@ mod tests {
 
     #[test]
     fn fixture_path_vectors() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("fixtures/reference/tests/path-vectors.json"))
-                .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "fixtures/reference/tests/path-vectors.json"
+        ))
+        .unwrap();
         for vector in fixture["round_trip"].as_array().unwrap() {
             let source = vector["value"].as_str().unwrap();
             let encoded = vector["encoded"].as_str().unwrap();
