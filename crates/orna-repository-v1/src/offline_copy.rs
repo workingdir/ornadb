@@ -430,6 +430,25 @@ impl OfflineCopy {
     }
 }
 
+impl OfflineCopy {
+    /// Verifies the whole bundle like `import_plan`, then sets every row's
+    /// media type to `media_type`. Only the annotation changes: the length and
+    /// SHA-256 that identify the payload are still checked against the bytes.
+    pub fn import_plan_as_media_type(
+        &self,
+        media_type: &str,
+    ) -> Result<OfflineImportPlan, OfflineCopyError> {
+        if media_type.is_empty() || !media_type.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(OfflineCopyError::InvalidRow("media type must be one token"));
+        }
+        let mut plan = self.import_plan()?;
+        for row in &mut plan.rows {
+            row.media_type = media_type.to_owned();
+        }
+        Ok(plan)
+    }
+}
+
 /// What an import would write, reported after full verification. Payload
 /// bytes are not kept.
 #[derive(Clone, Debug, Eq, PartialEq)]
