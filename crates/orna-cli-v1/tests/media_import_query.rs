@@ -1,7 +1,7 @@
-use std::{path::Path, sync::Arc};
+use std::path::Path;
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::{KeyRange, Repository, RepositoryCaptureCapability, TypedKey};
+use orna_repository_v1::{KeyRange, Repository, TypedKey};
 use orna_runtime_v1::{
     RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
@@ -43,7 +43,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         .await
         .unwrap();
     let writer = state.acquire_lease([0x63; 16]).await.unwrap();
-    let capability = capture_capability(&repository, relation_id);
+    let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(source.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
@@ -213,15 +213,4 @@ async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
             }
         })
         .collect()
-}
-
-fn capture_capability(
-    repository: &Repository,
-    relation_id: [u8; 16],
-) -> RepositoryCaptureCapability {
-    let format = repository.open_format_context().unwrap();
-    let row_map = format.load_row_map(relation_id).unwrap();
-    let graph = Arc::new(format.open_native_graph(&row_map).unwrap());
-    let scope = graph.open_read_scope().unwrap();
-    RepositoryCaptureCapability::new(graph, scope).unwrap()
 }
