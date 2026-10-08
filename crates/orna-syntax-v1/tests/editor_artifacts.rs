@@ -313,7 +313,12 @@ fn semantic_legend_csv_has_one_row_per_token_type_and_modifier() {
     assert_eq!(rows.len(), 1 + type_count + editor::TOKEN_MODIFIERS.len());
     for (index, token_type) in editor::legend_token_types().enumerate() {
         let sample = editor::token_type_sample(token_type).expect("sample");
-        assert!(rows.contains(&format!("token_type,{index},{token_type},{sample}").as_str()));
+        let sample_field = if sample.contains('"') {
+            format!("\"{}\"", sample.replace('"', "\"\""))
+        } else {
+            sample.to_owned()
+        };
+        assert!(rows.contains(&format!("token_type,{index},{token_type},{sample_field}").as_str()));
     }
     for (index, modifier) in editor::TOKEN_MODIFIERS.iter().enumerate() {
         assert!(rows.contains(&format!("token_modifier,{index},{modifier},").as_str()));
