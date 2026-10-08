@@ -22,6 +22,7 @@ pub(super) enum LegendFormat {
     Text,
     Json,
     Markdown,
+    Csv,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -261,15 +262,16 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             }
         }
         Some("semantic-legend") => {
-            let format = match (words.next(), words.next()) {
-                (None, _) => LegendFormat::Text,
-                (Some("--json"), None) => LegendFormat::Json,
-                (Some("--markdown"), None) => LegendFormat::Markdown,
+            let format = match (words.next(), words.next(), words.next()) {
+                (None, _, _) => LegendFormat::Text,
+                (Some("--json"), None, _) => LegendFormat::Json,
+                (Some("--markdown"), None, _) => LegendFormat::Markdown,
+                (Some("--format"), Some("csv"), None) => LegendFormat::Csv,
                 _ => {
                     return Err(Diagnostic::usage(
                         "E1002",
                         "unsupported `semantic-legend` option",
-                        "use `semantic-legend`, `semantic-legend --json` or `semantic-legend --markdown`",
+                        "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown` or `semantic-legend --format csv`",
                     ));
                 }
             };
