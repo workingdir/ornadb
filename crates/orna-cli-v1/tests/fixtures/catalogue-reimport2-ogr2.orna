@@ -1,0 +1,3 @@
+pub fn greeting(): Text = "hello";
+
+pub fn total(values: [Int]): Int = std.collection.count(values);
