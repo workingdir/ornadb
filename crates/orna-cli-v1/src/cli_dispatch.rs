@@ -47,6 +47,15 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::SemanticLegend {
+            format: LegendFormat::Count,
+            ..
+        } => {
+            let (token_types, token_modifiers) = orna_syntax_v1::editor::semantic_legend_counts();
+            println!("token_types {token_types}");
+            println!("token_modifiers {token_modifiers}");
+            Ok(())
+        }
+        Command::SemanticLegend {
             format: LegendFormat::Table,
             ..
         } => {
