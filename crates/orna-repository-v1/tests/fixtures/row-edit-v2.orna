@@ -1,0 +1,11 @@
+database Notes {
+  table note {
+    id: text primary key
+    body: text
+  }
+}
+
+row note {
+  id: "n1"
+  body: "edited after first publish"
+}
