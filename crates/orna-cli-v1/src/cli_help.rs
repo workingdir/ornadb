@@ -19,6 +19,8 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  fetch [REMOTE] [BRANCH]",
     "  serve [--port PORT]",
     "  diff [GIT_DIFF_ARGS...]",
+    "  import BUNDLE --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]",
+    "  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid",
     "Editor tooling:",
     "  semantic-legend [--json|--markdown|--format csv|--quiet] [--limit N]",
     "  semantic-legend                  token types and modifiers as text",
@@ -49,6 +51,12 @@ mod tests {
         assert!(HELP_LINES.contains(&"Repository and maintenance commands:"));
         assert!(HELP_LINES.contains(&"  fetch [REMOTE] [BRANCH]"));
         assert!(HELP_LINES.contains(&"  diff [GIT_DIFF_ARGS...]"));
+        assert!(HELP_LINES.contains(
+            &"  import BUNDLE --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]"
+        ));
+        assert!(HELP_LINES.contains(
+            &"  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid"
+        ));
         assert!(HELP_LINES.contains(&"  status [--porcelain|--short|--format human|short|json]"));
     }
 
