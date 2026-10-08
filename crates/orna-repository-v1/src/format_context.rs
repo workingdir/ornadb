@@ -1535,6 +1535,25 @@ mod graph_bridge_tests {
     }
 
     #[test]
+    fn unresolved_listing_keeps_only_the_ids_git_cannot_resolve() {
+        let directory = repository();
+        let root = directory.path();
+        let context = context(root);
+        let (schema, digest) = schema_node(root, &context);
+        let rows = sealed_rows(&context, &schema, digest);
+        let graph = context
+            .open_native_graph(&rows)
+            .expect("admit the fixture graph");
+        let scope = graph.open_read_scope().expect("read scope");
+        let missing = NativeOid::from_hex(GitHashAlgorithm::Sha1, &"0".repeat(40))
+            .expect("well-formed all-zero SHA-1 object id");
+        let listed = graph
+            .unresolved_object_ids(&scope, &[graph.store_root().clone(), missing.clone()])
+            .expect("list unresolved ids");
+        assert_eq!(listed, vec![missing], "the resolvable store root is left out");
+    }
+
+    #[test]
     fn native_graph_bridge_rejects_tampered_schema_payload_length_and_digest() {
         let directory = repository();
         let root = directory.path();
