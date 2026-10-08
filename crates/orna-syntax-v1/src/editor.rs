@@ -139,15 +139,40 @@ pub fn semantic_legend_json() -> String {
 /// Renders the semantic-token legend as Markdown tables: token types by index,
 /// and modifiers by the protocol bit each one sets.
 pub fn semantic_legend_markdown() -> String {
-    let mut out = String::from("### Token types\n\n| Index | Token type |\n| --- | --- |\n");
+    let mut out =
+        String::from("### Token types\n\n| Index | Token type | Hover sample |\n| --- | --- | --- |\n");
     for (index, token_type) in legend_token_types().enumerate() {
-        out.push_str(&format!("| {index} | {token_type} |\n"));
+        let sample = token_type_sample(token_type).unwrap_or("");
+        out.push_str(&format!("| {index} | {token_type} | `{sample}` |\n"));
     }
     out.push_str("\n### Token modifiers\n\n| Bit | Token modifier |\n| --- | --- |\n");
     for (index, modifier) in TOKEN_MODIFIERS.iter().enumerate() {
         out.push_str(&format!("| 1 << {index} | {modifier} |\n"));
     }
     out
+}
+
+/// Example lexeme shown as the hover sample for each legend token type.
+const TOKEN_TYPE_SAMPLES: &[(&str, &str)] = &[
+    ("keyword", "fn"),
+    ("variable", "total"),
+    ("number", "42"),
+    ("string", "\"text\""),
+    ("comment", "// note"),
+    ("operator", "+"),
+    ("type", "Int"),
+    ("enum", "Ordering"),
+    ("interface", "Printable"),
+    ("function", "increment"),
+    ("parameter", "value"),
+];
+
+/// Hover sample for one legend token type, if it has one.
+pub fn token_type_sample(token_type: &str) -> Option<&'static str> {
+    TOKEN_TYPE_SAMPLES
+        .iter()
+        .find(|(name, _)| *name == token_type)
+        .map(|(_, sample)| *sample)
 }
 
 /// Complete semantic-token legend advertised to editors: the lexical classes
