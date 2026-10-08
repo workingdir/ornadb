@@ -1,6 +1,6 @@
 {
   "language": "orna",
-  "tokenTypes": ["keyword", "variable", "number", "string", "comment", "operator"],
+  "tokenTypes": ["keyword", "variable", "number", "string", "comment", "operator", "type", "enum", "interface", "function", "parameter"],
   "tokenModifiers": [],
   "lexicalClasses": [
     { "class": "Keyword", "semanticTokenType": "keyword", "textmateScope": "keyword.control.orna" },

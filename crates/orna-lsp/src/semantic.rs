@@ -225,6 +225,11 @@ mod tests {
             .collect::<Vec<_>>();
         let advertised = TOKEN_TYPES.to_vec();
         assert_eq!(
+            advertised,
+            editor::legend_token_types().collect::<Vec<_>>(),
+            "the generator must declare the full advertised legend"
+        );
+        assert_eq!(
             advertised, editor_types,
             "editor attach legend must declare every token type the LSP advertises"
         );
