@@ -331,3 +331,18 @@ fn semantic_legend_version_tracks_the_crate_version() {
     assert_eq!(editor::SEMANTIC_LEGEND_VERSION, env!("CARGO_PKG_VERSION"));
     assert_eq!(editor::SEMANTIC_LEGEND_VERSION, "1.0.0");
 }
+
+#[test]
+fn semantic_legend_table_aligns_every_row_to_the_same_columns() {
+    let table = editor::semantic_legend_table();
+    let lines = table.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1 + editor::legend_token_types().count());
+    let header = lines[0];
+    let sample_column = header.find("Hover sample").expect("sample column");
+    for (index, token_type) in editor::legend_token_types().enumerate() {
+        let line = lines[index + 1];
+        assert!(line.starts_with(&format!("{index} ")), "{line}");
+        assert!(line.contains(token_type), "{line}");
+        assert_eq!(line.find(editor::token_type_sample(token_type).unwrap()), Some(sample_column), "{line}");
+    }
+}
