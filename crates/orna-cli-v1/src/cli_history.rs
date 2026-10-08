@@ -69,7 +69,7 @@ fn parse_relation_id(value: &str) -> Result<[u8; 16], Diagnostic> {
     Ok(bytes)
 }
 
-fn history_error(title: &str, detail: impl Into<String>) -> Diagnostic {
+fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
         "E2000",
         title,
