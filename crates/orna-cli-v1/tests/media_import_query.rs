@@ -39,6 +39,10 @@ const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
 );
+const LIMIT_ZERO_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-limit-zero.orna"
+);
 const SORT_IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image-sort.orna"
@@ -54,6 +58,14 @@ const PROJECTION_SONG_IMPORT_FIXTURE: &str = concat!(
 const NEGATIVE_LIMIT_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-negative-limit.orna"
+);
+const EMPTY_CATALOGUE_SONG_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-empty-catalogue.orna"
+);
+const IMAGE_SINCE_BOUNDARY_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-image-since-boundary.orna"
 );
 const IMAGE_JSON_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -524,6 +536,26 @@ fn revisions_since(revisions: &[RowRevision], since: &str) -> Option<Vec<RowRevi
 }
 
 
+/// Asserts an `orna history` run was refused: exit 1 and no revisions printed.
+fn assert_history_refused(output: &std::process::Output, what: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{what} must exit 1: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "{what} must list no revisions: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// The 16-byte relation id as the 32-digit hex the `orna history` CLI takes.
+fn relation_hex(relation_id: [u8; 16]) -> String {
+    relation_id.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Runs `orna history` with `arguments` as a child process inside the repository
 /// and returns its raw output, whatever the exit status.
 fn run_history(directory: &Path, arguments: &[&str]) -> std::process::Output {
@@ -538,8 +570,7 @@ fn run_history(directory: &Path, arguments: &[&str]) -> std::process::Output {
 /// Runs `orna history <relation> <key> --format json` as a child process inside
 /// the repository and parses its stdout as the revision array.
 fn history_json(directory: &Path, relation_id: [u8; 16], key: &str) -> Vec<serde_json::Value> {
-    let relation: String = relation_id.iter().map(|byte| format!("{byte:02x}")).collect();
-    let output = run_history(directory, &[&relation, key, "--format", "json"]);
+    let output = run_history(directory, &[&relation_hex(relation_id), key, "--format", "json"]);
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -805,22 +836,117 @@ async fn history_rejects_negative_and_out_of_range_limits_before_listing() {
     drop(bindings);
     drop(state);
 
-    let relation: String = relation_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    let relation = relation_hex(relation_id);
     // Each value is outside 1..=4096 or not a number; `-1` is the negative case.
     for value in ["-1", "0", "4097", "x"] {
         let output = run_history(directory.path(), &[&relation, "song", "--limit", value]);
-        assert_eq!(
-            output.status.code(),
-            Some(1),
-            "--limit {value} must exit 1: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "--limit {value} must list no revisions: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+        assert_history_refused(&output, &format!("--limit {value}"));
     }
+    drop(directory);
+}
+
+#[tokio::test]
+async fn history_since_excludes_the_named_boundary_commit_end_to_end() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("pixel.png"),
+        source.path().join("pixel.png"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let image = import_expression(IMAGE_SINCE_BOUNDARY_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x70, true).await;
+    drop(bindings);
+    drop(state);
+
+    let relation = relation_hex(relation_id);
+    let full = history_json(directory.path(), relation_id, "image");
+    assert!(full.len() >= 2, "the image row has a present and an absent revision");
+
+    // `--since <commit>` drops the named commit and everything older, so the
+    // boundary revision itself is excluded and only the newer one remains.
+    let boundary = full[1]["commit"].as_str().unwrap();
+    let output = run_history(
+        directory.path(),
+        &[&relation, "image", "--since", boundary, "--format", "json"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    let newer: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(newer, full[..1].to_vec(), "only the revision newer than the boundary");
+
+    // Cutting at the oldest revision keeps every other revision.
+    let oldest = full.last().unwrap()["commit"].as_str().unwrap();
+    let output = run_history(
+        directory.path(),
+        &[&relation, "image", "--since", oldest, "--format", "json"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let kept: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(kept, full[..full.len() - 1].to_vec());
+
+    // A commit outside the walk is refused with exit 1 and no listing.
+    let unknown = "0".repeat(40);
+    let output = run_history(
+        directory.path(),
+        &[&relation, "image", "--since", &unknown, "--format", "json"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    drop(directory);
+}
+
+#[tokio::test]
+async fn history_on_an_emptied_catalogue_is_refused_with_no_listing() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(EMPTY_CATALOGUE_SONG_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    // Deleting the only committed row leaves the catalogue empty.
+    delete_media(&state, writer, "song", 0x80).await;
+    assert!(list_media(&state).await.is_empty(), "the catalogue is empty");
+    drop(bindings);
+    drop(state);
+
+    let relation = relation_hex(relation_id);
+    let output = run_history(directory.path(), &[&relation, "song"]);
+    assert_history_refused(&output, "history on an emptied catalogue");
     drop(directory);
 }
 
@@ -1026,4 +1152,62 @@ async fn sort_orders_mixed_media_types_by_type_then_length() {
         .collect();
     // audio/wav sorts before image/png; each type's rows sort by length.
     assert_eq!(order, vec![("audio/wav", 4044), ("image/png", 73)]);
+}
+
+/// Revision walk for the committed song row, through the OGS-1 graph.
+fn song_revisions_limited_to(
+    repository: &Repository,
+    relation_id: [u8; 16],
+    max_commits: usize,
+) -> Vec<RowRevision> {
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let rows = graph
+        .range_rows(&KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+    let song = rows
+        .iter()
+        .find(|row| {
+            row.key() == &TypedKey::Bytes(b"song".to_vec())
+                || row.key() == &TypedKey::Text("song".to_owned())
+        })
+        .expect("the song row is committed");
+    graph.list_row_revisions(song, max_commits, &scope).unwrap()
+}
+
+#[tokio::test]
+async fn zero_limit_history_walk_returns_no_revisions() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(Path::new(MEDIA_FIXTURES).join(name), source.path().join(name)).unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(LIMIT_ZERO_SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+
+    // Control: a limit of one returns the head revision, so the walk is live.
+    assert_eq!(song_revisions_limited_to(&repository, relation_id, 1).len(), 1);
+    // Zero limit returns an empty listing, not an error or the full walk.
+    assert!(song_revisions_limited_to(&repository, relation_id, 0).is_empty());
+    drop(directory);
 }
