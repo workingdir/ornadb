@@ -2465,3 +2465,57 @@ mod rename_reserved_target_fixture_tests {
         assert_eq!(edits.values().map(Vec::len).sum::<usize>(), 2);
     }
 }
+
+#[cfg(test)]
+mod identity_rename_follow_tests {
+    use super::*;
+
+    const IDENTITY_SOURCE: &str =
+        include_str!("../tests/fixtures/identity-rename-follow-v1.orna");
+
+    fn open(text: &str, uri: &Uri) -> HashMap<Uri, Document> {
+        HashMap::from([(uri.clone(), Document::new(uri.clone(), text.to_owned(), 1))])
+    }
+
+    #[test]
+    fn rename_then_query_keeps_one_identity_for_the_renamed_function() {
+        let uri: Uri = "file:///workspace/identity-rename-follow-v1.orna".parse().unwrap();
+        let declared = IDENTITY_SOURCE.find("total(value").unwrap() + 1;
+        let position = PositionMapper::new(IDENTITY_SOURCE).position(declared);
+        let mut edits = semantic_rename(&open(IDENTITY_SOURCE, &uri), &uri, position, "sum")
+            .expect("a plain identifier renames the function");
+        let file_edits = edits.remove(&uri).unwrap();
+        assert_eq!(file_edits.len(), 2, "declaration and call are both rewritten");
+
+        let mapper = PositionMapper::new(IDENTITY_SOURCE);
+        let mut spans = file_edits
+            .iter()
+            .map(|edit| {
+                (
+                    mapper.byte_offset(edit.range.start),
+                    mapper.byte_offset(edit.range.end),
+                    edit.new_text.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        spans.sort_by(|left, right| right.0.cmp(&left.0));
+        let mut renamed = IDENTITY_SOURCE.to_owned();
+        for (start, end, text) in spans {
+            renamed.replace_range(start..end, text);
+        }
+        assert_eq!(renamed, IDENTITY_SOURCE.replace("total", "sum"));
+
+        let parse = orna_syntax_v1::parse_module(&renamed);
+        assert!(parse.diagnostics.is_empty());
+        let symbols = analysis::declaration_symbols(&parse, &renamed);
+        assert!(symbols.iter().any(|symbol| symbol.name == "sum"));
+        assert!(!symbols.iter().any(|symbol| symbol.name == "total"));
+
+        // Query the renamed function again: the same identity is renamed once more.
+        let declared = renamed.find("sum(value").unwrap() + 1;
+        let position = PositionMapper::new(&renamed).position(declared);
+        let again = semantic_rename(&open(&renamed, &uri), &uri, position, "count")
+            .expect("the follow-up rename resolves the renamed declaration");
+        assert_eq!(again.values().map(Vec::len).sum::<usize>(), 2);
+    }
+}
