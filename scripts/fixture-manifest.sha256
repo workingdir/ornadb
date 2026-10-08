@@ -2469,6 +2469,7 @@ bd27c37e3abf5adaa3f80779d7efe2f4708234f0793860bbe435e37d31c9ea30  crates/orna-ev
 9e19b72f4ffd2ff37fc701b01b715078488b4e9d8002aed4df5b173f4e139271  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-four-unique-o3yue.orna
 bb61f84e17c1c4c865b6f476994dda943975be301ebdb321ed4436bfa7d1e8fa  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-fourth-duplicate-o3yue.orna
 58e13a5aabd1165cd1f88515e1d33e447b854f22d5fe375930a1ae3896605fb3  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-insert-existing-o3yue.orna
+e55596b4ca7d52aa567173983e2510fa5469fed86fa7ed9cb6d8b1035ad32f41  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-keys-stable-ln4y7.orna
 95472e7ea3be55a39387909ea75f4db34ae11bc8a0bcda558ee1a4bc48d477c8  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-merge-order-o3yue.orna
 07fe8424237c2023e1aa73650b45b5ca348856fbc54cbbc4481eed07af0c6744  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-nested-ovb-key-order-w02pm.orna
 66a02906e038b530562db682346e9d496b9cc597ea0da5686c3b6b9f9b531fc9  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-order-ovb-o3yue.orna
