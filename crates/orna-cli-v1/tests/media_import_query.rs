@@ -269,6 +269,19 @@ fn assert_song_revision_history(
         revisions.len(),
     );
     assert_eq!(pages.concat(), revisions);
+    // The author filter keeps revisions whose `Name <email>` contains the text.
+    assert_eq!(filter_by_author(&revisions, "kierandrewett"), revisions);
+    assert!(filter_by_author(&revisions, "no-such-author").is_empty());
+}
+
+/// Keeps the revisions whose commit author contains `needle`, the same
+/// substring rule `orna history --author` applies to each listed revision.
+fn filter_by_author(revisions: &[RowRevision], needle: &str) -> Vec<RowRevision> {
+    revisions
+        .iter()
+        .filter(|revision| revision.author().contains(needle))
+        .cloned()
+        .collect()
 }
 
 /// Splits a newest-first revision walk into pages of `size`. `list(max)`
