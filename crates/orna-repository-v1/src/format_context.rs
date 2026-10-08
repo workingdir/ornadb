@@ -200,6 +200,23 @@ pub struct RepositoryFormatContext {
     snapshot: RepositorySnapshotPin,
 }
 
+/// Owner-issued proof that a repository's admitted context is the final
+/// format-3 writer for one database identity. Only
+/// `RepositoryFormatContext::final_format_capability` mints it, after format
+/// admission and identity validation, so a caller cannot forge it from a raw
+/// numeric coordinate, a sidecar value, or a legacy read-only reader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FinalFormatCapability {
+    database_id: DatabaseId,
+}
+
+impl FinalFormatCapability {
+    /// The database identity this capability was issued for.
+    pub const fn database_id(&self) -> DatabaseId {
+        self.database_id
+    }
+}
+
 impl fmt::Debug for RepositoryFormatContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -233,6 +250,16 @@ impl RepositoryFormatContext {
     pub fn require_database_id(&self) -> Result<DatabaseId, FormatContextError> {
         self.database_id
             .ok_or(FormatContextError::MetadataUnavailable)
+    }
+
+    /// Issues the final format-3 capability for this admitted context. Legacy
+    /// formats 1 and 2 are read-only compatibility inputs and are refused, and a
+    /// format-3 context without an admitted database identity is refused rather
+    /// than given a fabricated one.
+    pub fn final_format_capability(&self) -> Result<FinalFormatCapability, FormatContextError> {
+        self.require_format3()?;
+        let database_id = self.require_database_id()?;
+        Ok(FinalFormatCapability { database_id })
     }
 
     /// Whether the selected context is a legacy read-only input.
@@ -887,6 +914,21 @@ mod graph_bridge_tests {
         git(
             directory,
             &["commit", "--quiet", "-m", "advance bridge fixture"],
+        );
+    }
+
+    #[test]
+    fn final_format_capability_is_issued_for_the_admitted_format3_identity() {
+        let directory = repository();
+        let context = context(directory.path());
+        let capability = context
+            .final_format_capability()
+            .expect("admitted format-3 context issues the final capability");
+        assert_eq!(
+            capability.database_id(),
+            context
+                .require_database_id()
+                .expect("admitted format-3 identity")
         );
     }
 
