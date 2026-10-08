@@ -417,6 +417,10 @@ fn assert_song_revision_history(
     let since = revisions[2].commit().to_hex();
     assert_eq!(revisions_since(&revisions, &since), Some(revisions[..2].to_vec()));
     assert_eq!(revisions_since(&revisions, "no-such-commit"), None);
+    // `--limit N` keeps the N newest revisions; a limit past the walk keeps all.
+    assert_eq!(limited(&revisions, 2), revisions[..2].to_vec());
+    assert_eq!(limited(&revisions, revisions.len() + 5), revisions);
+    assert!(limited(&revisions, 0).is_empty());
 }
 
 /// Keeps the revisions newer than `since`, the same cut `orna history --since`
@@ -427,6 +431,13 @@ fn revisions_since(revisions: &[RowRevision], since: &str) -> Option<Vec<RowRevi
         .iter()
         .position(|revision| revision.commit().to_hex() == since)?;
     Some(revisions[..position].to_vec())
+}
+
+
+/// Keeps the `limit` newest revisions, the truncation `orna history --limit`
+/// applies to the newest-first walk.
+fn limited(revisions: &[RowRevision], limit: usize) -> Vec<RowRevision> {
+    revisions.iter().take(limit).cloned().collect()
 }
 
 /// Keeps the revisions whose commit author contains `needle`, the same
