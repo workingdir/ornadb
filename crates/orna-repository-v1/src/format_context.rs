@@ -1510,6 +1510,31 @@ mod graph_bridge_tests {
     }
 
     #[test]
+    fn cross_format_object_id_is_rejected_before_any_lookup() {
+        let directory = repository();
+        let root = directory.path();
+        let context = context(root);
+        let (schema, digest) = schema_node(root, &context);
+        let rows = sealed_rows(&context, &schema, digest);
+        let graph = context
+            .open_native_graph(&rows)
+            .expect("admit the SHA-1 fixture graph");
+        let scope = graph.open_read_scope().expect("read scope");
+        // An all-zero SHA-256 id belongs to a different object format than
+        // the SHA-1 repository, so it must fail on width, not on lookup.
+        let foreign = NativeOid::from_hex(GitHashAlgorithm::Sha256, &"0".repeat(64))
+            .expect("well-formed all-zero SHA-256 object id");
+        let error = graph
+            .object_stats_since(&scope, &foreign)
+            .expect_err("a SHA-256 id must not resolve in a SHA-1 graph");
+        assert!(
+            matches!(error, crate::native_graph::GraphError::InvalidOidWidth { .. }),
+            "cross-format id is an invalid width, not an unresolved object: {error:?}"
+        );
+        assert_eq!(error.exit_code(), 1, "cross-format id exits 1, not 3");
+    }
+
+    #[test]
     fn native_graph_bridge_rejects_tampered_schema_payload_length_and_digest() {
         let directory = repository();
         let root = directory.path();
