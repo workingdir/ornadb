@@ -905,6 +905,42 @@ impl NativeGraphContext {
         &self.store_root
     }
 
+    /// Counts the format-3 nodes reachable from the admitted store root by
+    /// kind, and the distinct Blob OIDs those nodes name. Node data is decoded
+    /// and blob contents are never read, so the stats cost only metadata.
+    pub fn object_stats(&self, scope: &RepositoryReadScope) -> Result<ObjectStats, GraphError> {
+        scope.authorize(self)?;
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let mut stats = ObjectStats::default();
+        let mut seen_trees = BTreeSet::new();
+        let mut seen_blobs = BTreeSet::new();
+        let mut pending = vec![self.store_root.clone()];
+        while let Some(oid) = pending.pop() {
+            if !seen_trees.insert(oid.clone()) {
+                continue;
+            }
+            let node = self.read_native_node(&oid, scope, &mut objects)?;
+            *stats.nodes.entry(node.kind()).or_insert(0) += 1;
+            for dependency in node.dependencies()? {
+                match dependency.kind() {
+                    NativeObjectKind::Tree => pending.push(dependency.oid().clone()),
+                    NativeObjectKind::Blob => {
+                        if seen_blobs.insert(dependency.oid().clone()) {
+                            stats.blob_references += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(stats)
+    }
+
     /// Lists up to `max_commits` commits reachable from `HEAD`, newest first,
     /// each paired with its root tree snapshot. Only commit headers and tree
     /// object kinds are read; no blob or OGB-2 chunk is opened, so history can
@@ -3469,6 +3505,29 @@ impl NativeRefEntry {
 
     pub const fn kind(&self) -> NativeObjectKind {
         self.kind
+    }
+}
+
+/// Object counts reachable from one admitted store root, produced by
+/// [`NativeGraphContext::object_stats`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ObjectStats {
+    nodes: BTreeMap<NodeKind, u64>,
+    blob_references: u64,
+}
+
+impl ObjectStats {
+    /// Number of reachable nodes of `kind`; zero when none were reached.
+    pub fn node_count(&self, kind: NodeKind) -> u64 {
+        self.nodes.get(&kind).copied().unwrap_or(0)
+    }
+
+    pub const fn blob_references(&self) -> u64 {
+        self.blob_references
+    }
+
+    pub fn nodes(&self) -> &BTreeMap<NodeKind, u64> {
+        &self.nodes
     }
 }
 
