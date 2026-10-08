@@ -27,6 +27,10 @@ const AUTHORED_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-authored.orna"
 );
+const SINCE_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-since.orna"
+);
 const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
@@ -298,6 +302,76 @@ async fn author_filter_keeps_every_revision_of_each_imported_row() {
     drop(directory);
 }
 
+#[tokio::test]
+async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let later = import_expression(SINCE_SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &later, "song-later", 0x80, true).await;
+    // Reading the committed rows first, as the listing does, makes them visible to the graph.
+    state.committed_table_rows("media").await.unwrap();
+
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let rows = graph
+        .range_rows(&KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+    let head = git_output(directory.path(), &["rev-parse", "HEAD"], None);
+    let head = String::from_utf8(head).unwrap().trim().to_owned();
+
+    for key in ["song", "song-later"] {
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.key() == &TypedKey::Bytes(key.as_bytes().to_vec())
+                    || row.key() == &TypedKey::Text(key.to_owned())
+            })
+            .unwrap_or_else(|| panic!("the {key} row is committed"));
+        let revisions = graph.list_row_revisions(row, 64, &scope).unwrap();
+        assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
+        // Cutting at the second revision keeps only the head, which is newer.
+        let since = revisions[1].commit().to_hex();
+        assert_eq!(
+            revisions_since(&revisions, &since),
+            Some(revisions[..1].to_vec()),
+            "{key}: since keeps only newer revisions"
+        );
+        // A cut at the oldest revision keeps everything except that commit.
+        let oldest = revisions.last().unwrap().commit().to_hex();
+        assert_eq!(
+            revisions_since(&revisions, &oldest),
+            Some(revisions[..revisions.len() - 1].to_vec()),
+            "{key}: since at the oldest keeps the rest"
+        );
+    }
+    drop(directory);
+}
+
 fn assert_song_revision_history(
     repository: &Repository,
     directory: &TempDir,
@@ -339,6 +413,20 @@ fn assert_song_revision_history(
     // The author filter keeps revisions whose `Name <email>` contains the text.
     assert_eq!(filter_by_author(&revisions, "kierandrewett"), revisions);
     assert!(filter_by_author(&revisions, "no-such-author").is_empty());
+    // `--since <commit>` keeps only the revisions newer than that commit.
+    let since = revisions[2].commit().to_hex();
+    assert_eq!(revisions_since(&revisions, &since), Some(revisions[..2].to_vec()));
+    assert_eq!(revisions_since(&revisions, "no-such-commit"), None);
+}
+
+/// Keeps the revisions newer than `since`, the same cut `orna history --since`
+/// applies: the named commit and everything older are dropped. `None` when the
+/// commit is not in the walk.
+fn revisions_since(revisions: &[RowRevision], since: &str) -> Option<Vec<RowRevision>> {
+    let position = revisions
+        .iter()
+        .position(|revision| revision.commit().to_hex() == since)?;
+    Some(revisions[..position].to_vec())
 }
 
 /// Keeps the revisions whose commit author contains `needle`, the same
