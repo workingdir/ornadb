@@ -39,6 +39,10 @@ const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
 );
+const PROJECTION_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-projection.orna"
+);
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
 /// One committed media row, as its listing query sees it.
@@ -746,4 +750,46 @@ async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
             }
         })
         .collect()
+}
+
+#[tokio::test]
+async fn listing_projects_suffix_column_for_song_and_image_rows() {
+    let (_directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(Path::new(MEDIA_FIXTURES).join(name), source.path().join(name)).unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(PROJECTION_SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+
+    let listing = list_media(&state).await;
+    let suffixes: Vec<(Vec<u8>, Option<String>)> = listing
+        .into_iter()
+        .map(|row| (row.key, row.suffix))
+        .collect();
+    assert_eq!(
+        suffixes,
+        vec![
+            (b"image".to_vec(), Some("png".to_owned())),
+            (b"song".to_vec(), Some("wav".to_owned())),
+        ]
+    );
 }
