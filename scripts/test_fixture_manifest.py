@@ -534,3 +534,21 @@ class FixtureManifestTsvFormatTests(unittest.TestCase):
         self.assertEqual(rows[0], "ok\tfiles\ttrees\terrors")
         self.assertEqual(rows[1].split("\t")[0], "false")
         self.assertEqual(rows[1].split("\t")[3], "1")
+
+
+class FixtureManifestHelpTests(unittest.TestCase):
+    def test_help_lists_examples_and_exit_status(self) -> None:
+        stdout = StringIO()
+        with (
+            mock.patch("sys.argv", ["check_fixture_manifest.py", "--help"]),
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            check_fixture_manifest.main()
+
+        self.assertEqual(raised.exception.code, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("examples:", help_text)
+        self.assertIn("--since origin/main", help_text)
+        self.assertIn("exit status:", help_text)
+        self.assertIn("2  the pinned manifest is missing", help_text)

@@ -171,7 +171,23 @@ def _limited(errors: list[str], limit: int | None) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+examples:
+  check_fixture_manifest.py --check              compare the checkout with the pinned manifest
+  check_fixture_manifest.py --list               print only drift entries, one per line
+  check_fixture_manifest.py --check --format json  one JSON object for CI tooling
+  check_fixture_manifest.py --check --since origin/main  drift for fixtures changed since a revision
+  check_fixture_manifest.py --update             rewrite the pinned manifest after an intended change
+
+exit status:
+  0  the checkout matches the pinned manifest
+  1  drift, a scan error, or a rejected manifest
+  2  the pinned manifest is missing, or an argument (such as --since) is invalid
+""",
+    )
     action = parser.add_mutually_exclusive_group()
     action.add_argument(
         "--check", action="store_true", help="compare the checkout with the pinned manifest"
