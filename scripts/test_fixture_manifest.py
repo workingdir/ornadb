@@ -3,9 +3,14 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import re
+from contextlib import redirect_stdout
+from io import StringIO
+import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 
+from scripts import check_fixture_manifest
 from scripts.check_fixture_manifest import fixture_hashes, render_manifest, validate_manifest
 
 
@@ -330,3 +335,47 @@ class FixtureManifestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FixtureManifestJsonFormatTests(unittest.TestCase):
+    def run_check(self, extra_args: list[str], hashes: dict[str, str], manifest: str) -> tuple[int, str]:
+        with TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "fixture-manifest.sha256"
+            manifest_path.write_text(manifest, encoding="utf-8")
+            stdout = StringIO()
+            with (
+                mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(check_fixture_manifest, "fixture_hashes", return_value=(hashes, [])),
+                mock.patch("sys.argv", ["check_fixture_manifest.py", "--check", *extra_args]),
+                redirect_stdout(stdout),
+            ):
+                status = check_fixture_manifest.main()
+        return status, stdout.getvalue()
+
+    def test_format_json_reports_drift_as_one_object(self) -> None:
+        path = "crates/example/tests/fixtures/input.orna"
+        pinned = hashlib.sha256(b"original\n").hexdigest()
+        changed = hashlib.sha256(b"changed\n").hexdigest()
+        status, output = self.run_check(
+            ["--format", "json"], {path: changed}, render_manifest({path: pinned})
+        )
+
+        result = json.loads(output)
+        self.assertEqual(status, 1)
+        self.assertEqual(output.count("\n"), 1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["files"], 1)
+        self.assertEqual(result["scan_errors"], [])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn(path, result["errors"][0])
+
+    def test_json_alias_matches_format_json(self) -> None:
+        path = "crates/example/tests/fixtures/input.orna"
+        pinned = hashlib.sha256(b"original\n").hexdigest()
+        manifest = render_manifest({path: pinned})
+        by_format = self.run_check(["--format", "json"], {path: pinned}, manifest)
+        by_alias = self.run_check(["--json"], {path: pinned}, manifest)
+
+        self.assertEqual(by_format, by_alias)
+        self.assertEqual(by_format[0], 0)
+        self.assertTrue(json.loads(by_format[1])["ok"])
