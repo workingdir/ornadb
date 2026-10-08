@@ -1889,6 +1889,7 @@ pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BlobMetadataFilter {
     media_type: Option<String>,
+    excluded_media_types: Vec<String>,
     min_length: Option<u64>,
     max_length: Option<u64>,
 }
@@ -1901,6 +1902,12 @@ impl BlobMetadataFilter {
     #[must_use]
     pub fn with_media_type(mut self, media_type: impl Into<String>) -> Self {
         self.media_type = Some(media_type.into());
+        self
+    }
+
+    #[must_use]
+    pub fn without_media_type(mut self, media_type: impl Into<String>) -> Self {
+        self.excluded_media_types.push(media_type.into());
         self
     }
 
@@ -1920,6 +1927,10 @@ impl BlobMetadataFilter {
         self.media_type
             .as_deref()
             .is_none_or(|media_type| metadata.media_type() == media_type)
+            && self
+                .excluded_media_types
+                .iter()
+                .all(|media_type| metadata.media_type() != media_type)
             && self.min_length.is_none_or(|min| metadata.length() >= min)
             && self.max_length.is_none_or(|max| metadata.length() <= max)
     }
