@@ -64,9 +64,12 @@ pub enum Error {
     InvalidContext,
     /// The Blob's MIME family is a closed set (see `MediaFamily`), so naming it
     /// does not echo any caller-supplied media type.
+    /// `length` is the Blob's byte length from its identity, so naming it
+    /// reads no content.
     RoleMismatch {
         role: BlobRole,
         family: Option<MediaFamily>,
+        length: u64,
     },
     OwnerExpired,
     Cancelled,
@@ -76,9 +79,16 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::RoleMismatch { role, family } => {
+            Self::RoleMismatch {
+                role,
+                family,
+                length,
+            } => {
                 let family = family.map_or("unknown", MediaFamily::name);
-                write!(f, "OVB-2 Blob role {role:?} does not admit MIME family {family}")
+                write!(
+                    f,
+                    "OVB-2 Blob role {role:?} does not admit MIME family {family} ({length} bytes)"
+                )
             }
             _ => write!(f, "OVB-1 {self:?}"),
         }

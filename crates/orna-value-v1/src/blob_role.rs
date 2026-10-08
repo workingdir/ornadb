@@ -102,6 +102,7 @@ impl Blob {
             Err(Error::RoleMismatch {
                 role,
                 family: MediaFamily::of(self.annotation()),
+                length: self.length(),
             })
         }
     }
