@@ -1,0 +1,5 @@
+pub table Author(id: Int) { name: Str, }
+
+fn main() {
+    Author.insert({ id: 1, name: "eve" });
+}
