@@ -84,6 +84,9 @@ jobs:
       - name: Prove std map empty-side identity
         run: cargo test --locked -p orna-evaluator-v1 --test standard_library_map_empty_side_ln4y7
 
+      - name: Prove std list concat identity
+        run: cargo test --locked -p orna-evaluator-v1 --test standard_library_list_concat_identity_ln4y7
+
       - name: Prove std map conflict chain behavior
         run: cargo test --locked -p orna-evaluator-v1 --test standard_library_map_conflict_chain_ln4y7
 
