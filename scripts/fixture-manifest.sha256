@@ -2299,6 +2299,7 @@ ea6bc66b679810b1b343123215b83ee28488f6b7683a4efdb746e55321af39e9  crates/orna-ev
 ea6bc66b679810b1b343123215b83ee28488f6b7683a4efdb746e55321af39e9  crates/orna-evaluator-v1/tests/fixtures/stdlib-core-without-std-jx1e3.orna
 9efae0eaae0de8398cc57d4a96c1d97f674b9c7a1980da4464903d6503f0b3a9  crates/orna-evaluator-v1/tests/fixtures/stdlib-core-without-time-text-1b5ob.orna
 8cdd8cdc17b6e6c0b7562cabf698d1f5b6e1e2ef199460cb8a7d78e78a2519cf  crates/orna-evaluator-v1/tests/fixtures/stdlib-decimal-exponent-underflow-pyyhx.orna
+db3c63ef07aacb241e6036bb86d72f17f07d2f4f7ffe45feaee17b09857f8276  crates/orna-evaluator-v1/tests/fixtures/stdlib-decimal-rounding-exact-and-scale0-ln4y7.orna
 661475a837b15a3269d4f209afbf95604cb41fb013919b450d9f1693bb5a3544  crates/orna-evaluator-v1/tests/fixtures/stdlib-decode-empty-tuple-ovb-o3yue.orna
 a7eea40ce91f163b758907520ce9bf5ad3018ef9cdf48fbdf2daebb3c82c71a6  crates/orna-evaluator-v1/tests/fixtures/stdlib-decode-tuple-ovb-o3yue.orna
 abf77d6199d11c174799ac1da12ff17237c51766a1be0303d7690dc29913aeea  crates/orna-evaluator-v1/tests/fixtures/stdlib-decode-tuple-wrong-witness-o3yue.orna
