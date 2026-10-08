@@ -59,6 +59,10 @@ const NEGATIVE_LIMIT_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-negative-limit.orna"
 );
+const EMPTY_CATALOGUE_SONG_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-empty-catalogue.orna"
+);
 const IMAGE_SINCE_BOUNDARY_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image-since-boundary.orna"
@@ -904,6 +908,45 @@ async fn history_since_excludes_the_named_boundary_commit_end_to_end() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
+    drop(directory);
+}
+
+#[tokio::test]
+async fn history_on_an_emptied_catalogue_is_refused_with_no_listing() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(EMPTY_CATALOGUE_SONG_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    // Deleting the only committed row leaves the catalogue empty.
+    delete_media(&state, writer, "song", 0x80).await;
+    assert!(list_media(&state).await.is_empty(), "the catalogue is empty");
+    drop(bindings);
+    drop(state);
+
+    let relation = relation_hex(relation_id);
+    let output = run_history(directory.path(), &[&relation, "song"]);
+    assert_history_refused(&output, "history on an emptied catalogue");
     drop(directory);
 }
 
