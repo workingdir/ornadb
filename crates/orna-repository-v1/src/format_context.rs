@@ -1390,6 +1390,25 @@ mod graph_bridge_tests {
     }
 
     #[test]
+    fn unresolvable_object_id_exits_3_from_the_resolver() {
+        let directory = repository();
+        let root = directory.path();
+        let context = context(root);
+        let (schema, digest) = schema_node(root, &context);
+        let rows = sealed_rows(&context, &schema, digest);
+        let graph = context
+            .open_native_graph(&rows)
+            .expect("admit the fixture graph");
+        let scope = graph.open_read_scope().expect("read scope");
+        let missing = NativeOid::from_hex(GitHashAlgorithm::Sha1, &"0".repeat(40))
+            .expect("well-formed all-zero SHA-1 object id");
+        let error = graph
+            .object_stats_since(&scope, &missing)
+            .expect_err("an object git does not know must not resolve");
+        assert_eq!(error.exit_code(), 3, "unresolved object exits 3: {error}");
+    }
+
+    #[test]
     fn object_stats_since_traverses_the_second_fixture_root_against_the_first() {
         let directory = repository();
         let root = directory.path();
