@@ -387,7 +387,7 @@ fn offline_export_quiet_writes_nothing_and_verbose_reports_each_written_row() {
     .unwrap();
     assert_eq!(
         String::from_utf8(verbose).unwrap(),
-        "exported 1/1 image (73 bytes)\n"
+        "exported 1/1 image (73 bytes)\nexported 1 rows, 73 payload bytes, 0 history entries\n"
     );
 }
 
