@@ -1,0 +1,4 @@
+std.query.recursive_cte(
+    [1],
+    value => if value == 1 { [2] } else { if value == 2 { [1, 3] } else { [value] } }
+) == [1, 2, 3]
