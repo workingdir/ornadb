@@ -314,6 +314,14 @@ mod tests {
     }
 
     #[test]
+    fn quiet_combines_with_format_and_flags_in_any_position() {
+        let flagged = words(&["--quiet", "--format", "json", "0102", "--limit", "2", "song"]);
+        let parsed = parse_options(&flagged).unwrap();
+        assert!(parsed.quiet);
+        assert_eq!(parsed.format, HistoryFormat::Json);
+        assert_eq!((parsed.limit, parsed.relation, parsed.key), (2, "0102", "song"));
+    }
+
     fn quiet_is_a_bare_flag_and_defaults_off() {
         let plain = words(&["0102", "song"]);
         assert!(!parse_options(&plain).unwrap().quiet);
