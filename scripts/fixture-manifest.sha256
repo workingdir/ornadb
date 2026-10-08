@@ -113,6 +113,7 @@ b3711d0746280137a2f5ce469efecd0ac2cb76b5349263c0b3fb2c270ad5f3ad  crates/orna-cl
 330cd38e8d99a312342a488abd169902d890d00edcbcdcaa7bf6ce583eee7de8  crates/orna-cli-v1/tests/fixtures/captured-standard-parent.orna
 b8c00d075002cadfa7d055979c26d5f34e4b3d7f5a1300f5d2a226cf24655f67  crates/orna-cli-v1/tests/fixtures/catalogue-delete-ogd1.orna
 c1cfe3394230c341e4d8086c7988f09d2ed5d6bca9da42599ff084d4255e0a22  crates/orna-cli-v1/tests/fixtures/catalogue-exit-ogx1.orna
+21e15c61faf3a7cdac03b3d9f1d7b2a4f7442b96c2590612acc031b4fce07c82  crates/orna-cli-v1/tests/fixtures/catalogue-filename-ogf1.orna
 27009f68d2f1d1be88e9b03465dae3d8f96993df24038ba30b6e6a1a344b4858  crates/orna-cli-v1/tests/fixtures/catalogue-mtime-ogm1.orna
 3a685284720875ee62575099d7ce51fee9746aa2fe9759c099a2104587403094  crates/orna-cli-v1/tests/fixtures/catalogue-reimport-ogr1.orna
 4e9beee8565f7fce2ce23f742bfbf12266776af6ff5a0f920810b1317465cbfd  crates/orna-cli-v1/tests/fixtures/catalogue-reimport2-ogr2.orna
