@@ -3530,6 +3530,17 @@ impl ObjectStats {
         &self.nodes
     }
 
+    /// Total reachable nodes across every kind.
+    pub fn total_nodes(&self) -> u64 {
+        self.nodes.values().sum()
+    }
+
+    /// The `--quiet` form: only the total node count, with no labels or
+    /// per-kind rows, so scripts can read one number.
+    pub fn to_quiet_line(&self) -> String {
+        self.total_nodes().to_string()
+    }
+
     /// Reached node kinds as `(name, count)` rows sorted by kind name, for
     /// listings that order by type name rather than format-3 order.
     pub fn rows_by_type_name(&self) -> Vec<(&'static str, u64)> {
