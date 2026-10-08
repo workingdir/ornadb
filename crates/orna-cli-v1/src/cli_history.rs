@@ -176,10 +176,11 @@ mod tests {
 
     #[test]
     fn options_default_limit_and_accept_flags_in_any_position() {
-        let parsed = parse_options(&words(&["0102", "song"])).unwrap();
+        let plain = words(&["0102", "song"]);
+        let parsed = parse_options(&plain).unwrap();
         assert_eq!((parsed.limit, parsed.since), (DEFAULT_HISTORY_LIMIT, None));
-        let parsed =
-            parse_options(&words(&["--limit", "3", "0102", "--since", "abc", "song"])).unwrap();
+        let flagged = words(&["--limit", "3", "0102", "--since", "abc", "song"]);
+        let parsed = parse_options(&flagged).unwrap();
         assert_eq!((parsed.relation, parsed.key), ("0102", "song"));
         assert_eq!((parsed.limit, parsed.since), (3, Some("abc")));
     }
