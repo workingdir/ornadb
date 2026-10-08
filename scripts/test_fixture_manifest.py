@@ -12,7 +12,12 @@ import unittest
 from unittest import mock
 
 from scripts import check_fixture_manifest
-from scripts.check_fixture_manifest import fixture_hashes, render_manifest, validate_manifest
+from scripts.check_fixture_manifest import (
+    fixture_hashes,
+    only_changed,
+    render_manifest,
+    validate_manifest,
+)
 
 
 class FixtureManifestTests(unittest.TestCase):
@@ -452,3 +457,25 @@ class FixtureManifestLimitTests(unittest.TestCase):
             with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as raised:
                 check_fixture_manifest.main()
         self.assertEqual(raised.exception.code, 2)
+
+
+class FixtureManifestSinceTests(unittest.TestCase):
+    def test_only_changed_keeps_errors_naming_a_changed_path(self) -> None:
+        changed_path = "crates/example/tests/fixtures/input.orna"
+        other_path = "crates/example/tests/fixtures/other.orna"
+        pinned = {changed_path: hashlib.sha256(b"a\n").hexdigest(), other_path: hashlib.sha256(b"b\n").hexdigest()}
+        actual = {changed_path: hashlib.sha256(b"x\n").hexdigest(), other_path: hashlib.sha256(b"y\n").hexdigest()}
+        errors = validate_manifest(actual, render_manifest(pinned))
+        self.assertEqual(len(errors), 2)
+
+        kept = only_changed(errors, {changed_path})
+
+        self.assertEqual(len(kept), 1)
+        self.assertIn(changed_path, kept[0])
+        self.assertNotIn(other_path, kept[0])
+
+    def test_only_changed_does_not_match_path_prefixes(self) -> None:
+        short = "crates/example/tests/fixtures/input.orna"
+        longer = "crates/example/tests/fixtures/input.orna.bak"
+        errors = [f"{longer}:1: fixture is missing from manifest: {longer}"]
+        self.assertEqual(only_changed(errors, {short}), [])
