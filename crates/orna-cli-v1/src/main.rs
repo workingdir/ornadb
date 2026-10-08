@@ -2738,6 +2738,23 @@ mod tests {
     }
 
     #[test]
+    fn semantic_legend_unknown_class_or_option_exits_with_usage_code_two() {
+        for words in [
+            &["semantic-legend", "--class", "string"][..],
+            &["semantic-legend", "--format", "xml"][..],
+            &["semantic-legend", "--limit", "0"][..],
+        ] {
+            let arguments = words.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>();
+            match parse_cli(&arguments) {
+                Ok(_) => panic!("{words:?} should be rejected"),
+                Err(error) => {
+                    assert_eq!((error.code, error.exit as i32), ("E1002", 2), "{words:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn explain_documents_frozen_assertion_and_syntax_diagnostics() {
         assert_eq!(
             explain_diagnostic("ORNA-A091-001").expect("assertion diagnostic is documented"),
