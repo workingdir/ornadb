@@ -529,6 +529,30 @@ struct ManagedFileState<S> {
     unlinked: bool,
 }
 
+/// Stat of one managed destination's accepted image, from [`ManagedFile::stat`].
+pub struct ManagedFileStat<S> {
+    size: u64,
+    pin: SnapshotPin<S>,
+    generation: u64,
+}
+
+impl<S> ManagedFileStat<S> {
+    /// Byte length of the accepted image.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Snapshot pin of the accepted image.
+    pub fn pin(&self) -> &SnapshotPin<S> {
+        &self.pin
+    }
+
+    /// Repository-wide invalidation generation at the time of the stat.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 /// One already-managed destination. New opens observe its latest accepted
 /// image; open handles keep the immutable image captured when they opened.
 pub struct ManagedFile<S> {
@@ -551,6 +575,25 @@ impl<S> ManagedFile<S> {
     /// Returns the repository-wide invalidation generation.
     pub async fn cache_generation(&self) -> u64 {
         self.cache_epoch.generation().await
+    }
+
+    /// Reports size, snapshot pin and cache generation of the accepted image.
+    /// Returns `None` after an accepted unlink, like [`ManagedFile::open_current`].
+    /// Draft state is not part of this view: a stat never observes or
+    /// accepts a private EDIT-1 draft.
+    pub async fn stat(&self) -> Option<ManagedFileStat<S>> {
+        let (size, pin) = {
+            let state = self.state.lock().await;
+            if state.unlinked {
+                return None;
+            }
+            (state.image.len(), state.image.pin().clone_pin())
+        };
+        Some(ManagedFileStat {
+            size,
+            pin,
+            generation: self.cache_epoch.generation().await,
+        })
     }
 
     /// Creates a private sibling-save candidate and captures this destination's
