@@ -389,6 +389,33 @@ mod tests {
     }
 
     #[test]
+    fn every_admitted_final_callable_matches_its_generated_binding() {
+        let final_context = final_context();
+        let abi = crate::system_provider_abi();
+        let mut checked = 0usize;
+        for callable in system_api_selection().available(final_context) {
+            let name = callable.descriptor.name;
+            let operation = abi.operation(name).unwrap_or_else(|| {
+                panic!("admitted final callable `{name}` has no generated binding")
+            });
+            assert_eq!(
+                operation.signature.source, callable.descriptor.signature,
+                "generated binding signature for `{name}` matches the catalogue read"
+            );
+            assert!(
+                operation
+                    .effects
+                    .iter()
+                    .any(|effect| *effect == callable.descriptor.effect),
+                "generated binding effects for `{name}` include the catalogue read effect"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, system_api_selection().available(final_context).count());
+        assert!(checked > 0, "final catalogue admits at least one callable");
+    }
+
+    #[test]
     fn generated_selection_is_internal_and_context_scoped() {
         let final_context = final_context();
         let selection = system_api_selection();
