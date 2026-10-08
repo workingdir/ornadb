@@ -5803,6 +5803,33 @@ mod persisted_orp_tests {
     }
 
     #[test]
+    fn pin_description_round_trips_the_captured_fixture_bytes() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload: &[u8] = include_bytes!("../tests/fixtures/pin-roundtrip.orna");
+        let candidate = graph
+            .capture_blob_candidate(payload, payload.len() as u64, &scope)
+            .expect("capture authorized fixture stream");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+
+        let json = crate::publication_describe::describe_pin_json(&pin);
+        let sha256 = Sha256::digest(payload);
+        let sha256_hex: String = sha256.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert!(json.contains(&format!("\"length\":{}", payload.len())));
+        assert!(json.contains(&format!("\"sha256\":\"{sha256_hex}\"")));
+        assert_eq!(
+            json,
+            crate::publication_describe::describe_transfer_json(&pin.transfer_record()),
+            "the pin description must come from its transfer record"
+        );
+        graph
+            .accept_protected_blob_pin(pin)
+            .expect("accept the described pin");
+    }
+
+    #[test]
     fn cancelled_captured_candidate_cleans_its_provisional_ref() {
         let (directory, graph) = capture_test_context();
         let scope = graph.open_read_scope().expect("owner read scope");
