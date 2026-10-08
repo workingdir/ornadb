@@ -1,6 +1,7 @@
 //! Translation from parsed commands to the existing runtime and repository handlers.
 
 use super::*;
+use crate::cli_args::LegendFormat;
 
 pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
