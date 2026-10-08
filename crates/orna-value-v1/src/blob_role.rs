@@ -104,6 +104,7 @@ impl Blob {
                 family: MediaFamily::of(self.annotation()),
                 length: self.length(),
                 expected: BlobRole::for_annotation(self.annotation()),
+                digest: self.identity.sha256(),
             })
         }
     }
@@ -206,7 +207,7 @@ mod tests {
         let error = value.blob_as(BlobRole::Video).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "OVB2_ROLE_MISMATCH: OVB-2 Blob role Video does not admit MIME family image (7 bytes); admit as Image or Opaque"
+            "OVB2_ROLE_MISMATCH: OVB-2 Blob role Video does not admit MIME family image (7 bytes, sha256 239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5); admit as Image or Opaque"
         );
         assert_eq!(error.code(), Some(ErrorCode::RoleMismatch));
         assert_eq!(ErrorCode::RoleMismatch.as_str(), "OVB2_ROLE_MISMATCH");
