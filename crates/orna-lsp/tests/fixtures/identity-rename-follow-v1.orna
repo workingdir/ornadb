@@ -1,0 +1,2 @@
+pub fn total(value: Int): Int = value;
+pub fn run(): Int = total(1);
