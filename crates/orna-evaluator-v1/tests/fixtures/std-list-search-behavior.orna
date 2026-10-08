@@ -1,0 +1,16 @@
+sorting.sort(list.unique([3, 1, 3, 2])) == [1, 2, 3]
+&& list.reverse(sorting.sort([2, 3, 1])) == [3, 2, 1]
+&& list.contains(sorting.sort([5, 4]), 4) == true
+&& list.first(sorting.sort([9, 7, 8])) == Some(7)
+&& list.last(sorting.sort_descending([1, 3, 2])) == Some(1)
+&& sorting.is_sorted(list.append(sorting.sort([2, 1]), 3)) == true
+&& sorting.is_sorted(list.prepend([1], 0)) == true
+&& sorting.min_by(list.concat([4], [2, 9]), value => value) == Some(2)
+&& sorting.max_by(list.unique([7, 7, 5]), value => value) == Some(7)
+&& std.collection.exists([1, 2, 3], value => value == 2) == true
+&& std.collection.exists([1, 2, 3], value => value == 9) == false
+&& std.collection.exists(empty_ints, value => value == 2) == false
+&& std.collection.every([1, 2, 3], value => value > 0) == true
+&& std.collection.every([1, 2, 3], value => value > 1) == false
+&& std.collection.every(empty_ints, value => value > 0) == true
+&& std.collection.one([1, 2, 3], value => value == 2) == 2
