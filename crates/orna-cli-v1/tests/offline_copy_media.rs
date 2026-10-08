@@ -2,7 +2,7 @@ use std::path::Path;
 
 use orna_repository_v1::offline_copy::{
     OfflineCopy, OfflineCopyError, OfflineHistoryEntry, OfflineImportOutput, OfflineRow,
-    write_offline_copy,
+    write_offline_copy, write_offline_copy_limited,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -325,4 +325,29 @@ fn offline_import_quiet_writes_nothing_and_verbose_writes_one_line_per_row() {
         String::from_utf8(verbose).unwrap(),
         "verified 1/2 image (73 bytes)\nverified 2/2 song (4044 bytes)\n"
     );
+}
+
+#[test]
+fn offline_export_limit_writes_only_the_first_rows_and_keeps_history() {
+    let directory = TempDir::new().unwrap();
+    let rows = [
+        committed_row("image", "image/png", "pixel.png"),
+        committed_row("song", "audio/wav", "tone.wav"),
+    ];
+    let history = [OfflineHistoryEntry {
+        sequence: 1,
+        commit: [0x51; 32],
+    }];
+    let bundle = directory.path().join("limited");
+    write_offline_copy_limited(&bundle, &rows, &history, 1).unwrap();
+
+    let copy = OfflineCopy::open(&bundle).unwrap();
+    assert_eq!(copy.rows().len(), 1);
+    assert_eq!(copy.rows()[0].key, b"image");
+    assert_eq!(copy.history(), &history);
+    assert!(!bundle.join("media").join(hex(&rows[1].sha256)).exists());
+
+    let none = directory.path().join("none");
+    write_offline_copy_limited(&none, &rows, &[], 0).unwrap();
+    assert!(OfflineCopy::open(&none).unwrap().rows().is_empty());
 }
