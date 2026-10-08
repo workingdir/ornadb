@@ -1,0 +1,9 @@
+pub table Author(id: Int) { name: Str, }
+pub table Book(id: Int) { author: Int, title: Str, }
+
+fn main() {
+    Book.insert({ id: 11, author: 2, title: "second" });
+    Book.insert({ id: 10, author: 1, title: "first" });
+    Author.insert({ id: 2, name: "bo" });
+    Author.insert({ id: 1, name: "ada" });
+}
