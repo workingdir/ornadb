@@ -23,6 +23,7 @@ pub(super) enum LegendFormat {
     Json,
     Markdown,
     Csv,
+    Quiet,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -267,11 +268,12 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 (Some("--json"), None, _) => LegendFormat::Json,
                 (Some("--markdown"), None, _) => LegendFormat::Markdown,
                 (Some("--format"), Some("csv"), None) => LegendFormat::Csv,
+                (Some("--quiet"), None, _) => LegendFormat::Quiet,
                 _ => {
                     return Err(Diagnostic::usage(
                         "E1002",
                         "unsupported `semantic-legend` option",
-                        "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown` or `semantic-legend --format csv`",
+                        "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown`, `semantic-legend --format csv` or `semantic-legend --quiet`",
                     ));
                 }
             };
@@ -406,6 +408,17 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn semantic_legend_quiet_flag_selects_bare_names() {
+        assert_eq!(
+            parse_cli(&args(&["semantic-legend", "--quiet"])).unwrap().command,
+            Command::SemanticLegend {
+                format: LegendFormat::Quiet
+            }
+        );
+        assert!(parse_cli(&args(&["semantic-legend", "--quiet", "extra"])).is_err());
     }
 
     #[test]
