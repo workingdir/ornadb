@@ -3417,6 +3417,51 @@ mod tests {
     }
 
     #[test]
+    fn playground_catalogue_page_bounds_from_one_fixture_row() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git_succeeds(directory.path(), &["init", "--quiet"]);
+        let route_directory = directory.path().join("playground/Route");
+        std::fs::create_dir_all(&route_directory).expect("create route rows");
+        std::fs::write(
+            route_directory
+                .join("route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373.orna"),
+            include_str!("../tests/fixtures/playground-route-catalogue-bounds.orna"),
+        )
+        .expect("write route row");
+        git_succeeds(directory.path(), &["add", "playground/Route"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add one catalogue route for the bounds",
+            ],
+        );
+        let identity = RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        };
+
+        let last = playground_catalogue_page(directory.path(), identity, "page=10000");
+        assert_eq!(last.status, 200);
+        let last = String::from_utf8(last.body).expect("HTML body is UTF-8");
+        assert!(!last.contains("/playground/assets/examples.css"));
+
+        for query in ["page=10001", "page=18446744073709551616"] {
+            assert_eq!(
+                playground_catalogue_page(directory.path(), identity, query).status,
+                400,
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn playground_example_catalog_rows_decode_for_asset_namespace() {
         const ROUTE: &str =
             include_str!("../tests/fixtures/playground-route-example-catalog-style.orna");
