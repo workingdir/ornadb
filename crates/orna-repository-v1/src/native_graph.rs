@@ -958,6 +958,33 @@ impl NativeGraphContext {
         Ok(stats)
     }
 
+    /// Lists the candidate ids that this repository cannot resolve, in input
+    /// order. An id git can resolve is left out. An id of another object
+    /// format is an error, not a missing object, and any other git failure is
+    /// returned as-is rather than reported as missing.
+    pub fn unresolved_object_ids(
+        &self,
+        scope: &RepositoryReadScope,
+        candidates: &[NativeOid],
+    ) -> Result<Vec<NativeOid>, GraphError> {
+        scope.authorize(self)?;
+        let mut unresolved = Vec::new();
+        for candidate in candidates {
+            if candidate.algorithm() != self.algorithm {
+                return Err(GraphError::InvalidOidWidth {
+                    expected: self.algorithm.width(),
+                    actual: candidate.algorithm().width(),
+                });
+            }
+            match self.git_object_kind(candidate) {
+                Ok(_) => {}
+                Err(GraphError::UnknownObjectAvailability) => unresolved.push(candidate.clone()),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(unresolved)
+    }
+
     fn stats_budget(&self, scope: &RepositoryReadScope) -> ObjectBudget {
         ObjectBudget::new(
             scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
