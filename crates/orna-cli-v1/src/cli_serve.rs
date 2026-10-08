@@ -3071,6 +3071,41 @@ mod tests {
     }
 
     #[test]
+    fn playground_catalogue_json_single_route_row_from_one_fixture() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git_succeeds(directory.path(), &["init", "--quiet"]);
+        let route_directory = directory.path().join("playground/Route");
+        std::fs::create_dir_all(&route_directory).expect("create route rows");
+        std::fs::write(
+            route_directory
+                .join("route-2f706c617967726f756e642f6173736574732f6578616d706c65732e637373.orna"),
+            include_str!("../tests/fixtures/playground-route-example-catalog-style.orna"),
+        )
+        .expect("write route row");
+        git_succeeds(directory.path(), &["add", "playground/Route"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add one catalogue route",
+            ],
+        );
+
+        let response = playground_catalogue_json(directory.path());
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            String::from_utf8(response.body).expect("JSON body is UTF-8"),
+            r#"{"routes":["/playground/assets/examples.css"]}"#
+        );
+    }
+
+    #[test]
     fn playground_example_catalog_rows_decode_for_asset_namespace() {
         const ROUTE: &str =
             include_str!("../tests/fixtures/playground-route-example-catalog-style.orna");
