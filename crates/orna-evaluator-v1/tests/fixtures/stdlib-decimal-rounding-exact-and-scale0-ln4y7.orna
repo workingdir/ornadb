@@ -1,0 +1,8 @@
+std.money.quantize(-2.50, 1, "half_even") == -2.5
+&& std.money.quantize(-2.50, 1, "half_up") == -2.5
+&& std.money.quantize(-2.50, 1, "toward_zero") == -2.5
+&& std.money.quantize(-2.50, 1, "away_from_zero") == -2.5
+&& std.money.quantize(-2.50, 1, "floor") == -2.5
+&& std.money.quantize(-2.50, 1, "ceil") == -2.5
+&& std.money.quantize(2.5, 0, "half_up") == 3.0
+&& std.money.quantize(-2.5, 0, "half_up") == -3.0
