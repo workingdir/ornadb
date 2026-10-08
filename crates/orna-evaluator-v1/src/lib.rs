@@ -38,6 +38,7 @@ use unicode_normalization::UnicodeNormalization;
 #[cfg(feature = "project-repl")]
 mod admitted_repl;
 mod cancellation;
+mod regex_lite;
 mod relation;
 mod repl;
 mod sys_bindings;
