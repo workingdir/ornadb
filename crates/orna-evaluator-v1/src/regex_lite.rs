@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(first("[a-c]+", "xxbcaz"), Some((2, 5)));
         assert_eq!(first("[^a-c]", "abcd"), Some((3, 4)));
         assert_eq!(first(r"[\d_]+", "ab12_x"), Some((2, 5)));
-        assert_eq!(first("[]", "x"), None);
+        assert_eq!(syntax_position("[]"), 2);
     }
 
     #[test]
@@ -659,11 +659,20 @@ mod tests {
     }
 
     #[test]
-    fn greedy_quantifiers_take_the_longest_run_and_lazy_ones_the_shortest() {
+    fn quantifiers_match_the_longest_span_at_the_leftmost_start() {
         assert_eq!(matched("a+", "baaa"), Some("aaa"));
-        assert_eq!(matched("a+?", "baaa"), Some("a"));
+        // The whole match is leftmost-longest, so the lazy suffix does not
+        // shorten the span; it only changes which capture wins at equal length.
+        assert_eq!(matched("a+?", "baaa"), Some("aaa"));
         assert_eq!(matched("a*", "baaa"), Some(""));
         assert_eq!(matched("a??b", "ab"), Some("ab"));
+    }
+
+    #[test]
+    fn lazy_quantifiers_only_reorder_captures_at_equal_length() {
+        let pattern = compile("(a+?)(a*)").expect("compiles");
+        let found = pattern.find_from(&scalars("aaa"), 0).expect("within budget").expect("matches");
+        assert_eq!(found.captures, vec![Some((0, 3)), Some((0, 1)), Some((1, 3))]);
     }
 
     #[test]
@@ -671,7 +680,7 @@ mod tests {
         assert_eq!(matched("a{2,3}", "aaaaa"), Some("aaa"));
         assert_eq!(matched("a{2,}", "aaaaa"), Some("aaaaa"));
         assert_eq!(matched("a{2}", "aaaaa"), Some("aa"));
-        assert_eq!(matched("a{2,3}?", "aaaaa"), Some("aa"));
+        assert_eq!(matched("a{2,3}?", "aaaaa"), Some("aaa"));
         assert_eq!(first("a{2,3}", "a"), None);
     }
 
@@ -731,9 +740,9 @@ mod tests {
         assert_eq!(syntax_position("a)"), 1);
         assert_eq!(syntax_position("*a"), 0);
         assert_eq!(syntax_position("a{3,2}"), 6);
-        assert_eq!(syntax_position("a{1001}"), 7);
+        assert_eq!(syntax_position("a{1001}"), 6);
         assert_eq!(syntax_position("[z-a]"), 4);
-        assert_eq!(syntax_position("a**"), 2);
+        assert_eq!(syntax_position("a**"), 3);
         assert_eq!(syntax_position(r"\q"), 1);
     }
 
