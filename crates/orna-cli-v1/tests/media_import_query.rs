@@ -516,15 +516,22 @@ fn revisions_since(revisions: &[RowRevision], since: &str) -> Option<Vec<RowRevi
 }
 
 
+/// Runs `orna history` with `arguments` as a child process inside the repository
+/// and returns its raw output, whatever the exit status.
+fn run_history(directory: &Path, arguments: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .current_dir(directory)
+        .arg("history")
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
 /// Runs `orna history <relation> <key> --format json` as a child process inside
 /// the repository and parses its stdout as the revision array.
 fn history_json(directory: &Path, relation_id: [u8; 16], key: &str) -> Vec<serde_json::Value> {
     let relation: String = relation_id.iter().map(|byte| format!("{byte:02x}")).collect();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
-        .current_dir(directory)
-        .args(["history", &relation, key, "--format", "json"])
-        .output()
-        .unwrap();
+    let output = run_history(directory, &[&relation, key, "--format", "json"]);
     assert_eq!(
         output.status.code(),
         Some(0),
