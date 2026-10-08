@@ -682,6 +682,7 @@ c498fa5e77701507c101050917ef995ec18b00e65b02763c8be21ce9588db876  crates/orna-co
 06203e40528bddd6027ecdb5431ec3acc362d3df24c8919d4600f149b386cade  crates/orna-conformance-v1/tests/fixtures/relation-aggregate-integer-zero-budget.orna
 f312e3c7448c00c5372679f0c5f11e32a22ed1130834d390e00614084ed0b3aa  crates/orna-conformance-v1/tests/fixtures/relation-aggregate-nested-assertion.orna
 f55f43057a03cd8c7366e46357c3c01ce2b736f332e65543f86b0263352a2662  crates/orna-conformance-v1/tests/fixtures/relation-aggregate-nested-seed.orna
+83f2d7ffd41e8a3c7bb23e64d410a21f729bc3f7e7fcccfbdc112aba837e9999  crates/orna-conformance-v1/tests/fixtures/relation-bulk-delete-with-missing.orna
 8034021bd0f73e2251b9d118c706ce729154bb483c07a34050fab3f42803c544  crates/orna-conformance-v1/tests/fixtures/relation-core-section9-m9f62.orna
 7f0ce2a0006044b23c37fa72c213878f4f89c5d1439eefd7d9b82f987b7b4070  crates/orna-conformance-v1/tests/fixtures/relation-create-author-conflict.orna
 bbda38941cbd15e87f0a2fcddabced4509e424abcef154abf58217989cefd1ba  crates/orna-conformance-v1/tests/fixtures/relation-create-author.orna
