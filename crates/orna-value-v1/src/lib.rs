@@ -66,10 +66,13 @@ pub enum Error {
     /// does not echo any caller-supplied media type.
     /// `length` is the Blob's byte length from its identity, so naming it
     /// reads no content.
+    /// `expected` is the role the annotation selects, so the message can
+    /// suggest a fix without echoing any caller-supplied value.
     RoleMismatch {
         role: BlobRole,
         family: Option<MediaFamily>,
         length: u64,
+        expected: BlobRole,
     },
     OwnerExpired,
     Cancelled,
@@ -83,11 +86,12 @@ impl fmt::Display for Error {
                 role,
                 family,
                 length,
+                expected,
             } => {
                 let family = family.map_or("unknown", MediaFamily::name);
                 write!(
                     f,
-                    "OVB-2 Blob role {role:?} does not admit MIME family {family} ({length} bytes)"
+                    "OVB-2 Blob role {role:?} does not admit MIME family {family} ({length} bytes); admit as {expected:?} or Opaque"
                 )
             }
             _ => write!(f, "OVB-1 {self:?}"),
