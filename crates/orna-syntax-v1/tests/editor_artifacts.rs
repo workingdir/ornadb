@@ -303,3 +303,25 @@ fn every_legend_token_type_has_a_hover_sample_in_markdown() {
     }
     assert!(markdown.contains("| Index | Token type | Hover sample |"));
 }
+
+#[test]
+fn semantic_legend_csv_has_one_row_per_token_type_and_modifier() {
+    let csv = editor::semantic_legend_csv();
+    let rows = csv.lines().collect::<Vec<_>>();
+    assert_eq!(rows[0], "kind,index,name,sample");
+    let type_count = editor::legend_token_types().count();
+    assert_eq!(rows.len(), 1 + type_count + editor::TOKEN_MODIFIERS.len());
+    for (index, token_type) in editor::legend_token_types().enumerate() {
+        let sample = editor::token_type_sample(token_type).expect("sample");
+        assert!(rows.contains(&format!("token_type,{index},{token_type},{sample}").as_str()));
+    }
+    for (index, modifier) in editor::TOKEN_MODIFIERS.iter().enumerate() {
+        assert!(rows.contains(&format!("token_modifier,{index},{modifier},").as_str()));
+    }
+}
+
+#[test]
+fn semantic_legend_csv_quotes_samples_that_need_it() {
+    let csv = editor::semantic_legend_csv();
+    assert!(csv.contains("token_type,3,string,\"\"\"text\"\"\"\n"));
+}
