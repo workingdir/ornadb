@@ -38,6 +38,12 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::SemanticLegend {
+            format: LegendFormat::Csv,
+        } => {
+            print!("{}", orna_syntax_v1::editor::semantic_legend_csv());
+            Ok(())
+        }
+        Command::SemanticLegend {
             format: LegendFormat::Text,
         } => {
             println!("Token types:");
