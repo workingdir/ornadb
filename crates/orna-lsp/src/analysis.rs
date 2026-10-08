@@ -939,6 +939,17 @@ pub fn hover(
 ) -> Option<Hover> {
     let byte = mapper.byte_offset(position);
     let token = token_at(&document.text, byte)?;
+    // Reserved words cannot name a binding or symbol, so the lexer's keyword
+    // table decides the card before any scope lookup.
+    if let Some(keyword) = Keyword::from_text(&token.text) {
+        return Some(crate::hover::declaration(
+            "keyword",
+            keyword.spelling(),
+            None,
+            &[],
+            Some("Reserved word of the Orna language (ORNA-LEX-007)."),
+        ));
+    }
     if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
         let kind = match binding.kind {
             crate::locals::LocalBindingKind::Parameter => "parameter",
