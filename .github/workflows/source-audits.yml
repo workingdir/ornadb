@@ -81,6 +81,9 @@ jobs:
       - name: Prove std map boundary pin behavior
         run: cargo test --locked -p orna-evaluator-v1 --test standard_library_map_boundary_pins_ln4y7
 
+      - name: Prove std map empty-side identity
+        run: cargo test --locked -p orna-evaluator-v1 --test standard_library_map_empty_side_ln4y7
+
       - name: Prove hash-pinned runtime historical snapshot behavior
         run: cargo test --locked -p orna-runtime-v1 --test historical_snapshots
 
