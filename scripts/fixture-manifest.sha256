@@ -132,6 +132,7 @@ b42f8ed673740c142be33126aa268fbc57999745475d31c06ec9578a64dc1052  crates/orna-cl
 e279a7bfc9c04cf067704ccc6adfdda5b4bf8a958d7f9f1db63065377a7c18ce  crates/orna-cli-v1/tests/fixtures/init/version-1.orna
 79a0a004fac1dbbab00c544a883c81f7e8f66b77c5dd2d0e96d204cb2c2a15ae  crates/orna-cli-v1/tests/fixtures/init/version-2.orna
 6ec32696932b34a8d30ebe7bdcda8885e2c07ec8f67fb52655d7ab80aa29d1f7  crates/orna-cli-v1/tests/fixtures/lib002-core-only.orna
+5dc2bc9624d60a07f38ba830bf28851c87dd5da9279d2d3432b40eb1293b5bc4  crates/orna-cli-v1/tests/fixtures/media/edit-cycle-bundle-files.txt
 5dc2bc9624d60a07f38ba830bf28851c87dd5da9279d2d3432b40eb1293b5bc4  crates/orna-cli-v1/tests/fixtures/media/export-bundle-files.txt
 038d9e7fbf912679d14e68b0087e1ca71047e016c50c4b272ae4bce38d5dedcb  crates/orna-cli-v1/tests/fixtures/media/import-image-json.orna
 038d9e7fbf912679d14e68b0087e1ca71047e016c50c4b272ae4bce38d5dedcb  crates/orna-cli-v1/tests/fixtures/media/import-image.orna
@@ -140,6 +141,7 @@ d2eff8224767cc3bf267832033969153720cf1c42f90de2ab577848520fdda64  crates/orna-cl
 2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-cli-v1/tests/fixtures/media/import-song-json.orna
 2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-cli-v1/tests/fixtures/media/import-song-limit.orna
 2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-cli-v1/tests/fixtures/media/import-song-paged.orna
+2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-cli-v1/tests/fixtures/media/import-song-projection.orna
 2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-cli-v1/tests/fixtures/media/import-song-quiet-rev.orna
 2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-cli-v1/tests/fixtures/media/import-song-quiet.orna
 2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-cli-v1/tests/fixtures/media/import-song-since.orna
@@ -2467,6 +2469,7 @@ d0f433c44de5a4cb18f50181177eca0ce2096de8dfcf1436aaf3ebce8649e4ad  crates/orna-ev
 914b918806ea7d6730cb1a9380b42b5928917cc4ec680e3e3b501c17827e8000  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-conflicts-ln4y7.orna
 df3d028daf2148cf175c3e73bc06468771b0f1ffe0e0cbaf9bc543defc5cd68c  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-contract-i7bat.orna
 bd27c37e3abf5adaa3f80779d7efe2f4708234f0793860bbe435e37d31c9ea30  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-empty-side-ln4y7.orna
+b2d263c0835a230617887960a865ac0a248629f446ca6fea710d642ab2d2a5f0  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-entries-order-ln4y7.orna
 43985941b63599cfce81d28f975be57d27698ae15f3327a0a0e3d22cb90eadc5  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-four-entry-ovb-order-w02pm.orna
 9e19b72f4ffd2ff37fc701b01b715078488b4e9d8002aed4df5b173f4e139271  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-four-unique-o3yue.orna
 bb61f84e17c1c4c865b6f476994dda943975be301ebdb321ed4436bfa7d1e8fa  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-fourth-duplicate-o3yue.orna
@@ -3386,10 +3389,12 @@ e26462d689c55d2035f4ee535f113c543d433ab4e627569bb0bada85ae1c690a  crates/orna-ls
 08e620147301729a77c6835a091d039eb7a7b1ec860e85178730bfab8eeaaf57  crates/orna-lsp/tests/fixtures/range-formatting-v1.orna
 034f96a2b28e9117c1edf56db04aebae41c0e67466ef3c8e84ff2aeb0e4e7f1b  crates/orna-lsp/tests/fixtures/rename-caller-v1.orna
 7477e338729cc2d0e79d3b8b240b43ab9b5712bc78dcb44076f1efc3573448b6  crates/orna-lsp/tests/fixtures/rename-provider-v1.orna
+7714c28e1c84be1fa16438a3ff92745d28a050a31fa27bbc69afc9b0e523f60c  crates/orna-lsp/tests/fixtures/rename-reserved-target-v1.orna
 53d7a8fd34196932558e28a0b214c772b8740c970c8bf8cf876d5d8dbf7f7910  crates/orna-lsp/tests/fixtures/semantic-token-delta-v1.orna
 53d7a8fd34196932558e28a0b214c772b8740c970c8bf8cf876d5d8dbf7f7910  crates/orna-lsp/tests/fixtures/semantic-token-multiline-modifiers-v1.orna
 267fa641bc6c9b614d903de2f3ec55fc3ac208160ed88f210d2a11376d961294  crates/orna-lsp/tests/fixtures/signature-actions-v1.orna
 647245f7310a99ec8cf7469f3c5e690fdbfcca95abe617ac0ce487bd6d8cf9f7  crates/orna-lsp/tests/fixtures/signature-keyword-args-v1.orna
+9ff0b8e613efabb6943b818ed53c53949ee331c03875500e73eb3f9487fb85a9  crates/orna-lsp/tests/fixtures/signature-overloads-v1.orna
 9a14af6c57d9551e81d375f0eb4ea06008bf18026ebd0a960cb4d1b2e57dafc6  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/accepted_actions_inspector.txt
 c505dd602eed8bd3ebbfa839e703182657981081fa9b5444382085b2212f2a8e  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/accepted_client_fixture.txt
 4ca1b841deb67f165859252bd81ae51d718c706b3bbcf26706538e9afab2dda5  crates/orna-lsp/tests/fixtures/tree-sitter-corpus/alter_drop.txt
