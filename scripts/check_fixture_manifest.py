@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
@@ -141,6 +142,29 @@ def _positive_int(text: str) -> int:
     return value
 
 
+def changed_fixture_paths(revision: str) -> set[str]:
+    """Return paths that differ between `revision` and the working tree."""
+    result = subprocess.run(
+        ["git", "diff", "--name-only", "--no-renames", revision, "--"],
+        cwd=WORKSPACE_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or f"git diff failed for {revision}")
+    return {line for line in result.stdout.splitlines() if line}
+
+
+def only_changed(errors: list[str], paths: set[str]) -> list[str]:
+    """Keep errors that name at least one changed path as a whole token."""
+    return [
+        error
+        for error in errors
+        if any(re.search(rf"(^|\s){re.escape(path)}(?=$|[\s:])", error) for path in paths)
+    ]
+
+
 def _limited(errors: list[str], limit: int | None) -> list[str]:
     """Return the first `limit` errors, or all of them when no limit is given."""
     return errors if limit is None else errors[:limit]
@@ -177,6 +201,11 @@ def main() -> int:
         help="alias for --format json",
     )
     parser.add_argument(
+        "--since",
+        metavar="REV",
+        help="with --check, report only drift for fixtures changed since REV (git revision)",
+    )
+    parser.add_argument(
         "--limit",
         type=_positive_int,
         metavar="N",
@@ -206,6 +235,13 @@ def main() -> int:
         print(f"fixture manifest does not exist: {MANIFEST_PATH}", file=sys.stderr)
         return 1
     errors = validate_manifest(hashes, MANIFEST_PATH.read_text(encoding="utf-8"))
+    if args.since:
+        try:
+            changed = changed_fixture_paths(args.since)
+        except ValueError as error:
+            print(f"fixture manifest --since failed: {error}", file=sys.stderr)
+            return 2
+        errors = only_changed(errors, changed)
     trees = len(fixture_roots(WORKSPACE_ROOT))
     if args.format == "json":
         print(
