@@ -136,6 +136,20 @@ pub fn semantic_legend_json() -> String {
     format!("{{\n  \"tokenTypes\": [{token_types}],\n  \"tokenModifiers\": [{modifiers}]\n}}\n")
 }
 
+/// Renders the semantic-token legend as Markdown tables: token types by index,
+/// and modifiers by the protocol bit each one sets.
+pub fn semantic_legend_markdown() -> String {
+    let mut out = String::from("### Token types\n\n| Index | Token type |\n| --- | --- |\n");
+    for (index, token_type) in legend_token_types().enumerate() {
+        out.push_str(&format!("| {index} | {token_type} |\n"));
+    }
+    out.push_str("\n### Token modifiers\n\n| Bit | Token modifier |\n| --- | --- |\n");
+    for (index, modifier) in TOKEN_MODIFIERS.iter().enumerate() {
+        out.push_str(&format!("| 1 << {index} | {modifier} |\n"));
+    }
+    out
+}
+
 /// Complete semantic-token legend advertised to editors: the lexical classes
 /// in protocol index order, then the LSP refinements.
 pub fn legend_token_types() -> impl Iterator<Item = &'static str> {
