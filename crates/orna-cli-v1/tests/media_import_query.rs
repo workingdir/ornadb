@@ -236,6 +236,107 @@ async fn import_media(
     assert_eq!(committed.request.state, RequestState::Completed);
 }
 
+#[tokio::test]
+async fn deleting_a_committed_media_row_removes_it_from_listing_and_filters() {
+    let (_directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let imports = [
+        ("song", SONG_IMPORT_FIXTURE, 0x70_u8),
+        ("image", IMAGE_IMPORT_FIXTURE, 0x80_u8),
+    ];
+    for (key, fixture, ordinal) in imports {
+        let expression = import_expression(fixture, source.path());
+        import_media(&state, writer, &mut bindings, &expression, key, ordinal).await;
+    }
+
+    let song_filter = BlobMetadataFilter::new().with_media_type("audio/wav");
+    let image_filter = BlobMetadataFilter::new().with_media_type("image/png");
+    assert_eq!(list_media(&state).await.len(), 2);
+    assert_eq!(filter_media(&state, &song_filter).await, vec![b"song".to_vec()]);
+
+    // Membership follows the edit: the committed delete removes the song row
+    // from the listing and from every filter that used to select it.
+    delete_media(&state, writer, "song", 0x90).await;
+
+    let keys = list_media(&state)
+        .await
+        .into_iter()
+        .map(|row| row.key)
+        .collect::<Vec<_>>();
+    assert_eq!(keys, vec![b"image".to_vec()]);
+    assert!(filter_media(&state, &song_filter).await.is_empty());
+    assert_eq!(filter_media(&state, &image_filter).await, vec![b"image".to_vec()]);
+}
+
+/// Deletes one committed media row through an admitted request, the same path
+/// the import uses for inserts.
+async fn delete_media(
+    state: &RuntimeState,
+    writer: orna_runtime_v1::WriterLease,
+    key: &str,
+    ordinal: u8,
+) {
+    let request_identity = RequestIdentity {
+        session_id: [ordinal; 16],
+        request_id: [ordinal + 1; 16],
+    };
+    let fingerprint = [ordinal + 2; 32];
+    let (_, admission) = state
+        .reserve_request_with_admission(request_identity, fingerprint)
+        .await
+        .unwrap();
+    state
+        .start_request_with_owner_and_admission(
+            request_identity,
+            fingerprint,
+            writer,
+            admission.expect("new request returns its admission capability"),
+        )
+        .await
+        .unwrap();
+    let context = state.begin_activation().await.unwrap();
+    // A row mutation without a value deletes the committed row.
+    let mutation =
+        TableMutation::new([ordinal + 3; 16], "media", key.as_bytes().to_vec(), None).unwrap();
+    let committed = state
+        .commit_table_request_activation(
+            writer,
+            request_identity,
+            fingerprint,
+            &context,
+            &[mutation],
+            [ordinal + 4; 32],
+            TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
+            &orna_runtime_v1::NoFault,
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.request.state, RequestState::Completed);
+}
+
 async fn filter_media(state: &RuntimeState, filter: &BlobMetadataFilter) -> Vec<Vec<u8>> {
     state
         .committed_table_rows("media")
