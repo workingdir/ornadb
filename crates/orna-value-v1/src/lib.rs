@@ -73,6 +73,7 @@ pub enum Error {
         family: Option<MediaFamily>,
         length: u64,
         expected: BlobRole,
+        digest: [u8; 32],
     },
     OwnerExpired,
     Cancelled,
@@ -112,12 +113,14 @@ impl fmt::Display for Error {
                 family,
                 length,
                 expected,
+                digest,
             } => {
                 let code = ErrorCode::RoleMismatch.as_str();
+                let digest = hex::encode(digest);
                 let family = family.map_or("unknown", MediaFamily::name);
                 write!(
                     f,
-                    "{code}: OVB-2 Blob role {role:?} does not admit MIME family {family} ({length} bytes); admit as {expected:?} or Opaque"
+                    "{code}: OVB-2 Blob role {role:?} does not admit MIME family {family} ({length} bytes, sha256 {digest}); admit as {expected:?} or Opaque"
                 )
             }
             _ => write!(f, "OVB-1 {self:?}"),
