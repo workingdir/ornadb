@@ -13,7 +13,7 @@ mod media_range;
 mod repl;
 
 use cli_args::{
-    Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode,
+    Command, Invocation, LegendFormat, Parsed, StatusFormat, parse_cli, requested_color_mode,
     requested_debug_mode,
 };
 use cli_dispatch::execute;
