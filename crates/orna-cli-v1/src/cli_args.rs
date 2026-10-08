@@ -51,7 +51,10 @@ pub(super) enum Command {
     Init(Option<PathBuf>),
     Status { format: StatusFormat },
     Fetch { remote: String, branch: String },
-    SemanticLegend { format: LegendFormat },
+    SemanticLegend {
+        format: LegendFormat,
+        limit: Option<usize>,
+    },
     Serve { port: u16 },
     Diff(Vec<String>),
     History(Vec<String>),
@@ -132,6 +135,40 @@ pub(super) fn requested_debug_mode(arguments: &[String]) -> bool {
     clippy::too_many_lines,
     reason = "the command grammar deliberately keeps validation precedence in one auditable parser"
 )]
+/// Options for `semantic-legend`. `--limit N` caps the token-type rows of the
+/// plain text and `--quiet` listings; the JSON, Markdown and CSV artifacts
+/// always carry the full legend.
+fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Diagnostic> {
+    let usage = || {
+        Diagnostic::usage(
+            "E1002",
+            "unsupported `semantic-legend` option",
+            "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown`, `semantic-legend --format csv`, `semantic-legend --quiet` or `semantic-legend --limit N`",
+        )
+    };
+    let limit = |value: &str| {
+        value.parse::<usize>().ok().filter(|count| *count > 0).ok_or_else(|| {
+            Diagnostic::usage(
+                "E1002",
+                "invalid `semantic-legend --limit` value",
+                "use a positive integer, such as `--limit 5`",
+            )
+        })
+    };
+    match args {
+        [] => Ok((LegendFormat::Text, None)),
+        ["--json"] => Ok((LegendFormat::Json, None)),
+        ["--markdown"] => Ok((LegendFormat::Markdown, None)),
+        ["--format", "csv"] => Ok((LegendFormat::Csv, None)),
+        ["--quiet"] => Ok((LegendFormat::Quiet, None)),
+        ["--limit", count] => Ok((LegendFormat::Text, Some(limit(count)?))),
+        ["--quiet", "--limit", count] | ["--limit", count, "--quiet"] => {
+            Ok((LegendFormat::Quiet, Some(limit(count)?)))
+        }
+        _ => Err(usage()),
+    }
+}
+
 pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut endpoint = Endpoint::ManagedLocal;
     let mut has_explicit_endpoint = false;
@@ -263,21 +300,9 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             }
         }
         Some("semantic-legend") => {
-            let format = match (words.next(), words.next(), words.next()) {
-                (None, _, _) => LegendFormat::Text,
-                (Some("--json"), None, _) => LegendFormat::Json,
-                (Some("--markdown"), None, _) => LegendFormat::Markdown,
-                (Some("--format"), Some("csv"), None) => LegendFormat::Csv,
-                (Some("--quiet"), None, _) => LegendFormat::Quiet,
-                _ => {
-                    return Err(Diagnostic::usage(
-                        "E1002",
-                        "unsupported `semantic-legend` option",
-                        "use `semantic-legend`, `semantic-legend --json`, `semantic-legend --markdown`, `semantic-legend --format csv` or `semantic-legend --quiet`",
-                    ));
-                }
-            };
-            Command::SemanticLegend { format }
+            let rest = words.by_ref().collect::<Vec<_>>();
+            let (format, limit) = parse_legend_args(&rest)?;
+            Command::SemanticLegend { format, limit }
         }
         Some("fetch") => Command::Fetch {
             remote: words.next().unwrap_or("origin").to_owned(),
@@ -411,11 +436,26 @@ mod tests {
     }
 
     #[test]
+    fn semantic_legend_limit_is_positive_and_text_or_quiet_only() {
+        assert_eq!(
+            parse_cli(&args(&["semantic-legend", "--limit", "3"])).unwrap().command,
+            Command::SemanticLegend {
+                format: LegendFormat::Text,
+                limit: Some(3),
+            }
+        );
+        assert!(parse_cli(&args(&["semantic-legend", "--limit", "0"])).is_err());
+        assert!(parse_cli(&args(&["semantic-legend", "--limit", "x"])).is_err());
+        assert!(parse_cli(&args(&["semantic-legend", "--json", "--limit", "3"])).is_err());
+    }
+
+    #[test]
     fn semantic_legend_quiet_flag_selects_bare_names() {
         assert_eq!(
             parse_cli(&args(&["semantic-legend", "--quiet"])).unwrap().command,
             Command::SemanticLegend {
-                format: LegendFormat::Quiet
+                format: LegendFormat::Quiet,
+                limit: None,
             }
         );
         assert!(parse_cli(&args(&["semantic-legend", "--quiet", "extra"])).is_err());
