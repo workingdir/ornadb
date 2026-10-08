@@ -23,3 +23,32 @@ fn run_import(bundle: &Path) -> Output {
         .output()
         .unwrap()
 }
+
+#[test]
+fn empty_catalogue_exports_a_zero_row_bundle_that_imports_with_exit_zero() {
+    use orna_repository_v1::offline_copy::{OfflineCopy, write_offline_copy};
+    use tempfile::TempDir;
+
+    let _catalogue = declared_catalogue("catalogue-empty-ogz1.orna");
+    let directory = TempDir::new().unwrap();
+    let bundle = directory.path().join("bundle");
+    write_offline_copy(&bundle, &[], &[]).unwrap();
+
+    let copy = OfflineCopy::open(&bundle).unwrap();
+    assert!(copy.rows().is_empty());
+    assert!(copy.history().is_empty());
+    assert!(copy.import_plan().unwrap().rows.is_empty());
+    assert!(
+        !bundle.join("media").exists(),
+        "an empty bundle has no payloads"
+    );
+
+    let output = run_import(&bundle);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("dry run: 0 of 0 rows"));
+}
