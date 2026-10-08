@@ -2119,6 +2119,7 @@ caa74a4612c6361259f23874f6d9506654e04cc680abb18acf26aaf84f08ca60  crates/orna-ev
 877403d3428de5489dc1d1c95f935858c5458e1fe122cdcd80d781e5d0ba0de6  crates/orna-evaluator-v1/tests/fixtures/std-list-search-sorting-use.orna
 19247dded0992eec6f61fc754c2aa726f818f6d650f9685cf6c73aa4f02d3aca  crates/orna-evaluator-v1/tests/fixtures/std-list-search-use.orna
 19247dded0992eec6f61fc754c2aa726f818f6d650f9685cf6c73aa4f02d3aca  crates/orna-evaluator-v1/tests/fixtures/std-list-use.orna
+31a7b5089d20f56b6a9e9afb57448943ac7080ef7f0ee8710800d25822454218  crates/orna-evaluator-v1/tests/fixtures/std-unicode-scalar-boundaries.orna
 e7355a2df5a7a747a74245fbd9466037c012d264e5d487cdb835f7e863a07dd0  crates/orna-evaluator-v1/tests/fixtures/stdlib-algorithm-behavior-oo3k6.orna
 1ce40fa00233ba78e775b81fc2a6a0a9b0e0f2be9ee82e36bd054a3d2fc00df2  crates/orna-evaluator-v1/tests/fixtures/stdlib-algorithm-sort-oo3k6.orna
 a6c71821d016530ffbd8b62a277c2f29ccb16415eedaaa793490fabf9de03353  crates/orna-evaluator-v1/tests/fixtures/stdlib-algorithm-stable-ties-cli9f.orna
@@ -2156,6 +2157,7 @@ b90d95e3638ee9e299dea5f6f74c9a89a1eca5510d3702db680c128e00eb5cdc  crates/orna-ev
 2f71e515ac2888a1bccdd406577914d27ab3820e870a96eb6d3a48e6337b8be1  crates/orna-evaluator-v1/tests/fixtures/stdlib-call-net-websocket-bc963.orna
 d3c0b3e13831363b5d8f2d8ab598e4c4982a0b33bf26ed424423a542ecc43954  crates/orna-evaluator-v1/tests/fixtures/stdlib-call-random-dmkss.orna
 a7925569eb99b0b7a4964e82c466eeeca72647d7f69ea6ae2a8539601e6c3f8e  crates/orna-evaluator-v1/tests/fixtures/stdlib-call-set-contract-i7bat.orna
+acdb8c3962190a099475ad1233fe7a65062781f8dd5c57849fc69d9874b27666  crates/orna-evaluator-v1/tests/fixtures/stdlib-call-set-edge-contract-ogcs1.orna
 d9c144029b74c9a6201c280a8c350fc18b9cb270fb8e766e86fd049112af5e75  crates/orna-evaluator-v1/tests/fixtures/stdlib-codec-base64-invalid-rl767.orna
 c97a73ae9fdb572446891d57ecc45c70a84f31df0a0ab35301ede600af3147f3  crates/orna-evaluator-v1/tests/fixtures/stdlib-codec-json-duplicate-rl767.orna
 699420c85285903e90190b406889781f2de6b898ce2fe72b83c51f6d767a20b0  crates/orna-evaluator-v1/tests/fixtures/stdlib-codec-json-encode-exact-decimal-pyyhx.orna
@@ -2362,6 +2364,7 @@ f3f3891581e0a62aba7cbc75cda2b7621bceb0a307d2496faefae01ace762e45  crates/orna-ev
 b7daa068a39c939eb3d1cb3804d5d4914c51a54f5aa37e4f9da8888465a95d65  crates/orna-evaluator-v1/tests/fixtures/stdlib-io-json-write-overwrite-i50o4.orna
 c05537866f1a0936f64c70529502190f8f7a28913d4dd4cabaf13d8b2353f399  crates/orna-evaluator-v1/tests/fixtures/stdlib-io-path-absolute-l80o5.orna
 0b0ed22beb9f3dd05f16939c796a8d84c284c7b2be844a3c23e56454fe9a9e80  crates/orna-evaluator-v1/tests/fixtures/stdlib-io-path-backslash-l80o5.orna
+d5e1121bdaa11cccefdc3d7c4a0b7bcafa142a5a139d97a9f317e0f5ac80311d  crates/orna-evaluator-v1/tests/fixtures/stdlib-io-path-edge-contract-ogp1.orna
 901f6ff88393dbe35beae1a558936c34bd6d216d9055b68c4685ea7748a43193  crates/orna-evaluator-v1/tests/fixtures/stdlib-io-path-metadata-contract-l80o5.orna
 775d76428cee0da8be9f6b068137286b95f067dd8a314f736b48aa6fdc999109  crates/orna-evaluator-v1/tests/fixtures/stdlib-io-path-root-escape-l80o5.orna
 8b9388f22ef81e1c506a9b88525a2fecaa0382566e42785e039b4b3b39637cd8  crates/orna-evaluator-v1/tests/fixtures/stdlib-io-path-without-snapshot-l80o5.orna
@@ -2568,6 +2571,7 @@ bc3609caa9d25df4441716260bb02f0283dc8b6291750667c9139c79123dd2b3  crates/orna-ev
 7a6bc1010576f81873bfdbab7dc1ca58bfe3b6c3b47169dc428651d7be138dda  crates/orna-evaluator-v1/tests/fixtures/stdlib-result-map-error-compose.orna
 c16c6e9cd1b578e197837735bc600a3d244b67ab50b5b368f1dea216646bbf89  crates/orna-evaluator-v1/tests/fixtures/stdlib-result-map-error-proof.orna
 48f0b3af9a94f6cf66555103d3b053ff8a7d995bf2326edf2fd4d25c5f15e3e3  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-contract-i7bat.orna
+24d3554f455b78ea161960517c14d10a55eb9f910bf10312ab32077a19817284  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-edge-contract-ogcs1.orna
 c952d9eb7bb38efab0120e600e1c8741ae9ec9bc1fc98e08c61add9e92c4d8fc  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-order-ovb-o3yue.orna
 23b81a7b751f8b921444c0ee4e21a142232c07ac6134e26f2dacbd4e916b1807  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-order-roundtrip-o3yue.orna
 1ce54165c550b3a13cd62d2dacb2d3d088f940dc85712766246a6f86afa2343d  crates/orna-evaluator-v1/tests/fixtures/stdlib-set-order-value-o3yue.orna
@@ -3288,6 +3292,7 @@ d49a4b8de867606627946be5ce4c374f36ce18c0ae9d0d19e191d51498850da8  crates/orna-ls
 1d6507c277771162faf5ab37dfe673dbbe59c3184ddf06274272d00a134470d9  crates/orna-lsp/tests/fixtures/ji3t0-invalid-v1.orna
 01e3906bf653fdb21af2004278ef449a14178756ebb34f4e0bd6cc49ee4d7e21  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1-self-contained.orna
 953ba69f21a16700cc90bee0b6920e14a9af8c340a6c88def7d2b466aed1b4b6  crates/orna-lsp/tests/fixtures/ji3t0-lsp-v1.orna
+1b8a1738e76a314cf07bd9a08b99882cd0ed386f0943efb62520f5c766657df9  crates/orna-lsp/tests/fixtures/keyword-coverage-v1.orna
 394e849ed3b715bd9f3a157d126ad913bc733ec96fb25f186d84ba1bab96b082  crates/orna-lsp/tests/fixtures/legacy-guard/current-manifest.toml
 0b6c66aacbf3c8db45d19b3c1da08f970e95b9b433f0fa4800043dcbce64e373  crates/orna-lsp/tests/fixtures/legacy-guard/current-source.rs
 39d46f817fc5a242361bd06502ce7312e7376fe8484bea27a24aefe74e87c184  crates/orna-lsp/tests/fixtures/legacy-guard/legacy-manifest.toml
