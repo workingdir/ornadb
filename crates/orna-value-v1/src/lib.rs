@@ -1936,6 +1936,15 @@ impl BlobMetadataFilter {
     }
 }
 
+/// Orders payload-free Blob metadata for listings over mixed media types:
+/// media type first, then length, then digest, so equal keys stay stable.
+pub fn compare_blob_metadata(left: &BlobMetadata, right: &BlobMetadata) -> Ordering {
+    left.media_type()
+        .cmp(right.media_type())
+        .then_with(|| left.length().cmp(&right.length()))
+        .then_with(|| left.sha256().cmp(&right.sha256()))
+}
+
 pub fn encode_rov3(blob: &Blob) -> Result<Vec<u8>> {
     blob.to_context_value(ValueFormat::Rov3)?.encode()
 }
