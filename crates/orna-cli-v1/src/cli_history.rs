@@ -26,6 +26,7 @@ struct HistoryOptions<'a> {
     limit: usize,
     since: Option<&'a str>,
     format: HistoryFormat,
+    reverse: bool,
 }
 
 fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic> {
@@ -33,6 +34,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     let mut limit = DEFAULT_HISTORY_LIMIT;
     let mut since = None;
     let mut format = HistoryFormat::Human;
+    let mut reverse = false;
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
@@ -57,6 +59,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
                 })?;
                 since = Some(value);
             }
+            "--reverse" => reverse = true,
             "--format" => {
                 let value = words.next().ok_or_else(|| {
                     history_error("--format needs a value", "usage: --format <human|json>")
@@ -93,6 +96,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
         limit,
         since,
         format,
+        reverse,
     })
 }
 
@@ -146,6 +150,10 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         revisions.truncate(position);
     }
     revisions.truncate(options.limit);
+    // Revisions arrive newest first; `--reverse` prints oldest first.
+    if options.reverse {
+        revisions.reverse();
+    }
     match options.format {
         HistoryFormat::Human => {
             let present = revisions.iter().filter(|revision| revision.present()).count();
@@ -258,5 +266,13 @@ mod tests {
         assert_eq!(super::summary_line(0, 0), "0 revisions (0 present, 0 absent)");
         assert_eq!(super::summary_line(1, 1), "1 revision (1 present, 0 absent)");
         assert_eq!(super::summary_line(4, 3), "4 revisions (3 present, 1 absent)");
+    }
+
+    #[test]
+    fn reverse_is_a_bare_flag_and_defaults_off() {
+        let plain = words(&["0102", "song"]);
+        assert!(!parse_options(&plain).unwrap().reverse);
+        let flagged = words(&["0102", "--reverse", "song"]);
+        assert!(parse_options(&flagged).unwrap().reverse);
     }
 }
