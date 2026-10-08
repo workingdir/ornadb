@@ -26,6 +26,7 @@ class FixtureManifestTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("fixture content hash changed", errors[0])
         self.assertIn(path, errors[0])
+        self.assertTrue(errors[0].startswith("scripts/fixture-manifest.sha256:3: "), errors[0])
 
     def test_rejects_added_and_removed_fixture_paths(self) -> None:
         pinned_path = "crates/example/tests/fixtures/pinned.orna"
@@ -38,10 +39,16 @@ class FixtureManifestTests(unittest.TestCase):
 
         errors = validate_manifest({pinned_path: pinned, added_path: added}, manifest)
 
+        removed_line = next(
+            number
+            for number, line in enumerate(manifest.splitlines(), start=1)
+            if line.endswith(f"  {removed_path}")
+        )
         self.assertEqual(
             errors,
             [
-                f"fixture is missing from manifest: {added_path}",
+                f"{added_path}:1: fixture is missing from manifest: {added_path}",
+                f"scripts/fixture-manifest.sha256:{removed_line}: "
                 f"manifest fixture is missing from checkout: {removed_path}",
             ],
         )
