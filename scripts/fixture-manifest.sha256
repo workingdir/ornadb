@@ -111,6 +111,7 @@ a6ca224a43637d923a7f0a5ea9daa3f4e9c10d8c22451184af616b9d0c95a2a6  crates/orna-ap
 b3711d0746280137a2f5ce469efecd0ac2cb76b5349263c0b3fb2c270ad5f3ad  crates/orna-cli-v1/tests/fixtures/captured-standard-main.orna
 666c5fd37750c47fe301fd06dfef74851103f6da7eb9d2b27d88bcaf02afaea8  crates/orna-cli-v1/tests/fixtures/captured-standard-math.orna
 330cd38e8d99a312342a488abd169902d890d00edcbcdcaa7bf6ce583eee7de8  crates/orna-cli-v1/tests/fixtures/captured-standard-parent.orna
+8f0bf948dc130ba4f904a865be0f92f771f204a844a69b574cdcddf134252f68  crates/orna-cli-v1/tests/fixtures/catalogue-count-no-args-ogx1.orna
 b8c00d075002cadfa7d055979c26d5f34e4b3d7f5a1300f5d2a226cf24655f67  crates/orna-cli-v1/tests/fixtures/catalogue-delete-ogd1.orna
 2d5c8af40b0b3f6c0390bf7619681e1dd030bd12189d232027aa237d59725c49  crates/orna-cli-v1/tests/fixtures/catalogue-empty-ogz1.orna
 9a9c2573f73668729d3ea1efe7183aa0d06a71a315baacb3e855e90c513d67a1  crates/orna-cli-v1/tests/fixtures/catalogue-eq-ogq1.orna
