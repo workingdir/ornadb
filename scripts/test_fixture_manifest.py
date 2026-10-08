@@ -611,3 +611,27 @@ class FixtureManifestRootsTests(unittest.TestCase):
                 "crates/example/tests/fixtures",
             ],
         )
+
+
+class FixtureManifestErrorPrefixTests(unittest.TestCase):
+    def test_stderr_headers_share_the_ornadb_prefix(self) -> None:
+        path = "crates/example/tests/fixtures/input.orna"
+        pinned = hashlib.sha256(b"original\n").hexdigest()
+        changed = hashlib.sha256(b"changed\n").hexdigest()
+        with TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "fixture-manifest.sha256"
+            manifest_path.write_text(render_manifest({path: pinned}), encoding="utf-8")
+            stderr = StringIO()
+            with (
+                mock.patch.object(check_fixture_manifest, "MANIFEST_PATH", manifest_path),
+                mock.patch.object(check_fixture_manifest, "fixture_hashes", return_value=({path: changed}, [])),
+                mock.patch("sys.argv", ["check_fixture_manifest.py", "--check"]),
+                redirect_stderr(stderr),
+            ):
+                status = check_fixture_manifest.main()
+
+        self.assertEqual(status, 1)
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(lines[0], "ornadb: fixture manifest drift detected:")
+        self.assertTrue(lines[1].startswith("  "))
+        self.assertEqual(lines[-1], "ornadb: fixture manifest drift total: 1")
