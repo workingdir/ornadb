@@ -44,6 +44,39 @@ pub fn describe_pins<'a>(pins: impl IntoIterator<Item = &'a ProtectedContentPin>
         .join("\n")
 }
 
+/// Describes one protected pin as a single-line JSON object. Every value is a
+/// hex string, a decimal number, or a fixed algorithm name, so no escaping is
+/// needed.
+pub fn describe_pin_json(pin: &ProtectedContentPin) -> String {
+    describe_transfer_json(&pin.transfer_record())
+}
+
+/// Describes the transfer record as a single-line JSON object with the same
+/// fields as `describe_transfer`.
+pub fn describe_transfer_json(transfer: &ProtectedContentTransfer) -> String {
+    let identity = transfer.content_identity();
+    format!(
+        "{{\"pin_id\":\"{}\",\"repository_id\":\"{}\",\"database_id\":\"{}\",\"owner_id\":\"{}\",\"descriptor\":{{\"algorithm\":\"{:?}\",\"oid\":\"{}\"}},\"content\":{{\"length\":{},\"sha256\":\"{}\"}}}}",
+        hex(transfer.pin_id()),
+        hex(transfer.repository_id()),
+        hex(transfer.database_id()),
+        hex(transfer.owner_id()),
+        transfer.descriptor_oid().algorithm(),
+        transfer.descriptor_oid().to_hex(),
+        identity.length(),
+        hex(&identity.sha256()),
+    )
+}
+
+/// Describes every pin as a JSON array, in order.
+pub fn describe_pins_json<'a>(pins: impl IntoIterator<Item = &'a ProtectedContentPin>) -> String {
+    let entries = pins
+        .into_iter()
+        .map(describe_pin_json)
+        .collect::<Vec<_>>();
+    format!("[{}]", entries.join(","))
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
