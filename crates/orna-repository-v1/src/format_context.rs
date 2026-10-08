@@ -1771,6 +1771,10 @@ mod graph_bridge_tests {
             graph.object_stats_limited(&scope, total_nodes - 1),
             Err(crate::native_graph::GraphError::InventoryQuotaExceeded)
         ));
+        let table = stats.to_table();
+        assert!(table.starts_with("KIND  COUNT\n"), "table header: {table}");
+        assert!(table.contains("StoreRoot  1\n"), "table row: {table}");
+        assert!(table.ends_with(&format!("blob_references  {}\n", stats.blob_references())));
         let json = stats.to_json();
         assert!(
             json.starts_with("{\"nodes\":{\"StoreRoot\":1,"),
