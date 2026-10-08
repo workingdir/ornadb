@@ -2431,3 +2431,35 @@ mod rename_reserved_word_tests {
         assert_eq!(edits.values().map(Vec::len).sum::<usize>(), 2);
     }
 }
+
+#[cfg(test)]
+mod rename_reserved_target_fixture_tests {
+    use super::*;
+    use orna_syntax_v1::Keyword;
+
+    const RENAME_TARGET_SOURCE: &str =
+        include_str!("../tests/fixtures/rename-reserved-target-v1.orna");
+
+    #[test]
+    fn reserved_word_target_from_a_real_fixture_produces_no_edits() {
+        let uri: Uri = "file:///workspace/rename-reserved-target-v1.orna".parse().unwrap();
+        let mut documents = HashMap::new();
+        documents.insert(
+            uri.clone(),
+            Document::new(uri.clone(), RENAME_TARGET_SOURCE.to_owned(), 1),
+        );
+        let declared_byte = RENAME_TARGET_SOURCE.find("total(value").unwrap() + 1;
+        let position = PositionMapper::new(RENAME_TARGET_SOURCE).position(declared_byte);
+
+        for keyword in Keyword::ALL {
+            assert!(
+                semantic_rename(&documents, &uri, position, keyword.spelling()).is_none(),
+                "rename of `total` to `{}` must be rejected",
+                keyword.spelling()
+            );
+        }
+        let edits = semantic_rename(&documents, &uri, position, "sum")
+            .expect("a plain identifier renames the function");
+        assert_eq!(edits.values().map(Vec::len).sum::<usize>(), 2);
+    }
+}
