@@ -1,0 +1,2 @@
+std.query.recursive_cte([5], value => [value]) == [5]
+&& std.query.recursive_cte([5], value => [value, value]) == [5]
