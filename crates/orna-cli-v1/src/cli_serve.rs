@@ -3190,6 +3190,50 @@ mod tests {
     }
 
     #[test]
+    fn playground_catalogue_empty_result_for_one_undecodable_fixture_row() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        git_succeeds(directory.path(), &["init", "--quiet"]);
+        let route_directory = directory.path().join("playground/Route");
+        std::fs::create_dir_all(&route_directory).expect("create route rows");
+        std::fs::write(
+            route_directory.join("route-0000000000000000.orna"),
+            include_str!("../tests/fixtures/playground-route-catalogue-invalid.orna"),
+        )
+        .expect("write undecodable route row");
+        git_succeeds(directory.path(), &["add", "playground/Route"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "add an undecodable catalogue route",
+            ],
+        );
+
+        let json = playground_catalogue_json(directory.path());
+        assert_eq!(json.status, 200);
+        assert_eq!(
+            String::from_utf8(json.body).expect("JSON body is UTF-8"),
+            r#"{"routes":[]}"#
+        );
+
+        let identity = RuntimeIdentity {
+            database_id: [1; 16],
+            repository_id: [2; 16],
+        };
+        let page = playground_catalogue_page(directory.path(), identity, "");
+        assert_eq!(page.status, 200);
+        let page = String::from_utf8(page.body).expect("HTML body is UTF-8");
+        assert!(page.contains("No playground catalogue entries are committed."));
+        assert!(!page.contains("Next page"));
+    }
+
+    #[test]
     fn playground_example_catalog_rows_decode_for_asset_namespace() {
         const ROUTE: &str =
             include_str!("../tests/fixtures/playground-route-example-catalog-style.orna");
