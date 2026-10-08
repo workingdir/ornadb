@@ -940,7 +940,13 @@ fn playground_catalogue_page(root: &Path, identity: RuntimeIdentity, query: &str
     } else {
         InspectionNode::List(rows)
     };
-    let mut sections = vec![("Catalogue".into(), content)];
+    let mut sections = vec![
+        (
+            "Total routes".into(),
+            InspectionNode::Text(routes.len().to_string()),
+        ),
+        ("Catalogue".into(), content),
+    ];
     if has_next {
         sections.push((
             "More".into(),
