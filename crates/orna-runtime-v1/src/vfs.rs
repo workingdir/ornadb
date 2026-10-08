@@ -1638,6 +1638,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stat_reports_accepted_size_pin_and_generation_and_hides_unlinked() {
+        let image = fixture_image();
+        let expected_len = image.len();
+        let managed = ManagedFile {
+            state: Mutex::new(ManagedFileState {
+                image,
+                unlinked: false,
+            }),
+            cache_epoch: SharedCacheEpoch::default(),
+        };
+
+        let stat = managed.stat().await.unwrap();
+        assert_eq!(stat.size(), expected_len);
+        assert_eq!(*stat.pin().snapshot(), 7);
+        assert_eq!(stat.generation(), 0);
+
+        managed.state.lock().await.unlinked = true;
+        assert!(managed.stat().await.is_none());
+    }
+
+    #[tokio::test]
     async fn rejected_draft_is_retained_and_repeated_fsync_is_idempotent() {
         let draft = EditDraft::open(fixture_image(), 1 << 20);
         draft.write_at(0, &[0x58]).await.unwrap();
