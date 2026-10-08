@@ -6,7 +6,7 @@ use orna_runtime_v1::{
     RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use orna_value_v1::{BlobMetadataFilter, decode_rov3_blob_metadata};
+use orna_value_v1::{BlobMetadataFilter, compare_blob_metadata, decode_rov3_blob_metadata};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -38,6 +38,10 @@ const LIMIT_SONG_IMPORT_FIXTURE: &str = concat!(
 const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
+);
+const SORT_IMAGE_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-image-sort.orna"
 );
 const NEGATION_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -917,4 +921,49 @@ async fn negated_media_type_filter_excludes_only_the_named_type() {
         .without_media_type("image/png")
         .without_media_type("audio/wav");
     assert!(filter_media(&state, &neither).await.is_empty());
+}
+
+#[tokio::test]
+async fn sort_orders_mixed_media_types_by_type_then_length() {
+    let (_directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(Path::new(MEDIA_FIXTURES).join(name), source.path().join(name)).unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    // Committed in reverse of the expected sort order.
+    let image = import_expression(SORT_IMAGE_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+
+    let mut metadata: Vec<_> = state
+        .committed_table_rows("media")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, row)| decode_rov3_blob_metadata(&row).unwrap())
+        .collect();
+    metadata.sort_by(compare_blob_metadata);
+    let order: Vec<(&str, u64)> = metadata
+        .iter()
+        .map(|row| (row.media_type(), row.length()))
+        .collect();
+    // audio/wav sorts before image/png; each type's rows sort by length.
+    assert_eq!(order, vec![("audio/wav", 4044), ("image/png", 73)]);
 }
