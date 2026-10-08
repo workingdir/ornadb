@@ -24,8 +24,29 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             branch,
             parsed.color.stdout_enabled(),
         ),
-        Command::SemanticLegend => {
+        Command::SemanticLegend {
+            format: LegendFormat::Json,
+        } => {
             print!("{}", orna_syntax_v1::editor::semantic_legend_json());
+            Ok(())
+        }
+        Command::SemanticLegend {
+            format: LegendFormat::Markdown,
+        } => {
+            print!("{}", orna_syntax_v1::editor::semantic_legend_markdown());
+            Ok(())
+        }
+        Command::SemanticLegend {
+            format: LegendFormat::Text,
+        } => {
+            println!("Token types:");
+            for token_type in orna_syntax_v1::editor::legend_token_types() {
+                println!("  {token_type}");
+            }
+            println!("Token modifiers:");
+            for modifier in orna_syntax_v1::editor::TOKEN_MODIFIERS {
+                println!("  {modifier}");
+            }
             Ok(())
         }
         Command::Serve { port } => cli_serve::run(&parsed.endpoint, port),
