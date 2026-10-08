@@ -1759,6 +1759,9 @@ mod graph_bridge_tests {
             .expect("count objects added since the current root");
         assert!(since_self.nodes().is_empty(), "nothing is added since the current root");
         assert_eq!(since_self.blob_references(), 0);
+        assert!(since_self.is_empty());
+        assert_eq!(since_self.exit_code(), 3, "an empty store exits 3");
+        assert_eq!(stats.exit_code(), 0, "a populated store exits 0");
         let total_nodes = stats.nodes().values().sum::<u64>();
         let limited = graph
             .object_stats_limited(&scope, total_nodes)
