@@ -1,0 +1,6 @@
+pub table Book(id: Int) { author: Int, title: Str, }
+
+fn main() {
+    Book.delete(10);
+    Book.delete(99);
+}
