@@ -2441,6 +2441,7 @@ a2e9d3b162aa79a4c4b6b3badc7fcc508bc602d5468ad022035504ec57fa73c9  crates/orna-ev
 1013dcee6a1428facc429c7be45ddff72557bc5f4f5889ae4379b02f3f4a8e06  crates/orna-evaluator-v1/tests/fixtures/stdlib-lazy-sequence-transform-xtbh5.orna
 76d3f8983a52c0fa4d88d3c15deda3c83375f34ae56b7573b4779de0ca6a2d09  crates/orna-evaluator-v1/tests/fixtures/stdlib-lazy-without-snapshot-s58ir.orna
 602352fa36c9bf07e23b35d81406cc3353edc6350a013437048b1a86e961827d  crates/orna-evaluator-v1/tests/fixtures/stdlib-lazy-zip-with-xef6t.orna
+21b1cb410175bb444713c3bd673634814b5f5b1a6567fc8ceed3daf83a296d94  crates/orna-evaluator-v1/tests/fixtures/stdlib-list-concat-identity-ln4y7.orna
 66e60288a0f14f9f9faa766adf6557551c2e11af35d69f22f559923b72cca6f4  crates/orna-evaluator-v1/tests/fixtures/stdlib-list-contract-i7bat.orna
 300d3c76483e316f921d67af5140a5dc43a1fb53c2c91b099b575bad8bb3b8b3  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-boundary-pins-ln4y7.orna
 d0f433c44de5a4cb18f50181177eca0ce2096de8dfcf1436aaf3ebce8649e4ad  crates/orna-evaluator-v1/tests/fixtures/stdlib-map-conflict-chain-ln4y7.orna
@@ -3312,6 +3313,7 @@ cd04e763ea6bd21a7201fc468207f68dd3de91ad4ce1e1841288aab86c0d0fe9  crates/orna-ls
 c75bbee709cc649cc9025108885f1ffae279b05b13edfd66647c6f56003b77d3  crates/orna-lsp/tests/fixtures/call-v1.orna
 48192399bc07aec2a77ce8acb9f810d4427fbdbd1b282141564bc9f442388859  crates/orna-lsp/tests/fixtures/diagnostic-clean-v1.orna
 c495e288bad67eb7ccd2a0f52580b2dde835d84c45bb85ab675aab178b59654d  crates/orna-lsp/tests/fixtures/diagnostic-keyword-name-v1.orna
+1d6507c277771162faf5ab37dfe673dbbe59c3184ddf06274272d00a134470d9  crates/orna-lsp/tests/fixtures/diagnostic-severity-v1.orna
 415bdfd6d8187cea64dccd750f93055025db74f13f49919190ce0ae830014460  crates/orna-lsp/tests/fixtures/document-highlight-code-lens-v1.orna
 e93403528dbf82b2ee2d1d6de8490b8b15a3526e55d41435efc62bc1d9b1ca95  crates/orna-lsp/tests/fixtures/document-link-target-v1.orna
 06ab71790499bbcd5b856ec721ae09b10eaeb511923b0882d3bdbc45c838cca7  crates/orna-lsp/tests/fixtures/document-links-v1.orna
