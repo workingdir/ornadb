@@ -901,6 +901,9 @@ impl NativeGraphContext {
         self.algorithm
     }
 
+    /// The admitted `.orna/store` root this context pinned. A candidate commit
+    /// that rewrites the store must nest the replacement tree in its own
+    /// private index rather than reusing this identity.
     pub fn store_root(&self) -> &NativeOid {
         &self.store_root
     }
@@ -2364,25 +2367,7 @@ impl NativeGraphContext {
         written: &mut BTreeSet<NativeOid>,
         object_limit: u64,
     ) -> Result<NativeOid, GraphError> {
-        let data = node.encode_canonical()?;
-        self.write_capture_envelope(&data, node, written, object_limit)
-    }
-
-    /// The stable database identity admitted for this graph context.
-    pub const fn database_id(&self) -> &[u8; 16] {
-        &self.database_id
-    }
-
-    /// The hash algorithm fixed by the admitted repository format.
-    pub const fn algorithm(&self) -> GitHashAlgorithm {
-        self.algorithm
-    }
-
-    /// The admitted `.orna/store` root this context pinned. A candidate commit
-    /// that rewrites the store must nest the replacement tree in its own
-    /// private index rather than reusing this identity.
-    pub fn store_root(&self) -> &NativeOid {
-        &self.store_root
+        self.write_capture_envelope(node, written, object_limit)
     }
 
     /// Writes one complete OGS-1 node envelope (its canonical `data` blob, its
@@ -2441,7 +2426,7 @@ impl NativeGraphContext {
         let cacheinfo = format!(
             "040000,{},{}",
             store_root.to_hex(),
-            crate::format_context::STORE_PATH
+            crate::init::format_context::STORE_PATH
         );
         let output = self
             .git_command()
