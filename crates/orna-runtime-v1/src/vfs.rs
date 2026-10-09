@@ -1114,6 +1114,10 @@ fn stale_baseline_diagnostic() -> SafeDiagnostic {
 /// retained-draft identity rules as every other rejection (ORNA-VFS-009): the
 /// identity is issued once per rejected revision and reused while that
 /// revision stays unchanged.
+///
+/// [`DraftState::retain_rejection`] is the one authority for a retained
+/// rejection, so this route and the direct draft routes cannot disagree about
+/// a draft's retained identity.
 async fn retain_rejected_draft<S>(draft: &EditDraft<S>, diagnostic: SafeDiagnostic) {
     let mut draft_state = draft.state.lock().await;
     let revision = draft_state.revision;
