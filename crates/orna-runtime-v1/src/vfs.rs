@@ -17,9 +17,12 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{
-    CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeError, RuntimeState, RuntimeTableIdentity,
-    SafeDiagnostic, TableActivationError, TableMutation, ValidatedTableActivationCommit,
+    CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, RuntimeActivationContext,
+    RuntimeError, RuntimeState, RuntimeTableIdentity, SafeDiagnostic,
+    TableActivationCandidateValidator, TableActivationError, TableMutation,
+    ValidatedTableActivationCommit, WriterLease,
 };
+use orna_repository_v1::{CwdGeneration, ProtectedContentPin};
 
 /// One repository-wide invalidation clock shared by projections in a VFS
 /// repository scope.
@@ -2152,6 +2155,333 @@ pub async fn commit_vfs_table_activation(
     request: ValidatedTableActivationCommit<'_>,
 ) -> Result<CwdCapture, TableActivationError> {
     runtime.commit_validated_table_activation(request).await
+}
+
+/// The repository-issued coordinates one durable document save commits under.
+///
+/// The writer that owns the repository, the admitted relation identity and
+/// typed key, and the repository-issued CWD and schema generation are one unit:
+/// a save cannot combine a generation from one repository state with a row
+/// identity from another (`ORNA-STATE-003`, VFS-002).
+pub struct VfsDurableSave {
+    owner_id: [u8; 16],
+    cwd_generation: CwdGeneration,
+    table: RuntimeTableIdentity,
+    key: Vec<u8>,
+}
+
+impl VfsDurableSave {
+    pub fn new(
+        owner_id: [u8; 16],
+        cwd_generation: CwdGeneration,
+        table: RuntimeTableIdentity,
+        key: Vec<u8>,
+    ) -> Self {
+        Self {
+            owner_id,
+            cwd_generation,
+            table,
+            key,
+        }
+    }
+
+    /// The admitted committed identity of the saved row's relation.
+    pub fn table(&self) -> &RuntimeTableIdentity {
+        &self.table
+    }
+
+    /// The admitted typed key of the saved row.
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+}
+
+/// The admitted coordinates one save hands to its caller: the committed
+/// relation identity and typed key the candidate row must address. Owned, so a
+/// caller's async candidate builder borrows nothing from the admission.
+pub struct VfsSaveCoordinates {
+    table: RuntimeTableIdentity,
+    key: Vec<u8>,
+}
+
+impl VfsSaveCoordinates {
+    /// The admitted committed identity of the saved row's relation.
+    pub fn table(&self) -> &RuntimeTableIdentity {
+        &self.table
+    }
+
+    /// The admitted typed key of the saved row.
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+}
+
+/// One admitted VFS row save, held open across the activation.
+///
+/// A save is admitted once: the runtime leases the repository, captures the
+/// generation the candidate is based on, and commits under the digest of that
+/// capture. `S` is the repository owner's opaque row-map snapshot, so the
+/// baseline carried by the draft and this admission's capture travel together.
+pub struct VfsSaveAdmission<'a, S> {
+    runtime: &'a RuntimeState,
+    context: RuntimeActivationContext,
+    save: VfsDurableSave,
+    writer: WriterLease,
+    digest: [u8; 32],
+    faults: &'a dyn FaultInjector,
+    _baseline: std::marker::PhantomData<fn() -> S>,
+}
+
+/// One complete VFS row save: the exact row replacement plus the caller's
+/// candidate validator. The validator carries the schema, key/field and
+/// assertion authority for the relation, so this module never invents a second
+/// row authority and never validates rows it does not own (VFS-002).
+pub struct VfsSaveCandidate {
+    replacement: VfsTableRowReplacement,
+    validator: Box<dyn TableActivationCandidateValidator>,
+}
+
+impl VfsSaveCandidate {
+    pub fn new(
+        replacement: VfsTableRowReplacement,
+        validator: Box<dyn TableActivationCandidateValidator>,
+    ) -> Self {
+        Self {
+            replacement,
+            validator,
+        }
+    }
+
+    /// The row replacement the activation will commit.
+    pub fn replacement(&self) -> &VfsTableRowReplacement {
+        &self.replacement
+    }
+}
+
+impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
+    /// Leases the repository and captures the generation this save is based on.
+    ///
+    /// The capture is the runtime's admitted-table activation, so the row's
+    /// committed relation identity is verified against committed metadata in the
+    /// same read transaction that captures the generation (VFS-002).
+    pub async fn begin(
+        runtime: &'a RuntimeState,
+        save: VfsDurableSave,
+        faults: &'a dyn FaultInjector,
+    ) -> Result<Self, TableActivationError> {
+        let writer = runtime
+            .acquire_lease(save.owner_id)
+            .await
+            .map_err(TableActivationError::Runtime)?;
+        let snapshot = runtime
+            .begin_admitted_table_activation(std::slice::from_ref(&save.table))
+            .await
+            .map_err(TableActivationError::Runtime)?;
+        let context = snapshot.context().clone();
+        let digest = context.capture().generation_digest();
+        Ok(Self {
+            runtime,
+            context,
+            save,
+            writer,
+            digest,
+            faults,
+            _baseline: std::marker::PhantomData,
+        })
+    }
+
+    /// The admitted coordinates the candidate row must address. Owned so the
+    /// caller's candidate builder can own them across its own await points.
+    pub fn coordinates(&self) -> VfsSaveCoordinates {
+        VfsSaveCoordinates {
+            table: self.save.table.clone(),
+            key: self.save.key.clone(),
+        }
+    }
+
+    /// The digest the activation commits under.
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Commits one complete row replacement through the runtime's single
+    /// validated transaction. The candidate relation is validated before any
+    /// row, mutation record, or checkpoint becomes visible, so a rejected save
+    /// leaves the row store byte-identical and publishes no checkpoint. The
+    /// returned capture is a reopenable durable acknowledgement (VFS-021).
+    pub async fn commit(
+        &self,
+        candidate: VfsSaveCandidate,
+    ) -> Result<CwdCapture, TableActivationError> {
+        let VfsSaveCandidate {
+            replacement,
+            mut validator,
+        } = candidate;
+        let mutation = replacement
+            .mutation()
+            .map_err(TableActivationError::Runtime)?;
+        let mut content_pins: [ProtectedContentPin; 0] = [];
+        commit_vfs_table_activation(
+            self.runtime,
+            ValidatedTableActivationCommit {
+                writer: self.writer,
+                context: &self.context,
+                cwd_generation: &self.save.cwd_generation,
+                mutations: std::slice::from_ref(&mutation),
+                content_pins: &mut content_pins,
+                next_digest: self.digest,
+                validator: validator.as_mut(),
+                faults: self.faults,
+            },
+        )
+        .await
+    }
+}
+
+/// Why a durable save was not admitted. Every variant is decided before the
+/// row store is touched except `Activation`, which the runtime refuses inside
+/// its own transaction.
+#[derive(Debug)]
+pub enum VfsSaveError<E> {
+    /// The activated destination already accepted this draft.
+    AlreadyApplied {
+        /// The cache generation the accepted image was published at.
+        generation: u64,
+    },
+    /// The captured baseline is no longer the destination's image, so the
+    /// candidate is stale and the destination keeps its accepted row (VFS-011).
+    Stale {
+        /// The repository's cache generation observed at admission.
+        generation: u64,
+        diagnostic: SafeDiagnostic,
+    },
+    /// The runtime refused the saved row. The row store keeps the accepted row
+    /// and this is the stable diagnostic association in local state (VFS-009).
+    Rejected {
+        /// The repository's cache generation observed at admission.
+        generation: u64,
+        diagnostic: SafeDiagnostic,
+    },
+    /// The file holds no candidate bytes to admit (VFS-001).
+    NoCandidate,
+    /// The runtime refused the activation itself.
+    Activation(E),
+}
+
+impl<S: Send + Sync + 'static> ManagedFile<S> {
+    /// Adopts one complete VFS row-document save through the same durable
+    /// validation and transaction boundary the CLI uses, then publishes it to
+    /// the projection cache (ORNA-VFS-006, VFS-009, VFS-021).
+    ///
+    /// The row is committed to the runtime's own state database, so an accepted
+    /// save is visible to any reopen of that database and a rejected one is not
+    /// durably accepted at all. `admit` turns the candidate bytes into the
+    /// complete typed row replacement; this module never invents a second row
+    /// authority (VFS-002). Stale and rejected candidates retain their bytes and
+    /// diagnostic through the draft (VFS-009). `faults` is the commit-boundary
+    /// seam: crash recovery is exercised through the same runtime transaction a
+    /// normal save uses.
+    pub async fn commit_durable_document_save<A, AFut>(
+        self: &Arc<Self>,
+        draft: &EditDraft<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
+    {
+        let mut destination = self.state.lock().await;
+        let mut draft_state = draft.state.lock().await;
+        if destination.unlinked || !Arc::ptr_eq(&destination.image, &draft_state.baseline) {
+            let diagnostic = SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Transient,
+            };
+            let generation = *self.cache_epoch.generation.lock().await;
+            let revision = draft_state.revision;
+            draft_state.retain_rejection(revision, diagnostic);
+            return Err(VfsSaveError::Stale {
+                generation,
+                diagnostic,
+            });
+        }
+        let revision = draft_state.revision;
+        // Repeated callbacks for one sequence return the recorded outcome; a
+        // later write begins a new candidate based on accepted state, so one
+        // revision is never admitted twice (VFS-008).
+        if let Some((rejected, diagnostic)) = draft_state.last_rejection
+            && rejected == revision
+        {
+            let generation = *self.cache_epoch.generation.lock().await;
+            return Err(VfsSaveError::Rejected {
+                generation,
+                diagnostic,
+            });
+        }
+        let Some(candidate) = draft_state.candidate.clone() else {
+            return Err(VfsSaveError::NoCandidate);
+        };
+        // One shared image of the candidate bytes is handed to the caller and
+        // published on acceptance, so no second copy is made at either end.
+        let candidate_bytes: Arc<[u8]> = Arc::from(candidate.as_slice());
+
+        // Serialize admissions in this repository epoch and keep the epoch lock
+        // across admission and commit, so no projection observes a partially
+        // advanced generation. A failed or rejected save leaves it unchanged.
+        let mut cache_generation = self.cache_epoch.generation.lock().await;
+        let next_generation = match cache_generation.checked_add(1) {
+            Some(next) => next,
+            None => {
+                return Err(VfsSaveError::Activation(TableActivationError::Runtime(
+                    RuntimeError::RecoveryInvalid,
+                )));
+            }
+        };
+        let admission = VfsSaveAdmission::<S>::begin(runtime, save, faults)
+            .await
+            .map_err(VfsSaveError::Activation)?;
+        let candidate = admit(admission.coordinates(), Arc::clone(&candidate_bytes))
+            .await
+            .map_err(VfsSaveError::Activation)?;
+        match admission.commit(candidate).await {
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                draft_state.retain_rejection(revision, diagnostic);
+                Err(VfsSaveError::Rejected {
+                    generation: *cache_generation,
+                    diagnostic,
+                })
+            }
+            Err(error) => Err(VfsSaveError::Activation(error)),
+            Ok(_capture) => {
+                // Mirror the temp-rename route: the accepted handle carries the
+                // candidate bytes, and the image new opens see carries the
+                // advanced projection (VFS-019).
+                let accepted = Arc::new(VfsFileSnapshot::new(
+                    draft_state.baseline.pin.clone_pin(),
+                    Arc::clone(&candidate_bytes),
+                ));
+                let image = Arc::new(VfsFileSnapshot::with_projection(
+                    &accepted,
+                    CacheProjection {
+                        epoch: self.cache_epoch.clone(),
+                        generation: next_generation,
+                    },
+                ));
+                draft_state.candidate = None;
+                draft_state.last_rejection = None;
+                draft_state.baseline = Arc::clone(&image);
+                destination.image = Arc::clone(&image);
+                *cache_generation = next_generation;
+                Ok(TemporaryRenameOutcome::Applied {
+                    generation: next_generation,
+                    handle: SnapshotReadHandle::open(image),
+                })
+            }
+        }
+    }
 }
 
 #[cfg(test)]
