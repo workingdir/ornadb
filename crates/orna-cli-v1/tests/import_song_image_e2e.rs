@@ -97,16 +97,20 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
     assert_eq!(committed[0].0, b"image".to_vec());
     assert_eq!(committed[1].0, b"song".to_vec());
 
-    // Both committed rows must be reachable from the *published* format-3
-    // snapshot, not only from the runtime that staged them: the publication
-    // boundary is what every other process reads. A row that lists through the
-    // runtime but is absent from the row map never left the pending tail.
-    let log = git_output(directory.path(), &["log", "--oneline", "--all"], None);
-    eprintln!("PUBLOG\n{}", String::from_utf8_lossy(&log));
-    let status = git_output(directory.path(), &["status", "--porcelain"], None);
-    eprintln!("PUBSTATUS\n{}", String::from_utf8_lossy(&status));
-    let files = git_output(directory.path(), &["ls-files"], None);
-    eprintln!("PUBFILES\n{}", String::from_utf8_lossy(&files));
+    // Publication must leave both loose row files in the committed tree: the
+    // explicit boundary is the only thing that advances the repository, and a
+    // read of the tree is what a second process sees.
+    let tracked = git_output(directory.path(), &["ls-files"], None);
+    let tracked = String::from_utf8(tracked).unwrap();
+    for row in ["media/song.orna", "media/image.orna"] {
+        assert!(tracked.contains(row), "publication commits {row}");
+    }
+
+    // Both committed rows must also be reachable through the format-3 row map,
+    // which is the store root the read path resolves (`open_format_context` ->
+    // `load_row_map` -> `open_native_graph`). A row that lists through the
+    // runtime that staged it but is absent from the row map was never projected
+    // into the published store, so no other process can see it.
     let format = repository.open_format_context().unwrap();
     let row_map = format.load_row_map(relation_id).unwrap();
     let graph = format.open_native_graph(&row_map).unwrap();
@@ -121,7 +125,7 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
     assert_eq!(
         published.len(),
         2,
-        "both imported rows are committed to the published snapshot, got {published_keys:?}"
+        "both imported rows are projected into the published store, got {published_keys:?}"
     );
 
     let objects = blob_count(directory.path());
