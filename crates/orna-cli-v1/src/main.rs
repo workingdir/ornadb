@@ -12,8 +12,9 @@ mod cli_export;
 mod cli_import;
 mod cli_mount;
 mod cli_publish;
-mod cli_status;
 mod cli_serve;
+mod cli_status;
+mod snapshot_selector;
 mod media_range;
 mod repl;
 

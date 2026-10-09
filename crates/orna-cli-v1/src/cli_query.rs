@@ -42,6 +42,7 @@ struct QueryOptions<'a> {
     limit: usize,
     format: QueryFormat,
     predicate: BlobMetadataFilter,
+    at: Option<&'a str>,
 }
 
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
@@ -51,9 +52,22 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut limit = DEFAULT_QUERY_LIMIT;
     let mut format = QueryFormat::Human;
     let mut predicate = BlobMetadataFilter::new();
+    let mut at = None;
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
+            "--at" => {
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--at needs a value", "usage: --at <selector>"))?;
+                if at.is_some() {
+                    return Err(query_error(
+                        "Query names one snapshot",
+                        "usage: --at <selector>",
+                    ));
+                }
+                at = Some(value);
+            }
             "--key" => {
                 let value = words
                     .next()
@@ -133,8 +147,8 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 return Err(query_error(
                     "Unknown query flag",
                     format!(
-                        "got {flag:?}; accepted: --key, --field, --kind, --not-kind, --suffix, \
-                         --min-length, --max-length, --limit, --format"
+                        "got {flag:?}; accepted: --key, --at, --field, --kind, --not-kind, \
+                         --suffix, --min-length, --max-length, --limit, --format"
                     ),
                 ));
             }
@@ -144,7 +158,9 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--field N] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
+            "usage: orna query <relation-hex> [--key KEY] [--at SELECTOR] [--field N] \
+             [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] \
+             [--max-length BYTES] [--limit N] [--format human|json]",
         ));
     };
     Ok(QueryOptions {
@@ -154,6 +170,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
         limit,
         format,
         predicate,
+        at,
     })
 }
 
@@ -163,9 +180,48 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let path = local_project_path(endpoint)?;
     let repository = Repository::discover(path)
         .map_err(|error| query_error("Repository could not be opened", format!("{error:?}")))?;
-    let format = repository
-        .open_format_context()
-        .map_err(|error| query_error("Format context could not be opened", format!("{error:?}")))?;
+    // `--at` pins one named snapshot exactly as `orna history` does. The
+    // selector is resolved exactly once, here, and the row map, read scope and
+    // listing all come from that commit's own objects, so an edit published
+    // afterwards never changes what a pinned query reports.
+    let format = match options.at {
+        Some(selector) => {
+            // Git resolves a name carried by both a branch and a tag by ref
+            // precedence and only warns, so a read pinned with `--at amb`
+            // would silently answer from whichever of the colliding refs it
+            // preferred. The read is refused instead of picking one.
+            if super::snapshot_selector::bare_ref_selector_is_ambiguous(path, selector)
+                .map_err(|detail| query_error("Git could not list the snapshot names", detail))?
+            {
+                return Err(Diagnostic::target_with_detail(
+                    "E2000",
+                    "Snapshot name is ambiguous",
+                    "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
+                     `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
+                    format!("{selector:?} names more than one branch, tag or remote branch"),
+                ));
+            }
+            repository
+                .open_pinned_format_context(selector)
+                .map_err(|error| {
+                    query_error(
+                        "Snapshot could not be pinned",
+                        format!("{selector:?}: {error:?}"),
+                    )
+                })?
+        }
+        None => repository.open_format_context().map_err(|error| {
+            query_error("Format context could not be opened", format!("{error:?}"))
+        })?,
+    };
+    // A format-1/2 pin is a read-only compatibility input with no native row
+    // store, so it has no row map to list.
+    if format.is_read_only() {
+        return Err(query_error(
+            "Snapshot is a legacy format-1/2 input",
+            "--at names a read-only compatibility snapshot with no native row store; name a format-3 commit",
+        ));
+    }
     let row_map = format
         .load_row_map(relation)
         .map_err(|error| query_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -250,12 +306,13 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         QueryFormat::Human => {
             for (key, field, metadata) in &listings {
                 println!(
-                    "{} {field} {} {} {} {} {}",
+                    "{} {field} {} {} {} {} {} {}",
                     render_key(key),
                     metadata.media_type(),
                     metadata.suffix().unwrap_or("-"),
                     metadata.length(),
                     hex(&metadata.sha256()),
+                    descriptor_hex(metadata.descriptor_oid()),
                     metadata.is_hydrated(),
                 );
             }
@@ -278,6 +335,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                         "suffix": metadata.suffix(),
                         "length": metadata.length(),
                         "sha256": hex(&metadata.sha256()),
+                        "descriptor": descriptor_hex(metadata.descriptor_oid()),
                         "hydrated": metadata.is_hydrated(),
                     })
                 })
@@ -424,6 +482,13 @@ fn key_candidates(value: &str) -> Result<Vec<TypedKey>, Diagnostic> {
         candidates.push(TypedKey::Bytes(bytes));
     }
     Ok(candidates)
+}
+
+/// The descriptor a stored reference names, or `-` when the field carries no
+/// descriptor at all. Both cases are printed, so a listing never shows an
+/// empty column that could be mistaken for a missing OID.
+fn descriptor_hex(descriptor: Option<&orna_value_v1::NativeOid>) -> String {
+    descriptor.map_or_else(|| "-".to_owned(), |oid| hex(oid.as_bytes()))
 }
 
 fn hex(bytes: &[u8]) -> String {
