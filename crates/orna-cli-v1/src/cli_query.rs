@@ -316,13 +316,21 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     match options.format {
         QueryFormat::Human => {
             for (key, field, metadata) in &listings {
+                // The descriptor is the object a caller needs to read the
+                // payload the listing did not fetch, so it is stated here
+                // rather than left to a second lookup. The listing decoded it
+                // from the row's own stored reference, so printing it reads no
+                // additional object.
                 println!(
-                    "{} {field} {} {} {} {} {}",
+                    "{} {field} {} {} {} {} descriptor {} {}",
                     render_key(key),
                     metadata.media_type(),
                     metadata.suffix().unwrap_or("-"),
                     metadata.length(),
                     hex(&metadata.sha256()),
+                    metadata
+                        .descriptor_oid()
+                        .map_or_else(|| "-".to_owned(), |oid| hex(oid.as_bytes())),
                     metadata.is_hydrated(),
                 );
             }
@@ -345,6 +353,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                         "suffix": metadata.suffix(),
                         "length": metadata.length(),
                         "sha256": hex(&metadata.sha256()),
+                        "descriptor": metadata
+                            .descriptor_oid()
+                            .map(|oid| hex(oid.as_bytes())),
                         "hydrated": metadata.is_hydrated(),
                     })
                 })
