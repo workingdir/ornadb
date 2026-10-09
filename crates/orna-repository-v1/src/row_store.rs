@@ -255,7 +255,28 @@ impl AdmittedRow {
         let Some(field) = fields.get(field) else {
             return Ok(None);
         };
-        decode_blob_field_metadata(field).map(Some)
+        blob_field_metadata(field)
+    }
+
+    /// Projects every Blob field of this row to payload-free metadata.
+    ///
+    /// A media row keeps its Blob among ordinary fields, so a listing walks
+    /// the tuple once and reports each Blob with its index in canonical
+    /// order. A field that is not a Blob in canonical shape is skipped: it is
+    /// not a Blob, which is a different answer from a malformed Blob.
+    pub fn blob_fields(&self) -> Result<Vec<(usize, BlobMetadata)>, RowStoreError> {
+        let fields = decode_canonical_fields_of(
+            self.value
+                .encoded_fields()
+                .ok_or(RowStoreError::BlobMetadataRequiresGraphContext)?,
+        )?;
+        let mut projected = Vec::new();
+        for (index, field) in fields.iter().enumerate() {
+            if let Some(metadata) = blob_field_metadata(field)? {
+                projected.push((index, metadata));
+            }
+        }
+        Ok(projected)
     }
 }
 
@@ -1124,7 +1145,16 @@ pub(crate) fn decode_canonical_fields_of(encoded: &[u8]) -> Result<Vec<CborValue
 /// A Blob field is the format-3 ROV-3 tag 60111: `[length, sha256,
 /// media_type, suffix, descriptor]`. The descriptor is deliberately not
 /// resolved here, so a listing reads the row's own bytes and nothing else.
-/// A field that is not a Blob in canonical shape is not a Blob.
+/// A field that is not a Blob in canonical shape is not a Blob: it yields
+/// `None` rather than being reported or rejected. A field that *is* a tagged
+/// Blob but whose payload is malformed is a real error, not a silent miss.
+fn blob_field_metadata(field: &CborValue) -> Result<Option<BlobMetadata>, RowStoreError> {
+    if !matches!(field, CborValue::Tag(ROV3_BLOB_TAG, _)) {
+        return Ok(None);
+    }
+    decode_blob_field_metadata(field).map(Some)
+}
+
 fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStoreError> {
     let CborValue::Tag(ROV3_BLOB_TAG, payload) = field else {
         return Err(RowStoreError::InvalidCanonicalRowValue);
