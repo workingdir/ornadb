@@ -494,10 +494,24 @@ impl Repository {
         self.open_format_context_at(&snapshot)
     }
 
-    /// Opens and validates the format metadata at the current immutable HEAD.
+    /// Opens and validates format metadata at the current immutable HEAD.
     /// Worktree-only metadata is not silently treated as a committed snapshot.
     pub fn open_format_context(&self) -> Result<RepositoryFormatContext, FormatContextError> {
         let snapshot = self.pin_snapshot("HEAD")?;
+        self.open_format_context_at(&snapshot)
+    }
+
+    /// Pins one reachable selector and opens its format metadata, so a caller
+    /// can read a named snapshot instead of whatever `HEAD` becomes later.
+    ///
+    /// Resolving happens once, here: the returned context is bound to the
+    /// commit the selector named, and never follows a branch that advances
+    /// during the read.
+    pub fn open_pinned_format_context(
+        &self,
+        selector: &str,
+    ) -> Result<RepositoryFormatContext, FormatContextError> {
+        let snapshot = self.pin_snapshot(selector)?;
         self.open_format_context_at(&snapshot)
     }
 
@@ -2056,15 +2070,15 @@ mod graph_bridge_tests {
         assert!(commit_count >= 2, "store install must add a commit");
 
         let all = graph
-            .list_revision_snapshots(commit_count)
+            .list_revision_snapshots("HEAD", commit_count)
             .expect("list every reachable revision");
         assert_eq!(all.len(), commit_count);
         assert_eq!(all[0].commit().to_hex(), head);
         assert_eq!(all[0].tree().to_hex(), head_tree);
-        assert_eq!(graph.list_revision_snapshots(1).unwrap(), all[..1].to_vec());
-        assert!(graph.list_revision_snapshots(0).unwrap().is_empty());
+        assert_eq!(graph.list_revision_snapshots("HEAD", 1).unwrap(), all[..1].to_vec());
+        assert!(graph.list_revision_snapshots("HEAD", 0).unwrap().is_empty());
         assert!(matches!(
-            graph.list_revision_snapshots(4097),
+            graph.list_revision_snapshots("HEAD", 4097),
             Err(crate::native_graph::GraphError::InventoryQuotaExceeded)
         ));
 
