@@ -20868,30 +20868,26 @@ mod tests {
         };
         // Both saves build the same candidate, so the second one is the replay
         // of a save the relation already holds.
-        let admit = |accepted: Vec<u8>| {
-            move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| {
-                let identity = identity.clone();
-                let accepted = accepted.clone();
-                async move {
-                    let replacement = vfs::VfsTableRowReplacement::new(
-                        id(7),
-                        identity.clone(),
-                        coordinates.key().to_vec(),
-                        Some(bytes.to_vec()),
-                    )
-                    .map_err(TableActivationError::Runtime)?;
-                    let mut table_object_ids = BTreeMap::new();
-                    table_object_ids.insert(identity.table().to_owned(), identity.object_id());
-                    Ok(vfs::VfsSaveCandidate::new(
-                        replacement,
-                        Box::new(AcceptingRowValidator {
-                            tables: vec![identity.table().to_owned()],
-                            table_object_ids,
-                            accepted,
-                            calls: 0,
-                        }),
-                    ))
-                }
+        let admit = |mutation_id: [u8; 16], identity: RuntimeTableIdentity, accepted: Vec<u8>| {
+            move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
+                let replacement = vfs::VfsTableRowReplacement::new(
+                    mutation_id,
+                    identity.clone(),
+                    coordinates.key().to_vec(),
+                    Some(bytes.to_vec()),
+                )
+                .map_err(TableActivationError::Runtime)?;
+                let mut table_object_ids = BTreeMap::new();
+                table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                Ok(vfs::VfsSaveCandidate::new(
+                    replacement,
+                    Box::new(AcceptingRowValidator {
+                        tables: vec![identity.table().to_owned()],
+                        table_object_ids,
+                        accepted,
+                        calls: 0,
+                    }),
+                ))
             }
         };
 
@@ -20903,7 +20899,7 @@ mod tests {
                 &first_draft,
                 &state,
                 durable_save(),
-                admit(accepted_row.clone()),
+                admit(id(7), identity.clone(), accepted_row.clone()),
                 &NoFault,
             )
             .await
@@ -20933,7 +20929,7 @@ mod tests {
                 &replay_draft,
                 &state,
                 durable_save(),
-                admit(accepted_row.clone()),
+                admit(id(7), identity.clone(), accepted_row.clone()),
                 &NoFault,
             )
             .await
@@ -20972,7 +20968,7 @@ mod tests {
                 &changed_draft,
                 &state,
                 durable_save(),
-                admit(b"changed".to_vec()),
+                admit(identity.clone(), b"changed".to_vec()),
                 &NoFault,
             )
             .await
