@@ -821,7 +821,7 @@ async fn history_json_lists_each_revision_with_exactly_the_four_keys() {
         let object = entry.as_object().expect("each revision is a JSON object");
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["author", "commit", "present", "tree"]);
+        assert_eq!(keys, ["author", "commit", "committed", "present", "tree"]);
         for field in ["commit", "tree"] {
             let hex = object[field].as_str().expect("hex id is a string");
             assert_eq!(hex.len(), 40, "{field} is a full object id");
