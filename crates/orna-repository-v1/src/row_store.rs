@@ -601,6 +601,26 @@ impl RowValue {
         Self::Overflow(reference)
     }
 
+    /// The canonical CBOR spelling of this stored value exactly as it belongs
+    /// in an ORP-1 page. Inline values keep their admitted field encoding; an
+    /// overflow value is the kind-3 tag naming its shared value graph root, so
+    /// re-reading the page re-derives the same idempotent reference.
+    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Inline { encoded, .. } => encoded.clone(),
+            Self::Overflow(reference) => {
+                let mut output = Vec::with_capacity(1 + reference.encoded_metadata_len());
+                cbor_head(&mut output, 6, 60_113);
+                cbor_head(&mut output, 2, reference.byte_root.as_bytes().len() as u64);
+                match reference.native_root() {
+                    Some(root) => output.extend_from_slice(root.as_bytes()),
+                    None => output.extend_from_slice(reference.byte_root.as_bytes()),
+                }
+                output
+            }
+        }
+    }
+
     pub fn encoded_metadata_len(&self) -> usize {
         match self {
             Self::Inline { encoded, .. } => encoded.len(),
@@ -766,7 +786,7 @@ impl RowMapBuilder {
     }
 }
 
-fn partition_pages(entries: &[RowEntry], height: u8) -> Result<Vec<RowPage>, RowStoreError> {
+pub(crate) fn partition_pages(entries: &[RowEntry], height: u8) -> Result<Vec<RowPage>, RowStoreError> {
     let mut pages = Vec::new();
     let mut current = Vec::new();
     let mut current_size = 16usize;
