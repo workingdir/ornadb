@@ -39,6 +39,9 @@ pub(super) const HELP_LINES: &[&str] = &[
     "History commands:",
     "  history RELATION KEY [--at SELECTOR] [--limit N] [--since COMMIT] [--format human|json] [--reverse] [--author TEXT] [--count]",
     "  history exit codes: 0 listed or counted; 1 any history error (bad flag or value, unknown repository, row, --at selector, or --since commit)",
+    "  query RELATION [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]",
+    "  query                            Blob metadata of committed rows, payload-free",
+    "  query exit codes: 0 metadata listed; 1 any query error (bad flag or value, unknown repository or relation)",
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];
 
