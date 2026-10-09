@@ -936,7 +936,7 @@ pub(super) fn string_literal(value: &Expr) -> Option<&str> {
     text.strip_prefix('"')?.strip_suffix('"')
 }
 
-pub(super) fn canonical_database_bytes(database_id: &DatabaseId) -> Vec<u8> {
+pub(crate) fn canonical_database_bytes(database_id: &DatabaseId) -> Vec<u8> {
     format!(
         "{{\n    repository_format: {FINAL_REPOSITORY_FORMAT},\n    database_id: \"{database_id}\",\n}}\n"
     )
