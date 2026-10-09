@@ -308,6 +308,15 @@ impl CompleteCopyManifest {
             }
         }
         let snapshot = snapshot.ok_or(CompleteCopyError::InvalidArchive("missing snapshot"))?;
+        // The archive's own object list is the union of its members, so an
+        // object reachable from two members is recorded once. Grouping by
+        // member appends it once per member, so fold the union back to a set
+        // here: a read manifest then equals the manifest that was written.
+        let objects: Vec<CompleteCopyObject> = objects
+            .into_iter()
+            .collect::<BTreeSet<CompleteCopyObject>>()
+            .into_iter()
+            .collect();
         if members.is_empty() {
             if !legacy {
                 return Err(CompleteCopyError::InvalidArchive("missing archive members"));
