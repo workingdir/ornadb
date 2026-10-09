@@ -2370,16 +2370,6 @@ impl NativeGraphContext {
         self.write_capture_envelope(node, written, object_limit)
     }
 
-    /// The stable database identity admitted for this graph context.
-    pub const fn database_id(&self) -> &[u8; 16] {
-        &self.database_id
-    }
-
-    /// The hash algorithm fixed by the admitted repository format.
-    pub const fn algorithm(&self) -> GitHashAlgorithm {
-        self.algorithm
-    }
-
     /// Writes one complete OGS-1 node envelope (its canonical `data` blob, its
     /// `refs` tree when the node has dependencies, and the envelope tree that
     /// names both) into the repository's single object store.
@@ -2436,7 +2426,7 @@ impl NativeGraphContext {
         let cacheinfo = format!(
             "040000,{},{}",
             store_root.to_hex(),
-            crate::format_context::STORE_PATH
+            crate::init::format_context::STORE_PATH
         );
         let output = self
             .git_command()
