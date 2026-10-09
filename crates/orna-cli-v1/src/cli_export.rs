@@ -257,25 +257,27 @@ mod tests {
     }
 
     #[test]
-    fn parses_destination_selector_and_dependencies() {
+    fn parses_destination_selectors_and_dependencies() {
         let mode = parse_options(&words(&[
             "out",
             "--at",
             "main",
+            "--at",
+            "@~1",
             "--dependency",
             "deps/std=/srv/std",
         ]))
         .expect("parse export arguments");
         let Mode::Export {
             destination,
-            selector,
+            selectors,
             dependencies,
         } = mode
         else {
             panic!("expected an export mode");
         };
         assert_eq!(destination.to_str(), Some("out"));
-        assert_eq!(selector, "main");
+        assert_eq!(selectors, vec!["main".to_owned(), "@~1".to_owned()]);
         assert_eq!(dependencies.len(), 1);
         assert_eq!(dependencies[0].path, "deps/std");
         assert_eq!(dependencies[0].directory.to_str(), Some("/srv/std"));
@@ -311,18 +313,15 @@ mod tests {
         // `--worktree` only means something for a reconstruction.
         assert!(parse_options(&words(&["out", "--at", "main", "--worktree"])).is_err());
         assert!(parse_options(&words(&["a", "b", "--restore", "c"])).is_err());
+        // A selector needs a value, and one flag cannot carry two.
+        assert!(parse_options(&words(&["out", "--at"])).is_err());
+        assert!(parse_options(&words(&["out", "--at", ""])).is_err());
     }
 
     #[test]
     fn check_reports_an_absent_archive_without_a_repository() {
         // A read-only check must fail on the archive, not silently succeed.
         let missing = tempfile::tempdir().expect("create temporary directory");
-        assert!(
-            run(
-                missing.path(),
-                &words(&["./absent", "--check"])
-            )
-            .is_err()
-        );
+        assert!(run(missing.path(), &words(&["./absent", "--check"])).is_err());
     }
 }
