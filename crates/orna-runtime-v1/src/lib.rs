@@ -55,7 +55,8 @@ use uuid::Uuid;
 
 mod activation;
 pub use activation::{
-    ActivationError, ActivationWork, run_admitted_table_activation, run_table_activation,
+    ActivationError, ActivationWork, run_admitted_table_activation,
+    run_admitted_table_request_activation, run_table_activation,
     with_activation_scope,
     with_terminal_admin_effect,
 };
@@ -2236,6 +2237,11 @@ pub enum FaultPoint {
     AfterMutation,
     AfterCheckpoint,
     AfterCapture,
+    /// The writer transaction has already committed when the injector runs.
+    /// Only a whole-process abort here models a crash between durable commit
+    /// and the caller observing the result; an in-process `Err` would report
+    /// a rollback that did not happen.
+    AfterCommit,
     AfterFailureRecord,
     AfterFailurePayload,
     AfterReplayFailureRecord,
@@ -6254,6 +6260,7 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        faults.check(FaultPoint::AfterCommit)?;
         Ok(next)
     }
 
@@ -6471,6 +6478,9 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| TableActivationError::Runtime(RuntimeError::StorageUnavailable))?;
+        if let Err(error) = faults.check(FaultPoint::AfterCommit) {
+            return Err(TableActivationError::Runtime(error));
+        }
         Ok(next)
     }
 
@@ -6875,6 +6885,9 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        // The row, terminal claim and capture are already durable. A crash
+        // probe here must not report a rollback it did not perform.
+        faults.check(FaultPoint::AfterCommit)?;
         Ok(RequestActivationCommit {
             capture,
             request: RequestStatus {
@@ -7045,6 +7058,50 @@ impl RuntimeState {
             admin_audit_sequence,
             checkpoint_reset_audit_sequence,
         })
+    }
+
+    /// Selects the published `HEAD` pin for admitted relation reads.
+    ///
+    /// `HEAD` is the highest checkpoint generation whose publication completed
+    /// with a Git commit (`ORNA-STATE-001`). A frozen intent that never
+    /// completed, and every unpublished CWD generation after the last
+    /// completed publication, are excluded, so an admitted read of
+    /// `relation.as_of(HEAD)` never observes the unpublished tail
+    /// (`ORNA-STATE-003`).
+    ///
+    /// With no completed publication this fails closed rather than resolving
+    /// an empty baseline: an unpublished store has no `HEAD` to read.
+    pub async fn select_published_snapshot(&self) -> Result<HistoricalSnapshot, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT MAX(publication_freeze.checkpoint_generation) \
+                 FROM publication_freeze JOIN publication_commit \
+                 ON publication_commit.intent_id = publication_freeze.intent_id",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let published: Option<i64> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let generation = u64::try_from(published.ok_or(RuntimeError::SnapshotNotFound)?)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        self.select_historical_snapshot(generation).await
+    }
+
+    /// Reads one admitted relation at published `HEAD` by its committed
+    /// identity, so the rows match the live relation across a rename while the
+    /// unpublished tail stays invisible (`ORNA-STATE-003`).
+    pub async fn read_admitted_table_at_head(
+        &self,
+        identity: &RuntimeTableIdentity,
+    ) -> Result<HistoricalTableRows, RuntimeError> {
+        let snapshot = self.select_published_snapshot().await?;
+        self.read_admitted_table_at(&snapshot, identity).await
     }
 
     /// Resolves one already-pinned CWD snapshot descriptor to its retained
@@ -9935,6 +9992,7 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        faults.check(FaultPoint::AfterCommit)?;
         Ok(next)
     }
 
@@ -18425,23 +18483,15 @@ async fn apply_table_mutation_tx(
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
         }
         None => {
-            let mut rows = connection
-                .query(
-                    "SELECT 1 FROM table_row
-                     WHERE table_id = ?1 AND row_key = ?2
-                     LIMIT 1",
-                    params![storage_table.clone(), mutation.key.clone()],
-                )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            if rows
-                .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
-                .is_none()
-            {
-                return Err(RuntimeError::InvalidTableMutation);
-            }
+            // Rows are values; mutations are operations on tables
+            // (ORNA-MUT-001). A delete therefore records that the row is
+            // absent at this generation rather than asserting that it was
+            // present: deleting an already-absent row removes nothing and is a
+            // tolerated no-op here. The durable mutation, its pending evidence
+            // and the generation advance are recorded by the caller, so an
+            // `as_of` read observes exactly the delete this activation made.
+            // The language surface still rejects `T.delete` on a missing key
+            // before it reaches this boundary.
             connection
                 .execute(
                     "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
@@ -19457,6 +19507,7 @@ fn legacy_controlled_rollback_proof(marker: [u8; 32], point: FaultPoint) -> [u8;
         FaultPoint::AfterReplayFailureRecord => 8,
         FaultPoint::BeforeTerminalClaim => 9,
         FaultPoint::AfterTerminalClaim => 10,
+        FaultPoint::AfterCommit => 11,
     }]);
     digest.finalize().into()
 }
