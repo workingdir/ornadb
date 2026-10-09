@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(parsed.at, None);
         let flagged_arguments = words(&["--limit", "3", "0102", "--since", "abc", "song"]);
         let parsed = parse_options(&flagged_arguments).unwrap();
-        assert_eq!((parsed.relation, parsed.key), ("0102", "song"));
+        assert_eq!((parsed.relation, parsed.key), ("0102", Some("song")));
         assert_eq!((parsed.limit, parsed.since), (3, Some("abc")));
         assert_eq!(parsed.format, HistoryFormat::Human);
         let json = words(&["--format", "json", "0102", "song"]);
@@ -1006,7 +1006,7 @@ mod tests {
         assert_eq!(parsed.format, HistoryFormat::Json);
         assert_eq!(
             (parsed.limit, parsed.relation, parsed.key),
-            (2, "0102", "song")
+            (2, "0102", Some("song"))
         );
     }
 
