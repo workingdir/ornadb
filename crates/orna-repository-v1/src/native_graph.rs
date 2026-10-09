@@ -172,10 +172,15 @@ impl PrivateRefCleanupOwner {
             .output()
             .map_err(|_| GraphError::GitCommandFailed)?;
         if !output.status.success() {
-            return Err(if args.first() == Some(&"cat-file") {
-                GraphError::UnknownObjectAvailability
-            } else {
-                GraphError::GitCommandFailed
+            // A `cat-file` invocation that names one object reports an object
+            // that is absent locally. Name it, so a missing object is never an
+            // anonymous availability failure and stays distinguishable from a
+            // promised object (ORNA-GIT-002, ORNA-ROW-007).
+            return Err(match cat_file_object_id(args) {
+                Some(object_id) => GraphError::MissingObject {
+                    object_id: object_id.to_ascii_lowercase(),
+                },
+                None => GraphError::GitCommandFailed,
             });
         }
         Ok(output.stdout)
@@ -2698,7 +2703,9 @@ impl NativeGraphContext {
             .wait_with_output()
             .map_err(|_| GraphError::GitCommandFailed)?;
         if !output.status.success() {
-            return Err(GraphError::UnknownObjectAvailability);
+            return Err(GraphError::MissingObject {
+                object_id: hex.clone(),
+            });
         }
         if data.len() as u64 != size {
             return Err(GraphError::GitObjectMalformed);
@@ -2737,6 +2744,11 @@ impl NativeGraphContext {
         Ok(output.stdout)
     }
 
+    /// The single object id a `cat-file` invocation asks Git about, when the
+    /// call is a `cat-file` one that names exactly one object. `-t`, `-s` and
+    /// the kind readers (`blob`, `tree`, ...) all take the object id last, so
+    /// the final argument is it; the batch forms read object ids from stdin and
+    /// name none here.
     fn git_hash_object(&self, kind: &str, bytes: &[u8]) -> Result<NativeOid, GraphError> {
         let mut child = self
             .git_command()
@@ -5395,10 +5407,11 @@ impl PinnedNativeGraphReader {
             .output()
             .map_err(|_| GraphError::GitCommandFailed)?;
         if !output.status.success() {
-            return Err(if args.first() == Some(&"cat-file") {
-                GraphError::UnknownObjectAvailability
-            } else {
-                GraphError::GitCommandFailed
+            return Err(match cat_file_object_id(args) {
+                Some(object_id) => GraphError::MissingObject {
+                    object_id: object_id.to_ascii_lowercase(),
+                },
+                None => GraphError::GitCommandFailed,
             });
         }
         Ok(output.stdout)
@@ -7020,6 +7033,13 @@ pub enum GraphError {
     },
     UnavailableObject,
     UnknownObjectAvailability,
+    /// A `cat-file` read named one object that is absent from this repository.
+    /// The id is carried so a payload read of an object an offline copy does
+    /// not hold names what is missing instead of reporting an anonymous
+    /// availability failure (ORNA-GIT-002, ORNA-ROW-007).
+    MissingObject {
+        object_id: String,
+    },
     LegacyFormatReadOnly(u8),
     UnsupportedWriterProfile,
 }
@@ -7116,6 +7136,12 @@ impl fmt::Display for GraphError {
                 write!(f, "native object kind {actual:?}, expected {expected:?}")
             }
             Self::UnavailableObject => f.write_str("native object is unavailable"),
+            Self::MissingObject { object_id } => {
+                write!(
+                    f,
+                    "native object {object_id} is missing from this repository"
+                )
+            }
             Self::UnknownObjectAvailability => f.write_str("native object availability is unknown"),
             Self::LegacyFormatReadOnly(format) => {
                 write!(f, "repository format {format} is reader-only")
@@ -7123,6 +7149,19 @@ impl fmt::Display for GraphError {
             Self::UnsupportedWriterProfile => f.write_str("legacy writer profile is unsupported"),
         }
     }
+}
+
+/// The single object id a `cat-file` invocation asks Git about, when the call
+/// is a `cat-file` one that names exactly one object. `-t`, `-s` and the kind
+/// readers (`blob`, `tree`, ...) all take the object id last, so the final
+/// argument is it; the batch forms read object ids from stdin and name none
+/// here, so they report no object rather than a guessed one.
+fn cat_file_object_id(args: &[&str]) -> Option<&str> {
+    if args.first() != Some(&"cat-file") {
+        return None;
+    }
+    let object_id = *args.last()?;
+    (!object_id.starts_with('-')).then_some(object_id)
 }
 
 impl std::error::Error for GraphError {}
@@ -7158,6 +7197,7 @@ impl GraphError {
             Self::UnknownObjectAvailability
                 | Self::ObjectUnavailable
                 | Self::UnavailableObject
+                | Self::MissingObject { .. }
                 | Self::MissingReference
         )
     }
