@@ -562,6 +562,216 @@ impl NativeGraphContext {
             .collect()
     }
 
+    /// Applies ordered mutations to the pinned primary ORP-1 root and returns
+    /// the new root together with the object accounting of the pass.
+    ///
+    /// Mutations apply in the canonical order: deletes, then rekeys (a delete
+    /// of the old key plus an insert of the new one), then inserts. Each
+    /// mutation is checked against the pinned root, so a delete of an absent
+    /// key or an insert of a present one is rejected instead of silently
+    /// changing the row set.
+    ///
+    /// The pass rebuilds the canonical complete ORP-1 pages for the domain.
+    /// The boundary rule is position-independent, so every page the mutation
+    /// did not touch keeps its previous object id and is reported as an index
+    /// object that was reused: `index_objects_created` counts the new index
+    /// nodes (the measured index churn) while `payload_objects_reused` counts
+    /// the stored value and Blob-descriptor objects the rewrite kept, which no
+    /// maintenance pass rewrites. The new root stays unreachable until the
+    /// caller names it from a row-map version or publication candidate.
+    pub fn maintain_row_index(
+        &self,
+        mutations: &[RowIndexMutation],
+        scope: &RepositoryReadScope,
+    ) -> Result<IndexMaintenance, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+        let root = version.primary_root().clone();
+        let domain = rows_domain_for_version(version);
+
+        let (previous_nodes, previous_payload, mut rows) = {
+            let mut objects = ObjectBudget::new(
+                scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
+                scope.max_objects,
+                Arc::clone(&scope.objects_used),
+                scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
+                Arc::clone(&scope.metadata_used),
+            );
+            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+            let root_node = read_node(&root)?;
+            validate_ordered_root_node(&root_node, &domain, expected_count)?;
+            let mut nodes = BTreeSet::new();
+            nodes.insert(root.clone());
+            let mut payload = BTreeSet::new();
+            collect_ordered_index_objects_with(
+                &mut read_node,
+                &root_node,
+                &domain,
+                None,
+                &mut nodes,
+                &mut payload,
+            )?;
+            let limit = usize::try_from(expected_count).unwrap_or(usize::MAX);
+            let mut raw = Vec::new();
+            collect_ordered_range_with(
+                &mut read_node,
+                root_node,
+                &domain,
+                None,
+                None,
+                None,
+                None,
+                limit,
+                &mut raw,
+            )?;
+            let mut rows = Vec::with_capacity(raw.len());
+            for entry in raw {
+                let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                let value = self.decode_persisted_row_value(entry.value, scope, &mut objects)?;
+                rows.push((key, value));
+            }
+            (nodes, payload, rows)
+        };
+
+        apply_row_index_mutations(&mut rows, mutations)?;
+        if rows.len() as u64 > MAX_SIGNED_LENGTH {
+            return Err(GraphError::InvalidCount(rows.len()));
+        }
+        let row_count = rows.len() as u64;
+
+        let entries: Vec<crate::row_store::RowEntry> = rows
+            .into_iter()
+            .map(|(key, value)| crate::row_store::RowEntry::new(key, value))
+            .collect();
+        let leaf_pages = crate::row_store::partition_pages(&entries, 0)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+
+        let mut written = BTreeSet::new();
+        let mut new_payload = BTreeSet::new();
+        let mut level: Vec<BranchCandidate> = Vec::new();
+        if leaf_pages.is_empty() {
+            // The empty table is one empty leaf, not zero pages.
+            let node = NodeData::OrderedLeaf {
+                domain: domain.clone(),
+                entries: Vec::new(),
+            };
+            let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+            level.push(BranchCandidate {
+                max_key: Vec::new(),
+                oid,
+                row_count: 0,
+            });
+        }
+        for page in &leaf_pages {
+            let mut page_entries = Vec::with_capacity(page.entries().len());
+            for entry in page.entries() {
+                page_entries.push(OrderedLeafEntry {
+                    key: entry
+                        .key()
+                        .canonical_bytes()
+                        .map_err(|_| GraphError::NonCanonicalData)?,
+                    value: entry
+                        .value()
+                        .canonical_page_bytes()
+                        .map_err(|_| GraphError::NonCanonicalData)?,
+                });
+            }
+            let node = NodeData::OrderedLeaf {
+                domain: domain.clone(),
+                entries: page_entries,
+            };
+            for dependency in node.dependencies()? {
+                new_payload.insert(dependency.oid);
+            }
+            let NodeData::OrderedLeaf { entries, .. } = &node else {
+                unreachable!("constructed ordered leaf")
+            };
+            // The fence is the canonical encoding of the page's inclusive
+            // maximum key. `entry.key` is already that encoding, so it is kept
+            // as bytes: decoding it to a typed key and re-encoding it would be
+            // the same bytes, and the branch encoder and every fence comparison
+            // consume the canonical spelling rather than a typed key (ORP-1).
+            let max_key = entries.last().map_or(Vec::new(), |entry| entry.key.clone());
+            let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+            level.push(BranchCandidate {
+                max_key,
+                oid,
+                row_count: entries.len() as u64,
+            });
+        }
+
+        let mut height = 1u8;
+        while level.len() > 1 {
+            if height > MAX_GRAPH_HEIGHT {
+                return Err(GraphError::HeightExceeded(height));
+            }
+            let groups = partition_branch_candidates(&domain, height, &level)?;
+            if groups.len() >= level.len() {
+                return Err(GraphError::FanoutExceeded(level.len()));
+            }
+            let mut next = Vec::with_capacity(groups.len());
+            for group in groups {
+                let node = NodeData::OrderedBranch {
+                    domain: domain.clone(),
+                    height,
+                    entries: group
+                        .iter()
+                        .map(|candidate| OrderedBranchEntry {
+                            inclusive_max_key: candidate.max_key.clone(),
+                            child: candidate.oid.clone(),
+                            row_count: candidate.row_count,
+                        })
+                        .collect(),
+                };
+                let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+                next.push(BranchCandidate {
+                    max_key: group
+                        .last()
+                        .ok_or(GraphError::InvalidCount(0))?
+                        .max_key
+                        .clone(),
+                    oid,
+                    row_count: group.iter().map(|candidate| candidate.row_count).sum(),
+                });
+            }
+            level = next;
+            height += 1;
+        }
+        let primary_root = level
+            .first()
+            .ok_or(GraphError::InvalidCount(0))?
+            .oid
+            .clone();
+        self.sync_object_closure(&written, scope)?;
+
+        let index_objects_created: Vec<NativeOid> = written
+            .iter()
+            .filter(|oid| !previous_nodes.contains(*oid))
+            .cloned()
+            .collect();
+        let index_objects_reused: Vec<NativeOid> = written
+            .iter()
+            .filter(|oid| previous_nodes.contains(*oid))
+            .cloned()
+            .collect();
+        let payload_objects_reused: Vec<NativeOid> = previous_payload
+            .iter()
+            .filter(|oid| new_payload.contains(*oid))
+            .cloned()
+            .collect();
+        Ok(IndexMaintenance {
+            previous_root: root,
+            primary_root,
+            row_count,
+            objects_written: written.into_iter().collect(),
+            index_objects_created,
+            index_objects_reused,
+            payload_objects_reused,
+        })
+    }
+
     fn decode_persisted_row_value(
         &self,
         encoded: Vec<u8>,
@@ -3205,6 +3415,55 @@ fn accepted_content_ref(owner_id: &[u8; 16], pin_id: &[u8; 16]) -> String {
     )
 }
 
+/// Native hash algorithm for one hexadecimal object id, by its exact width.
+fn algorithm_for_hex(hex: &str) -> Option<GitHashAlgorithm> {
+    match hex.len() {
+        40 => Some(GitHashAlgorithm::Sha1),
+        64 => Some(GitHashAlgorithm::Sha256),
+        _ => None,
+    }
+}
+
+/// Reclaims the private pin refs of a runtime owner that exited without
+/// running its drop-time cleanup, for example under `SIGKILL`.
+///
+/// Capture, promotion and row-candidate preparation root their OGB-2 closure
+/// through `refs/orna/pins/<owner>/...` and release it from `Drop`. A killed
+/// owner never runs that cleanup, so those refs outlive the process and would
+/// pin objects forever. The surviving runtime owner lock records the departed
+/// identity, so a restart that re-acquires the lock for this worktree can
+/// reclaim exactly the departed owner's pin refs.
+///
+/// Only refs under the departed owner's own namespace are considered, and only
+/// when the name resolves to a native object id this repository can verify; an
+/// unresolvable ref is left in place rather than guessed at.
+pub fn reclaim_dead_owner_pin_refs(
+    repository: &crate::Repository,
+    dead_owner: [u8; 16],
+) -> Result<usize, GraphError> {
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    let prefix = format!("refs/orna/pins/{}/", hex_encode(&dead_owner));
+    let listing = owner.git_output(&["for-each-ref", "--format=%(refname)", &prefix])?;
+    let listing = String::from_utf8(listing).map_err(|_| GraphError::MalformedReferenceName)?;
+    let mut reclaimed = 0;
+    for name in listing.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let resolved = owner.git_output(&["rev-parse", "--verify", name])?;
+        let resolved =
+            String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
+        let resolved = resolved.trim();
+        let algorithm = algorithm_for_hex(resolved).ok_or(GraphError::MalformedReferenceName)?;
+        let oid = NativeOid::from_hex(algorithm, resolved)?;
+        owner.delete_protected_ref(name, &oid)?;
+        reclaimed += 1;
+    }
+    Ok(reclaimed)
+}
+
 fn resolve_git_path(worktree: &Path, output: &[u8]) -> Result<PathBuf, GraphError> {
     let value = std::str::from_utf8(output)
         .map_err(|_| GraphError::GitObjectMalformed)?
@@ -3323,6 +3582,82 @@ impl RowRevision {
 
     pub const fn present(&self) -> bool {
         self.present
+    }
+}
+
+/// One pending ordered-map mutation for [`NativeGraphContext::maintain_row_index`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowIndexMutation {
+    /// Removes one logical key. The pinned root must hold it.
+    Delete {
+        key: crate::row_store::TypedKey,
+    },
+    /// Moves one logical key and its stored value to a new logical key. The
+    /// source must be present, the destination absent and the two distinct.
+    Rekey {
+        from: crate::row_store::TypedKey,
+        to: crate::row_store::TypedKey,
+    },
+    /// Inserts one logical key. The key must be absent from the pinned root.
+    Insert {
+        key: crate::row_store::TypedKey,
+        value: crate::row_store::RowValue,
+    },
+}
+
+/// The measured outcome of one ORP-1 index maintenance pass.
+///
+/// The object sets are disjoint by construction, so a caller can attribute new
+/// tree objects to the index rewrite and prove unchanged media was reused
+/// rather than rewritten: `index_objects_created` is the index churn the pass
+/// actually caused, `index_objects_reused` names the previous root's nodes the
+/// new root still reaches at the same object id, and `payload_objects_reused`
+/// counts the stored value/Blob-descriptor objects the rewrite kept.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexMaintenance {
+    previous_root: NativeOid,
+    primary_root: NativeOid,
+    row_count: u64,
+    objects_written: Vec<NativeOid>,
+    index_objects_created: Vec<NativeOid>,
+    index_objects_reused: Vec<NativeOid>,
+    payload_objects_reused: Vec<NativeOid>,
+}
+
+impl IndexMaintenance {
+    /// The pinned primary root this pass rewrote from.
+    pub fn previous_root(&self) -> &NativeOid {
+        &self.previous_root
+    }
+
+    /// The new primary root. It stays unreachable until a caller names it.
+    pub fn primary_root(&self) -> &NativeOid {
+        &self.primary_root
+    }
+
+    /// Logical rows the new root holds.
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    /// Every object this pass wrote, for the caller's durability barrier.
+    pub fn objects_written(&self) -> &[NativeOid] {
+        &self.objects_written
+    }
+
+    /// New index nodes: index churn, counted separately from media reuse.
+    pub fn index_objects_created(&self) -> &[NativeOid] {
+        &self.index_objects_created
+    }
+
+    /// Previous index nodes the new root still names unchanged.
+    pub fn index_objects_reused(&self) -> &[NativeOid] {
+        &self.index_objects_reused
+    }
+
+    /// Stored value/Blob-descriptor objects reused unchanged.
+    pub fn payload_objects_reused(&self) -> &[NativeOid] {
+        &self.payload_objects_reused
     }
 }
 
@@ -5059,6 +5394,213 @@ fn find_ordered_entry_with(
     }
 }
 
+/// One child of a branch level under construction: the exact fence and count
+/// its parent entry will name, plus the object its envelope was written as.
+struct BranchCandidate {
+    max_key: Vec<u8>,
+    oid: NativeOid,
+    row_count: u64,
+}
+
+/// Applies one maintenance pass in the canonical order: deletes, then rekeys,
+/// then inserts. Every mutation is checked against the row set the pinned root
+/// actually held, so an absent delete/rekey source or a colliding insert is
+/// rejected rather than silently changing which rows exist.
+fn apply_row_index_mutations(
+    rows: &mut Vec<(crate::row_store::TypedKey, crate::row_store::RowValue)>,
+    mutations: &[RowIndexMutation],
+) -> Result<(), GraphError> {
+    for mutation in mutations {
+        let RowIndexMutation::Delete { key } = mutation else {
+            continue;
+        };
+        let index = locate_row(rows, key)?.ok_or(GraphError::RowKeyAbsent)?;
+        rows.remove(index);
+    }
+    for mutation in mutations {
+        let RowIndexMutation::Rekey { from, to } = mutation else {
+            continue;
+        };
+        let index = locate_row(rows, from)?.ok_or(GraphError::RowKeyAbsent)?;
+        if locate_row(rows, to)?.is_some() {
+            return Err(GraphError::DuplicateRowKey);
+        }
+        let (_, value) = rows.remove(index);
+        let insertion = locate_insertion(rows, to);
+        rows.insert(insertion, (to.clone(), value));
+    }
+    for mutation in mutations {
+        let RowIndexMutation::Insert { key, value } = mutation else {
+            continue;
+        };
+        let insertion = locate_insertion(rows, key);
+        if rows
+            .get(insertion)
+            .is_some_and(|(existing, _)| existing == key)
+        {
+            return Err(GraphError::DuplicateRowKey);
+        }
+        rows.insert(insertion, (key.clone(), value.clone()));
+    }
+    Ok(())
+}
+
+fn locate_row(
+    rows: &[(crate::row_store::TypedKey, crate::row_store::RowValue)],
+    key: &crate::row_store::TypedKey,
+) -> Result<Option<usize>, GraphError> {
+    Ok(rows
+        .binary_search_by(|(existing, _)| existing.cmp(key))
+        .ok())
+}
+
+fn locate_insertion(
+    rows: &[(crate::row_store::TypedKey, crate::row_store::RowValue)],
+    key: &crate::row_store::TypedKey,
+) -> usize {
+    rows.binary_search_by(|(existing, _)| existing.cmp(key))
+        .unwrap_or_else(|index| index)
+}
+
+/// Groups branch children into canonical ORP-1 branch pages: accumulate until
+/// the next entry would exceed the 64 KiB node data bound, 256 entries or 256
+/// distinct native refs; close a group at an anchor once it holds at least 16
+/// entries, or at exactly 256; and emit the final short tail.
+fn partition_branch_candidates<'a>(
+    domain: &[u8],
+    height: u8,
+    candidates: &'a [BranchCandidate],
+) -> Result<Vec<&'a [BranchCandidate]>, GraphError> {
+    let mut groups = Vec::new();
+    let mut start = 0usize;
+    let mut size = 16usize + domain.len();
+    let mut refs = 0usize;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let entry_size = branch_entry_encoded_size(candidate)?;
+        if entry_size + 16 + domain.len() > NODE_DATA_LIMIT {
+            return Err(GraphError::NodeDataTooLarge(entry_size));
+        }
+        let held = index - start;
+        let would_overflow = held != 0
+            && (held == crate::row_store::MAX_PAGE_ENTRIES
+                || refs + 1 > MAX_REFS
+                || size + entry_size > NODE_DATA_LIMIT);
+        if would_overflow {
+            groups.push(&candidates[start..index]);
+            start = index;
+            size = 16 + domain.len();
+            refs = 0;
+        }
+        size += entry_size;
+        refs += 1;
+        let held = index - start + 1;
+        let anchor = ordered_token_anchor(height, &candidate.max_key)?;
+        if held >= crate::row_store::MIN_PAGE_ENTRIES
+            && (anchor || held == crate::row_store::MAX_PAGE_ENTRIES)
+        {
+            groups.push(&candidates[start..=index]);
+            start = index + 1;
+            size = 16 + domain.len();
+            refs = 0;
+        }
+    }
+    if start < candidates.len() {
+        groups.push(&candidates[start..]);
+    }
+    Ok(groups)
+}
+
+/// Conservative encoded size of one `[inclusive_max_key, child_oid, count]`
+/// entry: the entry array head is one byte, the child is a byte string header
+/// plus the native width, and the count is a shortest definite head.
+fn branch_entry_encoded_size(candidate: &BranchCandidate) -> Result<usize, GraphError> {
+    let oid = candidate.oid.as_bytes().len();
+    Ok(1 + 1 + candidate.max_key.len() + 1 + oid + cbor_unsigned_len(candidate.row_count))
+}
+
+const fn cbor_unsigned_len(value: u64) -> usize {
+    if value < 24 {
+        1
+    } else if value <= u8::MAX as u64 {
+        2
+    } else if value <= u16::MAX as u64 {
+        3
+    } else if value <= u32::MAX as u64 {
+        5
+    } else {
+        9
+    }
+}
+
+/// The ORP-1 anchor test over an arbitrary canonical token. A leaf token is the
+/// key's own canonical bytes, so this agrees with `row_store::boundary_anchor`;
+/// a branch token is the child's inclusive maximum key.
+fn ordered_token_anchor(height: u8, token: &[u8]) -> Result<bool, GraphError> {
+    let mut hasher = Sha256::new();
+    hasher.update(crate::row_store::ORP_DOMAIN);
+    hasher.update(u32::from(height).to_be_bytes());
+    hasher.update(token);
+    let digest = hasher.finalize();
+    Ok(digest[31] & ((1 << crate::row_store::ORP_ANCHOR_BITS) - 1) == 0)
+}
+
+/// Collects every node object of one ordered index (root, branches and leaves)
+/// plus every stored-value payload object its entries reference, so a
+/// maintenance pass can separate index churn from media reuse by object id.
+fn collect_ordered_index_objects_with(
+    read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
+    node: &NodeData,
+    expected_domain: &[u8],
+    expected_height: Option<u8>,
+    nodes: &mut BTreeSet<NativeOid>,
+    payload: &mut BTreeSet<NativeOid>,
+) -> Result<(), GraphError> {
+    match node {
+        NodeData::OrderedLeaf { domain, entries } => {
+            if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
+                return Err(GraphError::InvalidDomain);
+            }
+            for entry in entries {
+                for dependency in leaf_value_dependencies(domain, &entry.value)? {
+                    payload.insert(dependency.oid);
+                }
+            }
+            Ok(())
+        }
+        NodeData::OrderedBranch {
+            domain,
+            height,
+            entries,
+        } => {
+            if domain != expected_domain
+                || *height == 0
+                || expected_height.is_some_and(|expected| expected != *height)
+                || entries.is_empty()
+            {
+                return Err(GraphError::InvalidDomain);
+            }
+            for entry in entries {
+                if nodes.insert(entry.child.clone()) {
+                    let child = read_node(&entry.child)?;
+                    collect_ordered_index_objects_with(
+                        read_node,
+                        &child,
+                        expected_domain,
+                        Some(height - 1),
+                        nodes,
+                        payload,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        other => Err(GraphError::WrongNodeKind {
+            expected: NodeKind::OrderedLeaf,
+            actual: other.kind(),
+        }),
+    }
+}
+
 fn ordered_node_bounds_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     node: NodeData,
@@ -5384,7 +5926,16 @@ mod persisted_orp_tests {
 
     fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
         let directory = tempfile::tempdir().expect("create capture repository");
-        let root = directory.path();
+        let graph = capture_context_in(directory.path());
+        (directory, graph)
+    }
+
+    /// Builds the capture fixture context for a repository path, creating the
+    /// repository if it does not exist yet. Every fixture object is
+    /// content-addressed and the owner identity is fixed, so the same path
+    /// yields the same context in a killed child and in the restarting parent
+    /// that reclaims its pin namespace.
+    fn capture_context_in(root: &Path) -> NativeGraphContext {
         let init = Command::new("git")
             .current_dir(root)
             .args(["init", "--quiet", "--template="])
@@ -5460,7 +6011,7 @@ mod persisted_orp_tests {
             snapshot,
         )
         .expect("issue graph context after verifying fixture schema");
-        (directory, graph)
+        graph
     }
 
     fn fixture_ref_exists(directory: &Path, reference: &str) -> bool {
@@ -6098,6 +6649,147 @@ mod persisted_orp_tests {
 
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
     }
+
+    const KILLED_OWNER_ROOT: &str = "ORNA_DEAD_OWNER_CAPTURE_ROOT";
+    const KILLED_OWNER_TEST: &str =
+        "native_graph::persisted_orp_tests::restart_reclaims_pin_refs_of_a_killed_owner";
+
+    /// Captures and protects a real fixture, then kills this process without
+    /// unwinding, exactly as an operator `SIGKILL` does. The kernel releases
+    /// the owner lock and nothing runs the pin's drop-time cleanup.
+    fn killed_owner_child_body(root: &Path) {
+        let graph = capture_context_in(root);
+        let repository =
+            crate::Repository::discover(root).expect("discover killed-owner repository");
+        let _owner_lock = repository
+            .acquire_runtime_owner_lock(graph.owner_id)
+            .expect("killed owner acquires its lock");
+        let scope = graph.open_read_scope().expect("killed owner read scope");
+        let payload: &[u8] = include_bytes!("../tests/fixtures/pin-roundtrip.orna");
+        let candidate = graph
+            .capture_blob_candidate(payload, payload.len() as u64, &scope)
+            .expect("capture authorized fixture stream");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+        println!(
+            "{} {}",
+            hex_encode(&graph.owner_id),
+            pin.descriptor_oid.to_hex()
+        );
+        std::io::stdout().flush().expect("flush pin evidence");
+        let status = Command::new("kill")
+            .args(["-9", &std::process::id().to_string()])
+            .status()
+            .expect("raise SIGKILL on the owner");
+        unreachable!("the killed owner never returns ({status})");
+    }
+
+    /// Names every ref under one owner's private pin namespace.
+    fn pin_ref_names(directory: &Path, owner_hex: &str) -> Vec<String> {
+        let prefix = format!("refs/orna/pins/{owner_hex}/");
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(["for-each-ref", "--format=%(refname)", &prefix])
+            .output()
+            .expect("list pin refs");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .expect("ref listing is UTF-8")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A runtime owner killed between capture and row acceptance never runs its
+    /// drop-time ref cleanup: the kernel releases the owner lock, the pin refs
+    /// stay. Restart must reclaim exactly those refs, and only that owner's.
+    #[test]
+    fn restart_reclaims_pin_refs_of_a_killed_owner() {
+        if let Some(root) = std::env::var_os(KILLED_OWNER_ROOT) {
+            killed_owner_child_body(Path::new(&root));
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("create killed-owner repository");
+        let root = directory.path();
+        let child = Command::new(std::env::current_exe().expect("resolve test binary"))
+            .args([
+                "--exact",
+                KILLED_OWNER_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(KILLED_OWNER_ROOT, root.as_os_str())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn the killed owner");
+        let output = child.wait_with_output().expect("await the killed owner");
+        assert_eq!(
+            output.status.code(),
+            None,
+            "the owner must die by signal, not exit normally"
+        );
+
+        let evidence = String::from_utf8(output.stdout).expect("owner evidence is UTF-8");
+        // The child shares the libtest harness, which writes `test <name> ... `
+        // to stdout without a trailing newline before the test body runs, so the
+        // evidence is not at the start of its line. Scan every whitespace token
+        // for the one `owner descriptor` pair the owner prints before dying.
+        let (owner_hex, descriptor_hex) = evidence
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find_map(|pair| {
+                let [owner, descriptor] = pair else {
+                    return None;
+                };
+                let hex_token = |token: &str, width: usize| {
+                    token.len() == width && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                };
+                (hex_token(owner, 32) && hex_token(descriptor, 40))
+                    .then(|| ((*owner).to_owned(), (*descriptor).to_owned()))
+            })
+            .expect("the killed owner prints its pin evidence before dying");
+
+        assert!(
+            !pin_ref_names(root, &owner_hex).is_empty(),
+            "a killed owner must leave its pin refs behind, or this proof is vacuous"
+        );
+
+        // A sibling pin namespace must never be reclaimed by this takeover.
+        let foreign_owner = [0x99; 16];
+        let foreign_ref = accepted_content_ref(&foreign_owner, &[0x77; 16]);
+        let zero = "0".repeat(40);
+        let foreign_created = Command::new("git")
+            .current_dir(root)
+            .args(["update-ref", &foreign_ref, &descriptor_hex, &zero])
+            .status()
+            .expect("create foreign owner pin ref");
+        assert!(foreign_created.success());
+
+        let repository =
+            crate::Repository::discover(root).expect("discover killed-owner repository");
+        let second = repository
+            .acquire_runtime_owner_lock([0x42; 16])
+            .expect("takeover after the owner was killed");
+        assert_eq!(
+            second.previous_owner().map(|owner| hex_encode(&owner)),
+            Some(owner_hex.clone()),
+            "the takeover must observe the killed owner identity"
+        );
+        assert!(
+            pin_ref_names(root, &owner_hex).is_empty(),
+            "a killed owner's pin refs must not survive the next takeover"
+        );
+        assert_eq!(
+            pin_ref_names(root, &hex_encode(&foreign_owner)),
+            vec![foreign_ref],
+            "reclamation must stay inside the killed owner's pin namespace"
+        );
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6121,6 +6813,8 @@ pub enum GraphError {
     InvalidRange,
     InvalidBlobAnnotation,
     DuplicateRowKey,
+    /// A delete or rekey named a logical key the pinned root does not hold.
+    RowKeyAbsent,
     CandidateRequiresBranchRewrite,
     ContextMismatch,
     InvalidReadScope,
@@ -6189,6 +6883,9 @@ impl fmt::Display for GraphError {
                 f.write_str("Blob MIME type or suffix is not canonical MIME-1")
             }
             Self::DuplicateRowKey => f.write_str("ORP row insertion key already exists"),
+            Self::RowKeyAbsent => {
+                f.write_str("ORP index maintenance names a key the pinned root does not hold")
+            }
             Self::CandidateRequiresBranchRewrite => {
                 f.write_str("ORP candidate requires a branch or page rewrite")
             }
@@ -7202,7 +7899,7 @@ fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData
         NodeKind::ByteIndex => {
             let height = bounded_height(unsigned(fields.get(2))?)?;
             let total_length = checked_length(unsigned(fields.get(3))?)?;
-            let entries = decode_byte_entries(fields.get(4), height, algorithm)?;
+            let entries = decode_byte_entries(fields.get(4), algorithm)?;
             Ok(NodeData::ByteIndex {
                 height,
                 total_length,
@@ -7245,7 +7942,6 @@ fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData
 
 fn decode_byte_entries(
     value: Option<&CborValue>,
-    height: u8,
     algorithm: GitHashAlgorithm,
 ) -> Result<Vec<ByteIndexEntry>, GraphError> {
     let entries = array_fields(value.cloned().ok_or(GraphError::NonCanonicalData)?)?
