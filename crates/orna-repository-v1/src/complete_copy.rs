@@ -55,9 +55,7 @@ use std::{
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
-use crate::{
-    CommittedTreeEntryKind, GitCommitRef, Repository, scrub_git_routing_environment,
-};
+use crate::{scrub_git_routing_environment, CommittedTreeEntryKind, GitCommitRef, Repository};
 
 const MANIFEST_FILE: &str = "manifest.tsv";
 const SUPERPROJECT_BUNDLE: &str = "superproject.bundle";
@@ -221,13 +219,19 @@ pub enum CompleteCopyError {
     /// The pinned snapshot is not an admitted format-3 repository snapshot.
     NotAFormat3Snapshot,
     /// A gitlink names a dependency with no recorded origin.
-    MissingDependencyOrigin { path: String },
+    MissingDependencyOrigin {
+        path: String,
+    },
     /// A pinned dependency repository could not be read for the export.
-    DependencyUnavailable { path: String },
+    DependencyUnavailable {
+        path: String,
+    },
     /// The closure exceeds the recorded object or dependency bound.
     ClosureTooLarge,
     /// A recorded integrity check failed. `scope` names what is unavailable.
-    IntegrityMismatch { scope: String },
+    IntegrityMismatch {
+        scope: String,
+    },
     /// Git could not be run or refused an operation.
     GitUnavailable,
     /// A recorded archive field could not be parsed.
@@ -323,7 +327,11 @@ pub fn export_complete_copy(
     let dependencies = resolve_dependencies(repository, &snapshot, sources)?;
 
     fs::create_dir_all(destination)?;
-    write_bundle(&source_root, snapshot.as_str(), &destination.join(SUPERPROJECT_BUNDLE))?;
+    write_bundle(
+        &source_root,
+        snapshot.as_str(),
+        &destination.join(SUPERPROJECT_BUNDLE),
+    )?;
     if !dependencies.is_empty() {
         fs::create_dir_all(destination.join(DEPENDENCIES_DIR))?;
     }
@@ -436,10 +444,7 @@ pub fn materialize_complete_copy(
 }
 
 fn checkout(repository: &Path, commit: &str) -> Result<(), CompleteCopyError> {
-    git_output(
-        repository,
-        &["checkout", "--quiet", "--detach", commit],
-    )?;
+    git_output(repository, &["checkout", "--quiet", "--detach", commit])?;
     Ok(())
 }
 
@@ -546,7 +551,8 @@ fn read_gitmodules(
     repository: &Repository,
     snapshot: &GitCommitRef,
 ) -> Result<Vec<(String, String)>, CompleteCopyError> {
-    let bytes = match repository.read_committed_file(snapshot, ".gitmodules", MAX_GITMODULES_BYTES) {
+    let bytes = match repository.read_committed_file(snapshot, ".gitmodules", MAX_GITMODULES_BYTES)
+    {
         Ok(bytes) => bytes,
         Err(_) => return Ok(Vec::new()),
     };
@@ -656,14 +662,18 @@ fn objects_at(
     }
     let output = git_output_stdin(
         directory,
-        &["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+        &[
+            "cat-file",
+            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        ],
         Some(stdin.as_bytes()),
     )?;
     let text = std::str::from_utf8(&output).map_err(|_| CompleteCopyError::GitUnavailable)?;
     let mut results = Vec::with_capacity(oids.len());
     for (line, oid) in text.lines().zip(oids) {
         let mut fields = line.split_ascii_whitespace();
-        let (Some(name), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next()) else {
+        let (Some(name), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next())
+        else {
             results.push(None);
             continue;
         };
@@ -725,10 +735,15 @@ fn verify_blob(directory: &Path, oid: &str, size: u64) -> Result<(), CompleteCop
         .args(["cat-file", "blob", oid]);
     scrub_git_routing_environment(&mut command);
     command.stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|_| CompleteCopyError::GitUnavailable)?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| CompleteCopyError::GitUnavailable)?;
     let mut hasher = object_hasher(&oid)?;
     hasher.update(format!("blob {size}\0").as_bytes());
-    let mut stream = child.stdout.take().ok_or(CompleteCopyError::GitUnavailable)?;
+    let mut stream = child
+        .stdout
+        .take()
+        .ok_or(CompleteCopyError::GitUnavailable)?;
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut read = 0_u64;
     loop {
@@ -747,7 +762,9 @@ fn verify_blob(directory: &Path, oid: &str, size: u64) -> Result<(), CompleteCop
         hasher.update(&buffer[..count]);
     }
     drop(stream);
-    let status = child.wait().map_err(|_| CompleteCopyError::GitUnavailable)?;
+    let status = child
+        .wait()
+        .map_err(|_| CompleteCopyError::GitUnavailable)?;
     if !status.success() || read != size {
         return Err(CompleteCopyError::IntegrityMismatch {
             scope: format!("blob {oid}"),
@@ -813,7 +830,13 @@ fn write_bundle(source: &Path, commit: &str, bundle: &Path) -> Result<(), Comple
     let stage = staging.path().join("bundle.git");
     git_output(
         source,
-        &["init", "--quiet", "--bare", "--template=", path_text(&stage)?],
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--template=",
+            path_text(&stage)?,
+        ],
     )?;
     git_output(
         source,
@@ -935,9 +958,14 @@ fn git_output_stdin(
         Stdio::null()
     });
     command.stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|_| CompleteCopyError::GitUnavailable)?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| CompleteCopyError::GitUnavailable)?;
     if let Some(bytes) = stdin {
-        let mut handle = child.stdin.take().ok_or(CompleteCopyError::GitUnavailable)?;
+        let mut handle = child
+            .stdin
+            .take()
+            .ok_or(CompleteCopyError::GitUnavailable)?;
         handle
             .write_all(bytes)
             .map_err(|_| CompleteCopyError::GitUnavailable)?;
@@ -955,13 +983,14 @@ fn git_output_stdin(
 #[cfg(test)]
 mod tests {
     use super::{
-        CompleteCopyManifest, CompleteCopyObjectKind, parse_gitmodules, valid_dependency_bundle,
-        valid_object_id,
+        parse_gitmodules, valid_dependency_bundle, valid_object_id, CompleteCopyManifest,
+        CompleteCopyObjectKind,
     };
 
     #[test]
     fn gitmodules_pairs_are_read_one_section_at_a_time() {
-        let text = "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/std.git\n\
+        let text =
+            "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/std.git\n\
                     [submodule \"tools\"]\n\tpath = tools\n\turl = ../tools.git\n\tbranch = main\n";
         assert_eq!(
             parse_gitmodules(text).unwrap(),
@@ -998,19 +1027,19 @@ mod tests {
 
     #[test]
     fn manifest_rejects_malformed_documents() {
-        assert!(CompleteCopyManifest::decode("orna-complete-copy 1\nobject\tblob\tzz\t1\n").is_err());
         assert!(
-            CompleteCopyManifest::decode(
-                "orna-complete-copy 1\nsnapshot\t0123456789012345678901234567890123456789\nrow\tx\n"
-            )
-            .is_err()
+            CompleteCopyManifest::decode("orna-complete-copy 1\nobject\tblob\tzz\t1\n").is_err()
         );
+        assert!(CompleteCopyManifest::decode(
+            "orna-complete-copy 1\nsnapshot\t0123456789012345678901234567890123456789\nrow\tx\n"
+        )
+        .is_err());
         assert!(
             CompleteCopyManifest::decode(
                 "orna-complete-copy 1\nsnapshot\t0123456789012345678901234567890123456789\n"
             )
             .is_err()
-            == false
+                == false
         );
         assert!(!valid_object_id("0123456789"));
         assert!(valid_object_id("0123456789012345678901234567890123456789"));

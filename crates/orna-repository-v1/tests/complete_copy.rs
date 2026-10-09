@@ -14,11 +14,11 @@ use std::{
 };
 
 use orna_repository_v1::{
-    Repository,
     complete_copy::{
-        CompleteCopyObjectKind, DependencySource, export_complete_copy, materialize_complete_copy,
-        read_complete_copy_manifest, restore_complete_copy,
+        export_complete_copy, materialize_complete_copy, read_complete_copy_manifest,
+        restore_complete_copy, CompleteCopyObjectKind, DependencySource,
     },
+    Repository,
 };
 use tempfile::TempDir;
 
@@ -74,10 +74,12 @@ fn dependency_repository(root: &Path) -> PathBuf {
     fs::create_dir_all(dependency.join(".orna/store")).expect("create dependency store");
     fs::write(dependency.join(".orna/store/data"), "dependency store root")
         .expect("write dependency store root");
-    fs::write(dependency.join("main.orna"), DEPENDENCY_SOURCE)
-        .expect("write dependency source");
+    fs::write(dependency.join("main.orna"), DEPENDENCY_SOURCE).expect("write dependency source");
     git(&dependency, &["add", "--all"]);
-    git(&dependency, &["commit", "--quiet", "-m", "dependency content"]);
+    git(
+        &dependency,
+        &["commit", "--quiet", "-m", "dependency content"],
+    );
     dependency
 }
 
@@ -103,7 +105,10 @@ fn superproject(root: &Path, dependency: &Path) -> PathBuf {
         ],
     );
     git(&project, &["add", "--all"]);
-    git(&project, &["commit", "--quiet", "-m", "library with dependency"]);
+    git(
+        &project,
+        &["commit", "--quiet", "-m", "library with dependency"],
+    );
     project
 }
 
@@ -121,15 +126,14 @@ fn complete_copy_reconstructs_snapshot_and_dependency_without_the_source() {
     // The exported closure is the snapshot plus its pinned dependency, not a
     // pointer-only clone.
     let archive = root.path().join("archive");
-    let manifest = export_complete_copy(&repository, "HEAD", &archive, &[])
-        .expect("export complete copy");
+    let manifest =
+        export_complete_copy(&repository, "HEAD", &archive, &[]).expect("export complete copy");
     assert_eq!(manifest.snapshot, snapshot);
     assert!(
         manifest
             .objects
             .iter()
-            .any(|object| object.kind == CompleteCopyObjectKind::Commit
-                && object.oid == payload),
+            .any(|object| object.kind == CompleteCopyObjectKind::Blob && object.oid == payload),
         "the closure records the pinned source blob: {:?}",
         manifest.objects
     );
@@ -199,6 +203,11 @@ fn complete_copy_fails_closed_when_a_dependency_is_unavailable() {
     let dependency = dependency_repository(root.path());
     let project = superproject(root.path(), &dependency);
     let repository = Repository::discover(&project).expect("discover superproject");
+
+    // An unpopulated dependency: neither the worktree path nor the module
+    // object store that a populated checkout keeps holds its pinned commit.
+    fs::remove_dir_all(project.join("deps/std")).expect("remove the dependency checkout");
+    fs::remove_dir_all(project.join(".git/modules/deps/std")).expect("remove the module objects");
     fs::remove_dir_all(&dependency).expect("remove the dependency repository");
 
     let archive = root.path().join("archive");
