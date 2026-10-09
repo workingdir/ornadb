@@ -831,11 +831,11 @@ mod graph_bridge_tests {
     use crate::{
         Repository,
         native_graph::{
-            ByteIndexEntry, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid, NodeData,
-            OrderedBranchEntry, OrderedLeafEntry,
+            ByteIndexEntry, CborValue, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid, NodeData,
+            OrderedBranchEntry, OrderedLeafEntry, decode_canonical_cbor,
         },
         row_store::{
-            KeyRange, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
+            KeyRange, RowEntry, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
         },
     };
 
@@ -1765,6 +1765,82 @@ mod graph_bridge_tests {
         println!(
             "git-backed ORP point lookup object reads: {point_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
         );
+    }
+
+    #[test]
+    fn canonical_page_bytes_reproduce_the_admitted_overflow_row() {
+        let directory = repository();
+        let root = directory.path();
+        let initial = context(root);
+        let relation_id = [0x75; 16];
+        let (relation_id, _) = install_overflow_row_store(root, &initial, relation_id, None);
+
+        let admitted = context(root);
+        let snapshot = admitted
+            .load_row_map(relation_id)
+            .expect("load pinned ORP identity");
+        let graph = admitted
+            .open_native_graph(&snapshot)
+            .expect("issue graph context from repository snapshot");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(7), &scope)
+            .expect("bounded point lookup")
+            .expect("stored row");
+        let RowValue::Overflow(reference) = row.value().clone() else {
+            panic!("a kind-3 row decodes as an overflow reference");
+        };
+
+        // A verified reference already names its graph root, so the value has
+        // exactly one canonical page spelling.
+        let entry = RowEntry::new(TypedKey::UInt(7), RowValue::overflow(reference.clone()));
+        let encoded = RowValue::page_bytes(std::slice::from_ref(&entry))
+            .expect("encode the admitted row as one ORP-1 page");
+
+        // The encoded page must decode back to the same tag and the same graph
+        // root the reader resolved. Substituting the byte root would name a
+        // different node and republishing the page would lose the row.
+        let CborValue::Array(pairs) = decode_canonical_cbor(&encoded).expect("canonical page")
+        else {
+            panic!("a page is a CBOR array");
+        };
+        assert_eq!(pairs.len(), 1);
+        let CborValue::Array(pair) = &pairs[0] else {
+            panic!("a page entry is a CBOR pair");
+        };
+        assert_eq!(pair.len(), 2);
+        assert_eq!(pair[0], CborValue::Unsigned(7));
+        let CborValue::Tag(tag, payload) = &pair[1] else {
+            panic!("an overflow value is a kind-3 tag");
+        };
+        assert_eq!(*tag, 60_113);
+        let CborValue::Array(root_field) = payload.as_ref() else {
+            panic!("the overflow tag payload is a one-element array");
+        };
+        assert_eq!(root_field.len(), 1);
+        let CborValue::Bytes(root_bytes) = &root_field[0] else {
+            panic!("the overflow payload names one graph root");
+        };
+        let resolved = reference
+            .native_root()
+            .expect("a verified reference has a graph root");
+        assert_eq!(root_bytes.as_slice(), resolved.as_bytes());
+
+        // A reference without a resolved root has no page spelling, so the
+        // byte root can never be substituted for the graph root.
+        let unresolved = RowValue::overflow(
+            crate::row_store::ValueOverflowRef::new(
+                reference.encoded_length(),
+                *reference.semantic_digest(),
+                reference.byte_root().clone(),
+                reference.dependency_root().cloned(),
+            )
+            .expect("construct an unresolved reference"),
+        );
+        assert!(matches!(
+            RowValue::page_bytes(&[RowEntry::new(TypedKey::UInt(7), unresolved)]),
+            Err(crate::row_store::RowStoreError::UnresolvedValueOverflow)
+        ));
     }
 
     #[test]
