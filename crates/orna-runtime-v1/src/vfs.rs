@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use super::{
     CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, RuntimeActivationContext,
-    RuntimeError, RuntimeState, RuntimeTableIdentity, SafeDiagnostic,
-    TableActivationCandidateValidator, TableActivationError, TableMutation,
+    RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
+    SafeDiagnostic, TableActivationCandidateValidator, TableActivationError, TableMutation,
     ValidatedTableActivationCommit, WriterLease,
 };
 use orna_repository_v1::{CwdGeneration, ProtectedContentPin};
@@ -2224,6 +2224,7 @@ impl VfsSaveCoordinates {
 /// baseline carried by the draft and this admission's capture travel together.
 pub struct VfsSaveAdmission<'a, S> {
     runtime: &'a RuntimeState,
+    snapshot: RuntimeTableActivationSnapshot,
     context: RuntimeActivationContext,
     save: VfsDurableSave,
     writer: WriterLease,
@@ -2281,6 +2282,7 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
         let digest = context.capture().generation_digest();
         Ok(Self {
             runtime,
+            snapshot,
             context,
             save,
             writer,
@@ -2302,6 +2304,22 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
     /// The digest the activation commits under.
     pub fn digest(&self) -> [u8; 32] {
         self.digest
+    }
+
+    /// The admitted relation row this save is replacing, as read inside the
+    /// admission's own committed capture.
+    ///
+    /// A save that committed durably and then lost its acknowledgement (a
+    /// crash between the writer transaction's commit and the caller observing
+    /// the result) leaves exactly this row behind. The caller compares it with
+    /// the candidate before committing, so replaying such a save reports the
+    /// accepted outcome instead of committing the same mutation a second time
+    /// (VFS-008, VFS-021).
+    pub fn admitted_row(&self) -> Option<&[u8]> {
+        self.snapshot
+            .query_exact(self.save.table.table(), &self.save.key)
+            .ok()
+            .flatten()
     }
 
     /// Commits one complete row replacement through the runtime's single
@@ -2446,40 +2464,53 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         let candidate = admit(admission.coordinates(), Arc::clone(&candidate_bytes))
             .await
             .map_err(VfsSaveError::Activation)?;
-        match admission.commit(candidate).await {
-            Err(TableActivationError::ValidationFailed(diagnostic)) => {
-                draft_state.retain_rejection(revision, diagnostic);
-                Err(VfsSaveError::Rejected {
-                    generation: *cache_generation,
-                    diagnostic,
-                })
+        // A save that committed durably and then lost its acknowledgement (the
+        // process died between the writer transaction's commit and this caller
+        // observing the result) already holds exactly this candidate. Acting on
+        // that state is idempotent: the accepted image is published again
+        // without appending a second mutation or advancing the durable
+        // generation twice (VFS-008, VFS-021).
+        let already_durable = candidate
+            .replacement()
+            .value()
+            .is_some_and(|value| admission.admitted_row() == Some(value));
+        if !already_durable {
+            match admission.commit(candidate).await {
+                Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                    draft_state.retain_rejection(revision, diagnostic);
+                    return Err(VfsSaveError::Rejected {
+                        generation: *cache_generation,
+                        diagnostic,
+                    });
+                }
+                Err(error) => return Err(VfsSaveError::Activation(error)),
+                Ok(_capture) => {}
             }
-            Err(error) => Err(VfsSaveError::Activation(error)),
-            Ok(_capture) => {
-                // Mirror the temp-rename route: the accepted handle carries the
-                // candidate bytes, and the image new opens see carries the
-                // advanced projection (VFS-019).
-                let accepted = Arc::new(VfsFileSnapshot::new(
-                    draft_state.baseline.pin.clone_pin(),
-                    Arc::clone(&candidate_bytes),
-                ));
-                let image = Arc::new(VfsFileSnapshot::with_projection(
-                    &accepted,
-                    CacheProjection {
-                        epoch: self.cache_epoch.clone(),
-                        generation: next_generation,
-                    },
-                ));
-                draft_state.candidate = None;
-                draft_state.last_rejection = None;
-                draft_state.baseline = Arc::clone(&image);
-                destination.image = Arc::clone(&image);
-                *cache_generation = next_generation;
-                Ok(TemporaryRenameOutcome::Applied {
+        }
+        {
+            // Mirror the temp-rename route: the accepted handle carries the
+            // candidate bytes, and the image new opens see carries the
+            // advanced projection (VFS-019).
+            let accepted = Arc::new(VfsFileSnapshot::new(
+                draft_state.baseline.pin.clone_pin(),
+                Arc::clone(&candidate_bytes),
+            ));
+            let image = Arc::new(VfsFileSnapshot::with_projection(
+                &accepted,
+                CacheProjection {
+                    epoch: self.cache_epoch.clone(),
                     generation: next_generation,
-                    handle: SnapshotReadHandle::open(image),
-                })
-            }
+                },
+            ));
+            draft_state.candidate = None;
+            draft_state.last_rejection = None;
+            draft_state.baseline = Arc::clone(&image);
+            destination.image = Arc::clone(&image);
+            *cache_generation = next_generation;
+            Ok(TemporaryRenameOutcome::Applied {
+                generation: next_generation,
+                handle: SnapshotReadHandle::open(image),
+            })
         }
     }
 }
