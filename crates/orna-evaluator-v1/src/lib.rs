@@ -691,6 +691,11 @@ impl EvaluationError {
     }
 
     fn from_canonical(value: CanonicalErrorValue) -> Self {
+        eprintln!(
+            "DEBUG-CANONICAL-ERROR code={} message={}",
+            value.code(),
+            value.message()
+        );
         Self {
             diagnostic: Box::new(
                 Diagnostic::new(
@@ -4562,13 +4567,28 @@ impl Context<'_, '_> {
             .as_deref()
             .is_some_and(|name| matches!(name, "std.collection.asof_join" | "std.query.asof_join"));
         let intrinsic_name = root_collection_name(callee);
+        let spelling = function_name(callee);
         let name = intrinsic_name
             .or_else(|| {
                 native_export
                     .then(|| portable_collection_operation(callee, resolved.as_deref()))
                     .flatten()
             })
-            .or(statistics_operation)?;
+            .or(statistics_operation);
+        if name.is_none() {
+            eprintln!(
+                "DEBUG-NO-RELATION spelling={:?} resolved={:?} intrinsic={:?} native_export={} scope_has_std={} source_fn={}",
+                spelling,
+                resolved,
+                intrinsic_name,
+                native_export,
+                scope.0.contains_key("std"),
+                spelling
+                    .as_deref()
+                    .is_some_and(|name| self.functions.contains_key(name))
+            );
+        }
+        let name = name?;
         if (statistics_operation.is_none()
             && intrinsic_name.is_some_and(|name| scope.0.contains_key(name)))
             || (resolved.is_some() && !native_export && statistics_operation.is_none())
