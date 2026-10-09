@@ -493,7 +493,7 @@ fn reopens_old_and_new_mounts_of_one_migrated_repository_together() {
     assert_eq!(old_mount_again.repository_format_number(), 1);
     assert!(old_mount_again.is_legacy_format());
     assert_ne!(
-        old_mount_again.snapshot_id(),
+        *old_mount_again.snapshot_id(),
         new_mount.snapshot_pin().snapshot_id()
     );
 
