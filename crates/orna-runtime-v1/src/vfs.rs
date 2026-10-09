@@ -2750,6 +2750,61 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_row_reuses_the_captured_blob_descriptor_instead_of_re_deriving_it() {
+        // A content sibling that a save admitted from the captured field keeps
+        // the descriptor the store reported for the row version it came from:
+        // the byte length, the raw digest, and the OGS-1 descriptor OID are the
+        // captured ones, so a save that changes only the selected suffix (or
+        // any other field) cannot mint a new descriptor or re-hash the payload
+        // (VFS-008: an unchanged descriptor uses the captured field, not a new
+        // path lookup into current state).
+        let descriptor_oid =
+            NativeObjectId::new("a".repeat(40)).expect("well-formed SHA-1 object id");
+        let captured = CapturedContentDescriptor::new(4096, [0x5a; 32], descriptor_oid.clone());
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            &[VfsStoredField::captured_content(
+                "content",
+                "audio/mpeg",
+                Some("mp1".to_owned()),
+                captured.clone(),
+                true,
+            )],
+        )
+        .expect("captured content projection");
+
+        let VfsProjectedEntry::Content(file) = row
+            .lookup("content.mp1")
+            .expect("the compatible suffix names the content file")
+        else {
+            panic!("content lookup should return the projected file");
+        };
+
+        let projected = file
+            .captured_descriptor()
+            .expect("the captured descriptor reaches the projected file");
+        assert_eq!(projected.length(), 4096);
+        assert_eq!(projected.sha256(), &[0x5a; 32]);
+        assert_eq!(projected.descriptor_oid(), &descriptor_oid);
+        assert_eq!(projected, &captured);
+        assert_eq!(file.descriptor_size(), captured.length());
+        assert!(file.is_required());
+
+        // A projection that was given no captured descriptor reports none, so a
+        // file can never claim an identity the store did not hand it.
+        let plain = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            &[VfsStoredField::content("content", "audio/mpeg", None, 4096)],
+        )
+        .expect("plain content projection");
+        let VfsProjectedEntry::Content(file) = plain.lookup("content.mp3").expect("content file")
+        else {
+            panic!("content lookup should return the projected file");
+        };
+        assert!(file.captured_descriptor().is_none());
+    }
+
+    #[test]
     fn content_file_name_stays_within_the_component_bound_with_its_suffix() {
         // The projected content file is one host component, so VFS-016's bound
         // covers the whole `field.suffix` spelling. A field base that leaves no
