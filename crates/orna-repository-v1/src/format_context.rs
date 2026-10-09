@@ -966,7 +966,7 @@ mod graph_bridge_tests {
         Repository,
         native_graph::{
             ByteIndexEntry, CborValue, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid, NodeData,
-            OrderedBranchEntry, OrderedLeafEntry, decode_canonical_cbor,
+            OrderedBranchEntry, OrderedLeafEntry, RowIndexMutation, decode_canonical_cbor,
         },
         row_store::{
             KeyRange, RowEntry, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
@@ -1245,6 +1245,340 @@ mod graph_bridge_tests {
         let store_root = write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
         commit_store_root(directory, algorithm, &store_root);
         descriptor_oid
+    }
+
+    /// Encodes one canonical stored value holding no dependency edges.
+    fn inline_value() -> Vec<u8> {
+        vec![0x81, 0x01]
+    }
+
+    /// Writes one OGS-1 leaf envelope from `entries` bytes verbatim, bypassing
+    /// the writer's own canonical checks so a malformed fixture can reach the
+    /// object store the way a foreign repository would leave it.
+    fn raw_rows_leaf(
+        directory: &Path,
+        algorithm: GitHashAlgorithm,
+        domain: &[u8],
+        entries: &[u8],
+        entry_count: u64,
+    ) -> NativeOid {
+        let mut data = Vec::new();
+        data.push(0x84);
+        data.push(0x01);
+        data.push(0x01);
+        cbor_bytes(&mut data, domain);
+        cbor_head(&mut data, 4, entry_count);
+        data.extend_from_slice(entries);
+        let data_oid = write_git_object(directory, algorithm, "blob", &data);
+        let mut envelope = Vec::new();
+        cbor_head(&mut envelope, 2, 6);
+        envelope.extend_from_slice(b"100644");
+        envelope.extend_from_slice(b"data\0");
+        envelope.extend_from_slice(data_oid.as_bytes());
+        write_git_object(directory, algorithm, "tree", &envelope)
+    }
+
+    /// Installs one relation whose row root is `primary_root` and whose
+    /// relation value declares `declared_count` rows, then commits a fresh
+    /// store root. A valid leaf passes a `declared_count` equal to its entry
+    /// count; the malformed legs use the writer's own checks as the oracle.
+    fn install_rows_store(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+        schema_oid: &NativeOid,
+        primary_root: &NativeOid,
+        declared_count: u64,
+    ) {
+        let algorithm = context
+            .validate_store_root()
+            .expect("pinned format-3 store")
+            .oid
+            .algorithm();
+        let database_id = context.require_database_id().expect("database identity");
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, primary_root.as_bytes());
+        relation_value.push(0xf6);
+        cbor_head(&mut relation_value, 0, declared_count);
+        let relation_map = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root =
+            write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(directory, algorithm, &store_root);
+    }
+
+    /// Builds a valid canonical rows leaf from `(key, value)` pairs.
+    fn rows_leaf(
+        directory: &Path,
+        algorithm: GitHashAlgorithm,
+        domain: &[u8],
+        rows: &[(u64, Vec<u8>)],
+    ) -> NativeOid {
+        write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: domain.to_vec(),
+                entries: rows
+                    .iter()
+                    .map(|(key, value)| OrderedLeafEntry {
+                        key: TypedKey::UInt(*key).canonical_bytes().unwrap(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+            },
+        )
+    }
+
+    #[test]
+    fn orp1_index_maintenance_reports_index_churn_separately_from_payload_reuse() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x6d; 16];
+
+        // Seed a relation so a graph context can capture the Blob the row will
+        // store, then publish the real 20-row page that carries it.
+        let initial = context(root);
+        if initial.load_row_map(relation_id).is_err() {
+            install_overflow_row_store(root, &initial, relation_id, None);
+        }
+        let seeding = context(root);
+        let snapshot = seeding
+            .load_row_map(relation_id)
+            .expect("seeded row-map identity");
+        let graph = seeding
+            .open_native_graph(&snapshot)
+            .expect("admit the seeded graph context");
+        let scope = graph.open_read_scope().expect("owner scope");
+        let payload = b"london take one".as_slice();
+        let mut input = std::io::Cursor::new(payload.to_vec());
+        let candidate = graph
+            .capture_blob_candidate(&mut input, payload.len() as u64, &scope)
+            .expect("capture the OGB-2 candidate closure");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect the OGB-2 closure");
+        let binding = graph
+            .accept_protected_blob_pin_with_annotation(pin, "audio/mpeg", Some("mp3"))
+            .expect("accept the annotated Blob binding");
+        let descriptor = binding.descriptor_oid().clone();
+
+        let (schema_oid, schema_digest) = schema_node(root, &seeding);
+        let algorithm = seeding
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let domain = row_domain(relation_id, schema_digest);
+        let mut annotated = vec![0x81];
+        annotated.extend_from_slice(binding.encoded_value());
+        let mut rows: Vec<(u64, Vec<u8>)> = (1..=20).map(|key| (key, inline_value())).collect();
+        rows[4].1 = annotated;
+        let leaf = rows_leaf(root, algorithm, &domain, &rows);
+        install_rows_store(root, &seeding, relation_id, &schema_oid, &leaf, 20);
+
+        let pinned = context(root);
+        let snapshot = pinned
+            .load_row_map(relation_id)
+            .expect("admit the published 20-row page");
+        let graph = pinned.open_native_graph(&snapshot).expect("admit graph");
+        let scope = graph.open_read_scope().expect("owner scope");
+
+        // A pass with no mutations rebuilds every page from the same rows, so
+        // every index object is byte-identical and nothing is new churn: the
+        // pass reports the previous root as its own successor.
+        let noop = graph
+            .maintain_row_index(&[], &scope)
+            .expect("empty maintenance pass");
+        assert_eq!(noop.row_count(), 20);
+        assert_eq!(noop.primary_root(), noop.previous_root());
+        assert!(
+            noop.index_objects_created().is_empty(),
+            "an unchanged rewrite creates no index object"
+        );
+        assert!(
+            !noop.index_objects_reused().is_empty(),
+            "an unchanged rewrite reuses its index nodes"
+        );
+
+        // A real churn pass: prepend, delete and rekey, with one media row left
+        // untouched.
+        let mutations = [
+            RowIndexMutation::Delete {
+                key: TypedKey::UInt(2),
+            },
+            RowIndexMutation::Rekey {
+                from: TypedKey::UInt(10),
+                to: TypedKey::UInt(50),
+            },
+            RowIndexMutation::Insert {
+                key: TypedKey::UInt(0),
+                value: RowValue::inline(inline_value(), Vec::new()).expect("canonical row value"),
+            },
+        ];
+        let churn = graph
+            .maintain_row_index(&mutations, &scope)
+            .expect("prepend/delete/rekey maintenance pass");
+        assert_eq!(churn.row_count(), 20);
+        assert_eq!(churn.previous_root(), snapshot.version().primary_root());
+        assert_ne!(churn.primary_root(), churn.previous_root());
+        assert!(
+            !churn.index_objects_created().is_empty(),
+            "an index rewrite reports the tree objects it wrote"
+        );
+        assert!(
+            churn
+                .index_objects_created()
+                .iter()
+                .all(|oid| !churn.index_objects_reused().contains(oid)),
+            "created and reused index objects are disjoint"
+        );
+        assert!(
+            churn.payload_objects_reused().contains(&descriptor),
+            "the untouched media row keeps its Blob descriptor object"
+        );
+        assert!(
+            !churn.index_objects_created().contains(&descriptor),
+            "media is never reported as index churn"
+        );
+
+        // The reported successor is the real one: naming it makes the mutated
+        // key set readable.
+        install_rows_store(
+            root,
+            &pinned,
+            relation_id,
+            &schema_oid,
+            churn.primary_root(),
+            churn.row_count(),
+        );
+        let successor = context(root);
+        let snapshot = successor
+            .load_row_map(relation_id)
+            .expect("admit the rewritten page");
+        let graph = successor.open_native_graph(&snapshot).expect("admit graph");
+        let scope = graph.open_read_scope().expect("owner scope");
+        for (key, present) in [(0u64, true), (2, false), (5, true), (10, false), (50, true)] {
+            assert_eq!(
+                graph
+                    .lookup_row(&TypedKey::UInt(key), &scope)
+                    .expect("bounded point lookup")
+                    .is_some(),
+                present,
+                "key {key} after the maintenance pass"
+            );
+        }
+    }
+
+    #[test]
+    fn orp1_index_maintenance_rejects_malformed_pages_on_read() {
+        let directory = repository();
+        let root = directory.path();
+
+        // A page over the 256-entry fanout bound is refused on read.
+        let fanout_relation = [0xb1; 16];
+        let seeded = context(root);
+        install_overflow_row_store(root, &seeded, fanout_relation, None);
+        let ready = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &ready);
+        let algorithm = ready
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let mut entries = Vec::new();
+        for key in 1..=257u64 {
+            entries.push(0x82);
+            entries.extend_from_slice(&TypedKey::UInt(key).canonical_bytes().unwrap());
+            entries.extend_from_slice(&inline_value());
+        }
+        let leaf = raw_rows_leaf(
+            root,
+            algorithm,
+            &row_domain(fanout_relation, schema_digest),
+            &entries,
+            257,
+        );
+        install_rows_store(root, &ready, fanout_relation, &schema_oid, &leaf, 257);
+        assert!(
+            context(root).load_row_map(fanout_relation).is_err(),
+            "a 257-entry page is rejected on read"
+        );
+
+        // The same single row is admitted under its own domain and refused
+        // under a domain carrying another schema digest, so the domain is what
+        // decides.
+        let domain_relation = [0xc2; 16];
+        let seeded = context(root);
+        install_overflow_row_store(root, &seeded, domain_relation, None);
+        let ready = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &ready);
+        let algorithm = ready
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let mut other_digest = schema_digest;
+        other_digest[0] ^= 0xff;
+        let leaf = rows_leaf(
+            root,
+            algorithm,
+            &row_domain(domain_relation, other_digest),
+            &[(1, inline_value())],
+        );
+        install_rows_store(root, &ready, domain_relation, &schema_oid, &leaf, 1);
+        assert!(
+            context(root).load_row_map(domain_relation).is_err(),
+            "a page from another schema domain is rejected on read"
+        );
+        let leaf = rows_leaf(
+            root,
+            algorithm,
+            &row_domain(domain_relation, schema_digest),
+            &[(1, inline_value())],
+        );
+        install_rows_store(root, &ready, domain_relation, &schema_oid, &leaf, 1);
+        assert!(
+            context(root).load_row_map(domain_relation).is_ok(),
+            "the same row under its own domain is admitted"
+        );
+
+        // A relation whose declared row count disagrees with its page is
+        // refused on read, so a caller cannot publish a miscounted relation.
+        let count_relation = [0xd3; 16];
+        let seeded = context(root);
+        install_overflow_row_store(root, &seeded, count_relation, None);
+        let ready = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &ready);
+        let algorithm = ready
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let rows: Vec<(u64, Vec<u8>)> = (1..=200).map(|key| (key, inline_value())).collect();
+        let leaf = rows_leaf(
+            root,
+            algorithm,
+            &row_domain(count_relation, schema_digest),
+            &rows,
+        );
+        install_rows_store(root, &ready, count_relation, &schema_oid, &leaf, 199);
+        assert!(
+            context(root).load_row_map(count_relation).is_err(),
+            "a page whose declared count disagrees with its entries is rejected on read"
+        );
     }
 
     #[test]
