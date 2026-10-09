@@ -38,7 +38,7 @@ const MAX_INHERITED_GIT_CONFIG_ENTRIES: usize = 1024;
 pub struct DatabaseId(Uuid);
 
 impl DatabaseId {
-    fn new_v4() -> Self {
+    pub(crate) fn new_v4() -> Self {
         Self(Uuid::new_v4())
     }
 
