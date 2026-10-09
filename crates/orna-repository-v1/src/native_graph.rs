@@ -6572,35 +6572,6 @@ struct VerifiedValueOverflow {
     semantic_value: CborValue,
 }
 
-/// Lifts a stored row value into the canonical values it may hold.
-///
-/// An inline value is its own encoding; a canonical overflow value names the
-/// node that holds it and is dereferenced through the same verified path the
-/// dependency check uses, so a row too large to inline is read here too.
-fn stored_row_values(
-    &self,
-    value: &crate::row_store::RowValue,
-    scope: &RepositoryReadScope,
-    objects: &mut ObjectBudget,
-) -> Result<Vec<CborValue>, GraphError> {
-    match value {
-        crate::row_store::RowValue::Inline { encoded, .. } => {
-            let parsed = decode_canonical_cbor(encoded)?;
-            if !matches!(parsed, CborValue::Array(_) | CborValue::Tag(60113, _)) {
-                return Err(GraphError::NonCanonicalData);
-            }
-            Ok(vec![parsed])
-        }
-        crate::row_store::RowValue::Overflow(reference) => {
-            let root = reference
-                .native_root()
-                .ok_or(GraphError::UnsupportedRowValueForm)?;
-            let verified =
-                self.verify_value_overflow(root, scope, objects, &mut BTreeSet::new())?;
-            Ok(vec![verified.semantic_value])
-        }
-    }
-}
 
 /// Collects every OVB-2 Blob value reachable inside a canonical stored row
 /// value, in the order the value holds them.
