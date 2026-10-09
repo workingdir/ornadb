@@ -10,11 +10,11 @@ use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
 use orna_repository_v1::{CapturedBlobCandidate, OrpBlobBinding, RepositoryCaptureCapability};
 use orna_syntax_v1::Expr;
 use orna_sys_v1::{
-    system_host_operation_registry, AbiType, CaptureFileError, ClockProvider,
-    EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError, FilesystemProvider,
-    FailureCode, HostHttpResponse, HostOperationDescriptor, HttpProvider, OperationContract,
-    OperationId, ProcessProvider, ProviderDiagnostic, ProviderFailure, ProviderOffer,
-    SemanticRoleContract, SystemOperationProvider, TypeId, TypedValue,
+    CaptureFileError, ClockProvider, EnvironmentDispatchValue, EnvironmentProvider,
+    EnvironmentProviderError, FailureCode, FilesystemProvider, HostHttpResponse,
+    HostOperationDescriptor, HttpProvider, OperationContract, OperationId, ProcessProvider,
+    ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
+    SystemOperationProvider, TypeId, TypedValue, system_host_operation_registry,
 };
 use orna_value_v1::{Blob, ContextValue, Error as ValueError, OVB2_BLOB_TAG, ValueFormat};
 
@@ -541,8 +541,15 @@ impl SysHostBindingRegistry {
             .process
             .as_ref()
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-        let [executable, args, working_directory, environment, input, timeout, output_limit] =
-            arguments
+        let [
+            executable,
+            args,
+            working_directory,
+            environment,
+            input,
+            timeout,
+            output_limit,
+        ] = arguments
         else {
             return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
         };
@@ -983,7 +990,7 @@ impl SysHostBindingRegistry {
             media_type,
             suffix.as_deref(),
         )
-            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
         let value = ContextValue::from_blob(&blob, ValueFormat::Ovb2)
             .map(Some)
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
@@ -1103,10 +1110,12 @@ impl SystemOperationProvider for BlobAnnotationProvider {
                 .map_err(|_| provider_failure())?;
             values.push(value.into_raw());
         }
-        let raw = apply_blob_annotation(operation.as_str(), &values)
-            .map_err(|code| ProviderFailure { code, payload: None })?;
-        let value =
-            ContextValue::new(ValueFormat::Ovb2, raw).map_err(|_| provider_failure())?;
+        let raw =
+            apply_blob_annotation(operation.as_str(), &values).map_err(|code| ProviderFailure {
+                code,
+                payload: None,
+            })?;
+        let value = ContextValue::new(ValueFormat::Ovb2, raw).map_err(|_| provider_failure())?;
         let canonical = value.encode().map_err(|_| provider_failure())?;
         Ok(TypedValue::public(
             TypeId::new(contract.signature.result.canonical()),
@@ -1148,14 +1157,13 @@ pub(crate) fn dispatch_blob_annotation(
         let canonical = argument
             .encode()
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
-        // An absent optional travels as its own null encoding: this ABI has no
-        // separate null type, so the declared optional is checked against its
-        // inner type and the provider reads the null back out.
-        let static_type = match &parameter.ty {
-            AbiType::Optional(inner) => inner.canonical(),
-            declared => declared.canonical(),
-        };
-        typed.push(TypedValue::public(TypeId::new(static_type), canonical));
+        // The ABI admits an optional argument under its full declared optional
+        // type, while the canonical payload carries the null itself, so an
+        // absent optional stays distinguishable from a present inner value.
+        typed.push(TypedValue::public(
+            TypeId::new(parameter.ty.canonical()),
+            canonical,
+        ));
     }
     match table.dispatch_to_provider(operation, &provider, &typed, |_| Ok(())) {
         Ok(orna_sys_v1::SystemDispatchResult::Returned(value)) => {
@@ -1186,8 +1194,7 @@ fn apply_blob_annotation(operation: &str, values: &[OvbRaw]) -> Result<OvbRaw, F
         return Err(static_failure("sys.abi.provider_failed"));
     };
     let suffix = blob_suffix_argument(suffix)?;
-    let blob =
-        ContextValue::new(ValueFormat::Ovb2, value.clone()).map_err(blob_value_failure)?;
+    let blob = ContextValue::new(ValueFormat::Ovb2, value.clone()).map_err(blob_value_failure)?;
     let annotated = blob
         .with_blob_annotation(media_type, suffix)
         .map_err(blob_value_failure)?;
