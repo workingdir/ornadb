@@ -1922,6 +1922,61 @@ mod tests {
             Err(VfsPathError::UnknownRow)
         );
     }
+
+    #[test]
+    fn suffix_selection_is_mime1_compatible_and_preferred_hint_is_absent() {
+        // A compatible non-preferred spelling is stored as that explicit hint,
+        // and the file name changes only in its suffix (MIME-1, VFS-012).
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("mp1")),
+            Ok(Some("mp1".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("MP1")),
+            Ok(Some("mp1".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("image/jpeg", Some("jpeg")),
+            Ok(Some("jpeg".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("application/gzip", Some("tgz")),
+            Ok(Some("tgz".to_owned()))
+        );
+
+        // The catalogued preferred suffix is recorded as an absent hint, never
+        // as a redundant one (MIME-1 default_hint_canonicalization).
+        assert_eq!(classify_content_suffix("audio/mpeg", Some("mp3")), Ok(None));
+        assert_eq!(classify_content_suffix("audio/mpeg", None), Ok(None));
+
+        // A suffix outside the MIME-1 entry is a malformed candidate rather
+        // than a silent transcode or a rekeyed row (VFS-012).
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("m4a")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        assert_eq!(
+            classify_content_suffix("image/jpeg", Some("png")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        // An unknown essence keeps only the profile's `bin` hint.
+        assert_eq!(
+            classify_content_suffix("application/x-unknown", Some("gz")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        assert_eq!(
+            classify_content_suffix("application/x-unknown", Some("bin")),
+            Ok(None)
+        );
+
+        // The suffix rename never changes the stored content identity: the same
+        // descriptor size projects under the selected hint, and the row's bytes
+        // are untouched.
+        let renamed = project_content_name("content", "audio/mpeg", Some("mp1"));
+        assert_eq!(renamed, "content.mp1");
+        assert_eq!(project_content_name("content", "audio/mpeg", None), "content.mp3");
+    }
+
     fn vfs_row_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/vfs-row-music-london.orna");
         Arc::new(VfsFileSnapshot::new(
