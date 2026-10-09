@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use orna_evaluator_v1::SysHostBindingRegistry;
+use orna_repository_v1::KeyRange;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
@@ -95,6 +96,34 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
     assert_eq!(committed.len(), 2, "the song and the image both commit");
     assert_eq!(committed[0].0, b"image".to_vec());
     assert_eq!(committed[1].0, b"song".to_vec());
+
+    // Both committed rows must be reachable from the *published* format-3
+    // snapshot, not only from the runtime that staged them: the publication
+    // boundary is what every other process reads. A row that lists through the
+    // runtime but is absent from the row map never left the pending tail.
+    let log = git_output(directory.path(), &["log", "--oneline", "--all"], None);
+    eprintln!("PUBLOG\n{}", String::from_utf8_lossy(&log));
+    let status = git_output(directory.path(), &["status", "--porcelain"], None);
+    eprintln!("PUBSTATUS\n{}", String::from_utf8_lossy(&status));
+    let files = git_output(directory.path(), &["ls-files"], None);
+    eprintln!("PUBFILES\n{}", String::from_utf8_lossy(&files));
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let published = graph
+        .range_rows(&KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+    let published_keys = published
+        .iter()
+        .map(|row| row.key().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        published.len(),
+        2,
+        "both imported rows are committed to the published snapshot, got {published_keys:?}"
+    );
+
     let objects = blob_count(directory.path());
     assert!(objects > 0, "the captures committed real objects");
 
