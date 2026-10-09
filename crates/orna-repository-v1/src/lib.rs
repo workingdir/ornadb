@@ -1027,6 +1027,39 @@ impl PublicationJournal {
         self.migration_annotation_defaults
     }
 
+    /// Re-admits a prepared migration journal whose stream/checkpoint identity
+    /// inventory was already durably recorded, so a resumed publisher resolves
+    /// the same successor identities instead of re-deriving them.
+    ///
+    /// This is the resume counterpart of [`Self::with_migration_continuity`],
+    /// which refuses a journal that already carries an inventory. A resumed
+    /// publisher must supply the inventory exactly as it was persisted, and a
+    /// substituted one is rejected: re-deriving a successor identity is the
+    /// reset this coordinate exists to prevent. It returns the record's own
+    /// value, so the resumed publisher reports the durable evidence rather than
+    /// the copy the caller supplied.
+    ///
+    /// The returned record is the only supported source of successor
+    /// identities; [`MigrationContinuityRecord::successor_for`] answers the
+    /// legacy-format checkpoint key this migration carried, and answers nothing
+    /// for a key it did not carry.
+    pub fn resume_migration_continuity(
+        &self,
+        continuity: MigrationContinuityRecord,
+    ) -> Result<MigrationContinuityRecord, RepositoryError> {
+        let recorded = self
+            .migration_continuity
+            .as_ref()
+            .ok_or(RepositoryError::InvalidFormatMigration)?;
+        if self.compact_manifest().is_some()
+            || self.stage != PublicationJournalStage::Prepared
+            || recorded != &continuity
+        {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        Ok(recorded.clone())
+    }
+
     pub const fn stage(&self) -> PublicationJournalStage {
         self.stage
     }
