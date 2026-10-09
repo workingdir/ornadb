@@ -19,7 +19,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  fetch [REMOTE] [BRANCH]",
     "  serve [--port PORT]",
     "  diff [GIT_DIFF_ARGS...]",
-    "  import BUNDLE --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]",
+    "  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]",
     "  export DEST --at SELECTOR [--dependency PATH=DIR]...",
     "  export DEST --check                               report one existing archive",
     "  export exit status: 0 archive written, verified, and reported; 1 snapshot, object closure, or pinned dependency unavailable",
@@ -36,8 +36,8 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  0 success            1 target             2 usage              3 connection",
     "  4 authorisation      5 presentation       6 cancelled          7 protocol",
     "History commands:",
-    "  history RELATION KEY [--limit N] [--since COMMIT] [--format human|json] [--reverse] [--author TEXT] [--count]",
-    "  history exit codes: 0 listed or counted; 1 any history error (bad flag or value, unknown repository, row, or --since commit)",
+    "  history RELATION KEY [--at SELECTOR] [--limit N] [--since COMMIT] [--format human|json] [--reverse] [--author TEXT] [--count]",
+    "  history exit codes: 0 listed or counted; 1 any history error (bad flag or value, unknown repository, row, --at selector, or --since commit)",
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];
 
@@ -59,7 +59,7 @@ mod tests {
         assert!(HELP_LINES.contains(&"  fetch [REMOTE] [BRANCH]"));
         assert!(HELP_LINES.contains(&"  diff [GIT_DIFF_ARGS...]"));
         assert!(HELP_LINES.contains(
-            &"  import BUNDLE --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]"
+            &"  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]"
         ));
         assert!(HELP_LINES.contains(
             &"  export DEST --at SELECTOR [--dependency PATH=DIR]..."
@@ -78,6 +78,7 @@ mod tests {
             .expect("history group");
         let group = &HELP_LINES[index + 1..];
         for flag in [
+            "--at",
             "--limit",
             "--since",
             "--format",
