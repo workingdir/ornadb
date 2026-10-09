@@ -450,11 +450,28 @@ fn complete_copy_verifies_every_object_id_and_refuses_a_truncated_or_substituted
         "each member records its own closure: {other_records} elsewhere"
     );
 
-    // 1. Truncated: the object records are dropped while the commit survives.
+    // 1. Truncated: the member's object records are dropped but for one, so the
+    // commit survives and the recorded closure is non-empty yet incomplete.
     let truncated = root.path().join("truncated");
     copy_archive(&archive, &truncated);
-    let truncated_document = document.replace(&member_block, "");
+    let retained = member_block
+        .lines()
+        .next()
+        .expect("the member records at least its own commit")
+        .to_owned();
+    let truncated_document = document.replace(&member_block, &format!("{retained}\n"));
     assert_ne!(truncated_document, document, "the manifest changed");
+    assert!(
+        truncated_document
+            .lines()
+            .filter(|line| line.starts_with("object\t"))
+            .count()
+            < document
+                .lines()
+                .filter(|line| line.starts_with("object\t"))
+                .count(),
+        "the recorded closure shrank"
+    );
     fs::write(truncated.join("manifest.tsv"), &truncated_document).expect("write manifest");
     let error = restore_complete_copy(&truncated, &root.path().join("copy-truncated"))
         .expect_err("a truncated recording is refused");
