@@ -297,6 +297,8 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                         &revision.tree().to_hex(),
                         revision.present(),
                         revision.author(),
+                        revision.committed_at(),
+                        revision.migration(),
                     )
                 })
                 .collect();
@@ -306,14 +308,31 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     Ok(())
 }
 
-/// One revision as a JSON object: commit, root tree, presence and author.
-fn revision_json(commit: &str, tree: &str, present: bool, author: &str) -> serde_json::Value {
-    serde_json::json!({
+/// One revision as a JSON object: commit, root tree, presence, author and the
+/// commit time in seconds since the Unix epoch, plus the migration coordinate
+/// when the commit is the journalled migration commit.
+///
+/// `migration` is present only on commits that carry one, so the documented
+/// shape is unchanged for every ordinary revision.
+fn revision_json(
+    commit: &str,
+    tree: &str,
+    present: bool,
+    author: &str,
+    committed_at: u64,
+    migration: Option<&str>,
+) -> serde_json::Value {
+    let mut object = serde_json::json!({
         "commit": commit,
         "tree": tree,
         "present": present,
         "author": author,
-    })
+        "committed": committed_at,
+    });
+    if let Some(migration) = migration {
+        object["migration"] = serde_json::Value::String(migration.to_owned());
+    }
+    object
 }
 
 /// Human listing: one `commit tree state` line per revision, then the summary
@@ -882,20 +901,71 @@ mod tests {
 
     #[test]
     fn revision_json_has_exactly_the_documented_keys() {
-        let value = super::revision_json("c0ffee", "7ree", true, "Ada <ada@example.test>");
+        let value = super::revision_json(
+            "c0ffee",
+            "7ree",
+            true,
+            "Ada <ada@example.test>",
+            1_700_000_000,
+            None,
+        );
         let object = value.as_object().unwrap();
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["author", "commit", "present", "tree"]);
+        assert_eq!(keys, ["author", "commit", "committed", "present", "tree"]);
         assert_eq!(object["present"], serde_json::Value::Bool(true));
         assert_eq!(object["author"], "Ada <ada@example.test>");
+        assert_eq!(object["committed"], 1_700_000_000);
+    }
+
+    #[test]
+    fn revision_json_reports_the_migration_coordinate_only_on_the_migration_commit() {
+        let value = super::revision_json(
+            "c0ffee",
+            "7ree",
+            true,
+            "Ada <ada@example.test>",
+            1_700_000_000,
+            Some("format-1-to-3"),
+        );
+        let object = value.as_object().unwrap();
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "author",
+                "commit",
+                "committed",
+                "migration",
+                "present",
+                "tree"
+            ],
+            "the migration coordinate is an additional key, not a replaced one"
+        );
+        assert_eq!(object["migration"], "format-1-to-3");
+        assert_eq!(object["commit"], "c0ffee");
     }
 
     #[test]
     fn revision_listing_round_trips_in_order_as_a_json_array() {
         let listing = serde_json::Value::Array(vec![
-            super::revision_json("aaa", "t1", true, "Ada <ada@example.test>"),
-            super::revision_json("bbb", "t2", false, "Ada <ada@example.test>"),
+            super::revision_json(
+                "aaa",
+                "t1",
+                true,
+                "Ada <ada@example.test>",
+                1_700_000_000,
+                None,
+            ),
+            super::revision_json(
+                "bbb",
+                "t2",
+                false,
+                "Ada <ada@example.test>",
+                1_700_000_001,
+                None,
+            ),
         ]);
         let parsed: serde_json::Value = serde_json::from_str(&listing.to_string()).unwrap();
         let entries = parsed.as_array().unwrap();
