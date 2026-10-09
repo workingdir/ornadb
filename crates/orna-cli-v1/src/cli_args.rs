@@ -70,9 +70,11 @@ pub(super) enum Command {
     /// `unmount DIR`: release the view's record, nothing else.
     Unmount { mountpoint: PathBuf },
     Diff(Vec<String>),
+    Log(Vec<String>),
     History(Vec<String>),
     Import(Vec<String>),
     Export(Vec<String>),
+    Publish(Vec<String>),
     Check,
     Explain(String),
     Invoke(String),
@@ -428,6 +430,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         }
         Some("import") => Command::Import(words.by_ref().map(str::to_owned).collect()),
         Some("export") => Command::Export(words.by_ref().map(str::to_owned).collect()),
+        Some("publish") => Command::Publish(words.by_ref().map(str::to_owned).collect()),
         Some("serve") => {
             let mut port = 8080;
             while let Some(option) = words.next() {
@@ -462,6 +465,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             }
             Command::Diff(arguments)
         }
+        Some("log") => Command::Log(words.by_ref().map(str::to_owned).collect()),
         Some("explain") => Command::Explain(
             words
                 .next()
@@ -683,6 +687,29 @@ mod tests {
             Command::Diff(vec![
                 "--no-color".into(),
                 "--exit-code".into(),
+                "--".into(),
+                "changed path.orna".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn parser_preserves_git_log_argument_boundaries_and_options() {
+        let parsed = parse_cli(&args(&[
+            "log",
+            "--oneline",
+            "-n",
+            "3",
+            "--",
+            "changed path.orna",
+        ]))
+        .expect("log arguments parse");
+        assert_eq!(
+            parsed.command,
+            Command::Log(vec![
+                "--oneline".into(),
+                "-n".into(),
+                "3".into(),
                 "--".into(),
                 "changed path.orna".into(),
             ])
