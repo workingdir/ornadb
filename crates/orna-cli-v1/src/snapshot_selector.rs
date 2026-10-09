@@ -46,9 +46,7 @@ pub(super) fn bare_ref_selector_is_ambiguous(
         ])
         .current_dir(directory)
         .output()
-        .map_err(|error| {
-            format!("check that Git is installed and available on PATH: {error}")
-        })?;
+        .map_err(|error| format!("check that Git is installed and available on PATH: {error}"))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
     }
