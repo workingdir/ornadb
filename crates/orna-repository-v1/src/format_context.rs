@@ -28,6 +28,8 @@ pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
 const DATABASE_PATH: &str = ".orna/database.orna";
 const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
 const MAIN_SOURCE_PATH: &str = "main.orna";
+/// The fixed position of the format-3 native store root inside a snapshot.
+pub(crate) const STORE_PATH: &str = ".orna/store";
 // Used only to classify a failed metadata-path lookup. The valid format-3
 // store path never recursively enumerates this tree.
 const MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC: usize = 65_536;
@@ -829,11 +831,11 @@ mod graph_bridge_tests {
     use crate::{
         Repository,
         native_graph::{
-            ByteIndexEntry, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid, NodeData,
-            OrderedBranchEntry, OrderedLeafEntry,
+            ByteIndexEntry, CborValue, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid, NodeData,
+            OrderedBranchEntry, OrderedLeafEntry, decode_canonical_cbor,
         },
         row_store::{
-            KeyRange, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
+            KeyRange, RowEntry, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
         },
     };
 
@@ -1390,6 +1392,70 @@ mod graph_bridge_tests {
     }
 
     #[test]
+    fn publication_store_subtree_pin_admits_only_a_real_store_root() {
+        let directory = repository();
+        let root = directory.path();
+        let context = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &context);
+        let rows = sealed_rows(&context, &schema_oid, schema_digest);
+        let graph = context
+            .open_native_graph(&rows)
+            .expect("admit the fixture graph");
+
+        // The production writer builds a complete OGS-1 envelope: the data
+        // blob, the refs tree naming the relation map, and the envelope tree.
+        let database_id = *context
+            .require_database_id()
+            .expect("admitted format-3 identity")
+            .as_bytes();
+        let mut written = std::collections::BTreeSet::new();
+        let relation_map = graph
+            .write_native_node(
+                &NodeData::OrderedLeaf {
+                    domain: relations_domain(database_id),
+                    entries: Vec::new(),
+                },
+                &mut written,
+            )
+            .expect("write the relation map node");
+        let store_root = graph
+            .write_native_node(&NodeData::StoreRoot { relation_map }, &mut written)
+            .expect("write the store root node");
+        assert!(
+            written.contains(&store_root),
+            "the envelope object is part of the durability closure"
+        );
+
+        // The envelope the writer produced is what a reader decodes, so the
+        // store position can be pinned from it.
+        let index = root.join(".git/private-store-index");
+        fs::write(&index, b"").expect("create a private index file");
+        graph
+            .pin_store_subtree_in_index(&index, &store_root)
+            .expect("a real store root is pinned at the fixed store path");
+        let staged = Command::new("git")
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", &index)
+            .args(["ls-files", "--stage", "--", ".orna/store"])
+            .output()
+            .expect("list the private index");
+        assert!(staged.status.success(), "list private index tree entry");
+        let staged = String::from_utf8_lossy(&staged.stdout).into_owned();
+        assert_eq!(
+            staged.trim(),
+            format!("040000 {} 0\t.orna/store", store_root.to_hex()),
+            "the private index stages the encoded store tree at .orna/store"
+        );
+
+        // A raw object cannot be planted at the store position.
+        let blob = write_git_object(root, graph.algorithm(), "blob", b"not a store root");
+        assert!(matches!(
+            graph.pin_store_subtree_in_index(&index, &blob),
+            Err(crate::native_graph::GraphError::WrongNodeKind { .. })
+        ));
+    }
+
+    #[test]
     fn unresolvable_object_id_exits_3_from_the_resolver() {
         let directory = repository();
         let root = directory.path();
@@ -1699,6 +1765,82 @@ mod graph_bridge_tests {
         println!(
             "git-backed ORP point lookup object reads: {point_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
         );
+    }
+
+    #[test]
+    fn canonical_page_bytes_reproduce_the_admitted_overflow_row() {
+        let directory = repository();
+        let root = directory.path();
+        let initial = context(root);
+        let relation_id = [0x75; 16];
+        let (relation_id, _) = install_overflow_row_store(root, &initial, relation_id, None);
+
+        let admitted = context(root);
+        let snapshot = admitted
+            .load_row_map(relation_id)
+            .expect("load pinned ORP identity");
+        let graph = admitted
+            .open_native_graph(&snapshot)
+            .expect("issue graph context from repository snapshot");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(7), &scope)
+            .expect("bounded point lookup")
+            .expect("stored row");
+        let RowValue::Overflow(reference) = row.value().clone() else {
+            panic!("a kind-3 row decodes as an overflow reference");
+        };
+
+        // A verified reference already names its graph root, so the value has
+        // exactly one canonical page spelling.
+        let entry = RowEntry::new(TypedKey::UInt(7), RowValue::overflow(reference.clone()));
+        let encoded = RowValue::page_bytes(std::slice::from_ref(&entry))
+            .expect("encode the admitted row as one ORP-1 page");
+
+        // The encoded page must decode back to the same tag and the same graph
+        // root the reader resolved. Substituting the byte root would name a
+        // different node and republishing the page would lose the row.
+        let CborValue::Array(pairs) = decode_canonical_cbor(&encoded).expect("canonical page")
+        else {
+            panic!("a page is a CBOR array");
+        };
+        assert_eq!(pairs.len(), 1);
+        let CborValue::Array(pair) = &pairs[0] else {
+            panic!("a page entry is a CBOR pair");
+        };
+        assert_eq!(pair.len(), 2);
+        assert_eq!(pair[0], CborValue::Unsigned(7));
+        let CborValue::Tag(tag, payload) = &pair[1] else {
+            panic!("an overflow value is a kind-3 tag");
+        };
+        assert_eq!(*tag, 60_113);
+        let CborValue::Array(root_field) = payload.as_ref() else {
+            panic!("the overflow tag payload is a one-element array");
+        };
+        assert_eq!(root_field.len(), 1);
+        let CborValue::Bytes(root_bytes) = &root_field[0] else {
+            panic!("the overflow payload names one graph root");
+        };
+        let resolved = reference
+            .native_root()
+            .expect("a verified reference has a graph root");
+        assert_eq!(root_bytes.as_slice(), resolved.as_bytes());
+
+        // A reference without a resolved root has no page spelling, so the
+        // byte root can never be substituted for the graph root.
+        let unresolved = RowValue::overflow(
+            crate::row_store::ValueOverflowRef::new(
+                reference.encoded_length(),
+                *reference.semantic_digest(),
+                reference.byte_root().clone(),
+                reference.dependency_root().cloned(),
+            )
+            .expect("construct an unresolved reference"),
+        );
+        assert!(matches!(
+            RowValue::page_bytes(&[RowEntry::new(TypedKey::UInt(7), unresolved)]),
+            Err(crate::row_store::RowStoreError::UnresolvedValueOverflow)
+        ));
     }
 
     #[test]
