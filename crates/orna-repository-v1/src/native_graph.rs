@@ -6241,20 +6241,24 @@ mod persisted_orp_tests {
         );
 
         let evidence = String::from_utf8(output.stdout).expect("owner evidence is UTF-8");
+        // The child shares the libtest harness, which writes `test <name> ... `
+        // to stdout without a trailing newline before the test body runs, so the
+        // evidence is not at the start of its line. Scan every whitespace token
+        // for the one `owner descriptor` pair the owner prints before dying.
         let (owner_hex, descriptor_hex) = evidence
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.split_whitespace();
-                match (fields.next(), fields.next(), fields.next()) {
-                    (Some(owner), Some(descriptor), None)
-                        if owner.len() == 32 && descriptor.len() == 40 =>
-                    {
-                        Some((owner.to_owned(), descriptor.to_owned()))
-                    }
-                    _ => None,
-                }
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find_map(|pair| {
+                let [owner, descriptor] = pair else {
+                    return None;
+                };
+                let hex_token = |token: &str, width: usize| {
+                    token.len() == width && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+                };
+                (hex_token(owner, 32) && hex_token(descriptor, 40))
+                    .then(|| ((*owner).to_owned(), (*descriptor).to_owned()))
             })
-            .next()
             .expect("the killed owner prints its pin evidence before dying");
 
         assert!(
