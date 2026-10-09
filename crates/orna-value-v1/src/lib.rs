@@ -1912,6 +1912,8 @@ pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
 pub struct BlobMetadataFilter {
     media_type: Option<String>,
     excluded_media_types: Vec<String>,
+    suffix: Option<String>,
+    suffixes: Vec<String>,
     min_length: Option<u64>,
     max_length: Option<u64>,
 }
@@ -1933,6 +1935,25 @@ impl BlobMetadataFilter {
         self
     }
 
+    /// Selects rows whose annotation binds exactly this suffix hint. The
+    /// suffix is part of the stored annotation coordinate, so it is answered
+    /// from the row's own tuple like the media type and never from the
+    /// payload's bytes.
+    #[must_use]
+    pub fn with_suffix(mut self, suffix: impl Into<String>) -> Self {
+        self.suffix = Some(suffix.into());
+        self
+    }
+
+    /// Selects rows whose annotation binds one of these suffix hints. An
+    /// unset suffix on a row never matches a named hint, because "no suffix"
+    /// is the absence of that coordinate rather than a suffix value.
+    #[must_use]
+    pub fn with_any_suffix(mut self, suffixes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.suffixes = suffixes.into_iter().map(Into::into).collect();
+        self
+    }
+
     #[must_use]
     pub const fn with_min_length(mut self, bytes: u64) -> Self {
         self.min_length = Some(bytes);
@@ -1945,6 +1966,13 @@ impl BlobMetadataFilter {
         self
     }
 
+    /// The coordinate names this predicate evaluates, in the order the plan
+    /// reports them. Every named coordinate is bound by the stored ROV-3
+    /// annotation, so evaluating the predicate reads no payload byte.
+    pub const fn coordinates(&self) -> &'static [&'static str] {
+        &["kind", "suffix", "length"]
+    }
+
     pub fn matches(&self, metadata: &BlobMetadata) -> bool {
         self.media_type
             .as_deref()
@@ -1953,6 +1981,14 @@ impl BlobMetadataFilter {
                 .excluded_media_types
                 .iter()
                 .all(|media_type| metadata.media_type() != media_type)
+            && self.suffix.as_deref().is_none_or(|suffix| {
+                metadata.suffix().is_some_and(|candidate| candidate == suffix)
+            })
+            && (self.suffixes.is_empty()
+                || self
+                    .suffixes
+                    .iter()
+                    .any(|suffix| metadata.suffix().is_some_and(|candidate| candidate == suffix)))
             && self.min_length.is_none_or(|min| metadata.length() >= min)
             && self.max_length.is_none_or(|max| metadata.length() <= max)
     }
