@@ -14,6 +14,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use super::{
     CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeError, RuntimeState, RuntimeTableIdentity,
@@ -464,6 +465,7 @@ pub enum FsyncOutcome<S> {
 /// The latest rejected replacement remains separately readable even after a
 /// later write starts a new candidate from its bytes.
 pub struct RetainedInvalidDraft<S> {
+    id: Uuid,
     baseline: SnapshotPin<S>,
     revision: u64,
     replacement: Arc<[u8]>,
@@ -473,6 +475,7 @@ pub struct RetainedInvalidDraft<S> {
 impl<S> Clone for RetainedInvalidDraft<S> {
     fn clone(&self) -> Self {
         Self {
+            id: self.id,
             baseline: self.baseline.clone(),
             revision: self.revision,
             replacement: Arc::clone(&self.replacement),
@@ -482,6 +485,17 @@ impl<S> Clone for RetainedInvalidDraft<S> {
 }
 
 impl<S> RetainedInvalidDraft<S> {
+    /// The unique identity of this retained candidate.
+    ///
+    /// VFS-011 requires a rejected candidate to stay recoverable and quota
+    /// accounted under a unique diagnostic/draft ID in local state. Revisions
+    /// are per-draft, so two retained candidates on different files would
+    /// otherwise share a revision number; this names one retained candidate
+    /// exactly, for a journal entry or a diagnostics surface.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
     pub fn baseline(&self) -> &SnapshotPin<S> {
         &self.baseline
     }
@@ -708,6 +722,7 @@ impl<S> ManagedFile<S> {
             );
             draft.last_rejection = Some((revision, diagnostic));
             draft.retained_invalid = Some(RetainedInvalidDraft {
+                id: Uuid::new_v4(),
                 baseline: scratch.baseline.pin.clone(),
                 revision,
                 replacement,
@@ -1080,6 +1095,7 @@ async fn retain_rejected_draft<S>(
     );
     draft_state.last_rejection = Some((revision, diagnostic));
     draft_state.retained_invalid = Some(RetainedInvalidDraft {
+        id: Uuid::new_v4(),
         baseline: baseline.pin.clone(),
         revision,
         replacement,
@@ -1251,6 +1267,7 @@ impl<S> EditDraft<S> {
                     Arc::from(state.candidate.as_deref().expect("candidate held by lock"));
                 state.last_rejection = Some((revision, diagnostic));
                 state.retained_invalid = Some(RetainedInvalidDraft {
+                    id: Uuid::new_v4(),
                     baseline: state.baseline.pin.clone(),
                     revision,
                     replacement,
@@ -2645,6 +2662,8 @@ mod tests {
         let retained = draft.retained_invalid_draft().await.unwrap();
         assert_eq!(retained.diagnostic(), rejected());
         assert_ne!(retained.replacement_bytes(), fixture_image().bytes.as_ref());
+        // A rejected candidate stays recoverable under one stable identity.
+        let first_id = retained.id();
 
         let second = draft
             .fsync_with(|_| {
@@ -2659,6 +2678,25 @@ mod tests {
             .unwrap();
         assert!(matches!(second, FsyncOutcome::Rejected(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            draft.retained_invalid_draft().await.unwrap().id(),
+            first_id,
+            "a repeated sync of the same rejected revision keeps one retained identity"
+        );
+
+        // A later write starts a new candidate, so its own rejection is a
+        // distinct retained draft rather than an alias of the first.
+        draft.write_at(0, &[0x59]).await.unwrap();
+        let third = draft
+            .fsync_with(|_| async { Ok::<_, ()>(ActivationDecision::Rejected(rejected())) })
+            .await
+            .unwrap();
+        assert!(matches!(third, FsyncOutcome::Rejected(_)));
+        assert_ne!(
+            draft.retained_invalid_draft().await.unwrap().id(),
+            first_id,
+            "each retained candidate has its own unique draft id"
+        );
     }
 
     #[tokio::test]
