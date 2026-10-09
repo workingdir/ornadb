@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use orna_repository_v1::complete_copy::{
-    export_complete_copy, materialize_complete_copy, read_complete_copy_manifest,
+    export_complete_copy_of, materialize_complete_copy, read_complete_copy_manifest,
     restore_complete_copy, CompleteCopyError, CompleteCopyManifest, DependencySource,
 };
 use orna_repository_v1::Repository;
@@ -28,7 +28,7 @@ use orna_repository_v1::Repository;
 use super::Diagnostic;
 
 const USAGE: &str = "usage:\n  \
-     orna export <DEST> --at <SELECTOR> [--dependency PATH=DIR]...\n  \
+     orna export <DEST> --at <SELECTOR> [--at <SELECTOR>]... [--dependency PATH=DIR]...\n  \
      orna export <ARCHIVE> --check\n  \
      orna export <ARCHIVE> --restore <DEST> [--worktree]";
 
@@ -38,7 +38,7 @@ enum Mode {
     /// Freeze one resolved snapshot into a new archive.
     Export {
         destination: PathBuf,
-        selector: String,
+        selectors: Vec<String>,
         dependencies: Vec<DependencySource>,
     },
     /// Report what an existing archive records.
@@ -62,7 +62,7 @@ fn export_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 fn parse_options(arguments: &[String]) -> Result<Mode, Diagnostic> {
     let mut positional = Vec::new();
-    let mut selector = None;
+    let mut selectors: Vec<String> = Vec::new();
     let mut dependencies = Vec::new();
     let mut check = false;
     let mut restore = None;
@@ -74,10 +74,10 @@ fn parse_options(arguments: &[String]) -> Result<Mode, Diagnostic> {
                 let value = words
                     .next()
                     .ok_or_else(|| export_error("--at needs a value", USAGE))?;
-                if selector.is_some() {
-                    return Err(export_error("Export names one snapshot", USAGE));
+                if value.is_empty() {
+                    return Err(export_error("--at needs a value", USAGE));
                 }
-                selector = Some(value.to_owned());
+                selectors.push(value.to_owned());
             }
             "--dependency" => {
                 let value = words
@@ -117,18 +117,18 @@ fn parse_options(arguments: &[String]) -> Result<Mode, Diagnostic> {
             path => positional.push(PathBuf::from(path)),
         }
     }
-    match (positional.as_slice(), selector, restore, check) {
-        ([destination], Some(selector), None, false) if !worktree => Ok(Mode::Export {
+    match (positional.as_slice(), selectors.is_empty(), restore, check) {
+        ([destination], false, None, false) if !worktree => Ok(Mode::Export {
             destination: destination.clone(),
-            selector,
+            selectors,
             dependencies,
         }),
-        ([archive], None, None, true) if dependencies.is_empty() && !worktree => {
+        ([archive], true, None, true) if dependencies.is_empty() && !worktree => {
             Ok(Mode::Inspect {
                 archive: archive.clone(),
             })
         }
-        ([archive], None, Some(destination), false) => Ok(Mode::Restore {
+        ([archive], true, Some(destination), false) => Ok(Mode::Restore {
             archive: archive.clone(),
             destination,
             worktree,
@@ -141,9 +141,9 @@ pub(super) fn run(project: &Path, arguments: &[String]) -> Result<(), Diagnostic
     match parse_options(arguments)? {
         Mode::Export {
             destination,
-            selector,
+            selectors,
             dependencies,
-        } => run_export(project, &destination, &selector, &dependencies),
+        } => run_export(project, &destination, &selectors, &dependencies),
         Mode::Inspect { archive } => report_archive(&archive),
         Mode::Restore {
             archive,
@@ -156,7 +156,7 @@ pub(super) fn run(project: &Path, arguments: &[String]) -> Result<(), Diagnostic
 fn run_export(
     project: &Path,
     destination: &Path,
-    selector: &str,
+    selectors: &[String],
     dependencies: &[DependencySource],
 ) -> Result<(), Diagnostic> {
     let repository = Repository::discover(project).map_err(|_| {
@@ -166,25 +166,31 @@ fn run_export(
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
-    let manifest = export_complete_copy(&repository, selector, destination, dependencies)
+    let selectors: Vec<&str> = selectors.iter().map(String::as_str).collect();
+    let manifest = export_complete_copy_of(&repository, &selectors, destination, dependencies)
         .map_err(|error| describe_export_failure(&error))?;
     let (objects, dependencies) = manifest.counts();
     println!(
-        "exported {}: {objects} objects, {dependencies} pinned dependencies",
-        manifest.snapshot
+        "exported {} ({} snapshots): {objects} objects, {dependencies} pinned dependencies",
+        manifest.snapshot,
+        manifest.members.len()
     );
+    for member in manifest.members.iter().skip(1) {
+        println!("  with {}", member.commit);
+    }
     report_dependencies(&manifest);
     Ok(())
 }
 
 /// Reconstructs one archive into a fresh directory and verifies it there.
 fn run_restore(archive: &Path, destination: &Path, worktree: bool) -> Result<(), Diagnostic> {
-    let manifest =
-        restore_complete_copy(archive, destination).map_err(|error| describe_export_failure(&error))?;
+    let manifest = restore_complete_copy(archive, destination)
+        .map_err(|error| describe_export_failure(&error))?;
     let (objects, dependencies) = manifest.counts();
     println!(
-        "restored {}: {objects} objects, {dependencies} pinned dependencies verified",
-        manifest.snapshot
+        "restored {} ({} snapshots): {objects} objects, {dependencies} pinned dependencies verified",
+        manifest.snapshot,
+        manifest.members.len()
     );
     if worktree {
         materialize_complete_copy(destination, &manifest)
@@ -197,13 +203,17 @@ fn run_restore(archive: &Path, destination: &Path, worktree: bool) -> Result<(),
 
 /// Reads one archive back and reports what it records.
 fn report_archive(archive: &Path) -> Result<(), Diagnostic> {
-    let manifest = read_complete_copy_manifest(archive)
-        .map_err(|error| describe_export_failure(&error))?;
+    let manifest =
+        read_complete_copy_manifest(archive).map_err(|error| describe_export_failure(&error))?;
     let (objects, dependencies) = manifest.counts();
     println!(
-        "complete copy of {}: {objects} objects, {dependencies} pinned dependencies",
-        manifest.snapshot
+        "complete copy of {} ({} snapshots): {objects} objects, {dependencies} pinned dependencies",
+        manifest.snapshot,
+        manifest.members.len()
     );
+    for member in manifest.members.iter().skip(1) {
+        println!("  with {}", member.commit);
+    }
     report_dependencies(&manifest);
     Ok(())
 }
