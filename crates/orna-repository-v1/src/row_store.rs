@@ -1403,6 +1403,7 @@ pub enum RowStoreError {
     ValueTooLarge(u64),
     EntryTooLarge(usize),
     PageFanoutExceeded(usize),
+    PageHeightExceeded(u8),
     BoundaryMismatch,
     VersionIdentityMismatch,
     RowCountExceeded,
@@ -1435,6 +1436,9 @@ impl fmt::Display for RowStoreError {
             Self::ValueTooLarge(length) => write!(f, "overflow value length {length} is too large"),
             Self::EntryTooLarge(size) => write!(f, "row entry is {size} bytes, over node bound"),
             Self::PageFanoutExceeded(count) => write!(f, "row page fanout is {count}, over 256"),
+            Self::PageHeightExceeded(height) => {
+                write!(f, "row page height {height} is over the format-3 bound")
+            }
             Self::BoundaryMismatch => {
                 f.write_str("row lookup boundary does not match map identity")
             }
