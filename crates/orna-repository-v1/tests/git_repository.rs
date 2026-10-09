@@ -8443,19 +8443,19 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             fs::read_to_string(copy.destination().join(".orna/format.orna")).unwrap(),
             format
         );
-        // The source is a legacy workspace with no canonical metadata at all;
-        // the copy has none either, so the publishable records travel in the
-        // candidate rather than being installed early.
-        assert!(
-            orna_repository_v1::inspect_metadata(&repo)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            orna_repository_v1::inspect_metadata(&migrated)
-                .unwrap()
-                .is_none()
-        );
+        // Neither the source nor the copy admits canonical metadata: a legacy
+        // workspace carries the format record and no database record, which the
+        // reader reports as incomplete metadata rather than a usable identity.
+        // The copy deliberately stays in that state — its new identity lives in
+        // the candidate, where `copy.database_id()` names it.
+        assert!(matches!(
+            orna_repository_v1::inspect_metadata(&repo),
+            Err(orna_repository_v1::RepositoryInitError::MetadataIncomplete)
+        ));
+        assert!(matches!(
+            orna_repository_v1::inspect_metadata(&migrated),
+            Err(orna_repository_v1::RepositoryInitError::MetadataIncomplete)
+        ));
         assert_eq!(copy.source_format_number(), format_number);
 
         // The coordinates the migration must report are the ones it was
