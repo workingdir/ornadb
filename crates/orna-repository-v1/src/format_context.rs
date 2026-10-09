@@ -1158,6 +1158,226 @@ mod graph_bridge_tests {
         write_git_object(directory, algorithm, "tree", &envelope)
     }
 
+    /// Publishes one relation holding a row whose fields are the format-3 Blob
+    /// value for `payload`. Returns the descriptor OID the row names, so a
+    /// later reader can prove it read that row's own Blob. With `repeat_field`
+    /// the row stores that same Blob twice, which no reader may attribute to
+    /// one field.
+    fn install_annotated_blob_row_store(
+        directory: &Path,
+        relation_id: [u8; 16],
+        key: u64,
+        payload: &[u8],
+        media_type: &str,
+        suffix: Option<&str>,
+        repeat_field: bool,
+    ) -> NativeOid {
+        // A relation must exist before capture resolves the relation map.
+        let seeding = context(directory);
+        install_overflow_row_store(directory, &seeding, relation_id, None);
+
+        let writing = context(directory);
+        let (schema_oid, schema_digest) = schema_node(directory, &writing);
+        let snapshot = writing
+            .load_row_map(relation_id)
+            .expect("load the seeded row-map identity");
+        let graph = writing
+            .open_native_graph(&snapshot)
+            .expect("admit the seeded graph context");
+        let scope = graph.open_read_scope().expect("owner scope");
+
+        let mut input = std::io::Cursor::new(payload.to_vec());
+        let candidate = graph
+            .capture_blob_candidate(&mut input, payload.len() as u64, &scope)
+            .expect("write a private OGB-2 candidate closure");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("verify and durably protect the OGB-2 closure");
+        let binding = graph
+            .accept_protected_blob_pin_with_annotation(pin, media_type, suffix)
+            .expect("accept the annotated ORP Blob binding");
+        let descriptor_oid = binding.descriptor_oid().clone();
+
+        let algorithm = writing
+            .validate_store_root()
+            .expect("pinned native store")
+            .oid
+            .algorithm();
+        let fields = if repeat_field { 2u8 } else { 1u8 };
+        let mut stored_fields = vec![0x80 | fields];
+        for _ in 0..fields {
+            stored_fields.extend_from_slice(binding.encoded_value());
+        }
+        let row_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::UInt(key).canonical_bytes().unwrap(),
+                    value: stored_fields,
+                }],
+            },
+        );
+        let database_id = writing.require_database_id().expect("database identity");
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, row_root.as_bytes());
+        relation_value.push(0xf6);
+        relation_value.push(0x01);
+        let relation_map = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root = write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(directory, algorithm, &store_root);
+        descriptor_oid
+    }
+
+    #[test]
+    fn checkout_of_a_prior_commit_reads_its_rows_and_annotated_blob() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x51; 16];
+
+        let first_payload = b"london take one".as_slice();
+        let first_descriptor =
+            install_annotated_blob_row_store(root, relation_id, 1, first_payload, "audio/mpeg", Some("mp3"));
+        let second_payload = b"london take two, remastered".as_slice();
+        let second_descriptor =
+            install_annotated_blob_row_store(root, relation_id, 1, second_payload, "audio/mpeg", Some("mp3"));
+        assert_ne!(first_descriptor, second_descriptor);
+
+        // Mount the prior commit. The selector resolves once; every row, Blob
+        // and annotation below comes from that commit's own objects.
+        let repository = Repository::discover(root).expect("discover the fixture repository");
+        let mounted = repository
+            .open_format_context_at_selector("HEAD~1")
+            .expect("mount the prior commit read-only");
+        assert_eq!(mounted.repository_format_number(), 3);
+        assert!(!mounted.is_legacy_format());
+        assert_eq!(
+            mounted.database_id(),
+            repository
+                .open_format_context()
+                .expect("admit the workspace context")
+                .database_id()
+        );
+
+        let snapshot = mounted.load_row_map(relation_id).expect("historical row map");
+        let graph = mounted.open_native_graph(&snapshot).expect("historical graph");
+        let scope = graph.open_read_scope().expect("historical read scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(1), &scope)
+            .expect("read the historical row")
+            .expect("the prior commit holds the row");
+
+        let stored = graph
+            .read_stored_blob_value(&row, &first_descriptor, &scope)
+            .expect("read the Blob the historical row stores");
+        assert_eq!(stored.annotation().media_type(), "audio/mpeg");
+        assert_eq!(stored.annotation().suffix(), Some("mp3"));
+        assert_eq!(stored.content_identity().length(), first_payload.len() as u64);
+        let range = graph
+            .read_blob_range(stored.reference(), 0..first_payload.len() as u64, &scope)
+            .expect("read the historical payload");
+        assert_eq!(range.bytes(), first_payload);
+        assert_eq!(
+            range.verification(),
+            crate::native_graph::RangeVerification::FullBlob
+        );
+
+        // The descriptor of the newer commit is not the one this row stored,
+        // so the historical pin never serves the newer content.
+        assert!(matches!(
+            graph.read_stored_blob_value(&row, &second_descriptor, &scope),
+            Err(crate::native_graph::GraphError::DescriptorNotInRow)
+        ));
+
+        // The workspace view still reads its own revision, and the two mounts
+        // carry distinct pinned snapshot identities.
+        let head = repository
+            .open_format_context()
+            .expect("admit the workspace context");
+        let head_snapshot = head.load_row_map(relation_id).expect("workspace row map");
+        let head_graph = head.open_native_graph(&head_snapshot).expect("workspace graph");
+        let head_scope = head_graph.open_read_scope().expect("workspace read scope");
+        let head_row = head_graph
+            .lookup_row(&TypedKey::UInt(1), &head_scope)
+            .expect("read the workspace row")
+            .expect("the workspace holds the row");
+        let head_stored = head_graph
+            .read_stored_blob_value(&head_row, &second_descriptor, &head_scope)
+            .expect("read the workspace Blob");
+        let head_range = head_graph
+            .read_blob_range(
+                head_stored.reference(),
+                0..second_payload.len() as u64,
+                &head_scope,
+            )
+            .expect("read the workspace payload");
+        assert_eq!(head_range.bytes(), second_payload);
+
+        let remounted = repository
+            .open_format_context_at_selector("HEAD~1")
+            .expect("remount the prior commit");
+        assert_eq!(
+            mounted.snapshot_id(),
+            remounted.snapshot_id(),
+            "one commit always resolves to one snapshot identity"
+        );
+        assert_ne!(mounted.snapshot_id(), head.snapshot_pin().snapshot_id());
+    }
+
+    #[test]
+    fn a_row_storing_one_blob_twice_is_refused_rather_than_attributed() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x52; 16];
+        let payload = b"london take three".as_slice();
+        install_annotated_blob_row_store(
+            root,
+            relation_id,
+            1,
+            payload,
+            "audio/mpeg",
+            Some("mp3"),
+            true,
+        );
+
+        let repository = Repository::discover(root).expect("discover the fixture repository");
+        let context = repository
+            .open_format_context()
+            .expect("admit the workspace context");
+        let snapshot = context.load_row_map(relation_id).expect("row map");
+        let graph = context.open_native_graph(&snapshot).expect("graph");
+        let scope = graph.open_read_scope().expect("read scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(1), &scope)
+            .expect("read the row")
+            .expect("the row exists");
+        let descriptor = row
+            .value()
+            .dependencies()
+            .first()
+            .expect("the row names its Blob")
+            .oid()
+            .clone();
+        assert!(matches!(
+            graph.read_stored_blob_value(&row, &descriptor, &scope),
+            Err(crate::native_graph::GraphError::UnsupportedRowValueForm)
+        ));
+    }
+
     fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
         let prefix = major << 5;
         match value {
