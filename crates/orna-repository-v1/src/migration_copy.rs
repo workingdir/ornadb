@@ -34,7 +34,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use crate::init::format_context::LEGACY_FORMAT_PATH;
+use crate::init::format_context::{LEGACY_FORMAT_PATH, canonical_database_bytes};
 use crate::{
     DatabaseId, GitCommitRef, IndexGeneration, LegacyAnnotationCandidate,
     MigrationAnnotationDefaults, MigrationContinuityRecord, PublicationJournal,
