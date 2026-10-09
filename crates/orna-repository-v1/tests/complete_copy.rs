@@ -1,11 +1,19 @@
-//! Offline complete-copy export and reconstruction for one pinned snapshot
-//! with a real pinned dependency.
+//! Offline complete-copy export and reconstruction for pinned snapshots with a
+//! real pinned dependency.
 //!
 //! One superproject with a gitlink dependency is exported, the original
 //! remotes are disabled, and the archive is reconstructed into a fresh
 //! directory. The reconstruction is then materialised and read back, so this
 //! proves the exported copy carries the snapshot closure, the dependency
 //! closure, and the raw blob bytes without the source repository.
+//!
+//! A second case exports two snapshots of one repository — the current commit
+//! and the commit it replaced — into one archive, then reads both back offline
+//! and checks every recorded blob's raw bytes with an extractor that shares no
+//! code with the crate under test (`support/independent_extractor.rs`).
+
+#[path = "support/independent_extractor.rs"]
+mod extractor;
 
 use std::{
     fs,
@@ -15,8 +23,9 @@ use std::{
 
 use orna_repository_v1::{
     complete_copy::{
-        export_complete_copy, materialize_complete_copy, read_complete_copy_manifest,
-        restore_complete_copy, CompleteCopyObjectKind, DependencySource,
+        export_complete_copy, export_complete_copy_of, materialize_complete_copy,
+        read_complete_copy_manifest, restore_complete_copy, CompleteCopyObjectKind,
+        DependencySource,
     },
     Repository,
 };
@@ -143,7 +152,11 @@ fn complete_copy_reconstructs_snapshot_and_dependency_without_the_source() {
     assert_eq!(recorded.commit, dependency_commit);
     assert_eq!(recorded.origin, dependency.to_string_lossy());
     assert!(archive.join(&recorded.bundle).is_file());
-    assert!(archive.join("superproject.bundle").is_file());
+    assert!(archive.join(&manifest.members[0].bundle).is_file());
+    assert_eq!(
+        manifest.members[0].bundle,
+        format!("snapshots/{snapshot}.bundle")
+    );
 
     // Reading the manifest back without the source yields the same record.
     let reread = read_complete_copy_manifest(&archive).expect("read manifest");
@@ -218,4 +231,146 @@ fn complete_copy_fails_closed_when_a_dependency_is_unavailable() {
     );
     // Nothing claims to be a complete copy.
     assert!(!archive.join("manifest.tsv").exists());
+}
+
+/// A third committed snapshot: the same schema source with one new row file, so
+/// the second snapshot has its own distinct closure and its own blob.
+const MAIN_SOURCE_UPDATED: &str = "module main;\n// remastered\n";
+
+#[test]
+fn complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extractor() {
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    let repository = Repository::discover(&project).expect("discover superproject");
+
+    let previous = git_stdout(&project, &["rev-parse", "HEAD"]);
+    let previous_payload = git_stdout(&project, &["rev-parse", "HEAD:main.orna"]);
+    // A second commit that replaces the source blob, so both members carry a
+    // different closure and the archive must hold both.
+    fs::write(project.join("main.orna"), MAIN_SOURCE_UPDATED).expect("write updated source");
+    git(&project, &["add", "--all"]);
+    git(&project, &["commit", "--quiet", "-m", "remaster the library"]);
+    let current = git_stdout(&project, &["rev-parse", "HEAD"]);
+    let current_payload = git_stdout(&project, &["rev-parse", "HEAD:main.orna"]);
+    assert_ne!(previous, current);
+    assert_ne!(previous_payload, current_payload);
+
+    // Export both snapshots into one archive: current first, then the commit it
+    // replaced.
+    let archive = root.path().join("both");
+    let selectors = ["HEAD", previous.as_str()];
+    let manifest = export_complete_copy_of(&repository, &selectors, &archive, &[])
+        .expect("export both snapshots");
+    assert_eq!(manifest.snapshot, current);
+    assert_eq!(
+        manifest.commits().collect::<Vec<_>>(),
+        vec![current.as_str(), previous.as_str()]
+    );
+    // Each member records its own source blob, and the archive records both.
+    let current_member = manifest.member(&current).expect("current member");
+    let previous_member = manifest.member(&previous).expect("previous member");
+    for (member, payload) in [
+        (current_member, &current_payload),
+        (previous_member, &previous_payload),
+    ] {
+        assert!(
+            member
+                .objects
+                .iter()
+                .any(|object| object.kind == CompleteCopyObjectKind::Blob && object.oid == *payload),
+            "{} records its own source blob",
+            member.commit
+        );
+    }
+    assert_ne!(current_member.bundle, previous_member.bundle);
+
+    // The extractor reads the archive itself: same members, same closures.
+    let recorded = extractor::read_manifest(&archive);
+    assert_eq!(recorded.snapshot, current);
+    assert_eq!(recorded.members.len(), 2);
+    assert_eq!(recorded.members[0].commit, current);
+    assert_eq!(recorded.members[1].commit, previous);
+    // The dependency is carried once and pinned by the member that names it.
+    assert_eq!(recorded.dependencies.len(), 1);
+    assert_eq!(recorded.dependencies[0].0, "deps/std");
+
+    // Disable the original remote entirely: only the archive remains.
+    fs::rename(&dependency, root.path().join("dependency-disabled")).expect("disable dependency");
+    fs::remove_dir_all(&project).expect("remove the source repository");
+
+    // Each member is extractable from its own bundle alone.
+    for member in &recorded.members {
+        let scratch = extractor::scratch(&member.commit[..8]);
+        extractor::extract_member(&archive, member, &scratch);
+        let blobs = extractor::verify_blobs(&scratch, member);
+        assert_eq!(
+            blobs,
+            member
+                .objects
+                .iter()
+                .filter(|object| object.kind == "blob")
+                .count()
+        );
+        fs::remove_dir_all(&scratch).expect("clean scratch");
+    }
+
+    let restored = root.path().join("restored");
+    let reconstructed = restore_complete_copy(&archive, &restored).expect("reconstruct the copy");
+    assert_eq!(reconstructed, manifest);
+    assert_eq!(git_stdout(&restored, &["rev-parse", "HEAD"]), current);
+    assert_eq!(git_stdout(&restored, &["remote"]), "");
+    // Both snapshots are readable from the one reconstruction.
+    assert_eq!(
+        extractor::read_path(&restored, &current, "main.orna"),
+        MAIN_SOURCE_UPDATED.as_bytes()
+    );
+    assert_eq!(
+        extractor::read_path(&restored, &previous, "main.orna"),
+        MAIN_SOURCE.as_bytes()
+    );
+    let paths = extractor::tree_paths(&restored, &previous);
+    assert!(paths.iter().any(|(path, _)| path == "main.orna"));
+
+    // Independent blob-hash verification over every member of the copy, driven
+    // by the extractor's own reading of the archive.
+    for member in &recorded.members {
+        assert!(extractor::verify_blobs(&restored, member) > 0);
+    }
+
+    // The primary member is materialised by --worktree, with its dependency.
+    materialize_complete_copy(&restored, &reconstructed).expect("materialise the copy");
+    assert_eq!(
+        fs::read_to_string(restored.join("main.orna")).expect("read materialised source"),
+        MAIN_SOURCE_UPDATED
+    );
+    assert_eq!(
+        fs::read_to_string(restored.join("deps/std/main.orna")).expect("read dependency source"),
+        DEPENDENCY_SOURCE
+    );
+}
+
+#[test]
+fn complete_copy_exports_one_snapshot_at_a_time_and_refuses_a_repeat() {
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    let repository = Repository::discover(&project).expect("discover superproject");
+
+    // The single-selector spelling and the repeated spelling agree.
+    let single = root.path().join("single");
+    let one = export_complete_copy(&repository, "HEAD", &single, &[]).expect("export one snapshot");
+    assert_eq!(one.members.len(), 1);
+
+    let repeated = root.path().join("repeated");
+    let error = export_complete_copy_of(&repository, &["HEAD", "HEAD"], &repeated, &[])
+        .expect_err("a repeated selector is refused");
+    assert!(
+        format!("{error}").contains("repeated snapshot"),
+        "the failure names the repeated member: {error}"
+    );
+    assert!(!repeated.join("manifest.tsv").exists());
+
+    let none = root.path().join("none");
+    assert!(export_complete_copy_of(&repository, &[], &none, &[]).is_err());
 }
