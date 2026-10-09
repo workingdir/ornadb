@@ -442,6 +442,6 @@ mod tests {
     #[test]
     fn query_errors_are_target_exit_status() {
         let error = parse_relation_id("nope").unwrap_err();
-        assert_eq!(error.exit(), Exit::Target);
+        assert_eq!(error.exit, Exit::Target);
     }
 }

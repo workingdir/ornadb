@@ -1387,9 +1387,29 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
         .with_repository_capture_capability(capability);
 
     let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &song,
+        "song",
+        0x70,
+        true,
+    )
+    .await;
     let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    import_media(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &image,
+        "image",
+        0x80,
+        true,
+    )
+    .await;
     drop(bindings);
     drop(state);
 
@@ -1412,7 +1432,11 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
         "the listing still walked committed graph objects, so the zero above is not vacuous"
     );
     let listings = report["listings"].as_array().unwrap();
-    assert_eq!(listings.len(), 2, "both committed rows carry one Blob field");
+    assert_eq!(
+        listings.len(),
+        2,
+        "both committed rows carry one Blob field: {report}"
+    );
 
     // Every committed payload is described without being fetched: the listed
     // length and digest are the real file's, taken from the row itself.
