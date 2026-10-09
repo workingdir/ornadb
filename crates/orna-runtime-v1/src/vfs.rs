@@ -12,6 +12,8 @@ use std::{
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 
+use orna_foundation_v1::{OvbRaw, Value as OvbValue};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use super::{
@@ -1089,6 +1091,589 @@ impl<S> EditDraft<S> {
 
     /// Explicit close path. It drops private state and never invokes activation.
     pub fn release(self) {}
+}
+
+// ---------------------------------------------------------------------------
+// VFS-1 host namespace projection (ORNA-VFS-001, 002, 004, 016, 017, 018)
+//
+// A row directory addresses database/table/typed key. `data.orna` encodes the
+// stored non-key fields and each stored Blob becomes an escaped sibling file
+// named from its MIME-1 annotation. Nothing here materialises a competing
+// authoritative copy: the projection records which stored field owns each host
+// name, and it renders the row document from the stored field values the owner
+// snapshot already holds.
+// ---------------------------------------------------------------------------
+
+/// Encoded component bound from the VFS-1 profile.
+pub const VFS_MAX_COMPONENT_BYTES: usize = 200;
+/// Repository-relative path bound from the VFS-1 profile.
+pub const VFS_MAX_PATH_BYTES: usize = 1024;
+/// The reserved projected name of the row document.
+pub const VFS_ROW_DOCUMENT: &str = "data.orna";
+
+/// `EAGAIN`: the captured baseline is no longer the accepted row (VFS-011).
+pub const VFS_EAGAIN: i32 = 11;
+/// `EINVAL`: malformed candidate, name, or document (VFS-001, VFS-016).
+pub const VFS_EINVAL: i32 = 22;
+/// `ENOENT`: no projected field or row at that address.
+pub const VFS_ENOENT: i32 = 2;
+/// `EPERM`: authority-refusing path or mutation (VFS-004, VFS-013).
+pub const VFS_EPERM: i32 = 1;
+/// `EOPNOTSUPP`: a VFS-1 unsupported operation (VFS-014).
+pub const VFS_EOPNOTSUPP: i32 = 95;
+
+/// Why a projected name, a resolved path, or a candidate document was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VfsPathError {
+    /// Absolute paths, traversal spellings, separators inside one component,
+    /// and any name outside the field's registered projection (VFS-004).
+    OutsideProjection,
+    /// The name does not belong to this row/field namespace (VFS-001).
+    WrongNamespace,
+    /// The encoded component or the whole path exceeds the VFS-1 bound (VFS-016).
+    NameTooLong,
+    /// Two distinct canonical names project to one host name (VFS-016).
+    NameCollision,
+    /// The candidate is not a complete stored non-key-field document (VFS-001).
+    InvalidDocument,
+    /// No stored field or row exists at that address (VFS-001).
+    UnknownRow,
+    /// The operation is unsupported in VFS-1 (VFS-013, VFS-014).
+    Unsupported,
+    /// The write baseline no longer matches the accepted row (VFS-011).
+    StaleBaseline,
+}
+
+impl VfsPathError {
+    /// The exact `errno` required by the VFS-1 profile error table.
+    pub const fn errno(self) -> i32 {
+        match self {
+            Self::OutsideProjection => VFS_EPERM,
+            Self::WrongNamespace | Self::NameTooLong | Self::NameCollision => VFS_EINVAL,
+            Self::InvalidDocument => VFS_EINVAL,
+            Self::UnknownRow => VFS_ENOENT,
+            Self::Unsupported => VFS_EOPNOTSUPP,
+            Self::StaleBaseline => VFS_EAGAIN,
+        }
+    }
+
+    /// The stable Orna cause code kept alongside the host `errno`. Unknown
+    /// rows report `ENOENT` with no Orna failure code of their own.
+    pub const fn failure_code(self) -> Option<&'static str> {
+        match self {
+            Self::OutsideProjection | Self::Unsupported => Some("sys.vfs.unsupported"),
+            Self::WrongNamespace | Self::NameTooLong | Self::InvalidDocument => {
+                Some("sys.vfs.invalid_document")
+            }
+            Self::NameCollision => Some("sys.vfs.name_collision"),
+            Self::StaleBaseline => Some("sys.vfs.stale_edit"),
+            Self::UnknownRow => None,
+        }
+    }
+}
+
+/// One addressable projected component.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VfsComponent {
+    /// A component that spells its canonical typed key/field text directly.
+    Canonical(String),
+    /// A `~key-`/`~field-<digest>` long alias for a canonical name over the
+    /// byte bound. Resolving it needs the snapshot-bound long-name index; the
+    /// digest is verified there against the full retained name (VFS-016).
+    LongAlias { digest: [u8; 32] },
+}
+
+/// The projection namespace a canonical component belongs to. Key and field
+/// components share one host shape but keep distinct alias prefixes, so a key
+/// alias can never resolve as a field name and vice versa (VFS-016).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VfsNameNamespace {
+    /// One component of a typed table key.
+    Key,
+    /// One stored field path inside a row.
+    Field,
+}
+
+impl VfsNameNamespace {
+    const fn alias_prefix(self) -> &'static str {
+        match self {
+            Self::Key => "~key-",
+            Self::Field => "~field-",
+        }
+    }
+}
+
+/// Projects one canonical typed key component to its host component, escaping
+/// every byte outside `[A-Za-z0-9._-]` as uppercase `%HH` and escaping the
+/// reserved names, trailing dots and DOS device basenames that would otherwise
+/// alias. Names over the component bound become a deterministic `~key-` digest
+/// alias instead of being dropped or merged (VFS-016).
+pub fn project_component(text: &str) -> String {
+    project_namespaced(text, VfsNameNamespace::Key)
+}
+
+/// Projects one stored field name to its host component. Field components use
+/// the `~field-` alias prefix for names over the byte bound, so the same long
+/// text in a key and in a field never lands on one host name (VFS-016).
+pub fn project_field_name(text: &str) -> String {
+    project_namespaced(text, VfsNameNamespace::Field)
+}
+
+fn project_namespaced(text: &str, namespace: VfsNameNamespace) -> String {
+    if text.is_empty() {
+        return "~empty".to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let reserved = is_reserved_component(text);
+    for (index, byte) in text.bytes().enumerate() {
+        let allowed = byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-');
+        if allowed && !(reserved && index == 0) {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{byte:02X}"));
+        }
+    }
+    let trailing = out.len() - out.trim_end_matches('.').len();
+    if trailing > 0 {
+        let stem = out.len() - trailing;
+        out.truncate(stem);
+        out.push_str(&"%2E".repeat(trailing));
+    }
+    if out.len() > VFS_MAX_COMPONENT_BYTES {
+        return long_alias(text, namespace);
+    }
+    out
+}
+
+/// True for the names the profile reserves: `.`, `..`, `.git`, `.orna`, and
+/// Windows device basenames in any case with any extension.
+fn is_reserved_component(text: &str) -> bool {
+    if matches!(text, "." | ".." | ".git" | ".orna") {
+        return true;
+    }
+    let stem = text
+        .trim_end_matches([' ', '.'])
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let bytes = stem.as_bytes();
+    bytes.len() == 4
+        && matches!(stem.get(..3), Some("COM" | "LPT"))
+        && matches!(bytes[3], b'1'..=b'9')
+}
+
+/// `~key-<64 hex SHA-256 of the OVB-encoded canonical text>` for keys and
+/// `~field-<same digest>` for stored field names.
+fn long_alias(text: &str, namespace: VfsNameNamespace) -> String {
+    format!(
+        "{}{}",
+        namespace.alias_prefix(),
+        hex_digest(&ovb_text_bytes(text))
+    )
+}
+
+/// The digest bound into a `~field-` alias for one canonical field name. The
+/// snapshot-bound long-name index re-derives it from the full retained name,
+/// so a colliding digest is detected instead of merged (VFS-016).
+pub fn field_name_digest(field: &str) -> [u8; 32] {
+    Sha256::digest(ovb_text_bytes(field)).into()
+}
+
+/// The canonical OVB encoding of one text value, the digest input for long
+/// aliases. Encoding is fixed by OVB-1, so the alias is stable across hosts.
+fn ovb_text_bytes(text: &str) -> Vec<u8> {
+    let raw = OvbRaw::Text(text.to_owned());
+    OvbValue::new(raw)
+        .and_then(|value| value.encode())
+        .unwrap_or_default()
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Projects one stored Blob field name to its sibling content-file name:
+/// escaped field name plus the MIME-1 selected suffix. A field that would spell
+/// the reserved row document keeps its own distinct name (VFS-016).
+pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>) -> String {
+    let selected = match suffix {
+        Some(hint) => hint.to_owned(),
+        None => media_suffixes(media_type),
+    };
+    let mut name = project_component(field);
+    name.push('.');
+    name.push_str(&selected);
+    if name == VFS_ROW_DOCUMENT {
+        name.replace_range(..1, &format!("%{:02X}", b'd'));
+    }
+    name
+}
+
+/// The preferred MIME-1 suffix for an essence. Unknown essences keep the
+/// profile's `bin` hint instead of guessing from the media type text.
+fn media_suffixes(media_type: &str) -> String {
+    let essence = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    let preferred = match essence.as_str() {
+        "application/gzip" => "gz",
+        "application/json" => "json",
+        "application/octet-stream" => "bin",
+        "application/pdf" => "pdf",
+        "application/wasm" => "wasm",
+        "application/zip" => "zip",
+        "audio/flac" => "flac",
+        "audio/mp4" => "m4a",
+        "audio/mpeg" => "mp3",
+        "audio/ogg" => "ogg",
+        "audio/wav" => "wav",
+        "image/gif" => "gif",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/svg+xml" => "svg",
+        "image/webp" => "webp",
+        "text/css" => "css",
+        "text/javascript" => "js",
+        "text/plain" => "txt",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        _ => "bin",
+    };
+    preferred.to_owned()
+}
+
+/// Splits one mount-relative path and refuses absolute paths, empty
+/// components, and traversal spellings before any name is resolved (VFS-004).
+pub fn split_vfs_relative(path: &str) -> Result<Vec<&str>, VfsPathError> {
+    if path.is_empty() || path.starts_with('/') || path.len() > VFS_MAX_PATH_BYTES {
+        return Err(VfsPathError::OutsideProjection);
+    }
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(VfsPathError::OutsideProjection);
+        }
+        if component.contains('\\') {
+            return Err(VfsPathError::OutsideProjection);
+        }
+        components.push(component);
+    }
+    Ok(components)
+}
+
+/// Decodes one projected component back to its canonical text, refusing any
+/// spelling that is not exactly what the projection would produce. Aliases
+/// therefore cannot target a different row or field.
+pub fn unproject_component(component: &str) -> Result<VfsComponent, VfsPathError> {
+    if let Some(hex) = component.strip_prefix("~key-") {
+        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            let mut digest = [0u8; 32];
+            for (index, slot) in digest.iter_mut().enumerate() {
+                *slot = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+                    .map_err(|_| VfsPathError::NameCollision)?;
+            }
+            return Ok(VfsComponent::LongAlias { digest });
+        }
+        return Err(VfsPathError::WrongNamespace);
+    }
+    if component == "~empty" {
+        return Ok(VfsComponent::Canonical(String::new()));
+    }
+    if component.contains('~') {
+        return Err(VfsPathError::WrongNamespace);
+    }
+    if component.len() > VFS_MAX_PATH_BYTES {
+        return Err(VfsPathError::NameTooLong);
+    }
+    let mut text = Vec::with_capacity(component.len());
+    let bytes = component.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = component
+                .get(at + 1..at + 3)
+                .ok_or(VfsPathError::WrongNamespace)?;
+            if !hex.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)) {
+                return Err(VfsPathError::WrongNamespace);
+            }
+            text.push(u8::from_str_radix(hex, 16).map_err(|_| VfsPathError::WrongNamespace)?);
+            at += 3;
+            continue;
+        }
+        let byte = bytes[at];
+        if !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')) {
+            return Err(VfsPathError::WrongNamespace);
+        }
+        text.push(byte);
+        at += 1;
+    }
+    let text = String::from_utf8(text).map_err(|_| VfsPathError::WrongNamespace)?;
+    if project_component(&text) != component {
+        return Err(VfsPathError::WrongNamespace);
+    }
+    Ok(VfsComponent::Canonical(text))
+}
+
+/// One stored field of a row as the shared store reports it. Content fields
+/// carry only the MIME-1 annotation and descriptor size, never payload bytes,
+/// so projecting a row reads no media (VFS-003, VFS-018).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VfsStoredField {
+    name: String,
+    kind: VfsStoredFieldKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VfsStoredFieldKind {
+    /// A stored field rendered inside `data.orna` from its canonical text.
+    Document { text: String },
+    /// A stored optional field present as explicit `null`.
+    Null,
+    /// A stored Blob projected as a sibling content file.
+    Content {
+        media_type: String,
+        suffix: Option<String>,
+        descriptor_size: u64,
+    },
+}
+
+impl VfsStoredField {
+    pub fn document(name: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: VfsStoredFieldKind::Document { text: text.into() },
+        }
+    }
+
+    pub fn null(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: VfsStoredFieldKind::Null,
+        }
+    }
+
+    pub fn content(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind: VfsStoredFieldKind::Content {
+                media_type: media_type.into(),
+                suffix,
+                descriptor_size,
+            },
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> &VfsStoredFieldKind {
+        &self.kind
+    }
+}
+
+/// One sibling content file of a row directory. Its size is the exact content
+/// descriptor size, so `stat` never touches payload bytes (VFS-018).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VfsProjectedFile {
+    name: String,
+    media_type: String,
+    descriptor_size: u64,
+}
+
+impl VfsProjectedFile {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn descriptor_size(&self) -> u64 {
+        self.descriptor_size
+    }
+}
+
+/// The `data.orna` document and sibling content files projected for one and the
+/// same row, pinned to the snapshot that admitted them (VFS-001, VFS-002).
+pub struct VfsRowProjection<S> {
+    pin: SnapshotPin<S>,
+    document: String,
+    files: Vec<VfsProjectedFile>,
+}
+
+impl<S> VfsRowProjection<S> {
+    /// Projects one row's stored non-key fields. Document and null fields are
+    /// encoded in order inside `data.orna`; content fields become escaped
+    /// sibling files. Two distinct fields that would share one host name are
+    /// refused rather than merged (VFS-016).
+    pub fn project(pin: SnapshotPin<S>, fields: &[VfsStoredField]) -> Result<Self, VfsPathError> {
+        let mut document = String::from("{\n");
+        let mut files = Vec::new();
+        let mut names = vec![VFS_ROW_DOCUMENT.to_owned()];
+        let mut fields_seen = std::collections::BTreeSet::new();
+        for field in fields {
+            if !fields_seen.insert(field.name().to_owned()) {
+                return Err(VfsPathError::InvalidDocument);
+            }
+            match field.kind() {
+                VfsStoredFieldKind::Document { text } => {
+                    document.push_str("    ");
+                    document.push_str(&render_field_name(&field.name)?);
+                    document.push_str(": ");
+                    document.push_str(text);
+                    document.push_str(",\n");
+                }
+                VfsStoredFieldKind::Null => {
+                    document.push_str("    ");
+                    document.push_str(&render_field_name(&field.name)?);
+                    document.push_str(": null,\n");
+                }
+                VfsStoredFieldKind::Content {
+                    media_type,
+                    suffix,
+                    descriptor_size,
+                } => {
+                    let name = project_content_name(&field.name, media_type, suffix.as_deref());
+                    // Two stored values that claim one host name are refused
+                    // rather than merged into one directory entry (VFS-016).
+                    if names.contains(&name) {
+                        return Err(VfsPathError::NameCollision);
+                    }
+                    document.push_str("    ");
+                    document.push_str(&render_field_name(&field.name)?);
+                    document.push_str(": { path: \"./");
+                    document.push_str(&name);
+                    document.push_str("\", media_type: \"");
+                    document.push_str(&escape_text(media_type));
+                    document.push_str("\" },\n");
+                    names.push(name.clone());
+                    files.push(VfsProjectedFile {
+                        name,
+                        media_type: media_type.clone(),
+                        descriptor_size: *descriptor_size,
+                    });
+                }
+            }
+        }
+        document.push_str("}\n");
+        if document.len() > VFS_MAX_PATH_BYTES * 1024 {
+            return Err(VfsPathError::NameTooLong);
+        }
+        Ok(Self {
+            pin,
+            document,
+            files,
+        })
+    }
+
+    /// The snapshot this projection was admitted from. A projection never
+    /// synthesizes a row version of its own (VFS-002, VFS-005).
+    pub fn pin(&self) -> &SnapshotPin<S> {
+        &self.pin
+    }
+
+    /// The complete stored-non-key-field document, ready to serve as
+    /// `data.orna`.
+    pub fn document_text(&self) -> &str {
+        &self.document
+    }
+
+    /// Binds the served document bytes to the snapshot that produced them, so
+    /// a read handle observes exactly the admitted row.
+    pub fn document_snapshot(&self) -> VfsFileSnapshot<S> {
+        VfsFileSnapshot::new(self.pin.clone_pin(), self.document.as_bytes())
+    }
+
+    /// Directory entries of this row, document first, then content files.
+    pub fn entry_names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(VFS_ROW_DOCUMENT).chain(self.files.iter().map(VfsProjectedFile::name))
+    }
+
+    pub fn files(&self) -> &[VfsProjectedFile] {
+        &self.files
+    }
+
+    /// Resolves one entry name inside this row directory. A name outside the
+    /// projection is refused, so a lookup can never retarget another row's
+    /// field (VFS-004, VFS-017).
+    pub fn lookup(&self, name: &str) -> Result<VfsProjectedEntry<'_>, VfsPathError> {
+        match unproject_component(name)? {
+            VfsComponent::Canonical(text) if text == VFS_ROW_DOCUMENT => {
+                Ok(VfsProjectedEntry::Document)
+            }
+            VfsComponent::Canonical(text) => {
+                let file = self
+                    .files
+                    .iter()
+                    .find(|file| file.name == text)
+                    .ok_or(VfsPathError::UnknownRow)?;
+                Ok(VfsProjectedEntry::Content(file))
+            }
+            VfsComponent::LongAlias { .. } => Err(VfsPathError::WrongNamespace),
+        }
+    }
+}
+
+/// One resolved entry of a projected row directory.
+#[derive(Debug)]
+pub enum VfsProjectedEntry<'a> {
+    Document,
+    Content(&'a VfsProjectedFile),
+}
+
+/// Escapes one Orna string-literal body. Stored field names are plain
+/// identifiers, but a MIME-1 annotation can carry RFC 9110 quoting that must be
+/// re-escaped to stay inside the row document.
+fn escape_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Renders one stored field name as the Orna record key used inside
+/// `data.orna`. Only plain identifiers are valid, so a name that would need
+/// quoting is refused instead of being written ambiguously.
+fn render_field_name(name: &str) -> Result<String, VfsPathError> {
+    let mut bytes = name.bytes();
+    let valid = match bytes.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == b'_' => bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+        _ => false,
+    };
+    if !valid {
+        return Err(VfsPathError::InvalidDocument);
+    }
+    Ok(name.to_owned())
 }
 
 /// The VFS call boundary into the runtime's single validated table transaction.
