@@ -546,6 +546,37 @@ impl MigrationContinuityRecord {
         &self.predecessors
     }
 
+    /// The format-3 successor identity of one legacy checkpoint key.
+    ///
+    /// A resumed publisher looks up the identity the migration recorded
+    /// instead of re-deriving it: re-deriving is exactly the reset this
+    /// coordinate exists to prevent. The returned source and partition are the
+    /// successor's canonical typed identity bytes, and `None` means the
+    /// successor has no partition, which stays distinct from an encoded empty
+    /// partition. A legacy key the migration never carried has no successor,
+    /// so a caller cannot invent one.
+    pub fn successor_for(
+        &self,
+        legacy_consumer_identity: [u8; 32],
+        legacy_source_identity: &[u8],
+        legacy_partition_identity: Option<&[u8]>,
+    ) -> Option<([u8; 32], &[u8], Option<&[u8]>)> {
+        self.predecessors
+            .iter()
+            .find(|predecessor| {
+                predecessor.legacy_consumer_identity == legacy_consumer_identity
+                    && predecessor.legacy_source_identity == legacy_source_identity
+                    && predecessor.legacy_partition_identity.as_deref() == legacy_partition_identity
+            })
+            .map(|predecessor| {
+                (
+                    predecessor.format3_consumer_identity,
+                    predecessor.format3_source_identity.as_slice(),
+                    predecessor.format3_partition_identity.as_deref(),
+                )
+            })
+    }
+
     fn encode(&self, bytes: &mut Vec<u8>) -> Result<(), RepositoryError> {
         bytes.push(1); // continuity-record version
         put_u32(bytes, self.predecessors.len())?;
