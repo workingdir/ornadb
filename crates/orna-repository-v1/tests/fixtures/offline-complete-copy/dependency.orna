@@ -1,0 +1,5 @@
+module stdlib;
+
+pub table Notes(id: Str) {
+    body: Str,
+}
