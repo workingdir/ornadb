@@ -344,7 +344,8 @@ mod tests {
         let json = words(&["--format", "json", "0102", "song"]);
         assert_eq!(parse_options(&json).unwrap().format, HistoryFormat::Json);
         // `--at` takes one selector, wherever it appears.
-        let pinned = parse_options(&words(&["--at", "HEAD~1", "0102", "song"])).unwrap();
+        let pinned_arguments = words(&["--at", "HEAD~1", "0102", "song"]);
+        let pinned = parse_options(&pinned_arguments).unwrap();
         assert_eq!(pinned.at, Some("HEAD~1"));
     }
 
