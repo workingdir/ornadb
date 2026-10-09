@@ -5940,8 +5940,7 @@ impl Context<'_, '_> {
             };
             supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
         }
-        let annotated =
-            crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
+        let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
         Value::from_raw(annotated.raw(), self, 0)
     }
 
@@ -6207,7 +6206,11 @@ impl Context<'_, '_> {
                     && crate::sys_bindings::is_blob_annotation_operation(&name))
                 .then_some(name)
             })
-            .filter(|name| orna_sys_v1::system_dispatch_table().operation(name).is_some());
+            .filter(|name| {
+                orna_sys_v1::system_dispatch_table()
+                    .operation(name)
+                    .is_some()
+            });
         if let Some(operation) = declared {
             return self.call_blob_annotation(&operation, arguments, input, scope, depth);
         }
