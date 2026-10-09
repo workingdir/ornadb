@@ -278,15 +278,13 @@ where
             {
                 return Err(ActivationError::Runtime(RuntimeError::OwnerLost));
             }
+            // The rows are read by committed identity under the request's own
+            // admitted capture, so a capture that already advanced is refused
+            // before the evaluator stages anything (`ORNA-STATE-003`).
             let snapshot = state
-                .begin_admitted_table_activation(tables)
+                .begin_continued_admitted_table_activation(tables, &continuation)
                 .await
                 .map_err(ActivationError::Runtime)?;
-            if snapshot.context().capture() != continuation.context().capture() {
-                return Err(ActivationError::Runtime(RuntimeError::StaleCapture {
-                    current: Box::new(snapshot.context().capture().clone()),
-                }));
-            }
             let work = evaluator(&snapshot)
                 .await
                 .map_err(ActivationError::Evaluator)?;
@@ -302,9 +300,7 @@ where
             // so catalogue-bearing work is refused here rather than committed
             // without it.
             if catalogue_admission.is_some() {
-                return Err(ActivationError::Runtime(
-                    RuntimeError::InvalidTableMutation,
-                ));
+                return Err(ActivationError::Runtime(RuntimeError::InvalidTableMutation));
             }
             validate_mutation_identities(&mutations, snapshot.table_object_ids())
                 .map_err(ActivationError::Runtime)?;
