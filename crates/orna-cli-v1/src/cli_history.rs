@@ -10,7 +10,7 @@
 //! local repository alone: no fetch, no remote, and no media payload.
 
 use super::*;
-use orna_repository_v1::{AdmittedRow, KeyRange, Repository, TypedKey};
+use orna_repository_v1::{AdmittedRow, KeyRange, Repository, RepositoryFormatContext, TypedKey};
 
 use std::collections::BTreeMap;
 
@@ -140,7 +140,9 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             flag if flag.starts_with("--") => {
                 return Err(history_error(
                     "Unknown history flag",
-                    format!("got {flag:?}; accepted: --at, --diff, --limit, --since, --format, --reverse, --author, --count, --quiet"),
+                    format!(
+                        "got {flag:?}; accepted: --at, --diff, --limit, --since, --format, --reverse, --author, --count, --quiet"
+                    ),
                 ));
             }
             _ => positional.push(word),
@@ -186,7 +188,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let repository = Repository::discover(path)
         .map_err(|error| history_error("Repository could not be opened", format!("{error:?}")))?;
     if let Some((from, to)) = options.diff {
-        return run_diff(&repository, relation, from, to, options.format);
+        return run_diff(&repository, path, relation, from, to, options.format);
     }
     // `parse_options` yields a key for every invocation without `--diff`.
     let key = options
@@ -198,33 +200,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // the answer. Without `--at` the walk starts at the current HEAD.
     let (format, start) = match options.at {
         Some(selector) => {
-            // An abbreviated object id is never ambiguous here: `rev-parse`
-            // reports a prefix that names no object or more than one exactly as
-            // a failure, which surfaces as a typed diagnostic below.
-            if bare_ref_selector_is_ambiguous(path, selector)? {
-                return Err(Diagnostic::target_with_detail(
-                    "E2000",
-                    "Snapshot name is ambiguous",
-                    "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
-                     `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
-                    format!("{selector:?} names more than one branch, tag or remote branch"),
-                ));
-            }
-            let commit = repository.resolve_snapshot(selector).map_err(|error| {
-                history_error(
-                    "Snapshot could not be resolved",
-                    format!("{selector:?}: {error:?}"),
-                )
-            })?;
-            let start = commit.as_str().to_owned();
-            let format = repository
-                .open_pinned_format_context(&start)
-                .map_err(|error| {
-                    history_error(
-                        "Snapshot could not be pinned",
-                        format!("{selector:?}: {error:?}"),
-                    )
-                })?;
+            // One guard, one resolution: `pin_snapshot` refuses an ambiguous
+            // name before it resolves, so `--at` and `--diff` cannot disagree.
+            let (start, format) = pin_snapshot(&repository, path, selector)?;
             (format, start)
         }
         None => {
@@ -390,6 +368,40 @@ fn parse_relation_id(value: &str) -> Result<[u8; 16], Diagnostic> {
 /// remote-branch namespaces, and two exact matches mean the name does not
 /// identify one snapshot.
 ///
+/// Resolves and pins one named snapshot exactly once, refusing a bare name that
+/// more than one branch, tag or remote branch carries. `--at` and both `--diff`
+/// endpoints pin through here, so an identical-prefix name is refused wherever
+/// it appears rather than resolved to whichever ref Git lists first.
+fn pin_snapshot(
+    repository: &Repository,
+    directory: &str,
+    selector: &str,
+) -> Result<(String, RepositoryFormatContext), Diagnostic> {
+    if bare_ref_selector_is_ambiguous(directory, selector)? {
+        return Err(Diagnostic::target_with_detail(
+            "E2000",
+            "Snapshot name is ambiguous",
+            "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
+             `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
+            format!("{selector:?} names more than one branch, tag or remote branch"),
+        ));
+    }
+    let commit = repository.resolve_snapshot(selector).map_err(|error| {
+        history_error(
+            "Snapshot could not be resolved",
+            format!("{selector:?}: {error:?}"),
+        )
+    })?;
+    let start = commit.as_str().to_owned();
+    let format = repository.open_pinned_format_context(&start).map_err(|error| {
+        history_error(
+            "Snapshot could not be pinned",
+            format!("{selector:?}: {error:?}"),
+        )
+    })?;
+    Ok((start, format))
+}
+
 /// Only exact matches count. `git for-each-ref <pattern>` matches by prefix, so
 /// `refs/remotes/origin` also lists `refs/remotes/origin/main`; those are
 /// different names and must not be read as a collision.
@@ -448,7 +460,10 @@ fn bare_ref_selector_is_ambiguous(directory: &str, selector: &str) -> Result<boo
 enum RowChange {
     Added(AdmittedRow),
     Removed(AdmittedRow),
-    Changed { before: AdmittedRow, after: AdmittedRow },
+    Changed {
+        before: AdmittedRow,
+        after: AdmittedRow,
+    },
 }
 
 /// The payload-free annotation coordinate of one row: the Blob field
@@ -488,17 +503,37 @@ fn encoded_value(row: &AdmittedRow) -> Vec<u8> {
 /// rather than as a change to the row's data.
 fn run_diff(
     repository: &Repository,
+    directory: &str,
     relation: [u8; 16],
     from: &str,
     to: &str,
     format: HistoryFormat,
 ) -> Result<(), Diagnostic> {
-    let from_label = diff_snapshot_label(repository, from)?;
-    let to_label = diff_snapshot_label(repository, to)?;
-    let (before, before_read) = read_relation_rows(repository, relation, from)?;
-    let (after, after_read) = read_relation_rows(repository, relation, to)?;
-    let payload_bytes_read = before_read.payload_bytes_read() + after_read.payload_bytes_read();
-    let native_objects_read = before_read.objects_read() + after_read.objects_read();
+    // Each endpoint is pinned once, through the same ambiguity guard `--at`
+    // uses, so an identical-prefix name is refused rather than resolved to
+    // whichever ref `git for-each-ref` lists first.
+    let (from_commit, before_format) = pin_snapshot(repository, directory, from)?;
+    let (to_commit, after_format) = pin_snapshot(repository, directory, to)?;
+    // A format-1/2 endpoint is a read-only compatibility input with no native
+    // `.orna/store`, so it has no row map to compare. Say so instead of
+    // reporting the format-3 store seam's generic failure, the same refusal
+    // `--at` gives.
+    for (selector, format) in [(from, &before_format), (to, &after_format)] {
+        if format.is_read_only() {
+            return Err(history_error(
+                "Snapshot is a legacy format-1/2 input",
+                format!(
+                    "{selector:?} names a read-only compatibility snapshot with no native row store; name a format-3 commit"
+                ),
+            ));
+        }
+    }
+    let from_label = format!("{from:?} ({from_commit})");
+    let to_label = format!("{to:?} ({to_commit})");
+    let (before, before_read) = read_relation_rows(&before_format, relation)?;
+    let (after, after_read) = read_relation_rows(&after_format, relation)?;
+    let payload_bytes_read = before_read.payload_bytes_read + after_read.payload_bytes_read;
+    let native_objects_read = before_read.objects_read + after_read.objects_read;
     let changes = compare_rows(before, after);
     let (added, changed, removed) = counts(&changes);
     match format {
@@ -537,20 +572,6 @@ fn run_diff(
     Ok(())
 }
 
-/// Names the commit each side of the comparison is pinned to, refusing a
-/// selector that names no commit rather than reading the current `HEAD`.
-fn diff_snapshot_label(repository: &Repository, selector: &str) -> Result<String, Diagnostic> {
-    repository
-        .resolve_snapshot(selector)
-        .map(|commit| format!("{selector:?} ({})", commit.as_str()))
-        .map_err(|error| {
-            history_error(
-                "Diff snapshot could not be resolved",
-                format!("{selector:?}: {error:?}"),
-            )
-        })
-}
-
 /// The measured cost of one pinned relation read: the media payload bytes and
 /// native objects the read touched.
 struct ReadCost {
@@ -558,26 +579,18 @@ struct ReadCost {
     objects_read: u64,
 }
 
-/// Reads every committed row of one relation at one pinned snapshot, keyed by
-/// canonical key bytes so the two sides join on the committed row identity.
+/// Reads every committed row of one relation at one already-pinned snapshot,
+/// keyed by canonical key bytes so the two sides join on the committed row
+/// identity.
 ///
 /// The relation is walked one bounded page at a time and no key is ever
 /// revisited: each page after the first resumes strictly after the last key
 /// already read. The cost returned is the read scope's own accounting, so a
 /// caller can report the payload bytes the comparison did not fetch.
 fn read_relation_rows(
-    repository: &Repository,
+    format: &RepositoryFormatContext,
     relation: [u8; 16],
-    selector: &str,
 ) -> Result<(BTreeMap<Vec<u8>, AdmittedRow>, ReadCost), Diagnostic> {
-    let format = repository
-        .open_pinned_format_context(selector)
-        .map_err(|error| {
-            history_error(
-                "Diff snapshot could not be pinned",
-                format!("{selector:?}: {error:?}"),
-            )
-        })?;
     let row_map = format
         .load_row_map(relation)
         .map_err(|error| history_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -732,11 +745,7 @@ fn render_key(key: &TypedKey) -> String {
         TypedKey::Bool(value) => value.to_string(),
         TypedKey::Null => "-".to_owned(),
         TypedKey::Bytes(bytes) => render_bytes(bytes),
-        TypedKey::Tuple(values) => values
-            .iter()
-            .map(render_key)
-            .collect::<Vec<_>>()
-            .join(","),
+        TypedKey::Tuple(values) => values.iter().map(render_key).collect::<Vec<_>>().join(","),
     }
 }
 
