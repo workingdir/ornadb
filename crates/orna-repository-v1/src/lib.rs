@@ -56,17 +56,20 @@ pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     initialize_repository, inspect_metadata,
 };
+pub use native_graph::RowRevision;
 pub use native_graph::{
     AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError, NativeGraphContext,
     NativeObjectKind, NativeOid, OrpBlobBinding, OrpGraphCandidate, ProtectedBlobMetadata,
     ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification,
     RepositoryCaptureCapability, RepositoryReadScope, VerifiedBlobRange,
 };
-pub use native_graph::RowRevision;
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
 };
-pub use row_store::{AdmittedRow, KeyRange, RowMapSnapshot, TypedKey};
+pub use row_store::{
+    AdmittedRow, KeyRange, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity, RowMapSnapshot,
+    TypedKey,
+};
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
 /// A verified native Git commit ID. It is intentionally Git-local: the
