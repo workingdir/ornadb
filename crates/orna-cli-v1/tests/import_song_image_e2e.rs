@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use orna_evaluator_v1::SysHostBindingRegistry;
+use orna_repository_v1::KeyRange;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
@@ -95,6 +96,38 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
     assert_eq!(committed.len(), 2, "the song and the image both commit");
     assert_eq!(committed[0].0, b"image".to_vec());
     assert_eq!(committed[1].0, b"song".to_vec());
+
+    // Publication must leave both loose row files in the committed tree: the
+    // explicit boundary is the only thing that advances the repository, and a
+    // read of the tree is what a second process sees.
+    let tracked = git_output(directory.path(), &["ls-files"], None);
+    let tracked = String::from_utf8(tracked).unwrap();
+    for row in ["media/song.orna", "media/image.orna"] {
+        assert!(tracked.contains(row), "publication commits {row}");
+    }
+
+    // Both committed rows must also be reachable through the format-3 row map,
+    // which is the store root the read path resolves (`open_format_context` ->
+    // `load_row_map` -> `open_native_graph`). A row that lists through the
+    // runtime that staged it but is absent from the row map was never projected
+    // into the published store, so no other process can see it.
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let published = graph
+        .range_rows(&KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+    let published_keys = published
+        .iter()
+        .map(|row| row.key().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        published.len(),
+        2,
+        "both imported rows are projected into the published store, got {published_keys:?}"
+    );
+
     let objects = blob_count(directory.path());
     assert!(objects > 0, "the captures committed real objects");
 
