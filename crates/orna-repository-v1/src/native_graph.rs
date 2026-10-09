@@ -786,6 +786,37 @@ impl NativeGraphContext {
         Ok(output)
     }
 
+    /// Lifts a stored row value into the canonical values it may hold.
+    ///
+    /// An inline value is its own encoding; a canonical overflow value names
+    /// the node that holds it and is dereferenced through the same verified
+    /// path the dependency check uses, so a row too large to inline is read
+    /// here too.
+    fn stored_row_values(
+        &self,
+        value: &crate::row_store::RowValue,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+    ) -> Result<Vec<CborValue>, GraphError> {
+        match value {
+            crate::row_store::RowValue::Inline { encoded, .. } => {
+                let parsed = decode_canonical_cbor(encoded)?;
+                if !matches!(parsed, CborValue::Array(_) | CborValue::Tag(60113, _)) {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                Ok(vec![parsed])
+            }
+            crate::row_store::RowValue::Overflow(reference) => {
+                let root = reference
+                    .native_root()
+                    .ok_or(GraphError::UnsupportedRowValueForm)?;
+                let verified =
+                    self.verify_value_overflow(root, scope, objects, &mut BTreeSet::new())?;
+                Ok(vec![verified.semantic_value])
+            }
+        }
+    }
+
     fn walk_dependency_index(
         &self,
         oid: &NativeOid,
@@ -901,6 +932,9 @@ impl NativeGraphContext {
         self.algorithm
     }
 
+    /// The admitted `.orna/store` root this context pinned. A candidate commit
+    /// that rewrites the store must nest the replacement tree in its own
+    /// private index rather than reusing this identity.
     pub fn store_root(&self) -> &NativeOid {
         &self.store_root
     }
@@ -1035,12 +1069,13 @@ impl NativeGraphContext {
         Ok((stats, reached))
     }
 
-    /// Lists up to `max_commits` commits reachable from `HEAD`, newest first,
+    /// Lists up to `max_commits` commits reachable from `start`, newest first,
     /// each paired with its root tree snapshot. Only commit headers and tree
     /// object kinds are read; no blob or OGB-2 chunk is opened, so history can
     /// be listed without materializing content.
     pub fn list_revision_snapshots(
         &self,
+        start: &str,
         max_commits: usize,
     ) -> Result<Vec<RevisionSnapshot>, GraphError> {
         if max_commits > MAX_REVISION_WALK {
@@ -1051,7 +1086,7 @@ impl NativeGraphContext {
         }
         let limit = format!("--max-count={max_commits}");
         // `%an <%ae>` follows a tab, so names containing spaces stay intact.
-        let output = self.git_output(&["log", "--format=%H %T%x09%an <%ae>", &limit, "HEAD"])?;
+        let output = self.git_output(&["log", "--format=%H %T%x09%an <%ae>", &limit, start])?;
         let text = std::str::from_utf8(&output).map_err(|_| GraphError::GitObjectMalformed)?;
         let mut snapshots = Vec::new();
         for line in text.lines() {
@@ -1081,14 +1116,15 @@ impl NativeGraphContext {
         Ok(snapshots)
     }
 
-    /// Lists up to `max_commits` revisions of one admitted row, newest first.
-    /// Each revision reports whether the row's descriptor tree is reachable
-    /// from that revision's root tree. The walk reads commit headers and tree
-    /// objects only (`ls-tree` never opens blob contents), so no payload is
-    /// materialized and no blob pin is taken.
+    /// Lists up to `max_commits` revisions of one admitted row from `start`,
+    /// newest first. Each revision reports whether the row's descriptor tree
+    /// is reachable from that revision's root tree. The walk reads commit
+    /// headers and tree objects only (`ls-tree` never opens blob contents), so
+    /// no payload is materialized and no blob pin is taken.
     pub fn list_row_revisions(
         &self,
         row: &crate::row_store::AdmittedRow,
+        start: &str,
         max_commits: usize,
         scope: &RepositoryReadScope,
     ) -> Result<Vec<RowRevision>, GraphError> {
@@ -1106,7 +1142,7 @@ impl NativeGraphContext {
         if descriptors.is_empty() {
             return Err(GraphError::DescriptorNotInRow);
         }
-        let snapshots = self.list_revision_snapshots(max_commits)?;
+        let snapshots = self.list_revision_snapshots(start, max_commits)?;
         let mut revisions = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let tree = snapshot.tree().to_hex();
@@ -1199,6 +1235,69 @@ impl NativeGraphContext {
         self.admit_blob(descriptor)
     }
 
+    /// Reads the Blob a committed row stores, including its canonical MIME-1
+    /// annotation.
+    ///
+    /// A Blob row's value names its own descriptor, so a reader holding only
+    /// the row must not guess that OID. The row value is resolved here — an
+    /// inline value directly, a canonical overflow value by dereferencing it
+    /// through the verified path the dependency check already uses — and the
+    /// Blob field whose recorded content identity is the descriptor's is
+    /// selected. A row that stores the same content twice under different
+    /// annotations is ambiguous and is refused rather than answered wrongly.
+    ///
+    /// The descriptor must still be one of the row's dependencies, and the
+    /// returned capability is bound to this owner and snapshot. It yields the
+    /// annotation and content identity alone; payload bytes stay behind
+    /// [`Self::read_blob_range`].
+    pub fn read_stored_blob_value(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        descriptor_oid: &NativeOid,
+        scope: &RepositoryReadScope,
+    ) -> Result<AdmittedStoredBlob, GraphError> {
+        self.require_committed_row(row, scope)?;
+        if descriptor_oid.algorithm() != self.algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: self.algorithm.width(),
+                actual: descriptor_oid.as_bytes().len(),
+            });
+        }
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        if !row.value().dependencies().iter().any(|dependency| {
+            dependency.kind() == NativeObjectKind::Tree && dependency.oid() == descriptor_oid
+        }) {
+            return Err(GraphError::DescriptorNotInRow);
+        }
+        let mut candidates = Vec::new();
+        for row_value in self.stored_row_values(row.value(), scope, &mut objects)? {
+            let value = self.to_sov_value(row_value, scope, &mut objects, &mut BTreeSet::new())?;
+            collect_blob_value_fields(&value, &mut candidates)?;
+        }
+        let descriptor = self.read_blob_descriptor(descriptor_oid, scope, &mut objects)?;
+        let mut matching = candidates
+            .into_iter()
+            .filter(|(_, identity)| *identity == descriptor.identity);
+        let Some((annotation, identity)) = matching.next() else {
+            return Err(GraphError::DescriptorNotInRow);
+        };
+        if matching.next().is_some() {
+            return Err(GraphError::UnsupportedRowValueForm);
+        }
+        debug_assert_eq!(identity, descriptor.identity);
+        let reference = self.admit_blob(descriptor)?;
+        Ok(AdmittedStoredBlob {
+            annotation,
+            reference,
+        })
+    }
+
     /// Resolves a native tree object only when an owner-issued row names it as
     /// a direct tree dependency. Objects that are merely reachable through the
     /// graph are not admitted here; callers must enter through a committed row.
@@ -1219,6 +1318,24 @@ impl NativeGraphContext {
         self.read_native_node(oid, scope, &mut objects)
     }
 
+    /// Checks that `row` is still the committed row for this context.
+    fn require_committed_row(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        scope: &RepositoryReadScope,
+    ) -> Result<(), GraphError> {
+        scope.authorize(self)?;
+        let persisted_row = self.lookup_row(row.key(), scope)?;
+        if row.version().database_id() != &self.database_id
+            || row.version().store_root() != &self.store_root
+            || row.version().schema().schema_digest() != &self.schema_digest
+            || persisted_row.as_ref() != Some(row)
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+        Ok(())
+    }
+
     /// Checks that `row` is still the committed row for this context and that
     /// `oid` is one of its direct tree dependencies.
     fn require_row_dependency(
@@ -1227,14 +1344,8 @@ impl NativeGraphContext {
         oid: &NativeOid,
         scope: &RepositoryReadScope,
     ) -> Result<(), GraphError> {
-        scope.authorize(self)?;
-        let persisted_row = self.lookup_row(row.key(), scope)?;
-        if row.version().database_id() != &self.database_id
-            || row.version().store_root() != &self.store_root
-            || row.version().schema().schema_digest() != &self.schema_digest
-            || oid.algorithm() != self.algorithm
-            || persisted_row.as_ref() != Some(row)
-        {
+        self.require_committed_row(row, scope)?;
+        if oid.algorithm() != self.algorithm {
             return Err(GraphError::ContextMismatch);
         }
         let dependency_present = row.value().dependencies().iter().any(|dependency| {
@@ -2362,25 +2473,7 @@ impl NativeGraphContext {
         written: &mut BTreeSet<NativeOid>,
         object_limit: u64,
     ) -> Result<NativeOid, GraphError> {
-        let data = node.encode_canonical()?;
-        self.write_capture_envelope(&data, node, written, object_limit)
-    }
-
-    /// The stable database identity admitted for this graph context.
-    pub const fn database_id(&self) -> &[u8; 16] {
-        &self.database_id
-    }
-
-    /// The hash algorithm fixed by the admitted repository format.
-    pub const fn algorithm(&self) -> GitHashAlgorithm {
-        self.algorithm
-    }
-
-    /// The admitted `.orna/store` root this context pinned. A candidate commit
-    /// that rewrites the store must nest the replacement tree in its own
-    /// private index rather than reusing this identity.
-    pub fn store_root(&self) -> &NativeOid {
-        &self.store_root
+        self.write_capture_envelope(node, written, object_limit)
     }
 
     /// Writes one complete OGS-1 node envelope (its canonical `data` blob, its
@@ -2439,7 +2532,7 @@ impl NativeGraphContext {
         let cacheinfo = format!(
             "040000,{},{}",
             store_root.to_hex(),
-            crate::format_context::STORE_PATH
+            crate::init::format_context::STORE_PATH
         );
         let output = self
             .git_command()
@@ -3270,6 +3363,31 @@ impl AdmittedBlobReference {
             && self.database_id == context.database_id
             && self.owner_id == context.owner_id
             && self.snapshot_id == context.snapshot_id
+    }
+}
+
+/// A Blob read out of a committed row: its canonical MIME-1 annotation and
+/// the content capability that serves its bytes.
+#[derive(Clone, Debug)]
+pub struct AdmittedStoredBlob {
+    annotation: crate::blob_store::BlobAnnotation,
+    reference: AdmittedBlobReference,
+}
+
+impl AdmittedStoredBlob {
+    /// The canonical declared metadata stored beside this reference.
+    pub fn annotation(&self) -> &crate::blob_store::BlobAnnotation {
+        &self.annotation
+    }
+
+    /// The content capability for the bytes this row names.
+    pub fn reference(&self) -> &AdmittedBlobReference {
+        &self.reference
+    }
+
+    /// Length and SHA-256 recorded by the row's Blob value.
+    pub const fn content_identity(&self) -> crate::blob_store::ContentIdentity {
+        self.reference.content_identity()
     }
 }
 
@@ -6007,6 +6125,8 @@ pub enum GraphError {
     ContextMismatch,
     InvalidReadScope,
     DescriptorNotInRow,
+    /// A stored row value form this reader does not resolve.
+    UnsupportedRowValueForm,
     ReadQuotaExceeded,
     MetadataQuotaExceeded,
     ReadCancelled,
@@ -6076,6 +6196,9 @@ impl fmt::Display for GraphError {
             Self::InvalidReadScope => f.write_str("invalid owner-bound graph read scope"),
             Self::DescriptorNotInRow => {
                 f.write_str("Blob descriptor is not a dependency of the admitted row")
+            }
+            Self::UnsupportedRowValueForm => {
+                f.write_str("stored row value form is not readable here")
             }
             Self::ReadQuotaExceeded => f.write_str("graph read exceeds owner quota"),
             Self::MetadataQuotaExceeded => f.write_str("graph metadata exceeds owner quota"),
@@ -6447,6 +6570,102 @@ fn leaf_value_dependencies(
 struct VerifiedValueOverflow {
     reference: crate::row_store::ValueOverflowRef,
     semantic_value: CborValue,
+}
+
+/// Lifts a stored row value into the canonical values it may hold.
+///
+/// An inline value is its own encoding; a canonical overflow value names the
+/// node that holds it and is dereferenced through the same verified path the
+/// dependency check uses, so a row too large to inline is read here too.
+fn stored_row_values(
+    &self,
+    value: &crate::row_store::RowValue,
+    scope: &RepositoryReadScope,
+    objects: &mut ObjectBudget,
+) -> Result<Vec<CborValue>, GraphError> {
+    match value {
+        crate::row_store::RowValue::Inline { encoded, .. } => {
+            let parsed = decode_canonical_cbor(encoded)?;
+            if !matches!(parsed, CborValue::Array(_) | CborValue::Tag(60113, _)) {
+                return Err(GraphError::NonCanonicalData);
+            }
+            Ok(vec![parsed])
+        }
+        crate::row_store::RowValue::Overflow(reference) => {
+            let root = reference
+                .native_root()
+                .ok_or(GraphError::UnsupportedRowValueForm)?;
+            let verified =
+                self.verify_value_overflow(root, scope, objects, &mut BTreeSet::new())?;
+            Ok(vec![verified.semantic_value])
+        }
+    }
+}
+
+/// Collects every OVB-2 Blob value reachable inside a canonical stored row
+/// value, in the order the value holds them.
+///
+/// A row's fields are not named here: the annotation is chosen by matching a
+/// Blob value's own recorded content identity against the descriptor the row
+/// references, so the value is the sole authority. An empty dependency list on
+/// such a value is kept, because the two encodings carry the same annotation
+/// and identity and the caller detects the ambiguity.
+fn collect_blob_value_fields(
+    value: &CborValue,
+    output: &mut Vec<(crate::blob_store::BlobAnnotation, crate::blob_store::ContentIdentity)>,
+) -> Result<(), GraphError> {
+    match value {
+        CborValue::Tag(60112, payload) => {
+            let CborValue::Array(fields) = payload.as_ref() else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            if fields.len() != 4 {
+                return Err(GraphError::NonCanonicalData);
+            }
+            let (Some(CborValue::Unsigned(length)), Some(CborValue::Bytes(digest))) =
+                (fields.first(), fields.get(1))
+            else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            let Some(CborValue::Text(media_type)) = fields.get(2) else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            if *length > MAX_SIGNED_LENGTH || digest.len() != 32 {
+                return Err(GraphError::NonCanonicalData);
+            }
+            let suffix = match fields.get(3) {
+                Some(CborValue::Null) => None,
+                Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
+                _ => return Err(GraphError::NonCanonicalData),
+            };
+            let mut digest_bytes = [0u8; 32];
+            digest_bytes.copy_from_slice(digest);
+            let identity = crate::blob_store::ContentIdentity::new(*length, digest_bytes)
+                .map_err(|_| GraphError::InvalidLength(*length))?;
+            let annotation = crate::blob_store::BlobAnnotation::new(media_type.clone(), suffix)
+                .map_err(|_| GraphError::InvalidBlobAnnotation)?;
+            output.push((annotation, identity));
+            Ok(())
+        }
+        CborValue::Array(values) => {
+            for item in values {
+                collect_blob_value_fields(item, output)?;
+            }
+            Ok(())
+        }
+        CborValue::Map(entries) => {
+            for (key, item) in entries {
+                collect_blob_value_fields(key, output)?;
+                collect_blob_value_fields(item, output)?;
+            }
+            Ok(())
+        }
+        // A canonical overflow value cannot appear here: `to_sov_value`
+        // dereferences it before this walk sees the value.
+        CborValue::Tag(60113, _) => Err(GraphError::UnsupportedRowValueForm),
+        CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+        _ => Ok(()),
+    }
 }
 
 fn rows_domain_for_version(version: &crate::row_store::RowMapVersion) -> Vec<u8> {

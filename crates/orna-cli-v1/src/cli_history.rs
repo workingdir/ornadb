@@ -23,6 +23,7 @@ enum HistoryFormat {
 struct HistoryOptions<'a> {
     relation: &'a str,
     key: &'a str,
+    at: Option<&'a str>,
     limit: usize,
     since: Option<&'a str>,
     format: HistoryFormat,
@@ -34,6 +35,7 @@ struct HistoryOptions<'a> {
 
 fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
+    let mut at = None;
     let mut limit = DEFAULT_HISTORY_LIMIT;
     let mut since = None;
     let mut format = HistoryFormat::Human;
@@ -53,10 +55,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
                     .ok()
                     .filter(|limit| (1..=MAX_HISTORY_LIMIT).contains(limit))
                     .ok_or_else(|| {
-                        history_error(
-                            "--limit is not in 1..=4096",
-                            format!("got {value:?}"),
-                        )
+                        history_error("--limit is not in 1..=4096", format!("got {value:?}"))
                     })?;
             }
             "--since" => {
@@ -64,6 +63,18 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
                     history_error("--since needs a commit id", "usage: --since <commit-hex>")
                 })?;
                 since = Some(value);
+            }
+            "--at" => {
+                let value = words
+                    .next()
+                    .ok_or_else(|| history_error("--at needs a value", "usage: --at <selector>"))?;
+                if at.is_some() {
+                    return Err(history_error(
+                        "History names one snapshot",
+                        "usage: --at <selector>",
+                    ));
+                }
+                at = Some(value);
             }
             "--reverse" => reverse = true,
             "--quiet" => quiet = true,
@@ -92,7 +103,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             flag if flag.starts_with("--") => {
                 return Err(history_error(
                     "Unknown history flag",
-                    format!("got {flag:?}; accepted: --limit, --since, --format, --reverse, --author, --count, --quiet"),
+                    format!("got {flag:?}; accepted: --at, --limit, --since, --format, --reverse, --author, --count, --quiet"),
                 ));
             }
             _ => positional.push(word),
@@ -101,12 +112,13 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     let [relation, key] = positional[..] else {
         return Err(history_error(
             "History expects a relation and a row key",
-            "usage: orna history <relation-hex> <key> [--limit N] [--since <commit-hex>]",
+            "usage: orna history <relation-hex> <key> [--at SELECTOR] [--limit N] [--since <commit-hex>]",
         ));
     };
     Ok(HistoryOptions {
         relation,
         key,
+        at,
         limit,
         since,
         format,
@@ -117,18 +129,43 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     })
 }
 
-pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
+pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
     let relation = parse_relation_id(options.relation)?;
     let key = options.key;
-    let repository = Repository::discover(
-        std::env::current_dir()
-            .map_err(|error| history_error("Current directory is unavailable", error.to_string()))?,
-    )
-    .map_err(|error| history_error("Repository could not be opened", format!("{error:?}")))?;
-    let format = repository
-        .open_format_context()
-        .map_err(|error| history_error("Format context could not be opened", format!("{error:?}")))?;
+    let path = local_project_path(endpoint)?;
+    let repository = Repository::discover(path)
+        .map_err(|error| history_error("Repository could not be opened", format!("{error:?}")))?;
+    // `--at` pins one named snapshot. The selector is resolved exactly once
+    // here; the row map, the read and the revision walk all come from the
+    // commit it named, so a branch that advances during the read never changes
+    // the answer. Without `--at` the walk starts at the current HEAD.
+    let (format, start) = match options.at {
+        Some(selector) => {
+            let commit = repository.resolve_snapshot(selector).map_err(|error| {
+                history_error(
+                    "Snapshot could not be resolved",
+                    format!("{selector:?}: {error:?}"),
+                )
+            })?;
+            let start = commit.as_str().to_owned();
+            let format = repository
+                .open_pinned_format_context(&start)
+                .map_err(|error| {
+                    history_error(
+                        "Snapshot could not be pinned",
+                        format!("{selector:?}: {error:?}"),
+                    )
+                })?;
+            (format, start)
+        }
+        None => {
+            let format = repository.open_format_context().map_err(|error| {
+                history_error("Format context could not be opened", format!("{error:?}"))
+            })?;
+            (format, "HEAD".to_owned())
+        }
+    };
     let row_map = format
         .load_row_map(relation)
         .map_err(|error| history_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -141,9 +178,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     let row = graph
         .lookup_row(&TypedKey::Text(key.to_owned()), &scope)
         .map_err(|error| history_error("Row lookup failed", format!("{error:?}")))?
-        .ok_or_else(|| {
-            history_error("Row is not committed", format!("no row with key {key:?}"))
-        })?;
+        .ok_or_else(|| history_error("Row is not committed", format!("no row with key {key:?}")))?;
     // `--since` needs the walk far enough to reach its commit, so walk the
     // full bound and cut afterwards; otherwise walk only what is printed.
     let walk = if options.since.is_some() || options.author.is_some() {
@@ -152,8 +187,10 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         options.limit
     };
     let mut revisions = graph
-        .list_row_revisions(&row, walk, &scope)
-        .map_err(|error| history_error("Revision history could not be listed", format!("{error:?}")))?;
+        .list_row_revisions(&row, &start, walk, &scope)
+        .map_err(|error| {
+            history_error("Revision history could not be listed", format!("{error:?}"))
+        })?;
     if let Some(since) = options.since {
         let position = revisions
             .iter()
@@ -277,7 +314,7 @@ fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_HISTORY_LIMIT, HistoryFormat, parse_options, parse_relation_id};
+    use super::{parse_options, parse_relation_id, HistoryFormat, DEFAULT_HISTORY_LIMIT};
     use crate::Exit;
 
     fn words(values: &[&str]) -> Vec<String> {
@@ -298,6 +335,7 @@ mod tests {
         let default_arguments = words(&["0102", "song"]);
         let parsed = parse_options(&default_arguments).unwrap();
         assert_eq!((parsed.limit, parsed.since), (DEFAULT_HISTORY_LIMIT, None));
+        assert_eq!(parsed.at, None);
         let flagged_arguments = words(&["--limit", "3", "0102", "--since", "abc", "song"]);
         let parsed = parse_options(&flagged_arguments).unwrap();
         assert_eq!((parsed.relation, parsed.key), ("0102", "song"));
@@ -305,6 +343,10 @@ mod tests {
         assert_eq!(parsed.format, HistoryFormat::Human);
         let json = words(&["--format", "json", "0102", "song"]);
         assert_eq!(parse_options(&json).unwrap().format, HistoryFormat::Json);
+        // `--at` takes one selector, wherever it appears.
+        let pinned_arguments = words(&["--at", "HEAD~1", "0102", "song"]);
+        let pinned = parse_options(&pinned_arguments).unwrap();
+        assert_eq!(pinned.at, Some("HEAD~1"));
     }
 
     #[test]
@@ -313,6 +355,11 @@ mod tests {
         assert!(parse_options(&words(&["r", "k", "--limit", "4097"])).is_err());
         assert!(parse_options(&words(&["r", "k", "--limit", "x"])).is_err());
         assert!(parse_options(&words(&["r", "k", "--since"])).is_err());
+        assert!(parse_options(&words(&["r", "k", "--at"])).is_err());
+        assert!(
+            parse_options(&words(&["r", "k", "--at", "a", "--at", "b"])).is_err(),
+            "history names one snapshot"
+        );
         assert!(parse_options(&words(&["r", "k", "--bogus"])).is_err());
         assert!(parse_options(&words(&["r"])).is_err());
         assert!(parse_options(&words(&["r", "k", "--format", "xml"])).is_err());
@@ -321,9 +368,18 @@ mod tests {
 
     #[test]
     fn summary_line_counts_total_present_and_absent() {
-        assert_eq!(super::summary_line(0, 0), "0 revisions (0 present, 0 absent)");
-        assert_eq!(super::summary_line(1, 1), "1 revision (1 present, 0 absent)");
-        assert_eq!(super::summary_line(4, 3), "4 revisions (3 present, 1 absent)");
+        assert_eq!(
+            super::summary_line(0, 0),
+            "0 revisions (0 present, 0 absent)"
+        );
+        assert_eq!(
+            super::summary_line(1, 1),
+            "1 revision (1 present, 0 absent)"
+        );
+        assert_eq!(
+            super::summary_line(4, 3),
+            "4 revisions (3 present, 1 absent)"
+        );
     }
 
     #[test]
@@ -388,11 +444,16 @@ mod tests {
 
     #[test]
     fn quiet_combines_with_format_and_flags_in_any_position() {
-        let flagged = words(&["--quiet", "--format", "json", "0102", "--limit", "2", "song"]);
+        let flagged = words(&[
+            "--quiet", "--format", "json", "0102", "--limit", "2", "song",
+        ]);
         let parsed = parse_options(&flagged).unwrap();
         assert!(parsed.quiet);
         assert_eq!(parsed.format, HistoryFormat::Json);
-        assert_eq!((parsed.limit, parsed.relation, parsed.key), (2, "0102", "song"));
+        assert_eq!(
+            (parsed.limit, parsed.relation, parsed.key),
+            (2, "0102", "song")
+        );
     }
 
     fn quiet_is_a_bare_flag_and_defaults_off() {

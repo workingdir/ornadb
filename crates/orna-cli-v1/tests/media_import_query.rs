@@ -191,7 +191,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     )
     .unwrap();
     let edit = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &edit, "song", 0x90, false).await;
+    import_media(&repository, &state, writer, &mut bindings, &edit, "song", 0x90, false).await;
     let edited = list_media(&state).await;
     let song = edited.iter().find(|row| row.key == b"song").unwrap();
     assert_eq!(song.media_type, "image/png");
@@ -200,7 +200,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
 
     // Re-import: committing the same .orna fixture again leaves the listing
     // exactly as the edit left it. Only committed rows are compared.
-    import_media(&state, writer, &mut bindings, &edit, "song", 0xa0, false).await;
+    import_media(&repository, &state, writer, &mut bindings, &edit, "song", 0xa0, false).await;
     assert_eq!(
         list_media(&state).await,
         edited,
@@ -237,9 +237,9 @@ async fn history_pages_cover_every_revision_once_across_imported_rows() {
 
     // Two imported rows, from two fixtures, so the walk spans more than one row.
     let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     let paged = import_expression(PAGED_SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &paged, "song-again", 0x80, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &paged, "song-again", 0x80, true).await;
 
     let format = repository.open_format_context().unwrap();
     let row_map = format.load_row_map(relation_id).unwrap();
@@ -259,11 +259,11 @@ async fn history_pages_cover_every_revision_once_across_imported_rows() {
                     || row.key() == &TypedKey::Text(key.to_owned())
             })
             .unwrap_or_else(|| panic!("the {key} row is committed"));
-        let revisions = graph.list_row_revisions(row, 64, &scope).unwrap();
+        let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
         // One revision per page: every page is exactly the next commit.
         let pages = revision_pages(
-            |max| graph.list_row_revisions(row, max, &scope).unwrap(),
+            |max| graph.list_row_revisions(row, "HEAD", max, &scope).unwrap(),
             1,
             revisions.len(),
         );
@@ -303,9 +303,9 @@ async fn author_filter_keeps_every_revision_of_each_imported_row() {
 
     // Two imported rows from two fixtures, so the filter runs across both walks.
     let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     let authored = import_expression(AUTHORED_SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &authored, "song-authored", 0x80, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &authored, "song-authored", 0x80, true).await;
 
     let format = repository.open_format_context().unwrap();
     let row_map = format.load_row_map(relation_id).unwrap();
@@ -325,7 +325,7 @@ async fn author_filter_keeps_every_revision_of_each_imported_row() {
                     || row.key() == &TypedKey::Text(key.to_owned())
             })
             .unwrap_or_else(|| panic!("the {key} row is committed"));
-        let revisions = graph.list_row_revisions(row, 64, &scope).unwrap();
+        let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
         // Every revision in the walk is stamped with the fixture identity, so the
         // filter keeps all of them and an unknown author keeps none.
@@ -365,9 +365,9 @@ async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
         .with_repository_capture_capability(capability);
 
     let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     let later = import_expression(SINCE_SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &later, "song-later", 0x80, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &later, "song-later", 0x80, true).await;
     // Reading the committed rows first, as the listing does, makes them visible to the graph.
     state.committed_table_rows("media").await.unwrap();
 
@@ -389,7 +389,7 @@ async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
                     || row.key() == &TypedKey::Text(key.to_owned())
             })
             .unwrap_or_else(|| panic!("the {key} row is committed"));
-        let revisions = graph.list_row_revisions(row, 64, &scope).unwrap();
+        let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
         // Cutting at the second revision keeps only the head, which is newer.
         let since = revisions[1].commit().to_hex();
@@ -442,7 +442,7 @@ async fn limit_walk_matches_the_truncated_full_walk_for_each_imported_row() {
     ];
     for (key, fixture, ordinal) in imports {
         let expression = import_expression(fixture, source.path());
-        import_media(&state, writer, &mut bindings, &expression, key, ordinal, true).await;
+        import_media(&repository, &state, writer, &mut bindings, &expression, key, ordinal, true).await;
     }
     // Reading the committed rows first makes them visible to the graph.
     state.committed_table_rows("media").await.unwrap();
@@ -463,11 +463,11 @@ async fn limit_walk_matches_the_truncated_full_walk_for_each_imported_row() {
                     || row.key() == &TypedKey::Text(key.to_owned())
             })
             .unwrap_or_else(|| panic!("the {key} row is committed"));
-        let full = graph.list_row_revisions(row, 64, &scope).unwrap();
+        let full = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         // `orna history --limit N` walks only N commits, so each bounded walk
         // must equal the first N revisions of the full walk.
         for n in 1..=full.len() {
-            let bounded = graph.list_row_revisions(row, n, &scope).unwrap();
+            let bounded = graph.list_row_revisions(row, "HEAD", n, &scope).unwrap();
             assert_eq!(bounded, limited(&full, n), "{key}: limit {n}");
         }
     }
@@ -494,7 +494,7 @@ fn assert_song_revision_history(
         })
         .expect("the song row is committed");
 
-    let revisions = graph.list_row_revisions(song, 64, &scope).unwrap();
+    let revisions = graph.list_row_revisions(song, "HEAD", 64, &scope).unwrap();
     let head = git_output(directory.path(), &["rev-parse", "HEAD"], None);
     let head = String::from_utf8(head).unwrap().trim().to_owned();
     // Store install plus one commit per imported row, newest first.
@@ -507,7 +507,7 @@ fn assert_song_revision_history(
     );
     // Paging one commit at a time must reproduce the full walk exactly.
     let pages = revision_pages(
-        |max| graph.list_row_revisions(song, max, &scope).unwrap(),
+        |max| graph.list_row_revisions(song, "HEAD", max, &scope).unwrap(),
         1,
         revisions.len(),
     );
@@ -559,10 +559,18 @@ fn relation_hex(relation_id: [u8; 16]) -> String {
 /// Runs `orna history` with `arguments` as a child process inside the repository
 /// and returns its raw output, whatever the exit status.
 fn run_history(directory: &Path, arguments: &[&str]) -> std::process::Output {
+    let mut words = vec!["history"];
+    words.extend_from_slice(arguments);
+    run_orna_from(directory, &words)
+}
+
+/// Runs the built CLI from `cwd` with `words` as its whole argument list, so a
+/// test can choose the global `--db` endpoint and the process directory
+/// independently.
+fn run_orna_from(cwd: &Path, words: &[&str]) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
-        .current_dir(directory)
-        .arg("history")
-        .args(arguments)
+        .current_dir(cwd)
+        .args(words)
         .output()
         .unwrap()
 }
@@ -632,6 +640,7 @@ fn import_expression(fixture: &str, root: &Path) -> String {
 /// Captures one file through `sys.blob.capture_file` and commits its row in an
 /// admitted request. The row stores the annotated Blob reference.
 async fn import_media(
+    repository: &Repository,
     state: &RuntimeState,
     writer: orna_runtime_v1::WriterLease,
     bindings: &mut SysHostBindingRegistry,
@@ -668,6 +677,7 @@ async fn import_media(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
+    let key_text = key;
     let (id, key, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
     let mutation = if insert_only {
         TableMutation::insert(id, "media", key, row)
@@ -691,6 +701,10 @@ async fn import_media(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
+    // The runtime only stages durable mutations. Publication is the explicit
+    // boundary that freezes that prefix into the store, so the imported row
+    // becomes reachable from a published snapshot.
+    publish_media_row(repository, state, key_text, ordinal).await;
 }
 
 #[tokio::test]
@@ -726,7 +740,7 @@ async fn deleting_a_committed_media_row_removes_it_from_listing_and_filters() {
     ];
     for (key, fixture, ordinal) in imports {
         let expression = import_expression(fixture, source.path());
-        import_media(&state, writer, &mut bindings, &expression, key, ordinal, true).await;
+        import_media(&repository, &state, writer, &mut bindings, &expression, key, ordinal, true).await;
     }
 
     let song_filter = BlobMetadataFilter::new().with_media_type("audio/wav");
@@ -776,9 +790,9 @@ async fn history_json_lists_each_revision_with_exactly_the_four_keys() {
         .with_repository_capture_capability(capability);
 
     let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     let image = import_expression(IMAGE_JSON_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
     drop(bindings);
     drop(state);
 
@@ -832,7 +846,7 @@ async fn history_rejects_negative_and_out_of_range_limits_before_listing() {
         .with_repository_capture_capability(capability);
 
     let fixture = import_expression(NEGATIVE_LIMIT_SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &fixture, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &fixture, "song", 0x70, true).await;
     drop(bindings);
     drop(state);
 
@@ -871,7 +885,7 @@ async fn history_since_excludes_the_named_boundary_commit_end_to_end() {
         .with_repository_capture_capability(capability);
 
     let image = import_expression(IMAGE_SINCE_BOUNDARY_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &image, "image", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x70, true).await;
     drop(bindings);
     drop(state);
 
@@ -937,7 +951,7 @@ async fn history_on_an_emptied_catalogue_is_refused_with_no_listing() {
         .with_repository_capture_capability(capability);
 
     let song = import_expression(EMPTY_CATALOGUE_SONG_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     // Deleting the only committed row leaves the catalogue empty.
     delete_media(&state, writer, "song", 0x80).await;
     assert!(list_media(&state).await.is_empty(), "the catalogue is empty");
@@ -947,6 +961,162 @@ async fn history_on_an_emptied_catalogue_is_refused_with_no_listing() {
     let relation = relation_hex(relation_id);
     let output = run_history(directory.path(), &[&relation, "song"]);
     assert_history_refused(&output, "history on an emptied catalogue");
+    drop(directory);
+}
+
+/// `orna --db PATH history` must read the named repository, so the same
+/// listing is available from an unrelated working directory.
+#[tokio::test]
+async fn history_reads_the_named_db_endpoint_from_an_unrelated_directory() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    drop(bindings);
+    drop(state);
+
+    let relation = relation_hex(relation_id);
+    // A directory that is not inside any repository: only `--db` can answer.
+    let elsewhere = TempDir::new().unwrap();
+    let database = directory.path().to_string_lossy().into_owned();
+    let output = run_orna_from(
+        elsewhere.path(),
+        &["--db", &database, "history", &relation, "song", "--format", "json"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "history --db failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let routed: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!routed.is_empty(), "the imported row has revisions");
+    assert_eq!(
+        routed,
+        history_json(directory.path(), relation_id, "song"),
+        "--db names the same repository as the worktree directory"
+    );
+
+    // Without `--db` the unrelated directory holds no repository, so the same
+    // command is refused instead of silently answering from somewhere else.
+    let output = run_history(elsewhere.path(), &[&relation, "song"]);
+    assert_history_refused(&output, "history outside a repository without --db");
+    drop(directory);
+}
+
+/// WALKTHROUGH §6: `orna history --at SELECTOR` reads the snapshot the
+/// selector named. The selector resolves once, so the answer stays in the past
+/// even though HEAD has moved on since.
+#[tokio::test]
+async fn history_at_pins_the_named_snapshot_instead_of_head() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    // The song lands first, so its commit is the past the pin must return.
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let past = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    // A later image import moves HEAD on; the pin must not follow it.
+    let image = import_expression(IMAGE_JSON_IMPORT_FIXTURE, source.path());
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    drop(bindings);
+    drop(state);
+    let present = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_ne!(past, present, "the image import advanced HEAD");
+
+    let relation = relation_hex(relation_id);
+    let pinned = run_history(
+        directory.path(),
+        &[&relation, "song", "--at", &past, "--format", "json"],
+    );
+    assert_eq!(
+        pinned.status.code(),
+        Some(0),
+        "history --at failed: {}",
+        String::from_utf8_lossy(&pinned.stderr)
+    );
+    let pinned: Vec<serde_json::Value> = serde_json::from_slice(&pinned.stdout).unwrap();
+    assert!(!pinned.is_empty(), "the pinned snapshot carries the song");
+    assert_eq!(
+        pinned[0]["commit"], past.as_str(),
+        "--at starts the walk at the named snapshot"
+    );
+    assert!(
+        pinned.iter().all(|entry| entry["commit"] != present.as_str()),
+        "the pinned walk never reaches the newer HEAD commit"
+    );
+
+    // Pinning only shortens the walk: the pinned listing is the tail of the
+    // unpinned one, so no revision is reordered or invented.
+    let full = history_json(directory.path(), relation_id, "song");
+    assert!(
+        full.len() > pinned.len(),
+        "the newer import adds a revision the pin excludes"
+    );
+    assert_eq!(full[full.len() - pinned.len()..], pinned[..]);
+
+    // `--at HEAD` resolves once to the same commit the unpinned read uses.
+    let at_head = run_history(
+        directory.path(),
+        &[&relation, "song", "--at", "HEAD", "--format", "json"],
+    );
+    assert_eq!(at_head.status.code(), Some(0), "--at HEAD must resolve");
+    let at_head: Vec<serde_json::Value> = serde_json::from_slice(&at_head.stdout).unwrap();
+    assert_eq!(at_head, full);
+
+    // An unresolvable selector is refused instead of silently reading HEAD.
+    let missing = run_history(directory.path(), &[&relation, "song", "--at", "no-such-ref"]);
+    assert_history_refused(&missing, "history --at with an unknown selector");
     drop(directory);
 }
 
@@ -1053,9 +1223,9 @@ async fn listing_projects_suffix_column_for_song_and_image_rows() {
         .with_repository_capture_capability(capability);
 
     let song = import_expression(PROJECTION_SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
 
     let listing = list_media(&state).await;
     let suffixes: Vec<(Vec<u8>, Option<String>)> = listing
@@ -1095,9 +1265,9 @@ async fn negated_media_type_filter_excludes_only_the_named_type() {
         .with_repository_capture_capability(capability);
 
     let song = import_expression(NEGATION_SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
 
     let not_png = BlobMetadataFilter::new().without_media_type("image/png");
     assert_eq!(filter_media(&state, &not_png).await, vec![b"song".to_vec()]);
@@ -1134,9 +1304,9 @@ async fn sort_orders_mixed_media_types_by_type_then_length() {
 
     // Committed in reverse of the expected sort order.
     let image = import_expression(SORT_IMAGE_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
     let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
 
     let mut metadata: Vec<_> = state
         .committed_table_rows("media")
@@ -1174,7 +1344,7 @@ fn song_revisions_limited_to(
                 || row.key() == &TypedKey::Text("song".to_owned())
         })
         .expect("the song row is committed");
-    graph.list_row_revisions(song, max_commits, &scope).unwrap()
+    graph.list_row_revisions(song, "HEAD", max_commits, &scope).unwrap()
 }
 
 #[tokio::test]
@@ -1201,9 +1371,9 @@ async fn zero_limit_history_walk_returns_no_revisions() {
         .with_repository_capture_capability(capability);
 
     let song = import_expression(LIMIT_ZERO_SONG_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
-    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
 
     // Control: a limit of one returns the head revision, so the walk is live.
     assert_eq!(song_revisions_limited_to(&repository, relation_id, 1).len(), 1);
