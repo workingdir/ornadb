@@ -5,7 +5,6 @@
 use std::path::Path;
 
 use orna_evaluator_v1::SysHostBindingRegistry;
-use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::decode_rov3_blob_metadata;
@@ -49,7 +48,6 @@ const OTHER_ROW_PAYLOAD: &[u8] = include_bytes!("fixtures/media/tone.wav");
 fn stored_metadata(row: &[u8]) -> orna_value_v1::BlobMetadata {
     decode_rov3_blob_metadata(row).expect("committed row carries a stored Blob reference")
 }
-
 
 fn row_for<'a>(rows: &'a [(Vec<u8>, Vec<u8>)], key: &[u8]) -> &'a [u8] {
     rows.iter()
@@ -121,7 +119,11 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
 
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let original = fixture_expression(REIMPORT_FIXTURE, &root);
-    let replacement = fixture_expression(REPLACE_FIXTURE, &root);
+    // The shared replacement fixture captures a `.wav` so the two-row test can
+    // prove an edit cannot reach a row holding the same payload's bytes. This
+    // test replaces the image with the other real PNG instead, which is what
+    // lets it prove the media type and suffix annotations survive an edit.
+    let replacement = format!("sys.blob.capture_file({root}, \"pixel2.png\", 65536)");
 
     commit_capture(
         &repository,
@@ -141,7 +143,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
     assert_eq!(before_metadata.length(), ORIGINAL_PIXEL.len() as u64);
     assert_eq!(
         before_metadata.sha256(),
-        Sha256::digest(ORIGINAL_PIXEL).into()
+        <[u8; 32]>::from(Sha256::digest(ORIGINAL_PIXEL))
     );
     assert_eq!(before_metadata.media_type(), "image/png");
 
@@ -214,16 +216,11 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
 /// bytes differ from the edited row's, so nothing about the edit can reach it.
 #[tokio::test]
 async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let (_directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),
         source.path().join("pixel.png"),
-    )
-    .unwrap();
-    std::fs::copy(
-        Path::new(MEDIA_FIXTURES).join("pixel2.png"),
-        source.path().join("pixel2.png"),
     )
     .unwrap();
     std::fs::copy(
