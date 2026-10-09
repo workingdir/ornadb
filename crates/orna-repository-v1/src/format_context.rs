@@ -28,6 +28,8 @@ pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
 const DATABASE_PATH: &str = ".orna/database.orna";
 const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
 const MAIN_SOURCE_PATH: &str = "main.orna";
+/// The fixed position of the format-3 native store root inside a snapshot.
+pub(crate) const STORE_PATH: &str = ".orna/store";
 // Used only to classify a failed metadata-path lookup. The valid format-3
 // store path never recursively enumerates this tree.
 const MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC: usize = 65_536;
@@ -1386,6 +1388,70 @@ mod graph_bridge_tests {
         assert!(matches!(
             original.open_native_graph(&other_snapshot_rows),
             Err(super::FormatContextError::RowMapMismatch)
+        ));
+    }
+
+    #[test]
+    fn publication_store_subtree_pin_admits_only_a_real_store_root() {
+        let directory = repository();
+        let root = directory.path();
+        let context = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &context);
+        let rows = sealed_rows(&context, &schema_oid, schema_digest);
+        let graph = context
+            .open_native_graph(&rows)
+            .expect("admit the fixture graph");
+
+        // The production writer builds a complete OGS-1 envelope: the data
+        // blob, the refs tree naming the relation map, and the envelope tree.
+        let database_id = *context
+            .require_database_id()
+            .expect("admitted format-3 identity")
+            .as_bytes();
+        let mut written = std::collections::BTreeSet::new();
+        let relation_map = graph
+            .write_native_node(
+                &NodeData::OrderedLeaf {
+                    domain: relations_domain(database_id),
+                    entries: Vec::new(),
+                },
+                &mut written,
+            )
+            .expect("write the relation map node");
+        let store_root = graph
+            .write_native_node(&NodeData::StoreRoot { relation_map }, &mut written)
+            .expect("write the store root node");
+        assert!(
+            written.contains(&store_root),
+            "the envelope object is part of the durability closure"
+        );
+
+        // The envelope the writer produced is what a reader decodes, so the
+        // store position can be pinned from it.
+        let index = root.join(".git/private-store-index");
+        fs::write(&index, b"").expect("create a private index file");
+        graph
+            .pin_store_subtree_in_index(&index, &store_root)
+            .expect("a real store root is pinned at the fixed store path");
+        let staged = Command::new("git")
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", &index)
+            .args(["ls-files", "--stage", "--", ".orna/store"])
+            .output()
+            .expect("list the private index");
+        assert!(staged.status.success(), "list private index tree entry");
+        let staged = String::from_utf8_lossy(&staged.stdout).into_owned();
+        assert_eq!(
+            staged.trim(),
+            format!("040000 {} 0\t.orna/store", store_root.to_hex()),
+            "the private index stages the encoded store tree at .orna/store"
+        );
+
+        // A raw object cannot be planted at the store position.
+        let blob = write_git_object(root, graph.algorithm(), "blob", b"not a store root");
+        assert!(matches!(
+            graph.pin_store_subtree_in_index(&index, &blob),
+            Err(crate::native_graph::GraphError::WrongNodeKind { .. })
         ));
     }
 
