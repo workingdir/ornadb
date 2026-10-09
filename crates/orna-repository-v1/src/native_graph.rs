@@ -1424,12 +1424,14 @@ impl NativeGraphContext {
             return Ok(Vec::new());
         }
         let limit = format!("--max-count={max_commits}");
-        // `%an <%ae>` follows a tab, so names containing spaces stay intact.
-        // The trailer block follows a second tab: a migration commit states its
-        // coordinate there so an ordinary commit renders as an empty field.
+        // Fields after the object ids are tab-separated. The committed seconds
+        // lead because a numeric field can never be mistaken for part of the
+        // author, then the author (`%an <%ae>`, so a name with spaces stays
+        // intact), then the trailer block: a migration commit states its
+        // coordinate there and an ordinary commit renders an empty field.
         let output = self.git_output(&[
             "log",
-            "--format=%H %T%x09%an <%ae>%x09%(trailers:key=Orna-Migration,valueonly)",
+            "--format=%H %T%x09%ct%x09%an <%ae>%x09%(trailers:key=Orna-Migration,valueonly)",
             &limit,
             start,
         ])?;
@@ -1439,6 +1441,12 @@ impl NativeGraphContext {
             let Some((header, rest)) = line.split_once('\t') else {
                 return Err(GraphError::GitObjectMalformed);
             };
+            let Some((committed_at, rest)) = rest.split_once('\t') else {
+                return Err(GraphError::GitObjectMalformed);
+            };
+            let committed_at = committed_at
+                .parse::<u64>()
+                .map_err(|_| GraphError::GitObjectMalformed)?;
             // A trailing newline inside the trailer block would coincide with
             // the record separator, so a marker value never carries one.
             let (author, migration) = split_revision_record(rest);
@@ -1460,6 +1468,7 @@ impl NativeGraphContext {
                 commit,
                 tree,
                 author: author.to_owned(),
+                committed_at,
                 migration,
             });
         }
@@ -1508,6 +1517,7 @@ impl NativeGraphContext {
                 commit: snapshot.commit().clone(),
                 tree: snapshot.tree().clone(),
                 author: snapshot.author().to_owned(),
+                committed_at: snapshot.committed_at(),
                 migration: snapshot.migration().map(str::to_owned),
                 present,
             });
@@ -3726,6 +3736,7 @@ pub struct RevisionSnapshot {
     commit: NativeOid,
     tree: NativeOid,
     author: String,
+    committed_at: u64,
     migration: Option<String>,
 }
 
@@ -3747,6 +3758,14 @@ impl RevisionSnapshot {
     /// format-1/2 to format-3 migration commit rather than an ordinary one.
     pub fn migration(&self) -> Option<&str> {
         self.migration.as_deref()
+    }
+
+    /// When the commit was created, in seconds since the Unix epoch, as git
+    /// prints `%ct`. The original commit keeps its own timestamp through a
+    /// migration, so a history walk reports the author's time, not the time the
+    /// migrated representation was established.
+    pub const fn committed_at(&self) -> u64 {
+        self.committed_at
     }
 }
 
@@ -3773,6 +3792,7 @@ pub struct RowRevision {
     commit: NativeOid,
     tree: NativeOid,
     author: String,
+    committed_at: u64,
     migration: Option<String>,
     present: bool,
 }
@@ -3799,6 +3819,13 @@ impl RowRevision {
     /// it, whose older revisions predate the format-3 row store.
     pub fn migration(&self) -> Option<&str> {
         self.migration.as_deref()
+    }
+
+    /// When the commit was created, in seconds since the Unix epoch, as git
+    /// prints `%ct`. Preserving the original author's time is what makes a
+    /// migrated row's history read the same after the migration.
+    pub const fn committed_at(&self) -> u64 {
+        self.committed_at
     }
 
     pub const fn present(&self) -> bool {
