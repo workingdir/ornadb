@@ -45,6 +45,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  4 authorisation      5 presentation       6 cancelled          7 protocol",
     "History commands:",
     "  history RELATION KEY [--at SELECTOR] [--limit N] [--since COMMIT] [--format human|json] [--reverse] [--author TEXT] [--count]",
+    "  history RELATION --diff FROM TO    what changed between two pinned snapshots, payload-free",
     "  history exit codes: 0 listed or counted; 1 any history error (bad flag or value, unknown repository, row, --at selector, or --since commit)",
     "Query commands:",
     "  query RELATION [--key KEY|0xBYTES] [--field N] [--at SELECTOR] [--limit N] [--format human|json]",
@@ -93,6 +94,7 @@ mod tests {
         let group = &HELP_LINES[index + 1..];
         for flag in [
             "--at",
+            "--diff",
             "--limit",
             "--since",
             "--format",
