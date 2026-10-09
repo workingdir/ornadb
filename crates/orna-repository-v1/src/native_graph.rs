@@ -668,6 +668,10 @@ impl NativeGraphContext {
             .map_err(|_| GraphError::NonCanonicalData)?;
 
         let mut written = BTreeSet::new();
+        // Envelope object ids only. A data blob carries the same value bytes
+        // whenever a page is rebuilt with unchanged stored values, so counting
+        // it as churn would report media as an index object.
+        let mut written_nodes = BTreeSet::new();
         let mut new_payload = BTreeSet::new();
         let mut level: Vec<BranchCandidate> = Vec::new();
         if leaf_pages.is_empty() {
@@ -677,6 +681,7 @@ impl NativeGraphContext {
                 entries: Vec::new(),
             };
             let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+            written_nodes.insert(oid.clone());
             level.push(BranchCandidate {
                 max_key: Vec::new(),
                 oid,
@@ -714,6 +719,7 @@ impl NativeGraphContext {
             // consume the canonical spelling rather than a typed key (ORP-1).
             let max_key = entries.last().map_or(Vec::new(), |entry| entry.key.clone());
             let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+            written_nodes.insert(oid.clone());
             level.push(BranchCandidate {
                 max_key,
                 oid,
@@ -745,6 +751,7 @@ impl NativeGraphContext {
                         .collect(),
                 };
                 let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+                written_nodes.insert(oid.clone());
                 next.push(BranchCandidate {
                     max_key: group
                         .last()
@@ -765,12 +772,12 @@ impl NativeGraphContext {
             .clone();
         self.sync_object_closure(&written, scope)?;
 
-        let index_objects_created: Vec<NativeOid> = written
+        let index_objects_created: Vec<NativeOid> = written_nodes
             .iter()
             .filter(|oid| !previous_nodes.contains(*oid))
             .cloned()
             .collect();
-        let index_objects_reused: Vec<NativeOid> = written
+        let index_objects_reused: Vec<NativeOid> = written_nodes
             .iter()
             .filter(|oid| previous_nodes.contains(*oid))
             .cloned()
