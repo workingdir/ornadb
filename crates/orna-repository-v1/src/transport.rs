@@ -31,6 +31,7 @@ const MAX_FETCH_REFS: usize = 4096;
 /// object barrier and its ref CAS. Set to a whole number of seconds to hold
 /// the process there so a supervising test can kill it deterministically.
 const FAULT_INJECTION_HOLD_ENV: &str = "ORNA_FAULT_INJECTION_FETCH_HOLD_SECONDS";
+
 /// The owner-scoped private edit and capture pins an ordinary push keeps local.
 /// These refs record one owner's in-flight protected content, so publishing
 /// them would expose private pins (`ORNA-GIT-008`).

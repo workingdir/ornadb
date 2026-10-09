@@ -17,6 +17,8 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  status [--porcelain|--short|--format human|short|json]",
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",
+    "  push [REMOTE] [BRANCH]        publish the branch with its continuity refs",
+    "  push exit status: 0 pushed; 1 repository, remote, or continuity conflict",
     "  serve [--port PORT]",
     "  mount DIR --at SELECTOR       read-only view of one resolved snapshot",
     "  mount status [--json]         report attached read-only views",

@@ -54,6 +54,12 @@ pub(super) enum Command {
     Init(Option<PathBuf>),
     Status { format: StatusFormat },
     Fetch { remote: String, branch: String },
+    /// `push [REMOTE] [BRANCH]`: publish the ordinary branch ref together with
+    /// the continuity refs an ordinary push synchronizes (ORNA-GIT-008).
+    Push {
+        remote: String,
+        branch: Option<String>,
+    },
     SemanticLegend {
         format: LegendFormat,
         limit: Option<usize>,
@@ -328,6 +334,18 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             remote: words.next().unwrap_or("origin").to_owned(),
             branch: words.next().unwrap_or("main").to_owned(),
         },
+        Some("push") => {
+            let remote = words.next().unwrap_or("origin").to_owned();
+            let branch = words.next().map(str::to_owned);
+            if words.next().is_some() {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "unsupported `push` argument",
+                    "use `push`, `push REMOTE` or `push REMOTE BRANCH`",
+                ));
+            }
+            Command::Push { remote, branch }
+        }
         Some("history") => Command::History(words.by_ref().map(str::to_owned).collect()),
         Some("query") => Command::Query(words.by_ref().map(str::to_owned).collect()),
         Some("mount") => {
