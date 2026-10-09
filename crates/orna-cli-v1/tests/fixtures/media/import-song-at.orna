@@ -1,0 +1,6 @@
+// Author the suffix coordinate the pinned query reads, so the row written into
+// the `--at` fixture's own commit binds a suffix hint rather than inheriting
+// one from another import. `sys.blob.annotate` binds a media type and the hint
+// that media type's own MIME-1 entry declares, so the pair is always the
+// canonical one (audio/wav -> wav).
+sys.blob.annotate(sys.blob.capture_file(__MEDIA_ROOT__, "tone.wav", 65536), "audio/wav", "wav")
