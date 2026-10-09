@@ -107,6 +107,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::Diff(ref arguments) => run_git_diff(arguments),
         Command::Log(ref arguments) => run_git_log(arguments),
         Command::History(arguments) => cli_history::run(&parsed.endpoint, &arguments),
+        Command::Query(arguments) => cli_query::run(&parsed.endpoint, &arguments),
         Command::Import(ref arguments) => cli_import::run(arguments),
         Command::Export(ref arguments) => {
             cli_export::run(std::path::Path::new(local_project_path(&parsed.endpoint)?), arguments)
