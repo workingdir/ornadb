@@ -142,6 +142,18 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // the answer. Without `--at` the walk starts at the current HEAD.
     let (format, start) = match options.at {
         Some(selector) => {
+            // An abbreviated object id is never ambiguous here: `rev-parse`
+            // reports a prefix that names no object or more than one exactly as
+            // a failure, which surfaces as a typed diagnostic below.
+            if bare_ref_selector_is_ambiguous(path, selector)? {
+                return Err(Diagnostic::target_with_detail(
+                    "E2000",
+                    "Snapshot name is ambiguous",
+                    "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
+                     `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
+                    format!("{selector:?} names more than one branch, tag or remote branch"),
+                ));
+            }
             let commit = repository.resolve_snapshot(selector).map_err(|error| {
                 history_error(
                     "Snapshot could not be resolved",
@@ -301,6 +313,70 @@ fn parse_relation_id(value: &str) -> Result<[u8; 16], Diagnostic> {
             .expect("hexadecimal digits were checked above");
     }
     Ok(bytes)
+}
+
+/// Whether a `--at` selector names one branch, tag or remote branch but is not
+/// spelled as a full ref, so Git would resolve it by ref lookup precedence.
+///
+/// `git rev-parse` *succeeds* on such a name and only warns, so a read pinned
+/// with `--at amb` would silently return whichever of the colliding refs it
+/// preferred. Nothing in the walk could report that choice, so the read is
+/// refused instead: the selector is compared against the branch, tag and
+/// remote-branch namespaces, and two exact matches mean the name does not
+/// identify one snapshot.
+///
+/// Only exact matches count. `git for-each-ref <pattern>` matches by prefix, so
+/// `refs/remotes/origin` also lists `refs/remotes/origin/main`; those are
+/// different names and must not be read as a collision.
+fn bare_ref_selector_is_ambiguous(directory: &str, selector: &str) -> Result<bool, Diagnostic> {
+    // Only a name that could collide is checked. A commit id, a `HEAD~2`-style
+    // expression, a revision `@`/`:` syntax, a `a..b` range or a full `refs/`
+    // path names one object by construction. Slashed names such as
+    // `origin/main` are *not* skipped: a branch and a remote-tracking branch
+    // can share one.
+    if selector.is_empty()
+        || selector.starts_with('-')
+        || selector.starts_with("refs/")
+        || selector == "HEAD"
+        || selector.contains([':', '^', '~', '@'])
+        || selector.contains("..")
+    {
+        return Ok(false);
+    }
+    let output = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            &format!("refs/heads/{selector}"),
+            &format!("refs/tags/{selector}"),
+            &format!("refs/remotes/{selector}"),
+            &format!("refs/remotes/{selector}/HEAD"),
+        ])
+        .current_dir(directory)
+        .output()
+        .map_err(|error| {
+            history_error(
+                "Git could not be started",
+                format!("check that Git is installed and available on PATH: {error}"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(history_error(
+            "Git could not list the snapshot names",
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    let wanted = [
+        format!("refs/heads/{selector}"),
+        format!("refs/tags/{selector}"),
+        format!("refs/remotes/{selector}"),
+        format!("refs/remotes/{selector}/HEAD"),
+    ];
+    let matches = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|name| wanted.iter().any(|candidate| candidate == name))
+        .count();
+    Ok(matches > 1)
 }
 
 fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
