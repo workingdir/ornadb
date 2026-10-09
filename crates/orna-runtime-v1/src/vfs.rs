@@ -846,7 +846,7 @@ impl<S> ManagedFile<S> {
             };
         if !reads_baseline {
             let diagnostic = stale_baseline_diagnostic();
-            retain_rejected_draft(&baseline.draft, &baseline.image, diagnostic).await;
+            retain_rejected_draft(&baseline.draft, diagnostic).await;
             return Ok(TemporaryRenameOutcome::Stale { diagnostic });
         }
         let mut cache_generation = self.cache_epoch.generation.lock().await;
@@ -1108,26 +1108,16 @@ fn stale_baseline_diagnostic() -> SafeDiagnostic {
 
 /// Keeps a refused draft's bytes and its stable diagnostic, so a rejected
 /// strong save is recoverable and is never silently dropped.
-async fn retain_rejected_draft<S>(
-    draft: &EditDraft<S>,
-    baseline: &Arc<VfsFileSnapshot<S>>,
-    diagnostic: SafeDiagnostic,
-) {
+///
+/// This records the rejection through the draft's own retention, so a strong
+/// save that is refused because its read baseline went stale keeps the same
+/// retained-draft identity rules as every other rejection (ORNA-VFS-009): the
+/// identity is issued once per rejected revision and reused while that
+/// revision stays unchanged.
+async fn retain_rejected_draft<S>(draft: &EditDraft<S>, diagnostic: SafeDiagnostic) {
     let mut draft_state = draft.state.lock().await;
     let revision = draft_state.revision;
-    let replacement: Arc<[u8]> = Arc::from(
-        draft_state
-            .candidate
-            .as_deref()
-            .unwrap_or(draft_state.baseline.bytes.as_ref()),
-    );
-    draft_state.last_rejection = Some((revision, diagnostic));
-    draft_state.retained_invalid = Some(RetainedInvalidDraft {
-        baseline: baseline.pin.clone(),
-        revision,
-        replacement,
-        diagnostic,
-    });
+    draft_state.retain_rejection(revision, diagnostic);
 }
 
 pub enum TemporaryRenameOutcome<S> {

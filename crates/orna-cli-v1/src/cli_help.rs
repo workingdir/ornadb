@@ -25,6 +25,8 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  export ARCHIVE --check                         report what one archive records",
     "  export ARCHIVE --restore DEST [--worktree]     reconstruct, verify, then materialise",
     "  export exit status: 0 archive written, verified, or restored; 1 snapshot, object closure, or pinned dependency unavailable",
+    "  publish [--message MESSAGE]                    commit the durable runtime tail as one publication commit",
+    "  publish exit status: 0 published or nothing to publish; 1 repository, runtime, or publication conflict",
     "Editor tooling:",
     "  semantic-legend [--json|--markdown|--format csv|--quiet] [--limit N]",
     "  semantic-legend                  token types and modifiers as text",
