@@ -1254,11 +1254,25 @@ mod graph_bridge_tests {
         let relation_id = [0x51; 16];
 
         let first_payload = b"london take one".as_slice();
-        let first_descriptor =
-            install_annotated_blob_row_store(root, relation_id, 1, first_payload, "audio/mpeg", Some("mp3"));
+        let first_descriptor = install_annotated_blob_row_store(
+            root,
+            relation_id,
+            1,
+            first_payload,
+            "audio/mpeg",
+            Some("mp3"),
+            false,
+        );
         let second_payload = b"london take two, remastered".as_slice();
-        let second_descriptor =
-            install_annotated_blob_row_store(root, relation_id, 1, second_payload, "audio/mpeg", Some("mp3"));
+        let second_descriptor = install_annotated_blob_row_store(
+            root,
+            relation_id,
+            1,
+            second_payload,
+            "audio/mpeg",
+            Some("mp3"),
+            false,
+        );
         assert_ne!(first_descriptor, second_descriptor);
 
         // Mount the prior commit. The selector resolves once; every row, Blob
@@ -1339,7 +1353,7 @@ mod graph_bridge_tests {
             remounted.snapshot_id(),
             "one commit always resolves to one snapshot identity"
         );
-        assert_ne!(mounted.snapshot_id(), head.snapshot_pin().snapshot_id());
+        assert_ne!(*mounted.snapshot_id(), head.snapshot_pin().snapshot_id());
     }
 
     #[test]
