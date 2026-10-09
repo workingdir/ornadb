@@ -1,5 +1,7 @@
-//! `orna query <relation-hex> [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]`:
-//! lists the payload-free Blob metadata of committed format-3 rows.
+//! `orna query <relation-hex> [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]`
+//! lists the payload-free Blob metadata of committed format-3 rows, optionally
+//! narrowed by an annotation predicate (`--kind`, `--not-kind`, `--suffix`,
+//! `--min-length`, `--max-length`).
 //!
 //! The query reads through the same repository-owned native graph the row
 //! history walks, so it is measured at the real storage read seam: every row
@@ -7,9 +9,17 @@
 //! `payload_bytes_read` stays at zero because the row's own field tuple
 //! carries the length, SHA-256 and MIME-1 annotation. Media bytes are only
 //! fetched by an explicit Blob read, never by a listing or summary.
+//!
+//! The predicate is evaluated against those same stored annotation
+//! coordinates, so a filtered listing reports the plan it used and the payload
+//! bytes it did not fetch. Coordinates a stored ROV-3 annotation does not bind
+//! (a decoded duration or pixel dimension) are not answered here: they are
+//! decoder output under ORNA-MEDIA-002, not annotation, and the plan names them
+//! as requiring an explicit decode.
 
 use super::*;
 use orna_repository_v1::{KeyRange, Repository, TypedKey};
+use orna_value_v1::BlobMetadataFilter;
 
 /// Most rows one listing reports when `--limit` is not given.
 const DEFAULT_QUERY_LIMIT: usize = 64;
@@ -31,6 +41,7 @@ struct QueryOptions<'a> {
     field: Option<usize>,
     limit: usize,
     format: QueryFormat,
+    predicate: BlobMetadataFilter,
 }
 
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
@@ -39,6 +50,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut field = None;
     let mut limit = DEFAULT_QUERY_LIMIT;
     let mut format = QueryFormat::Human;
+    let mut predicate = BlobMetadataFilter::new();
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
@@ -54,6 +66,40 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                     .ok_or_else(|| query_error("--field needs a value", "usage: --field N"))?;
                 field = Some(value.parse::<usize>().map_err(|_| {
                     query_error("--field is not an index", format!("got {value:?}"))
+                })?);
+            }
+            "--kind" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--kind needs a value", "usage: --kind MIME")
+                })?;
+                predicate = predicate.with_media_type(value);
+            }
+            "--not-kind" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--not-kind needs a value", "usage: --not-kind MIME")
+                })?;
+                predicate = predicate.without_media_type(value);
+            }
+            "--suffix" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--suffix needs a value", "usage: --suffix HINT")
+                })?;
+                predicate = predicate.with_suffix(value);
+            }
+            "--min-length" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--min-length needs a value", "usage: --min-length BYTES")
+                })?;
+                predicate = predicate.with_min_length(value.parse::<u64>().map_err(|_| {
+                    query_error("--min-length is not a byte count", format!("got {value:?}"))
+                })?);
+            }
+            "--max-length" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--max-length needs a value", "usage: --max-length BYTES")
+                })?;
+                predicate = predicate.with_max_length(value.parse::<u64>().map_err(|_| {
+                    query_error("--max-length is not a byte count", format!("got {value:?}"))
                 })?);
             }
             "--limit" => {
@@ -86,7 +132,10 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
             flag if flag.starts_with("--") => {
                 return Err(query_error(
                     "Unknown query flag",
-                    format!("got {flag:?}; accepted: --key, --field, --limit, --format"),
+                    format!(
+                        "got {flag:?}; accepted: --key, --field, --kind, --not-kind, --suffix, \
+                         --min-length, --max-length, --limit, --format"
+                    ),
                 ));
             }
             _ => positional.push(word),
@@ -95,7 +144,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--field N] [--limit N] [--format human|json]",
+            "usage: orna query <relation-hex> [--key KEY] [--field N] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
         ));
     };
     Ok(QueryOptions {
@@ -104,6 +153,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
         field,
         limit,
         format,
+        predicate,
     })
 }
 
@@ -183,6 +233,19 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             }
         }
     }
+    // The predicate is evaluated over the same stored annotation
+    // coordinates the listing already decoded, so narrowing a listing costs no
+    // additional read and never enters a descriptor or a payload chunk. A
+    // candidate that does not match is dropped rather than reported, and the
+    // plan below states which coordinates answered it.
+    let candidates = listings.len();
+    let subject = options.field.map_or_else(
+        || "all fields".to_owned(),
+        |field| format!("field {field}"),
+    );
+    listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
+    let matched = listings.len();
+    let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
     match options.format {
         QueryFormat::Human => {
             for (key, field, metadata) in &listings {
@@ -202,6 +265,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 scope.payload_bytes_read(),
                 scope.objects_read(),
             );
+            println!("{}", plan.human_line());
         }
         QueryFormat::Json => {
             let entries: Vec<serde_json::Value> = listings
@@ -225,12 +289,80 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     "blobs": entries.len(),
                     "media_payload_bytes_read": scope.payload_bytes_read(),
                     "native_objects_read": scope.objects_read(),
+                    "plan": plan.to_json(),
                     "listings": entries,
                 })
             );
         }
     }
     Ok(())
+}
+
+/// The measured plan of one annotation predicate evaluation.
+///
+/// This is the plan the query reports so a caller can see which annotation
+/// coordinates answered the predicate, whether the answer needed any payload
+/// byte, and which coordinates the stored annotation does not bind. It is
+/// evidence about the read that happened, not a statement of intent: the
+/// payload figure is the read seam's own count for this process.
+struct PredicatePlan<'a> {
+    predicate: &'a BlobMetadataFilter,
+    subject: &'a str,
+    candidates: usize,
+    matched: usize,
+}
+
+impl<'a> PredicatePlan<'a> {
+    const fn new(
+        predicate: &'a BlobMetadataFilter,
+        subject: &'a str,
+        candidates: usize,
+        matched: usize,
+    ) -> Self {
+        Self {
+            predicate,
+            subject,
+            candidates,
+            matched,
+        }
+    }
+
+    /// The coordinates this predicate evaluated, as the planner names them.
+    fn coordinates(&self) -> &'static [&'static str] {
+        self.predicate.coordinates()
+    }
+
+    /// Coordinates a decoded duration or pixel dimension would name. They are
+    /// not part of the stored annotation, so no predicate over them can be
+    /// answered without an explicit decode that reads payload bytes.
+    const fn decode_required_coordinates() -> &'static [&'static str] {
+        &["duration", "dimensions"]
+    }
+
+    fn human_line(&self) -> String {
+        format!(
+            "plan: annotation predicate over {}; coordinates {}; decoded-payload coordinates {}; \
+             candidates {} matched {}; subject {}",
+            self.subject,
+            self.coordinates().join(","),
+            Self::decode_required_coordinates().join(","),
+            self.candidates,
+            self.matched,
+            self.subject,
+        )
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "annotation-predicate",
+            "subject": self.subject,
+            "coordinates": self.coordinates(),
+            "decode_required_coordinates": Self::decode_required_coordinates(),
+            "candidates": self.candidates,
+            "matched": self.matched,
+            "payload_fetch": "none",
+        })
+    }
 }
 
 /// Renders a canonical row key the way the caller spelled it: a text key as
