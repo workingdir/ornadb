@@ -2,14 +2,31 @@
 //! lists the revision history of one committed row through the OGS-1
 //! commit-graph walk. Only commit headers and tree listings are read; no blob
 //! payload is opened or hydrated.
+//!
+//! `<key>` is one canonical Orna key expression. A row committed from imported
+//! media is keyed by the bytes the capture was given, so the spelling a
+//! `orna query` listing printed resolves to that row here too, whether the
+//! caller spells it as text or as `0x`-prefixed hex.
+//!
+//! `orna history <relation-hex> --diff <a> <b>` reports what changed in one
+//! relation between two named commits instead. Both endpoints are pinned
+//! independently through the same repository-owned historical snapshot
+//! context, so the comparison is one pair of immutable reads taken from the
+//! local repository alone: no fetch, no remote, and no media payload.
 
 use super::*;
-use orna_repository_v1::{Repository, TypedKey};
+use orna_repository_v1::{AdmittedRow, KeyRange, Repository, RepositoryFormatContext, TypedKey};
+
+use std::collections::BTreeMap;
 
 /// Most revisions one history listing reports when `--limit` is not given.
 const DEFAULT_HISTORY_LIMIT: usize = 64;
 /// Largest `--limit` accepted; matches the repository walk bound.
 const MAX_HISTORY_LIMIT: usize = 4096;
+/// Most rows one diff page reads; matches the repository range bound
+/// (`MAX_ROW_RANGE_LIMIT`). A relation larger than one page is walked page by
+/// page so the comparison never materialises an unbounded range.
+const MAX_DIFF_PAGE: usize = 256;
 
 /// Output shape for the revision listing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,7 +39,7 @@ enum HistoryFormat {
 #[derive(Debug, Eq, PartialEq)]
 struct HistoryOptions<'a> {
     relation: &'a str,
-    key: &'a str,
+    key: Option<&'a str>,
     at: Option<&'a str>,
     limit: usize,
     since: Option<&'a str>,
@@ -31,6 +48,9 @@ struct HistoryOptions<'a> {
     quiet: bool,
     count: bool,
     author: Option<&'a str>,
+    /// `--diff <a> <b>`: the two snapshots to compare instead of listing one
+    /// row's revisions.
+    diff: Option<(&'a str, &'a str)>,
 }
 
 fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic> {
@@ -43,6 +63,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     let mut quiet = false;
     let mut count = false;
     let mut author = None;
+    let mut diff = None;
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
@@ -79,6 +100,27 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             "--reverse" => reverse = true,
             "--quiet" => quiet = true,
             "--count" => count = true,
+            "--diff" => {
+                let from = words.next().ok_or_else(|| {
+                    history_error(
+                        "--diff needs two snapshots",
+                        "usage: --diff <from-selector> <to-selector>",
+                    )
+                })?;
+                let to = words.next().ok_or_else(|| {
+                    history_error(
+                        "--diff needs two snapshots",
+                        "usage: --diff <from-selector> <to-selector>",
+                    )
+                })?;
+                if diff.is_some() {
+                    return Err(history_error(
+                        "History compares one pair of snapshots",
+                        "usage: --diff <from-selector> <to-selector>",
+                    ));
+                }
+                diff = Some((from, to));
+            }
             "--author" => {
                 let value = words.next().ok_or_else(|| {
                     history_error("--author needs a value", "usage: --author <substring>")
@@ -103,17 +145,31 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             flag if flag.starts_with("--") => {
                 return Err(history_error(
                     "Unknown history flag",
-                    format!("got {flag:?}; accepted: --at, --limit, --since, --format, --reverse, --author, --count, --quiet"),
+                    format!(
+                        "got {flag:?}; accepted: --at, --diff, --limit, --since, --format, --reverse, --author, --count, --quiet"
+                    ),
                 ));
             }
             _ => positional.push(word),
         }
     }
-    let [relation, key] = positional[..] else {
-        return Err(history_error(
-            "History expects a relation and a row key",
-            "usage: orna history <relation-hex> <key> [--at SELECTOR] [--limit N] [--since <commit-hex>]",
-        ));
+    let (relation, key) = match (diff, positional[..].split_first()) {
+        // `--diff` names the relation and both snapshots, so no row key is
+        // read: the comparison is over every row of the relation.
+        (Some(_), Some((relation, []))) => (*relation, None),
+        (Some((_, _)), _) => {
+            return Err(history_error(
+                "History expects a relation for --diff",
+                "usage: orna history <relation-hex> --diff <from-selector> <to-selector>",
+            ));
+        }
+        (None, Some((relation, [key]))) => (*relation, Some(*key)),
+        (None, _) => {
+            return Err(history_error(
+                "History expects a relation and a row key",
+                "usage: orna history <relation-hex> <key> [--at SELECTOR] [--limit N] [--since <commit-hex>]",
+            ));
+        }
     };
     Ok(HistoryOptions {
         relation,
@@ -126,49 +182,32 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
         quiet,
         count,
         author,
+        diff,
     })
 }
 
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
     let relation = parse_relation_id(options.relation)?;
-    let key = options.key;
     let path = local_project_path(endpoint)?;
     let repository = Repository::discover(path)
         .map_err(|error| history_error("Repository could not be opened", format!("{error:?}")))?;
+    if let Some((from, to)) = options.diff {
+        return run_diff(&repository, path, relation, from, to, options.format);
+    }
+    // `parse_options` yields a key for every invocation without `--diff`.
+    let key = options
+        .key
+        .expect("a history read without --diff names one row key");
     // `--at` pins one named snapshot. The selector is resolved exactly once
     // here; the row map, the read and the revision walk all come from the
     // commit it named, so a branch that advances during the read never changes
     // the answer. Without `--at` the walk starts at the current HEAD.
     let (format, start) = match options.at {
         Some(selector) => {
-            // An abbreviated object id is never ambiguous here: `rev-parse`
-            // reports a prefix that names no object or more than one exactly as
-            // a failure, which surfaces as a typed diagnostic below.
-            if bare_ref_selector_is_ambiguous(path, selector)? {
-                return Err(Diagnostic::target_with_detail(
-                    "E2000",
-                    "Snapshot name is ambiguous",
-                    "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
-                     `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
-                    format!("{selector:?} names more than one branch, tag or remote branch"),
-                ));
-            }
-            let commit = repository.resolve_snapshot(selector).map_err(|error| {
-                history_error(
-                    "Snapshot could not be resolved",
-                    format!("{selector:?}: {error:?}"),
-                )
-            })?;
-            let start = commit.as_str().to_owned();
-            let format = repository
-                .open_pinned_format_context(&start)
-                .map_err(|error| {
-                    history_error(
-                        "Snapshot could not be pinned",
-                        format!("{selector:?}: {error:?}"),
-                    )
-                })?;
+            // One guard, one resolution: `pin_snapshot` refuses an ambiguous
+            // name before it resolves, so `--at` and `--diff` cannot disagree.
+            let (start, format) = pin_snapshot(&repository, path, selector)?;
             (format, start)
         }
         None => {
@@ -196,9 +235,22 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let scope = graph
         .open_read_scope()
         .map_err(|error| history_error("Read scope could not be opened", format!("{error:?}")))?;
-    let row = graph
-        .lookup_row(&TypedKey::Text(key.to_owned()), &scope)
-        .map_err(|error| history_error("Row lookup failed", format!("{error:?}")))?
+    // The key is one canonical Orna key expression (ORNA-CLI-005), and the
+    // same spelling names both a text key and the bytes that spell it: a row
+    // committed from imported media is keyed by the bytes the capture was
+    // given, while a row written by hand may be keyed by canonical text. Both
+    // are bounded point reads of the committed row map, so the row that answers
+    // is a real committed row rather than a reinterpretation of the argument.
+    let mut row = None;
+    for candidate in cli_row_key::key_candidates(key)? {
+        row = graph
+            .lookup_row(&candidate, &scope)
+            .map_err(|error| history_error("Row lookup failed", format!("{error:?}")))?;
+        if row.is_some() {
+            break;
+        }
+    }
+    let row = row
         .ok_or_else(|| history_error("Row is not committed", format!("no row with key {key:?}")))?;
     // `--since` needs the walk far enough to reach its commit, so walk the
     // full bound and cut afterwards; otherwise walk only what is printed.
@@ -263,6 +315,8 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                         &revision.tree().to_hex(),
                         revision.present(),
                         revision.author(),
+                        revision.committed_at(),
+                        revision.migration(),
                     )
                 })
                 .collect();
@@ -272,14 +326,31 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     Ok(())
 }
 
-/// One revision as a JSON object: commit, root tree, presence and author.
-fn revision_json(commit: &str, tree: &str, present: bool, author: &str) -> serde_json::Value {
-    serde_json::json!({
+/// One revision as a JSON object: commit, root tree, presence, author and the
+/// commit time in seconds since the Unix epoch, plus the migration coordinate
+/// when the commit is the journalled migration commit.
+///
+/// `migration` is present only on commits that carry one, so the documented
+/// shape is unchanged for every ordinary revision.
+fn revision_json(
+    commit: &str,
+    tree: &str,
+    present: bool,
+    author: &str,
+    committed_at: u64,
+    migration: Option<&str>,
+) -> serde_json::Value {
+    let mut object = serde_json::json!({
         "commit": commit,
         "tree": tree,
         "present": present,
         "author": author,
-    })
+        "committed": committed_at,
+    });
+    if let Some(migration) = migration {
+        object["migration"] = serde_json::Value::String(migration.to_owned());
+    }
+    object
 }
 
 /// Human listing: one `commit tree state` line per revision, then the summary
@@ -334,6 +405,42 @@ fn parse_relation_id(value: &str) -> Result<[u8; 16], Diagnostic> {
 /// remote-branch namespaces, and two exact matches mean the name does not
 /// identify one snapshot.
 ///
+/// Resolves and pins one named snapshot exactly once, refusing a bare name that
+/// more than one branch, tag or remote branch carries. `--at` and both `--diff`
+/// endpoints pin through here, so an identical-prefix name is refused wherever
+/// it appears rather than resolved to whichever ref Git lists first.
+fn pin_snapshot(
+    repository: &Repository,
+    directory: &str,
+    selector: &str,
+) -> Result<(String, RepositoryFormatContext), Diagnostic> {
+    if bare_ref_selector_is_ambiguous(directory, selector)? {
+        return Err(Diagnostic::target_with_detail(
+            "E2000",
+            "Snapshot name is ambiguous",
+            "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
+             `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
+            format!("{selector:?} names more than one branch, tag or remote branch"),
+        ));
+    }
+    let commit = repository.resolve_snapshot(selector).map_err(|error| {
+        history_error(
+            "Snapshot could not be resolved",
+            format!("{selector:?}: {error:?}"),
+        )
+    })?;
+    let start = commit.as_str().to_owned();
+    let format = repository
+        .open_pinned_format_context(&start)
+        .map_err(|error| {
+            history_error(
+                "Snapshot could not be pinned",
+                format!("{selector:?}: {error:?}"),
+            )
+        })?;
+    Ok((start, format))
+}
+
 /// Only exact matches count. `git for-each-ref <pattern>` matches by prefix, so
 /// `refs/remotes/origin` also lists `refs/remotes/origin/main`; those are
 /// different names and must not be read as a collision.
@@ -388,6 +495,335 @@ fn bare_ref_selector_is_ambiguous(directory: &str, selector: &str) -> Result<boo
     Ok(matches > 1)
 }
 
+/// One row's change between the two compared snapshots.
+enum RowChange {
+    Added(AdmittedRow),
+    Removed(AdmittedRow),
+    Changed {
+        before: AdmittedRow,
+        after: AdmittedRow,
+    },
+}
+
+/// The payload-free annotation coordinate of one row: the Blob field
+/// descriptors its own stored tuple carries, separately from the row's value.
+fn annotations_of(row: &AdmittedRow) -> Vec<(usize, serde_json::Value)> {
+    row.blob_fields()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(field, metadata)| {
+            (
+                field,
+                serde_json::json!({
+                    "field": field,
+                    "media_type": metadata.media_type(),
+                    "suffix": metadata.suffix(),
+                    "length": metadata.length(),
+                    "sha256": hex(&metadata.sha256()),
+                }),
+            )
+        })
+        .collect()
+}
+
+/// The stored value the row's own tuple holds, in its canonical encoded form.
+fn encoded_value(row: &AdmittedRow) -> Vec<u8> {
+    row.value().encoded_fields().unwrap_or_default().to_vec()
+}
+
+/// Reports what changed in one relation between two named snapshots.
+///
+/// Both endpoints are pinned through the same repository-owned historical
+/// snapshot context used by `--at`, so each side is one immutable read of the
+/// local store. Nothing here contacts a remote, fetches an object, or opens a
+/// media payload: the comparison is over row keys, the row's own field tuple,
+/// and the Blob annotation descriptors that tuple carries. An annotation that
+/// moved between the two sides is therefore reported as its own coordinate
+/// rather than as a change to the row's data.
+fn run_diff(
+    repository: &Repository,
+    directory: &str,
+    relation: [u8; 16],
+    from: &str,
+    to: &str,
+    format: HistoryFormat,
+) -> Result<(), Diagnostic> {
+    // Each endpoint is pinned once, through the same ambiguity guard `--at`
+    // uses, so an identical-prefix name is refused rather than resolved to
+    // whichever ref `git for-each-ref` lists first.
+    let (from_commit, before_format) = pin_snapshot(repository, directory, from)?;
+    let (to_commit, after_format) = pin_snapshot(repository, directory, to)?;
+    // A format-1/2 endpoint is a read-only compatibility input with no native
+    // `.orna/store`, so it has no row map to compare. Say so instead of
+    // reporting the format-3 store seam's generic failure, the same refusal
+    // `--at` gives.
+    for (selector, format) in [(from, &before_format), (to, &after_format)] {
+        if format.is_read_only() {
+            return Err(history_error(
+                "Snapshot is a legacy format-1/2 input",
+                format!(
+                    "{selector:?} names a read-only compatibility snapshot with no native row store; name a format-3 commit"
+                ),
+            ));
+        }
+    }
+    // Both endpoints are resolved inside this repository, but a commit can
+    // record a database identity other than the current one: a reinitialized
+    // repository keeps its older commits reachable, so one repository can hold
+    // snapshots of two databases. The format-3 row map is keyed by that
+    // recorded identity, so comparing across two identities would join rows
+    // that belong to different databases. Refuse instead of reporting
+    // unrelated rows as changes.
+    if before_format.database_id() != after_format.database_id() {
+        return Err(history_error(
+            "Snapshots belong to different repositories",
+            format!(
+                "{from:?} and {to:?} record different database identities; \
+                 compare two snapshots of one repository"
+            ),
+        ));
+    }
+    let from_label = format!("{from:?} ({from_commit})");
+    let to_label = format!("{to:?} ({to_commit})");
+    let (before, before_read) = read_relation_rows(&before_format, relation)?;
+    let (after, after_read) = read_relation_rows(&after_format, relation)?;
+    let payload_bytes_read = before_read.payload_bytes_read + after_read.payload_bytes_read;
+    let native_objects_read = before_read.objects_read + after_read.objects_read;
+    let changes = compare_rows(before, after);
+    let (added, changed, removed) = counts(&changes);
+    match format {
+        HistoryFormat::Human => {
+            for change in &changes {
+                println!("{}", human_change(change));
+            }
+            println!(
+                "{added} added; {changed} changed; {removed} removed; {} rows in {to_label}",
+                changes
+                    .iter()
+                    .filter(|change| !matches!(change, RowChange::Removed(_)))
+                    .count(),
+            );
+            println!(
+                "media payload bytes read: {payload_bytes_read}; native objects read: {native_objects_read}"
+            );
+        }
+        HistoryFormat::Json => {
+            let entries: Vec<serde_json::Value> = changes.iter().map(change_json).collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "from": from_label,
+                    "to": to_label,
+                    "added": added,
+                    "changed": changed,
+                    "removed": removed,
+                    "media_payload_bytes_read": payload_bytes_read,
+                    "native_objects_read": native_objects_read,
+                    "changes": entries,
+                })
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The measured cost of one pinned relation read: the media payload bytes and
+/// native objects the read touched.
+struct ReadCost {
+    payload_bytes_read: u64,
+    objects_read: u64,
+}
+
+/// Reads every committed row of one relation at one already-pinned snapshot,
+/// keyed by canonical key bytes so the two sides join on the committed row
+/// identity.
+///
+/// The relation is walked one bounded page at a time; each page resumes at the
+/// last key it read, and the map keys by canonical bytes so a boundary row seen
+/// twice is stored once. The cost returned is the read scope's own accounting,
+/// so a caller can report the payload bytes the comparison did not fetch.
+fn read_relation_rows(
+    format: &RepositoryFormatContext,
+    relation: [u8; 16],
+) -> Result<(BTreeMap<Vec<u8>, AdmittedRow>, ReadCost), Diagnostic> {
+    let row_map = format
+        .load_row_map(relation)
+        .map_err(|error| history_error("Row map could not be loaded", format!("{error:?}")))?;
+    let graph = format
+        .open_native_graph(&row_map)
+        .map_err(|error| history_error("Native graph could not be opened", format!("{error:?}")))?;
+    let scope = graph
+        .open_read_scope()
+        .map_err(|error| history_error("Read scope could not be opened", format!("{error:?}")))?;
+    let mut rows: BTreeMap<Vec<u8>, AdmittedRow> = BTreeMap::new();
+    let mut cursor: Option<TypedKey> = None;
+    loop {
+        let range = KeyRange::new(cursor.clone(), None, MAX_DIFF_PAGE)
+            .map_err(|error| history_error("Row range is invalid", format!("{error:?}")))?;
+        let page = graph
+            .range_rows(&range, &scope)
+            .map_err(|error| history_error("Row range could not be read", format!("{error:?}")))?;
+        let read = page.len();
+        let mut last = None;
+        for row in page {
+            // `KeyRange`'s lower bound is inclusive, so each page re-reads the
+            // boundary row it resumes at; the map insert keys by canonical
+            // bytes and dedupes it, and the cursor still advances a full page.
+            last = Some(row.key().clone());
+            let key = row.key().canonical_bytes().map_err(|error| {
+                history_error("Row key could not be encoded", format!("{error:?}"))
+            })?;
+            rows.insert(key, row);
+        }
+        if read < MAX_DIFF_PAGE {
+            return Ok((
+                rows,
+                ReadCost {
+                    payload_bytes_read: scope.payload_bytes_read(),
+                    objects_read: scope.objects_read(),
+                },
+            ));
+        }
+        match last {
+            // A full page with no advance would re-read the same page.
+            Some(last) => cursor = Some(last),
+            None => {
+                return Ok((
+                    rows,
+                    ReadCost {
+                        payload_bytes_read: scope.payload_bytes_read(),
+                        objects_read: scope.objects_read(),
+                    },
+                ));
+            }
+        }
+    }
+}
+
+/// Joins the two pinned reads by canonical key into one ordered change list.
+fn compare_rows(
+    before: BTreeMap<Vec<u8>, AdmittedRow>,
+    after: BTreeMap<Vec<u8>, AdmittedRow>,
+) -> Vec<RowChange> {
+    let mut changes = Vec::new();
+    for (key, old) in &before {
+        match after.get(key) {
+            None => changes.push(RowChange::Removed(old.clone())),
+            Some(new) if row_identity(old) != row_identity(new) => {
+                changes.push(RowChange::Changed {
+                    before: old.clone(),
+                    after: new.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for (key, new) in &after {
+        if !before.contains_key(key) {
+            changes.push(RowChange::Added(new.clone()));
+        }
+    }
+    changes
+}
+
+/// What makes two readings of one committed row the same row: the stored value
+/// beside the Blob annotation coordinate its tuple carries.
+fn row_identity(row: &AdmittedRow) -> (Vec<u8>, Vec<(usize, serde_json::Value)>) {
+    (encoded_value(row), annotations_of(row))
+}
+
+/// One change as a JSON object. A `changed` entry separates the two
+/// coordinates so a content move and an annotation move are told apart.
+fn change_json(change: &RowChange) -> serde_json::Value {
+    match change {
+        RowChange::Added(row) => serde_json::json!({
+            "change": "added",
+            "key": render_key(row.key()),
+            "annotations": annotations_of(row),
+        }),
+        RowChange::Removed(row) => serde_json::json!({
+            "change": "removed",
+            "key": render_key(row.key()),
+            "annotations": annotations_of(row),
+        }),
+        RowChange::Changed { before, after } => serde_json::json!({
+            "change": "changed",
+            "key": render_key(after.key()),
+            "content_changed": encoded_value(before) != encoded_value(after),
+            "before": { "annotations": annotations_of(before) },
+            "after": { "annotations": annotations_of(after) },
+        }),
+    }
+}
+
+/// One change as a human line. A changed row names which coordinate moved so a
+/// re-annotation is not read as a data change.
+fn human_change(change: &RowChange) -> String {
+    match change {
+        RowChange::Added(row) => format!("added   {}", render_key(row.key())),
+        RowChange::Removed(row) => format!("removed {}", render_key(row.key())),
+        RowChange::Changed { before, after } => {
+            let content = encoded_value(before) != encoded_value(after);
+            let annotation = annotations_of(before) != annotations_of(after);
+            format!(
+                "changed {} (content={}, annotation={})",
+                render_key(after.key()),
+                content,
+                annotation,
+            )
+        }
+    }
+}
+
+/// Counts the changes as `(added, changed, removed)`.
+fn counts(changes: &[RowChange]) -> (usize, usize, usize) {
+    let mut added = 0;
+    let mut changed = 0;
+    let mut removed = 0;
+    for change in changes {
+        match change {
+            RowChange::Added(_) => added += 1,
+            RowChange::Changed { .. } => changed += 1,
+            RowChange::Removed(_) => removed += 1,
+        }
+    }
+    (added, changed, removed)
+}
+
+/// Renders a canonical row key the way `orna query` prints one: a text key as
+/// its text, and a byte key as that same text when its bytes are valid UTF-8,
+/// so a key reported by either verb is greppable the same way.
+fn render_key(key: &TypedKey) -> String {
+    match key {
+        TypedKey::Text(text) => text.clone(),
+        TypedKey::UInt(value) => value.to_string(),
+        TypedKey::Int(value) => value.to_string(),
+        TypedKey::Bool(value) => value.to_string(),
+        TypedKey::Null => "-".to_owned(),
+        TypedKey::Bytes(bytes) => render_bytes(bytes),
+        TypedKey::Tuple(values) => values.iter().map(render_key).collect::<Vec<_>>().join(","),
+    }
+}
+
+fn render_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) if !text.is_empty() && text.chars().all(|character| !character.is_control()) => {
+            text.to_owned()
+        }
+        _ => format!("0x{}", hex(bytes)),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
         "E2000",
@@ -399,7 +835,7 @@ fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_options, parse_relation_id, HistoryFormat, DEFAULT_HISTORY_LIMIT};
+    use super::{DEFAULT_HISTORY_LIMIT, HistoryFormat, parse_options, parse_relation_id};
     use crate::Exit;
 
     fn words(values: &[&str]) -> Vec<String> {
@@ -423,7 +859,7 @@ mod tests {
         assert_eq!(parsed.at, None);
         let flagged_arguments = words(&["--limit", "3", "0102", "--since", "abc", "song"]);
         let parsed = parse_options(&flagged_arguments).unwrap();
-        assert_eq!((parsed.relation, parsed.key), ("0102", "song"));
+        assert_eq!((parsed.relation, parsed.key), ("0102", Some("song")));
         assert_eq!((parsed.limit, parsed.since), (3, Some("abc")));
         assert_eq!(parsed.format, HistoryFormat::Human);
         let json = words(&["--format", "json", "0102", "song"]);
@@ -483,20 +919,71 @@ mod tests {
 
     #[test]
     fn revision_json_has_exactly_the_documented_keys() {
-        let value = super::revision_json("c0ffee", "7ree", true, "Ada <ada@example.test>");
+        let value = super::revision_json(
+            "c0ffee",
+            "7ree",
+            true,
+            "Ada <ada@example.test>",
+            1_700_000_000,
+            None,
+        );
         let object = value.as_object().unwrap();
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["author", "commit", "present", "tree"]);
+        assert_eq!(keys, ["author", "commit", "committed", "present", "tree"]);
         assert_eq!(object["present"], serde_json::Value::Bool(true));
         assert_eq!(object["author"], "Ada <ada@example.test>");
+        assert_eq!(object["committed"], 1_700_000_000);
+    }
+
+    #[test]
+    fn revision_json_reports_the_migration_coordinate_only_on_the_migration_commit() {
+        let value = super::revision_json(
+            "c0ffee",
+            "7ree",
+            true,
+            "Ada <ada@example.test>",
+            1_700_000_000,
+            Some("format-1-to-3"),
+        );
+        let object = value.as_object().unwrap();
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "author",
+                "commit",
+                "committed",
+                "migration",
+                "present",
+                "tree"
+            ],
+            "the migration coordinate is an additional key, not a replaced one"
+        );
+        assert_eq!(object["migration"], "format-1-to-3");
+        assert_eq!(object["commit"], "c0ffee");
     }
 
     #[test]
     fn revision_listing_round_trips_in_order_as_a_json_array() {
         let listing = serde_json::Value::Array(vec![
-            super::revision_json("aaa", "t1", true, "Ada <ada@example.test>"),
-            super::revision_json("bbb", "t2", false, "Ada <ada@example.test>"),
+            super::revision_json(
+                "aaa",
+                "t1",
+                true,
+                "Ada <ada@example.test>",
+                1_700_000_000,
+                None,
+            ),
+            super::revision_json(
+                "bbb",
+                "t2",
+                false,
+                "Ada <ada@example.test>",
+                1_700_000_001,
+                None,
+            ),
         ]);
         let parsed: serde_json::Value = serde_json::from_str(&listing.to_string()).unwrap();
         let entries = parsed.as_array().unwrap();
@@ -537,7 +1024,7 @@ mod tests {
         assert_eq!(parsed.format, HistoryFormat::Json);
         assert_eq!(
             (parsed.limit, parsed.relation, parsed.key),
-            (2, "0102", "song")
+            (2, "0102", Some("song"))
         );
     }
 

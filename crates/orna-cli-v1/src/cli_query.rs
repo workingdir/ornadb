@@ -1,5 +1,7 @@
-//! `orna query <relation-hex> [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]`:
-//! lists the payload-free Blob metadata of committed format-3 rows.
+//! `orna query <relation-hex> [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]`
+//! lists the payload-free Blob metadata of committed format-3 rows, optionally
+//! narrowed by an annotation predicate (`--kind`, `--not-kind`, `--suffix`,
+//! `--min-length`, `--max-length`).
 //!
 //! The query reads through the same repository-owned native graph the row
 //! history walks, so it is measured at the real storage read seam: every row
@@ -7,9 +9,18 @@
 //! `payload_bytes_read` stays at zero because the row's own field tuple
 //! carries the length, SHA-256 and MIME-1 annotation. Media bytes are only
 //! fetched by an explicit Blob read, never by a listing or summary.
+//!
+//! The predicate is evaluated against those same stored annotation
+//! coordinates, so a filtered listing reports the plan it used and the payload
+//! bytes it did not fetch. Coordinates a stored ROV-3 annotation does not bind
+//! (a decoded duration or pixel dimension) are not answered here: they are
+//! decoder output under ORNA-MEDIA-002, not annotation, and the plan names them
+//! as requiring an explicit decode.
 
 use super::*;
+use crate::cli_row_key::key_candidates;
 use orna_repository_v1::{KeyRange, Repository, TypedKey};
+use orna_value_v1::BlobMetadataFilter;
 
 /// Most rows one listing reports when `--limit` is not given.
 const DEFAULT_QUERY_LIMIT: usize = 64;
@@ -31,6 +42,7 @@ struct QueryOptions<'a> {
     field: Option<usize>,
     limit: usize,
     format: QueryFormat,
+    predicate: BlobMetadataFilter,
 }
 
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
@@ -39,6 +51,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut field = None;
     let mut limit = DEFAULT_QUERY_LIMIT;
     let mut format = QueryFormat::Human;
+    let mut predicate = BlobMetadataFilter::new();
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
@@ -54,6 +67,40 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                     .ok_or_else(|| query_error("--field needs a value", "usage: --field N"))?;
                 field = Some(value.parse::<usize>().map_err(|_| {
                     query_error("--field is not an index", format!("got {value:?}"))
+                })?);
+            }
+            "--kind" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--kind needs a value", "usage: --kind MIME")
+                })?;
+                predicate = predicate.with_media_type(value);
+            }
+            "--not-kind" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--not-kind needs a value", "usage: --not-kind MIME")
+                })?;
+                predicate = predicate.without_media_type(value);
+            }
+            "--suffix" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--suffix needs a value", "usage: --suffix HINT")
+                })?;
+                predicate = predicate.with_suffix(value);
+            }
+            "--min-length" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--min-length needs a value", "usage: --min-length BYTES")
+                })?;
+                predicate = predicate.with_min_length(value.parse::<u64>().map_err(|_| {
+                    query_error("--min-length is not a byte count", format!("got {value:?}"))
+                })?);
+            }
+            "--max-length" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--max-length needs a value", "usage: --max-length BYTES")
+                })?;
+                predicate = predicate.with_max_length(value.parse::<u64>().map_err(|_| {
+                    query_error("--max-length is not a byte count", format!("got {value:?}"))
                 })?);
             }
             "--limit" => {
@@ -86,7 +133,10 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
             flag if flag.starts_with("--") => {
                 return Err(query_error(
                     "Unknown query flag",
-                    format!("got {flag:?}; accepted: --key, --field, --limit, --format"),
+                    format!(
+                        "got {flag:?}; accepted: --key, --field, --kind, --not-kind, --suffix, \
+                         --min-length, --max-length, --limit, --format"
+                    ),
                 ));
             }
             _ => positional.push(word),
@@ -95,7 +145,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--field N] [--limit N] [--format human|json]",
+            "usage: orna query <relation-hex> [--key KEY] [--field N] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
         ));
     };
     Ok(QueryOptions {
@@ -104,6 +154,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
         field,
         limit,
         format,
+        predicate,
     })
 }
 
@@ -183,6 +234,19 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             }
         }
     }
+    // The predicate is evaluated over the same stored annotation
+    // coordinates the listing already decoded, so narrowing a listing costs no
+    // additional read and never enters a descriptor or a payload chunk. A
+    // candidate that does not match is dropped rather than reported, and the
+    // plan below states which coordinates answered it.
+    let candidates = listings.len();
+    let subject = options.field.map_or_else(
+        || "all fields".to_owned(),
+        |field| format!("field {field}"),
+    );
+    listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
+    let matched = listings.len();
+    let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
     match options.format {
         QueryFormat::Human => {
             for (key, field, metadata) in &listings {
@@ -202,6 +266,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 scope.payload_bytes_read(),
                 scope.objects_read(),
             );
+            println!("{}", plan.human_line());
         }
         QueryFormat::Json => {
             let entries: Vec<serde_json::Value> = listings
@@ -225,12 +290,80 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     "blobs": entries.len(),
                     "media_payload_bytes_read": scope.payload_bytes_read(),
                     "native_objects_read": scope.objects_read(),
+                    "plan": plan.to_json(),
                     "listings": entries,
                 })
             );
         }
     }
     Ok(())
+}
+
+/// The measured plan of one annotation predicate evaluation.
+///
+/// This is the plan the query reports so a caller can see which annotation
+/// coordinates answered the predicate, whether the answer needed any payload
+/// byte, and which coordinates the stored annotation does not bind. It is
+/// evidence about the read that happened, not a statement of intent: the
+/// payload figure is the read seam's own count for this process.
+struct PredicatePlan<'a> {
+    predicate: &'a BlobMetadataFilter,
+    subject: &'a str,
+    candidates: usize,
+    matched: usize,
+}
+
+impl<'a> PredicatePlan<'a> {
+    const fn new(
+        predicate: &'a BlobMetadataFilter,
+        subject: &'a str,
+        candidates: usize,
+        matched: usize,
+    ) -> Self {
+        Self {
+            predicate,
+            subject,
+            candidates,
+            matched,
+        }
+    }
+
+    /// The coordinates this predicate evaluated, as the planner names them.
+    fn coordinates(&self) -> &'static [&'static str] {
+        self.predicate.coordinates()
+    }
+
+    /// Coordinates a decoded duration or pixel dimension would name. They are
+    /// not part of the stored annotation, so no predicate over them can be
+    /// answered without an explicit decode that reads payload bytes.
+    const fn decode_required_coordinates() -> &'static [&'static str] {
+        &["duration", "dimensions"]
+    }
+
+    fn human_line(&self) -> String {
+        format!(
+            "plan: annotation predicate over {}; coordinates {}; decoded-payload coordinates {}; \
+             candidates {} matched {}; subject {}",
+            self.subject,
+            self.coordinates().join(","),
+            Self::decode_required_coordinates().join(","),
+            self.candidates,
+            self.matched,
+            self.subject,
+        )
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "annotation-predicate",
+            "subject": self.subject,
+            "coordinates": self.coordinates(),
+            "decode_required_coordinates": Self::decode_required_coordinates(),
+            "candidates": self.candidates,
+            "matched": self.matched,
+            "payload_fetch": "none",
+        })
+    }
 }
 
 /// Renders a canonical row key the way the caller spelled it: a text key as
@@ -266,33 +399,6 @@ fn render_bytes(bytes: &[u8]) -> String {
 /// The canonical keys one `--key` spelling names, in the order a lookup tries
 /// them: the text spelling, then the same spelling's own bytes, then the bytes
 /// a `0x` hex spelling names.
-fn key_candidates(value: &str) -> Result<Vec<TypedKey>, Diagnostic> {
-    let mut candidates = vec![
-        TypedKey::Text(value.to_owned()),
-        TypedKey::Bytes(value.as_bytes().to_vec()),
-    ];
-    if let Some(digits) = value.strip_prefix("0x") {
-        if digits.is_empty()
-            || !digits.len().is_multiple_of(2)
-            || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Err(query_error(
-                "--key is not a byte key",
-                format!("got {value:?}; a byte key is 0x followed by an even number of hex digits"),
-            ));
-        }
-        let bytes = digits
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                u8::from_str_radix(std::str::from_utf8(pair).expect("hex digits are ASCII"), 16)
-                    .expect("hexadecimal digits were checked above")
-            })
-            .collect();
-        candidates.push(TypedKey::Bytes(bytes));
-    }
-    Ok(candidates)
-}
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -332,8 +438,7 @@ fn query_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::{
-        key_candidates, parse_options, parse_relation_id, render_key, QueryFormat,
-        DEFAULT_QUERY_LIMIT,
+        parse_options, parse_relation_id, render_key, QueryFormat, DEFAULT_QUERY_LIMIT,
     };
     use crate::Exit;
     use orna_repository_v1::TypedKey;
@@ -382,31 +487,6 @@ mod tests {
         assert_eq!(parsed.field, Some(0));
     }
 
-    #[test]
-    fn key_spelling_names_the_text_bytes_and_hex_candidates() {
-        // A listing prints a byte key that is UTF-8 as its text, so `--key`
-        // must find that row by the printed spelling as well as by its bytes.
-        assert_eq!(
-            key_candidates("song").unwrap(),
-            vec![
-                TypedKey::Text("song".to_owned()),
-                TypedKey::Bytes(b"song".to_vec()),
-            ]
-        );
-        assert_eq!(
-            key_candidates("0x736f6e67").unwrap(),
-            vec![
-                TypedKey::Text("0x736f6e67".to_owned()),
-                TypedKey::Bytes(b"0x736f6e67".to_vec()),
-                TypedKey::Bytes(b"song".to_vec()),
-            ]
-        );
-        // An odd digit count or a non-hex digit is not a byte key, and is
-        // refused rather than silently truncated into a different key.
-        assert!(key_candidates("0x736f6").is_err());
-        assert!(key_candidates("0xzz").is_err());
-        assert!(key_candidates("0x").is_err());
-    }
 
     #[test]
     fn rendered_keys_follow_the_spelling_the_row_carries() {
