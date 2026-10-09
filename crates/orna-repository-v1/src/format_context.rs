@@ -1300,7 +1300,7 @@ mod graph_bridge_tests {
             1,
             first_payload,
             "audio/mpeg",
-            Some("mp3"),
+            Some("mp2"),
             false,
         );
         let second_payload = b"london take two, remastered".as_slice();
@@ -1310,7 +1310,7 @@ mod graph_bridge_tests {
             1,
             second_payload,
             "audio/mpeg",
-            Some("mp3"),
+            Some("mp2"),
             false,
         );
         assert_ne!(first_descriptor, second_descriptor);
@@ -1343,7 +1343,7 @@ mod graph_bridge_tests {
             .read_stored_blob_value(&row, &first_descriptor, &scope)
             .expect("read the Blob the historical row stores");
         assert_eq!(stored.annotation().media_type(), "audio/mpeg");
-        assert_eq!(stored.annotation().suffix(), Some("mp3"));
+        assert_eq!(stored.annotation().suffix(), Some("mp2"));
         assert_eq!(stored.content_identity().length(), first_payload.len() as u64);
         let range = graph
             .read_blob_range(stored.reference(), 0..first_payload.len() as u64, &scope)
@@ -1393,7 +1393,11 @@ mod graph_bridge_tests {
             remounted.snapshot_id(),
             "one commit always resolves to one snapshot identity"
         );
-        assert_ne!(*mounted.snapshot_id(), head.snapshot_pin().snapshot_id());
+        assert_ne!(
+            *mounted.snapshot_id(),
+            head.snapshot_pin().snapshot_id(),
+            "a historical pin never shares the workspace snapshot identity"
+        );
     }
 
     #[test]
@@ -1408,7 +1412,7 @@ mod graph_bridge_tests {
             1,
             payload,
             "audio/mpeg",
-            Some("mp3"),
+            Some("mp2"),
             true,
         );
 
