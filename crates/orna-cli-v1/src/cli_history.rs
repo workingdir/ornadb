@@ -585,10 +585,10 @@ struct ReadCost {
 /// keyed by canonical key bytes so the two sides join on the committed row
 /// identity.
 ///
-/// The relation is walked one bounded page at a time and no key is ever
-/// revisited: each page after the first resumes strictly after the last key
-/// already read. The cost returned is the read scope's own accounting, so a
-/// caller can report the payload bytes the comparison did not fetch.
+/// The relation is walked one bounded page at a time; each page resumes at the
+/// last key it read, and the map keys by canonical bytes so a boundary row seen
+/// twice is stored once. The cost returned is the read scope's own accounting,
+/// so a caller can report the payload bytes the comparison did not fetch.
 fn read_relation_rows(
     format: &RepositoryFormatContext,
     relation: [u8; 16],
@@ -613,8 +613,9 @@ fn read_relation_rows(
         let read = page.len();
         let mut last = None;
         for row in page {
-            // `KeyRange` excludes its lower bound, so a key at or below the
-            // cursor is never read twice even when a page is exactly full.
+            // `KeyRange`'s lower bound is inclusive, so each page re-reads the
+            // boundary row it resumes at; the map insert keys by canonical
+            // bytes and dedupes it, and the cursor still advances a full page.
             last = Some(row.key().clone());
             let key = row.key().canonical_bytes().map_err(|error| {
                 history_error("Row key could not be encoded", format!("{error:?}"))
@@ -781,7 +782,7 @@ fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_options, parse_relation_id, HistoryFormat, DEFAULT_HISTORY_LIMIT};
+    use super::{DEFAULT_HISTORY_LIMIT, HistoryFormat, parse_options, parse_relation_id};
     use crate::Exit;
 
     fn words(values: &[&str]) -> Vec<String> {
