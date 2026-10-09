@@ -284,6 +284,19 @@ impl OfflineCopy {
         self.rows.iter().find(|row| row.key == key)
     }
 
+    /// Lists, in bundle order, the rows whose payload this copy does not hold:
+    /// a row without a copied payload, or one whose media file is absent. This
+    /// is a metadata-only question. It asks which objects are missing, never
+    /// what they contain, so it opens no media file and returns the `(key,
+    /// sha256)` pairs a fetch-on-demand caller must retrieve.
+    pub fn missing_payloads(&self) -> Vec<(Vec<u8>, [u8; 32])> {
+        self.rows
+            .iter()
+            .filter(|row| self.payload_path(row).is_none())
+            .map(|row| (row.key.clone(), row.sha256))
+            .collect()
+    }
+
     /// Reads and verifies one payload. This is the only call that touches
     /// `media/`.
     pub fn hydrate(&self, key: &[u8]) -> Result<Vec<u8>, OfflineCopyError> {
@@ -317,13 +330,33 @@ impl OfflineCopy {
             .collect()
     }
 
+    /// The media file holding one row's payload, or `None` when this copy does
+    /// not hold it: the row records no copied payload, or the file is absent.
+    /// Presence only; the bytes are read and verified by `read_payload`.
+    fn payload_path(&self, row: &OfflineRowMetadata) -> Option<PathBuf> {
+        if !row.has_payload {
+            return None;
+        }
+        let path = self.directory.join(MEDIA_DIR).join(hex(&row.sha256));
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => Some(path),
+            _ => None,
+        }
+    }
+
     fn read_payload(&self, row: &OfflineRowMetadata) -> Result<Vec<u8>, OfflineCopyError> {
         if !row.has_payload {
             return Err(OfflineCopyError::NoPayload {
                 key: row.key.clone(),
             });
         }
-        let payload = match fs::read(self.directory.join(MEDIA_DIR).join(hex(&row.sha256))) {
+        let Some(path) = self.payload_path(row) else {
+            return Err(OfflineCopyError::PayloadAbsent {
+                key: row.key.clone(),
+                sha256: row.sha256,
+            });
+        };
+        let payload = match fs::read(&path) {
             Ok(payload) => payload,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Err(OfflineCopyError::PayloadAbsent {
