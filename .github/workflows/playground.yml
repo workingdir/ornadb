@@ -15,8 +15,13 @@ env:
   CARGO_BUILD_JOBS: 2
   RUST_TEST_THREADS: 2
 
+# One group per ref. A workflow-wide group let every worker branch share main's
+# slot, and because GitHub keeps only one pending run per group and this group
+# does not cancel in progress, each branch push discarded main's queued run -
+# the job that runs the orna-cli-v1 integration suite silently never ran and a
+# real regression sat on main unnoticed (ornadb-tu8sp).
 concurrency:
-  group: playground-${{ github.workflow }}
+  group: playground-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -57,5 +62,21 @@ jobs:
       - name: Test browser LSP exports through the shared analysis core
         run: cargo test --locked -p orna-lsp browser_
 
-      - name: Test the in-database playground serve routes
+  # The CLI integration suite is the product's regression gate, not a playground
+  # detail. It used to be the last step of `build` above, where any earlier step
+  # failing - or the run being discarded - let a red suite report as green. It is
+  # its own job so a real failure is always visible as its own red check on the
+  # commit that caused it (ornadb-tu8sp, ornadb-c3g0c).
+  cli-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Test the orna-cli-v1 integration suite
         run: cargo test --locked -p orna-cli-v1 -- --nocapture
