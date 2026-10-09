@@ -166,16 +166,29 @@ fn crash_child_body(seam: Seam, repository_path: &Path) {
 }
 
 /// Runs this test binary again, crashing the child at `seam`.
+///
+/// The child dies by SIGABRT on purpose, so the kernel would write a core dump
+/// into the test's working directory on every run. On Linux the child is a
+/// `/bin/sh` that disables core dumps for itself and then `exec`s this same
+/// test binary, so the limit survives into the crashing process without unsafe
+/// code or an extra dependency.
 fn run_crashing_child(seam: Seam, repository_path: &Path, test_name: &str) -> ExitStatus {
-    Command::new(env::current_exe().expect("resolve test binary"))
-        .arg("--exact")
-        .arg(test_name)
-        .arg("--nocapture")
-        .arg("--test-threads=1")
+    let binary = env::current_exe().expect("resolve test binary");
+    let mut command = if cfg!(target_os = "linux") {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("ulimit -c 0 2>/dev/null; exec \"$0\" \"$@\"")
+            .arg(binary);
+        command
+    } else {
+        Command::new(binary)
+    };
+    command
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
         .env(CRASH_SEAM, OsString::from(seam.tag()))
-        .env(CRASH_REPOSITORY, repository_path.as_os_str())
-        .status()
-        .expect("run crashing child")
+        .env(CRASH_REPOSITORY, repository_path.as_os_str());
+    command.status().expect("run crashing child")
 }
 
 fn child_seam() -> Option<Seam> {
