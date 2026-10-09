@@ -8,8 +8,11 @@ use std::{
     process::{Command, Stdio},
 };
 
+use orna_conformance_v1::DurableTransactionalEvaluator;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository_v1::Repository;
+use orna_runtime_v1::RuntimeState;
+use orna_storage_v1::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -21,6 +24,39 @@ pub fn hex(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+/// Publishes one committed media row through the explicit publication
+/// boundary, the same path `orna` uses. The runtime only stages durable
+/// mutations; this freezes the pending tail at its checkpoint and projects the
+/// frozen prefix into the format-3 store as one Git commit, so the row becomes
+/// reachable from the published snapshot.
+///
+/// `ordinal` names the publication intent; it must not repeat within one
+/// runtime, because a frozen intent is durable.
+pub async fn publish_media_row(
+    repository: &Repository,
+    state: &RuntimeState,
+    key: &str,
+    ordinal: u8,
+) {
+    let checkpoint = state
+        .latest_checkpoint()
+        .await
+        .unwrap()
+        .expect("a committed row leaves a checkpoint");
+    let logical_key = key.to_owned();
+    DurableTransactionalEvaluator::default()
+        .publish_pending(
+            repository,
+            state,
+            [ordinal; 16],
+            &checkpoint,
+            |mutation| LoosePath::for_key(mutation.table(), &[logical_key.clone()]),
+            &format!("orna: publish {key}"),
+        )
+        .await
+        .expect("the explicit publication boundary succeeds");
 }
 
 pub fn capture_failure(

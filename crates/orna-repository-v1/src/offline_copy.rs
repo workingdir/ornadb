@@ -26,8 +26,9 @@ const MEDIA_DIR: &str = "media";
 const HEADER: &str = "orna-offline-copy 1";
 
 /// Fixed buffer used to hash one payload. Verification retention is bounded by
-/// this constant, not by the payload length.
-const PAYLOAD_BUFFER_BYTES: usize = 64 * 1024;
+/// this constant, not by the payload length, so it is also the temporary
+/// storage bound a caller can report for a streamed import (ACCEPTANCE Gate B).
+pub const PAYLOAD_BUFFER_BYTES: usize = 64 * 1024;
 
 /// One committed row to copy, with its payload when the caller selects it.
 #[derive(Clone, Debug, Eq, PartialEq)]

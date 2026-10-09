@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use super::{
-    CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeState, SafeDiagnostic,
-    TableActivationError, ValidatedTableActivationCommit,
+    CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeError, RuntimeState, RuntimeTableIdentity,
+    SafeDiagnostic, TableActivationError, TableMutation, ValidatedTableActivationCommit,
 };
 
 /// One repository-wide invalidation clock shared by projections in a VFS
@@ -640,6 +640,28 @@ impl<S> ManagedFile<S> {
             baseline,
             state: Mutex::new(TemporarySaveState {
                 draft,
+                synced_revision: None,
+                applied: None,
+            }),
+        }
+    }
+
+    /// Creates a private sibling backup from this destination's currently
+    /// accepted bytes. Backup saves preserve the old row image as scratch only:
+    /// fsyncing the backup persists the private file and never removes,
+    /// replaces, or admits the managed `data.orna` row. A later editor temp
+    /// rename must still pass through [`ManagedFile::rename_over`] and the
+    /// validated activation boundary.
+    pub async fn begin_temporary_backup(
+        self: &Arc<Self>,
+        max_file_bytes: usize,
+    ) -> TemporarySave<S> {
+        let baseline = Arc::clone(&self.state.lock().await.image);
+        TemporarySave {
+            target: Arc::clone(self),
+            baseline: Arc::clone(&baseline),
+            state: Mutex::new(TemporarySaveState {
+                draft: EditDraft::open(baseline, max_file_bytes),
                 synced_revision: None,
                 applied: None,
             }),
@@ -1326,10 +1348,7 @@ pub fn field_name_digest(field: &str) -> [u8; 32] {
 /// Resolves one `~field-` alias digest against a retained candidate field
 /// name. The full name is re-derived and verified rather than trusted, so a
 /// colliding digest is detected instead of merged (VFS-016).
-pub fn resolve_field_alias(
-    digest: &[u8; 32],
-    candidates: &[&str],
-) -> Result<String, VfsPathError> {
+pub fn resolve_field_alias(digest: &[u8; 32], candidates: &[&str]) -> Result<String, VfsPathError> {
     let mut resolved: Option<&str> = None;
     for candidate in candidates {
         if &field_name_digest(candidate) != digest {
@@ -1340,9 +1359,7 @@ pub fn resolve_field_alias(
         }
         resolved = Some(candidate);
     }
-    resolved
-        .map(str::to_owned)
-        .ok_or(VfsPathError::UnknownRow)
+    resolved.map(str::to_owned).ok_or(VfsPathError::UnknownRow)
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -1362,7 +1379,7 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
         Some(hint) => hint.to_owned(),
         None => media_suffixes(media_type),
     };
-    let mut name = project_component(field);
+    let mut name = project_field_name(field);
     name.push('.');
     name.push_str(&selected);
     if name == VFS_ROW_DOCUMENT {
@@ -1431,7 +1448,10 @@ pub fn split_vfs_relative(path: &str) -> Result<Vec<&str>, VfsPathError> {
 /// therefore cannot target a different row or field.
 pub fn unproject_component(component: &str) -> Result<VfsComponent, VfsPathError> {
     if let Some(hex) = component.strip_prefix("~key-") {
-        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        if hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
             let mut digest = [0u8; 32];
             for (index, slot) in digest.iter_mut().enumerate() {
@@ -1459,7 +1479,10 @@ pub fn unproject_component(component: &str) -> Result<VfsComponent, VfsPathError
             let hex = component
                 .get(at + 1..at + 3)
                 .ok_or(VfsPathError::WrongNamespace)?;
-            if !hex.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)) {
+            if !hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+            {
                 return Err(VfsPathError::WrongNamespace);
             }
             text.push(u8::from_str_radix(hex, 16).map_err(|_| VfsPathError::WrongNamespace)?);
@@ -1495,11 +1518,14 @@ pub enum VfsStoredFieldKind {
     Document { text: String },
     /// A stored optional field present as explicit `null`.
     Null,
-    /// A stored Blob projected as a sibling content file.
+    /// A stored Blob projected as a sibling content file. `required` is the
+    /// schema's declaration: a required Blob can never be removed through the
+    /// VFS, while an optional one may be unlinked to `null` (VFS-013).
     Content {
         media_type: String,
         suffix: Option<String>,
         descriptor_size: u64,
+        required: bool,
     },
 }
 
@@ -1518,11 +1544,34 @@ impl VfsStoredField {
         }
     }
 
+    /// A required stored Blob. Schema validity keeps its exact content
+    /// descriptor, so unlinking its sibling file must fail (VFS-013).
     pub fn content(
         name: impl Into<String>,
         media_type: impl Into<String>,
         suffix: Option<String>,
         descriptor_size: u64,
+    ) -> Self {
+        Self::content_with_class(name, media_type, suffix, descriptor_size, true)
+    }
+
+    /// An optional stored Blob. Unlinking its sibling file may set the stored
+    /// field to `null` after the row validates (VFS-013).
+    pub fn content_optional(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+    ) -> Self {
+        Self::content_with_class(name, media_type, suffix, descriptor_size, false)
+    }
+
+    fn content_with_class(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+        required: bool,
     ) -> Self {
         Self {
             name: name.into(),
@@ -1530,6 +1579,7 @@ impl VfsStoredField {
                 media_type: media_type.into(),
                 suffix,
                 descriptor_size,
+                required,
             },
         }
     }
@@ -1550,6 +1600,7 @@ pub struct VfsProjectedFile {
     name: String,
     media_type: String,
     descriptor_size: u64,
+    required: bool,
 }
 
 impl VfsProjectedFile {
@@ -1563,6 +1614,12 @@ impl VfsProjectedFile {
 
     pub fn descriptor_size(&self) -> u64 {
         self.descriptor_size
+    }
+
+    /// True when the schema declares this Blob required. A required Blob's
+    /// sibling file can never be unlinked (VFS-013).
+    pub const fn is_required(&self) -> bool {
+        self.required
     }
 }
 
@@ -1605,6 +1662,7 @@ impl<S> VfsRowProjection<S> {
                     media_type,
                     suffix,
                     descriptor_size,
+                    required,
                 } => {
                     let name = project_content_name(&field.name, media_type, suffix.as_deref());
                     // Two stored values that claim one host name are refused
@@ -1624,6 +1682,7 @@ impl<S> VfsRowProjection<S> {
                         name,
                         media_type: media_type.clone(),
                         descriptor_size: *descriptor_size,
+                        required: *required,
                     });
                 }
             }
@@ -1670,19 +1729,62 @@ impl<S> VfsRowProjection<S> {
     /// projection is refused, so a lookup can never retarget another row's
     /// field (VFS-004, VFS-017).
     pub fn lookup(&self, name: &str) -> Result<VfsProjectedEntry<'_>, VfsPathError> {
-        match unproject_component(name)? {
-            VfsComponent::Canonical(text) if text == VFS_ROW_DOCUMENT => {
-                Ok(VfsProjectedEntry::Document)
-            }
-            VfsComponent::Canonical(text) => {
-                let file = self
-                    .files
-                    .iter()
-                    .find(|file| file.name == text)
-                    .ok_or(VfsPathError::UnknownRow)?;
-                Ok(VfsProjectedEntry::Content(file))
-            }
-            VfsComponent::LongAlias { .. } => Err(VfsPathError::WrongNamespace),
+        if name == VFS_ROW_DOCUMENT {
+            return Ok(VfsProjectedEntry::Document);
+        }
+        let file = self
+            .files
+            .iter()
+            .find(|file| file.name == name)
+            .ok_or(VfsPathError::UnknownRow)?;
+        Ok(VfsProjectedEntry::Content(file))
+    }
+
+    /// Resolves one directory entry to its authorized unlink target (VFS-013).
+    /// The row document is a complete stored-non-key-field document, so
+    /// removing it is refused: row deletion is an explicit database operation,
+    /// never a VFS side effect. A sibling file resolves to its stored Blob
+    /// field, carrying the schema's required/optional class. A name outside the
+    /// projection is resolved to no target, exactly like its lookup (VFS-004).
+    pub fn resolve_unlink(&self, name: &str) -> Result<VfsUnlinkTarget<'_>, VfsPathError> {
+        match self.lookup(name)? {
+            VfsProjectedEntry::Document => Ok(VfsUnlinkTarget::RowDocument),
+            VfsProjectedEntry::Content(file) => Ok(VfsUnlinkTarget::Content(file)),
+        }
+    }
+}
+
+/// The authorized outcome of resolving one unlink inside a row directory. The
+/// projection decides this from schema-issued field classes alone; a host name
+/// never widens what an unlink may remove (VFS-013).
+#[derive(Debug, Eq, PartialEq)]
+pub enum VfsUnlinkTarget<'a> {
+    /// `data.orna` itself: always refused (VFS-013).
+    RowDocument,
+    /// A required stored Blob: refused, because schema validity depends on the
+    /// exact content descriptor (VFS-013).
+    RequiredContent(&'a VfsProjectedFile),
+    /// An optional stored Blob: the unlink may assign that field `null`
+    /// through the validated activation boundary (VFS-013).
+    OptionalContent(&'a VfsProjectedFile),
+}
+
+impl VfsUnlinkTarget<'_> {
+    /// The exact `errno` this target requires, or `None` when the unlink may
+    /// proceed to validation.
+    pub fn refusal_errno(&self) -> Option<i32> {
+        match self {
+            Self::RowDocument | Self::RequiredContent(_) => Some(VFS_EPERM),
+            Self::OptionalContent(_) => None,
+        }
+    }
+
+    /// The stable Orna cause code kept alongside the host `errno` for a
+    /// refused unlink.
+    pub fn refusal_code(&self) -> Option<&'static str> {
+        match self {
+            Self::RowDocument | Self::RequiredContent(_) => Some("sys.vfs.unsupported"),
+            Self::OptionalContent(_) => None,
         }
     }
 }
@@ -1715,14 +1817,75 @@ fn escape_text(text: &str) -> String {
 fn render_field_name(name: &str) -> Result<String, VfsPathError> {
     let mut bytes = name.bytes();
     let valid = match bytes.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == b'_' => bytes
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+        Some(first) if first.is_ascii_alphabetic() || first == b'_' => {
+            bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }
         _ => false,
     };
     if !valid {
         return Err(VfsPathError::InvalidDocument);
     }
     Ok(name.to_owned())
+}
+
+/// One complete VFS row replacement routed into the runtime's validated table
+/// activation boundary. The table identity is repository-issued admission
+/// metadata; host paths never supply or override it.
+pub struct VfsTableRowReplacement {
+    mutation_id: [u8; 16],
+    table: RuntimeTableIdentity,
+    key: Vec<u8>,
+    value: Option<Vec<u8>>,
+}
+
+impl VfsTableRowReplacement {
+    pub fn new(
+        mutation_id: [u8; 16],
+        table: RuntimeTableIdentity,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    ) -> Result<Self, RuntimeError> {
+        let mutation = TableMutation::new(mutation_id, table.table(), key.clone(), value.clone())?
+            .with_table_object_id(table.object_id());
+        Ok(Self {
+            mutation_id: mutation.id(),
+            table,
+            key: mutation.key().to_vec(),
+            value,
+        })
+    }
+
+    pub fn from_candidate<S>(
+        mutation_id: [u8; 16],
+        table: RuntimeTableIdentity,
+        key: Vec<u8>,
+        candidate: &ActivationCandidate<S>,
+    ) -> Result<Self, RuntimeError> {
+        let value = (!candidate.is_removal()).then(|| candidate.replacement_bytes().to_vec());
+        Self::new(mutation_id, table, key, value)
+    }
+
+    pub fn table(&self) -> &RuntimeTableIdentity {
+        &self.table
+    }
+
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    pub fn value(&self) -> Option<&[u8]> {
+        self.value.as_deref()
+    }
+
+    pub fn mutation(&self) -> Result<TableMutation, RuntimeError> {
+        TableMutation::new(
+            self.mutation_id,
+            self.table.table(),
+            self.key.clone(),
+            self.value.clone(),
+        )
+        .map(|mutation| mutation.with_table_object_id(self.table.object_id()))
+    }
 }
 
 /// The VFS call boundary into the runtime's single validated table transaction.
@@ -1738,7 +1901,10 @@ pub async fn commit_vfs_table_activation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex as TestMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     fn fixture_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/publication-repository-main.orna");
@@ -1752,6 +1918,223 @@ mod tests {
         SafeDiagnostic {
             code: DiagnosticCode::TableAssertionFalse,
             class: DiagnosticClass::Permanent,
+        }
+    }
+
+    #[test]
+    fn unlink_refuses_row_document_and_required_blob_while_allowing_optional() {
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(17_u64)),
+            &[
+                VfsStoredField::document("title", "\"Live in London\""),
+                VfsStoredField::content("content", "audio/mpeg", None, 99),
+                VfsStoredField::content_optional("cover", "image/jpeg", None, 4096),
+                VfsStoredField::null("booklet"),
+            ],
+        )
+        .expect("row projection");
+
+        let content = project_content_name("content", "audio/mpeg", None);
+        let cover = project_content_name("cover", "image/jpeg", None);
+        assert_eq!(content, "content.mp3");
+        assert_eq!(cover, "cover.jpg");
+
+        // Deleting `data.orna` is refused: row deletion is an explicit database
+        // operation, never a VFS unlink side effect (VFS-013).
+        let document = row.resolve_unlink(VFS_ROW_DOCUMENT).expect("document");
+        assert_eq!(document, VfsUnlinkTarget::RowDocument);
+        assert_eq!(document.refusal_errno(), Some(VFS_EPERM));
+        assert_eq!(document.refusal_code(), Some("sys.vfs.unsupported"));
+
+        // A required Blob cannot be removed, because schema validity depends on
+        // its exact content descriptor (VFS-013).
+        let required = row.resolve_unlink(&content).expect("required blob");
+        let VfsUnlinkTarget::RequiredContent(file) = &required else {
+            panic!("required blob must resolve to a required target");
+        };
+        assert!(file.is_required());
+        assert_eq!(required.refusal_errno(), Some(VFS_EPERM));
+        assert_eq!(required.refusal_code(), Some("sys.vfs.unsupported"));
+
+        // An optional Blob may be unlinked to `null`, so the target authorizes
+        // validation instead of refusing in the projection (VFS-013).
+        let optional = row.resolve_unlink(&cover).expect("optional blob");
+        let VfsUnlinkTarget::OptionalContent(file) = &optional else {
+            panic!("optional blob must resolve to an optional target");
+        };
+        assert!(!file.is_required());
+        assert_eq!(optional.refusal_errno(), None);
+        assert_eq!(optional.refusal_code(), None);
+
+        // Field classes come from the schema, not the host name: a name outside
+        // the projection resolves to no target at all (VFS-004).
+        assert_eq!(
+            row.resolve_unlink("missing.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
+        assert_eq!(
+            row.resolve_unlink("~key-not-a-field.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
+    }
+
+    #[test]
+    fn suffix_selection_is_mime1_compatible_and_preferred_hint_is_absent() {
+        // A compatible non-preferred spelling is stored as that explicit hint,
+        // and the file name changes only in its suffix (MIME-1, VFS-012).
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("mp1")),
+            Ok(Some("mp1".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("MP1")),
+            Ok(Some("mp1".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("image/jpeg", Some("jpeg")),
+            Ok(Some("jpeg".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("application/gzip", Some("tgz")),
+            Ok(Some("tgz".to_owned()))
+        );
+
+        // The catalogued preferred suffix is recorded as an absent hint, never
+        // as a redundant one (MIME-1 default_hint_canonicalization).
+        assert_eq!(classify_content_suffix("audio/mpeg", Some("mp3")), Ok(None));
+        assert_eq!(classify_content_suffix("audio/mpeg", None), Ok(None));
+
+        // A suffix outside the MIME-1 entry is a malformed candidate rather
+        // than a silent transcode or a rekeyed row (VFS-012).
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("m4a")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        assert_eq!(
+            classify_content_suffix("image/jpeg", Some("png")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        // An unknown essence keeps only the profile's `bin` hint.
+        assert_eq!(
+            classify_content_suffix("application/x-unknown", Some("gz")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        assert_eq!(
+            classify_content_suffix("application/x-unknown", Some("bin")),
+            Ok(None)
+        );
+
+        // The suffix rename never changes the stored content identity: the same
+        // descriptor size projects under the selected hint, and the row's bytes
+        // are untouched.
+        let renamed = project_content_name("content", "audio/mpeg", Some("mp1"));
+        assert_eq!(renamed, "content.mp1");
+        assert_eq!(project_content_name("content", "audio/mpeg", None), "content.mp3");
+    }
+
+    #[test]
+    fn vfs_table_row_replacement_preserves_admitted_table_identity() {
+        let table = RuntimeTableIdentity::new("Song", crate::TableObjectId::new([0x71; 16]))
+            .expect("valid table identity");
+        let replacement = VfsTableRowReplacement::new(
+            [0x55; 16],
+            table.clone(),
+            vec![0x18, 0x2a],
+            Some(vec![0xa1]),
+        )
+        .expect("valid replacement");
+
+        assert_eq!(replacement.table(), &table);
+        assert_eq!(replacement.key(), &[0x18, 0x2a]);
+        assert_eq!(replacement.value(), Some(&[0xa1][..]));
+        let mutation = replacement.mutation().expect("valid mutation");
+        assert_eq!(mutation.table(), "Song");
+        assert_eq!(mutation.table_object_id(), Some(table.object_id()));
+        assert_eq!(mutation.key(), &[0x18, 0x2a]);
+        assert_eq!(mutation.value(), Some(&[0xa1][..]));
+    }
+
+    #[test]
+    fn content_file_projection_uses_field_namespace_and_exact_entry_identity() {
+        let long_field = "content_".repeat(40);
+        let projected = project_content_name(&long_field, "audio/mpeg", None);
+        assert!(projected.starts_with("~field-"));
+        assert!(projected.ends_with(".mp3"));
+
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            &[VfsStoredField::content(
+                long_field.clone(),
+                "audio/mpeg",
+                None,
+                99,
+            )],
+        )
+        .expect("content field projection");
+        assert_eq!(row.files()[0].name(), projected);
+        let VfsProjectedEntry::Content(file) = row.lookup(&projected).expect("projected file")
+        else {
+            panic!("content lookup should return the projected file");
+        };
+        assert_eq!(file.descriptor_size(), 99);
+        assert_eq!(
+            row.lookup("~key-not-a-field.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
+    }
+
+    fn vfs_row_image() -> Arc<VfsFileSnapshot<u64>> {
+        let contents = include_str!("../tests/fixtures/vfs-row-music-london.orna");
+        Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::new(17)),
+            Arc::<[u8]>::from(contents.as_bytes()),
+        ))
+    }
+
+    struct ValidatedRowStore {
+        accepted: TestMutex<Vec<u8>>,
+        expected: Vec<u8>,
+        transactions: AtomicUsize,
+    }
+
+    impl ValidatedRowStore {
+        fn new(expected: &[u8]) -> Self {
+            Self {
+                accepted: TestMutex::new(expected.to_vec()),
+                expected: expected.to_vec(),
+                transactions: AtomicUsize::new(0),
+            }
+        }
+
+        fn accepted(&self) -> Vec<u8> {
+            self.accepted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn transaction_count(&self) -> usize {
+            self.transactions.load(Ordering::SeqCst)
+        }
+
+        async fn activate(
+            self: Arc<Self>,
+            candidate: ActivationCandidate<u64>,
+            accepted_snapshot: u64,
+        ) -> Result<ActivationDecision<u64>, ()> {
+            self.transactions.fetch_add(1, Ordering::SeqCst);
+            if candidate.replacement_bytes() == self.expected.as_slice() {
+                *self
+                    .accepted
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    candidate.replacement_bytes().to_vec();
+                Ok(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(accepted_snapshot),
+                )))
+            } else {
+                Ok(ActivationDecision::Rejected(rejected()))
+            }
         }
     }
 
@@ -2034,6 +2417,196 @@ mod tests {
         draft.write_at(1, &[0x59]).await.unwrap();
         draft.release();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn vfs_editor_backup_temp_and_truncate_patterns_share_one_validated_transaction() {
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(vfs_row_image()).await.unwrap();
+        let row_text = include_str!("../tests/fixtures/vfs-row-music-london.orna").as_bytes();
+        let row_store = Arc::new(ValidatedRowStore::new(row_text));
+
+        // A backup file is private scratch seeded with the accepted row bytes.
+        // Fsyncing it persists only that scratch and cannot admit a row.
+        let backup = target.begin_temporary_backup(1 << 20).await;
+        assert_eq!(backup.candidate_bytes().await.as_ref(), row_text);
+        let backup_syncs = Arc::new(AtomicUsize::new(0));
+        let backup_syncs_by_route = Arc::clone(&backup_syncs);
+        let backup_revision = backup
+            .fsync_scratch_with(move |revision, bytes| {
+                backup_syncs_by_route.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(revision, 0);
+                    assert_eq!(bytes.as_ref(), row_text);
+                    Ok::<_, ()>(())
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(backup_revision, 0);
+        let backup_syncs_by_route = Arc::clone(&backup_syncs);
+        let repeated_backup_revision = backup
+            .fsync_scratch_with(move |_, _| {
+                backup_syncs_by_route.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ()>(()) }
+            })
+            .await
+            .unwrap();
+        assert_eq!(repeated_backup_revision, 0);
+        assert_eq!(backup_syncs.load(Ordering::SeqCst), 1);
+        assert_eq!(row_store.transaction_count(), 0);
+        assert_eq!(repository.generation().await, 0);
+
+        // A temp-file editor may fsync scratch first; only rename over the
+        // managed target crosses the validated row-store transaction boundary.
+        let save = target.begin_temporary_replacement(1 << 20).await;
+        save.write_at(0, row_text).await.unwrap();
+        let temp_syncs = Arc::new(AtomicUsize::new(0));
+        let temp_syncs_by_route = Arc::clone(&temp_syncs);
+        let temp_revision = save
+            .fsync_scratch_with(move |revision, bytes| {
+                temp_syncs_by_route.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(revision, 2);
+                    assert_eq!(bytes.as_ref(), row_text);
+                    Ok::<_, ()>(())
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(temp_revision, 2);
+        let temp_syncs_by_route = Arc::clone(&temp_syncs);
+        let repeated_temp_revision = save
+            .fsync_scratch_with(move |_, _| {
+                temp_syncs_by_route.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ()>(()) }
+            })
+            .await
+            .unwrap();
+        assert_eq!(repeated_temp_revision, 2);
+        assert_eq!(temp_syncs.load(Ordering::SeqCst), 1);
+        assert_eq!(row_store.transaction_count(), 0);
+
+        let row_store_for_rename = Arc::clone(&row_store);
+        let applied = target
+            .rename_over(&save, move |candidate| {
+                Arc::clone(&row_store_for_rename).activate(candidate, 18)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(row_store.transaction_count(), 1);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(repository.generation().await, 1);
+
+        let row_store_for_repeat = Arc::clone(&row_store);
+        let repeated = target
+            .rename_over(&save, move |candidate| {
+                Arc::clone(&row_store_for_repeat).activate(candidate, 19)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            repeated,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(row_store.transaction_count(), 1);
+
+        // In-place truncate+write is a distinct editor pattern, but it uses
+        // the same single validated activation boundary as temp rename.
+        let draft = target.open_draft(1 << 20).await;
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, row_text).await.unwrap();
+        let row_store_for_direct = Arc::clone(&row_store);
+        let direct = target
+            .commit_draft_with(&draft, move |candidate| {
+                Arc::clone(&row_store_for_direct).activate(candidate, 19)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            direct,
+            TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(row_store.transaction_count(), 2);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(repository.generation().await, 2);
+    }
+
+    #[tokio::test]
+    async fn vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic() {
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(vfs_row_image()).await.unwrap();
+        let row_text = include_str!("../tests/fixtures/vfs-row-music-london.orna").as_bytes();
+        let invalid = &row_text[..row_text.len() / 2];
+        let row_store = Arc::new(ValidatedRowStore::new(row_text));
+
+        let save = target.begin_temporary_replacement(1 << 20).await;
+        save.write_at(0, invalid).await.unwrap();
+        let row_store_for_rename = Arc::clone(&row_store);
+        let rejected_rename = target
+            .rename_over(&save, move |candidate| {
+                Arc::clone(&row_store_for_rename).activate(candidate, 18)
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Rejected { diagnostic } = rejected_rename else {
+            panic!("invalid temp rename must be rejected");
+        };
+        assert_eq!(diagnostic, rejected());
+        assert_eq!(row_store.transaction_count(), 1);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(
+            target.open_read().await.read_at(0, row_text.len()),
+            row_text
+        );
+        let retained = save.retained_invalid_draft().await.unwrap();
+        assert_eq!(retained.replacement_bytes(), invalid);
+        assert_eq!(retained.diagnostic(), rejected());
+
+        let row_store_for_repeat = Arc::clone(&row_store);
+        let repeated = target
+            .rename_over(&save, move |candidate| {
+                Arc::clone(&row_store_for_repeat).activate(candidate, 19)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            repeated,
+            TemporaryRenameOutcome::Rejected {
+                diagnostic
+            } if diagnostic == rejected()
+        ));
+        assert_eq!(row_store.transaction_count(), 1);
+        assert_eq!(repository.generation().await, 0);
+
+        let draft = target.open_draft(1 << 20).await;
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, invalid).await.unwrap();
+        let row_store_for_direct = Arc::clone(&row_store);
+        let rejected_direct = target
+            .commit_draft_with(&draft, move |candidate| {
+                Arc::clone(&row_store_for_direct).activate(candidate, 20)
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Rejected { diagnostic } = rejected_direct else {
+            panic!("invalid direct write must be rejected");
+        };
+        assert_eq!(diagnostic, rejected());
+        assert_eq!(row_store.transaction_count(), 2);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(
+            target.open_read().await.read_at(0, row_text.len()),
+            row_text
+        );
+        let retained = draft.retained_invalid_draft().await.unwrap();
+        assert_eq!(retained.replacement_bytes(), invalid);
+        assert_eq!(retained.diagnostic(), rejected());
+        assert_eq!(repository.generation().await, 0);
     }
 
     #[tokio::test]

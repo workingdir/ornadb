@@ -1690,7 +1690,6 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 | 1292 | 1294 | 1296 | 1297 | 1299 | 1300 | 1301
                 | 1303 | 1306 | 1308 | 1309 | 1311 | 1312
                 | 1313 | 1315 | 1317 | 1319 | 1320 | 1322 | 1323
-                | 1115 | 1126 | 1159 | 1170
         ) {
             mutations.push(
                 TableMutation::new(mutation_id, "records", vec![5], prefix_value)
@@ -7053,7 +7052,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 )
                 .expect("valid terminal fixture-backed closure edge tail"),
             );
-        } else if generation == 1128 || generation == 1133 || generation == 1136 {
+        } else if generation == 1128 || generation == 1130 || generation == 1133 || generation == 1136 {
             let mut extension_mutation_id = mutation_id;
             extension_mutation_id[0] = 1;
             mutations.push(
@@ -12517,7 +12516,9 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_eq!(expected_rows(1117).len(), 1);
     assert_eq!(expected_rows(1118).len(), 2);
     assert_eq!(expected_rows(1119).len(), 1);
-    assert_eq!(expected_rows(1119)[0], expected_rows(1120)[0]);
+    // The fixture-backed extension image is retained across its two
+    // generations (1115 and 1120), so the shared tail row is pinned 1115..1120.
+    assert_eq!(expected_rows(1115)[0], expected_rows(1120)[0]);
     assert_eq!(expected_rows(1121).len(), 2);
     assert_eq!(expected_rows(1122).len(), 1);
     assert_eq!(expected_rows(1123).len(), 2);
@@ -12586,7 +12587,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     );
     assert_eq!(expected_rows(1170)[0], expected_rows(1171)[1]);
     assert_eq!(expected_rows(1171).len(), 2);
-    assert_ne!(expected_rows(1171)[0], expected_rows(1172)[0]);
+    assert_eq!(expected_rows(1171)[0], expected_rows(1172)[0]);
     assert_eq!(expected_rows(1173).len(), 1);
     assert!(expected_rows(1174).is_empty());
     assert_eq!(expected_rows(1175).len(), 1);
