@@ -2504,6 +2504,74 @@ fn run_fetch(
     Ok(())
 }
 
+/// Publishes the checked-out branch together with the continuity refs an
+/// ordinary push synchronizes (`ORNA-GIT-008`).
+///
+/// The branch defaults to the branch `HEAD` is attached to, so pushing from a
+/// detached `HEAD` is refused rather than guessing a name. A remote that is
+/// missing a selected continuity ref, or names it with a different object ID,
+/// is reported as a conflict before anything is transferred.
+fn run_push(
+    endpoint: &Endpoint,
+    remote: &str,
+    branch: Option<&str>,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run `push` inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let branch = match branch {
+        Some(branch) => branch.to_owned(),
+        None => repository.checked_out_branch().map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "the checked-out branch could not be read",
+                "run `push REMOTE BRANCH` or check out a branch first",
+            )
+        })?
+        .ok_or_else(|| {
+            Diagnostic::target(
+                "E2100",
+                "`push` needs a branch when HEAD is detached",
+                "run `push REMOTE BRANCH` or check out a branch first",
+            )
+        })?,
+    };
+    repository
+        .push_ordinary_with_local_continuity(remote, branch.clone())
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "Git push failed",
+                "check the configured remote, its continuity refs, and retry `push`",
+                error.to_string(),
+            )
+        })?;
+    let mut stdout = io::stdout().lock();
+    write_styled(&mut stdout, AnsiColor::Green, b"pushed ", color_enabled)
+        .and_then(|()| {
+            write_styled_display(&mut stdout, AnsiColor::Cyan, remote, color_enabled)
+        })
+        .and_then(|()| stdout.write_all(b" -> "))
+        .and_then(|()| {
+            write_styled_display(&mut stdout, AnsiColor::Cyan, &branch, color_enabled)
+        })
+        .and_then(|()| stdout.write_all(b"\n"))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "could not write command output",
+                "check that stdout is available, then retry the command",
+            )
+        })?;
+    Ok(())
+}
+
 fn fetch_continuity_diagnostic(
     continuity: orna_repository_v1::RemoteContinuity,
 ) -> Option<Diagnostic> {

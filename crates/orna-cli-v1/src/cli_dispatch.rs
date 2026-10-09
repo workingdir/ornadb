@@ -25,6 +25,15 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             branch,
             parsed.color.stdout_enabled(),
         ),
+        Command::Push {
+            ref remote,
+            ref branch,
+        } => run_push(
+            &parsed.endpoint,
+            remote,
+            branch.as_deref(),
+            parsed.color.stdout_enabled(),
+        ),
         Command::SemanticLegend {
             format: LegendFormat::Json,
             ..
