@@ -691,11 +691,6 @@ impl EvaluationError {
     }
 
     fn from_canonical(value: CanonicalErrorValue) -> Self {
-        eprintln!(
-            "DEBUG-CANONICAL-ERROR code={} message={}",
-            value.code(),
-            value.message()
-        );
         Self {
             diagnostic: Box::new(
                 Diagnostic::new(
@@ -4567,28 +4562,13 @@ impl Context<'_, '_> {
             .as_deref()
             .is_some_and(|name| matches!(name, "std.collection.asof_join" | "std.query.asof_join"));
         let intrinsic_name = root_collection_name(callee);
-        let spelling = function_name(callee);
         let name = intrinsic_name
             .or_else(|| {
                 native_export
                     .then(|| portable_collection_operation(callee, resolved.as_deref()))
                     .flatten()
             })
-            .or(statistics_operation);
-        if name.is_none() {
-            eprintln!(
-                "DEBUG-NO-RELATION spelling={:?} resolved={:?} intrinsic={:?} native_export={} scope_has_std={} source_fn={}",
-                spelling,
-                resolved,
-                intrinsic_name,
-                native_export,
-                scope.0.contains_key("std"),
-                spelling
-                    .as_deref()
-                    .is_some_and(|name| self.functions.contains_key(name))
-            );
-        }
-        let name = name?;
+            .or(statistics_operation)?;
         if (statistics_operation.is_none()
             && intrinsic_name.is_some_and(|name| scope.0.contains_key(name)))
             || (resolved.is_some() && !native_export && statistics_operation.is_none())
@@ -6421,7 +6401,8 @@ impl Context<'_, '_> {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         let native_collection = native_binding.is_some_and(|binding| {
-            binding.kind == StandardBindingKind::Collection && binding.operation.starts_with("__")
+            binding.kind == StandardBindingKind::Collection
+                && (binding.operation.starts_with("__") || binding.operation == "map")
         });
         let native_asof_join = portable_collection_name(callee) == Some("asof_join")
             && !self.restrict_function_names
@@ -6437,8 +6418,9 @@ impl Context<'_, '_> {
         }
         // Portable collection/query exports and selected exact arithmetic
         // leaves are admitted by their captured source declarations. Public
-        // list functions execute their Orna bodies; private evaluator leaves
-        // retain bounded primitive access to captured values and callbacks.
+        // functions execute their Orna bodies; `map` and private leaves use
+        // bounded primitives so callbacks retain the evaluator's captured
+        // namespace and module-pin context.
         if !native_asof_join
             && !native_collection
             && root_stream_operation.is_none()
