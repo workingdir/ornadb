@@ -41,6 +41,7 @@ pub(crate) mod test_support;
 mod transport;
 
 pub use blob_store::ContentIdentity;
+pub use orna_value_v1::BlobMetadata;
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry,
