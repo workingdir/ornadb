@@ -444,7 +444,11 @@ fn pin_snapshot(
 /// Only exact matches count. `git for-each-ref <pattern>` matches by prefix, so
 /// `refs/remotes/origin` also lists `refs/remotes/origin/main`; those are
 /// different names and must not be read as a collision.
-fn bare_ref_selector_is_ambiguous(directory: &str, selector: &str) -> Result<bool, Diagnostic> {
+pub(super) fn bare_ref_selector_is_ambiguous(
+    directory: &str,
+    selector: &str,
+    help: &'static str,
+) -> Result<bool, Diagnostic> {
     // Only a name that could collide is checked. A commit id, a `HEAD~2`-style
     // expression, a revision `@`/`:` syntax, a `a..b` range or a full `refs/`
     // path names one object by construction. Slashed names such as
@@ -471,14 +475,18 @@ fn bare_ref_selector_is_ambiguous(directory: &str, selector: &str) -> Result<boo
         .current_dir(directory)
         .output()
         .map_err(|error| {
-            history_error(
+            Diagnostic::target_with_detail(
+                "E2000",
                 "Git could not be started",
+                help,
                 format!("check that Git is installed and available on PATH: {error}"),
             )
         })?;
     if !output.status.success() {
-        return Err(history_error(
+        return Err(Diagnostic::target_with_detail(
+            "E2000",
             "Git could not list the snapshot names",
+            help,
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ));
     }
