@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use orna_value_v1::{BlobMetadata, MimeRegistry};
 
 use crate::native_graph::{
-    CborValue, GraphError, MAX_REFS, NODE_DATA_LIMIT, NativeObjectId, NativeObjectKind,
-    decode_canonical_cbor, row_fields_dependencies,
+    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeObjectId,
+    NativeObjectKind, MAX_REFS, NODE_DATA_LIMIT,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
@@ -1167,11 +1167,9 @@ pub(crate) fn partition_levels(
     let leaves = partition_token_ranges(&tokens, 0, leaf_node_overhead(domain))?;
     let mut levels = vec![leaves];
     let branch_overhead = branch_node_overhead(domain);
-    while levels
-        .last()
-        .is_some_and(|level| level.len() > 1)
-    {
-        let height = u8::try_from(levels.len()).map_err(|_| RowStoreError::PageHeightExceeded(64))?;
+    while levels.last().is_some_and(|level| level.len() > 1) {
+        let height =
+            u8::try_from(levels.len()).map_err(|_| RowStoreError::PageHeightExceeded(64))?;
         if height > MAX_PAGE_HEIGHT {
             return Err(RowStoreError::PageHeightExceeded(height));
         }
