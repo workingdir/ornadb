@@ -1812,7 +1812,11 @@ impl<S> VfsRowProjection<S> {
     pub fn resolve_unlink(&self, name: &str) -> Result<VfsUnlinkTarget<'_>, VfsPathError> {
         match self.lookup(name)? {
             VfsProjectedEntry::Document => Ok(VfsUnlinkTarget::RowDocument),
-            VfsProjectedEntry::Content(file) => Ok(VfsUnlinkTarget::Content(file)),
+            VfsProjectedEntry::Content(file) => Ok(if file.is_required() {
+                VfsUnlinkTarget::RequiredContent(file)
+            } else {
+                VfsUnlinkTarget::OptionalContent(file)
+            }),
         }
     }
 }
@@ -2140,10 +2144,10 @@ mod tests {
             panic!("content lookup should return the projected file");
         };
         assert_eq!(file.descriptor_size(), 99);
-        assert_eq!(
+        assert!(matches!(
             row.lookup("~key-not-a-field.mp3"),
             Err(VfsPathError::UnknownRow)
-        );
+        ));
     }
 
     #[test]
