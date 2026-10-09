@@ -1,24 +1,32 @@
-//! `orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]`:
-//! verifies an offline copy bundle in full and reports the rows and history an
-//! import would write. Nothing is written to the bundle or to any repository. A
-//! committing import is not wired yet, so `--dry-run` is required. `--limit N`
-//! reports only the first N rows in bundle order; every row is still verified.
-//! `--quiet` suppresses the success report; failures still exit non-zero with a
-//! diagnostic. `--type MEDIA_TYPE` reports every row under that media type
+//! `orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--metadata-only]
+//! [--type MEDIA_TYPE] [--format human|table]`: verifies an offline copy bundle
+//! in full and reports the rows and history an import would write, with the
+//! resource counters ACCEPTANCE Gate B requires. Nothing is written to the
+//! bundle or to any repository. A committing import is not wired yet, so
+//! `--dry-run` is required. `--limit N` reports only the first N rows in bundle
+//! order; every row is still verified. `--quiet` suppresses the success report;
+//! failures still exit non-zero with a diagnostic. `--metadata-only` reports
+//! key, media type and content commitment from the index and opens no payload
+//! file, so it reads exactly zero media-payload bytes (ORNA-BLOB-007,
+//! ORNA-BLOB-010). `--type MEDIA_TYPE` reports every row under that media type
 //! instead of its recorded one; the bundle's stored types are not changed.
-//! Unless `--quiet` is given, one progress line per verified row goes to stderr.
-//! Progress covers every row, because `--limit` does not skip verification.
-//! `--format table` lists each reported row (key, media type, bytes) above the
-//! summary line; `--format human` prints the summary line alone.
+//! Unless `--quiet` is given, one progress line per verified row goes to
+//! stderr; a metadata-only run reports each listed row instead of claiming
+//! verification. Progress covers every row, because `--limit` does not skip
+//! verification. `--format table` lists each reported row (key, media type,
+//! bytes, content commitment) above the summary line; `--format human` prints
+//! the summary line alone. The summary is followed by one `resources:` line
+//! reporting peak RSS, bytes read/written, media-payload bytes read and the
+//! temporary-storage bound for the run.
 
 use std::path::Path;
 
-use orna_repository_v1::offline_copy::{OfflineCopy, OfflineImportMetadata};
+use orna_repository_v1::offline_copy::{OfflineCopy, PAYLOAD_BUFFER_BYTES};
 use orna_value_v1::normalize_media_type;
 
 use super::Diagnostic;
 
-const USAGE: &str = "usage: orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]";
+const USAGE: &str = "usage: orna import <bundle-dir> --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]";
 
 /// Output shape for the dry-run report.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,22 +35,27 @@ enum ReportFormat {
     Table,
 }
 
-/// Parsed import options: the bundle directory, optional row limit, output mode, media type override, and report format.
+/// Parsed import options: the bundle directory, optional row limit, output
+/// mode, verification mode, media type override, and report format.
 #[derive(Debug, Eq, PartialEq)]
 struct ImportOptions<'a> {
     bundle: &'a str,
     limit: Option<usize>,
     quiet: bool,
+    metadata_only: bool,
     media_type: Option<String>,
     format: ReportFormat,
 }
 
-/// Returns the bundle directory, row limit, quiet flag, media type override, and report format when the arguments name one and request a dry run.
+/// Returns the bundle directory, row limit, quiet flag, verification mode,
+/// media type override, and report format when the arguments name one and
+/// request a dry run.
 fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> {
     let mut bundle = None;
     let mut dry_run = false;
     let mut limit = None;
     let mut quiet = false;
+    let mut metadata_only = false;
     let mut media_type = None;
     let mut format = ReportFormat::Human;
     let mut words = arguments.iter().map(String::as_str);
@@ -50,6 +63,7 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
         match word {
             "--dry-run" => dry_run = true,
             "--quiet" => quiet = true,
+            "--metadata-only" => metadata_only = true,
             "--format" => {
                 let value = words.next().ok_or_else(|| {
                     import_error("--format needs a value", "usage: --format <human|table>")
@@ -97,7 +111,7 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
                 return Err(import_error(
                     "Unknown import flag",
                     format!(
-                        "got {flag:?}; accepted: --dry-run, --limit, --quiet, --type, --format"
+                        "got {flag:?}; accepted: --dry-run, --limit, --quiet, --metadata-only, --type, --format"
                     ),
                 ));
             }
@@ -121,6 +135,7 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
         bundle,
         limit,
         quiet,
+        metadata_only,
         media_type,
         format,
     })
@@ -128,86 +143,297 @@ fn parse_options(arguments: &[String]) -> Result<ImportOptions<'_>, Diagnostic> 
 
 pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
-    let summary = dry_run_summary(
+    let report = dry_run_report(
         Path::new(options.bundle),
         options.limit,
         options.media_type.as_deref(),
         !options.quiet,
         options.format,
+        options.metadata_only,
     )?;
     if !options.quiet {
-        println!("{summary}");
+        println!("{}", report.body);
+        println!("{}", report.resources);
     }
     Ok(())
+}
+
+/// One row as the report renders it. Metadata only: a payload is never part of
+/// this value, and a digest is the recorded content commitment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReportRow<'a> {
+    key: &'a [u8],
+    media_type: &'a str,
+    suffix: Option<&'a str>,
+    length: u64,
+    sha256: [u8; 32],
+}
+
+/// The complete dry-run report: the table and summary line, then the measured
+/// resource line. Both are printed unless `--quiet` is given.
+#[derive(Debug, Eq, PartialEq)]
+struct ImportReport {
+    body: String,
+    resources: String,
+}
+
+/// Resource use measured across one import, in the shape ACCEPTANCE Gate B
+/// asks for: peak RSS, bytes read/written, media-payload bytes read and the
+/// temporary-storage bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Resources {
+    start_peak_rss_bytes: Option<u64>,
+    end_peak_rss_bytes: Option<u64>,
+    process_read_bytes: Option<u64>,
+    process_written_bytes: Option<u64>,
+    media_read_bytes: u64,
+    bundle_payload_bytes: u64,
+    verification_buffer_bytes: u64,
+    metadata_only: bool,
+}
+
+impl Resources {
+    /// Renders the `resources:` line. Unavailable counters stay unavailable
+    /// rather than being reported as zero.
+    fn line(&self) -> String {
+        let rss = match (self.start_peak_rss_bytes, self.end_peak_rss_bytes) {
+            (Some(start), Some(end)) => format!(
+                "peak RSS {} (growth {} bytes)",
+                render_rss(end),
+                end.saturating_sub(start)
+            ),
+            _ => "peak RSS unavailable".to_owned(),
+        };
+        let io = match (self.process_read_bytes, self.process_written_bytes) {
+            (Some(read), Some(written)) => {
+                format!("bytes read {read} bytes, written {written} bytes")
+            }
+            _ => "bytes read unavailable, written unavailable".to_owned(),
+        };
+        // This import writes no file: not to the bundle, not to a repository and
+        // not to a temporary path, so its temporary-storage bound is zero. The
+        // only working set above the index metadata is the fixed verification
+        // buffer the offline copy declares (ORNA-BLOB-007, ORNA-BLOB-010).
+        let note = match self.metadata_only {
+            true => "metadata only: no payload file opened".to_owned(),
+            false => format!(
+                "verification buffer {} bytes",
+                self.verification_buffer_bytes
+            ),
+        };
+        format!(
+            "resources: {rss}; {io}; media payload read {} bytes of {} bytes in the bundle; temp storage bound 0 bytes ({note})",
+            self.media_read_bytes, self.bundle_payload_bytes,
+        )
+    }
 }
 
 /// Verifies the bundle and returns the dry-run report. With a limit, only the
 /// first rows are counted; history is bundle-wide and always counted. A media
 /// type override is named in the report; it does not alter the bundle. The
-/// table format lists each reported row above the summary line.
-fn dry_run_summary(
+/// table format lists each reported row above the summary line. A metadata-only
+/// report reads the index alone and opens no payload file.
+fn dry_run_report(
     bundle: &Path,
     limit: Option<usize>,
     media_type: Option<&str>,
     progress: bool,
     format: ReportFormat,
-) -> Result<String, Diagnostic> {
+    metadata_only: bool,
+) -> Result<ImportReport, Diagnostic> {
+    let start_peak_rss_bytes = peak_rss_bytes();
     let copy = OfflineCopy::open(bundle)
         .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?;
+    let history_entries = copy.history().len();
+    let total = copy.rows().len();
+    let reported = limit.map_or(total, |limit| limit.min(total));
     // Every row is verified even when the report is limited, and the payloads
     // are hashed from a fixed buffer rather than retained (CAPTURE-3 step 2).
-    let total = copy.rows().len();
-    let summary = copy
-        .import_summary_with_progress(total, |step| {
-            if progress {
-                eprintln!("{step}");
-            }
-        })
-        .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?;
-    let reported = limit.map_or(total, |limit| limit.min(total));
-    let reported_rows = &summary.rows[..reported];
-    let payload_bytes: u64 = reported_rows.iter().map(|row| row.length).sum();
+    // A metadata-only run never opens a payload file at all.
+    let verified = match metadata_only {
+        true => None,
+        false => Some(
+            copy.import_summary_with_progress(total, |step| {
+                if progress {
+                    eprintln!("{step}");
+                }
+            })
+            .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?,
+        ),
+    };
+    let rows: Vec<ReportRow<'_>> = match &verified {
+        Some(summary) => summary.rows[..reported]
+            .iter()
+            .map(|row| ReportRow {
+                key: &row.key,
+                media_type: &row.media_type,
+                suffix: row.suffix.as_deref(),
+                length: row.length,
+                sha256: row.sha256,
+            })
+            .collect(),
+        None => copy.rows()[..reported]
+            .iter()
+            .map(|row| ReportRow {
+                key: &row.key,
+                media_type: &row.media_type,
+                suffix: row.suffix.as_deref(),
+                length: row.length,
+                sha256: row.sha256,
+            })
+            .collect(),
+    };
+    let process_io = process_io_bytes();
+    // Verification covers every row, because `--limit` does not skip it, so the
+    // payload actually read is the whole bundle's even when fewer rows are
+    // reported. Nothing is read at all in metadata-only mode.
+    let bundle_payload_bytes: u64 = copy.rows().iter().map(|row| row.length).sum();
+    let media_read_bytes = match metadata_only {
+        true => 0,
+        false => bundle_payload_bytes,
+    };
+    let resources = Resources {
+        start_peak_rss_bytes,
+        end_peak_rss_bytes: peak_rss_bytes(),
+        process_read_bytes: process_io.map(|(read, _)| read),
+        process_written_bytes: process_io.map(|(_, written)| written),
+        media_read_bytes,
+        bundle_payload_bytes,
+        verification_buffer_bytes: match metadata_only {
+            true => 0,
+            false => PAYLOAD_BUFFER_BYTES as u64,
+        },
+        metadata_only,
+    };
+    let reported_payload_bytes: u64 = rows.iter().map(|row| row.length).sum();
     let typed = media_type.map_or(String::new(), |media_type| format!(" as {media_type}"));
+    let counted = match metadata_only {
+        true => format!("{reported_payload_bytes} promised payload bytes unread"),
+        false => format!("{reported_payload_bytes} payload bytes"),
+    };
     let summary_line = format!(
-        "dry run: {reported} of {total} rows{typed}, {payload_bytes} payload bytes, {} history entries; nothing written",
-        summary.history.len()
+        "dry run: {reported} of {total} rows{typed}, {counted}, {history_entries} history entries; nothing written"
     );
-    Ok(match format {
+    let body = match format {
         ReportFormat::Human => summary_line,
-        ReportFormat::Table => format!("{}{summary_line}", render_table(reported_rows, media_type)),
+        ReportFormat::Table => format!("{}{summary_line}", render_table(&rows, media_type)),
+    };
+    if metadata_only && progress {
+        for (index, row) in rows.iter().enumerate() {
+            eprintln!(
+                "listed {}/{} {} ({} bytes), no payload opened",
+                index + 1,
+                rows.len(),
+                String::from_utf8_lossy(row.key),
+                row.length
+            );
+        }
+    }
+    Ok(ImportReport {
+        body,
+        resources: resources.line(),
     })
 }
 
 /// Renders the reported rows as an aligned table with a header line. Every
 /// line ends in a newline, so the summary line can follow directly.
-fn render_table(rows: &[OfflineImportMetadata], media_type: Option<&str>) -> String {
+fn render_table(rows: &[ReportRow<'_>], media_type: Option<&str>) -> String {
     let header = [
         "key".to_owned(),
         "media_type".to_owned(),
         "bytes".to_owned(),
+        "sha256".to_owned(),
     ];
     let mut lines = vec![header];
     lines.extend(rows.iter().map(|row| {
         [
-            String::from_utf8_lossy(&row.key).into_owned(),
-            media_type.unwrap_or(row.media_type.as_str()).to_owned(),
+            String::from_utf8_lossy(row.key).into_owned(),
+            media_type.unwrap_or(row.media_type).to_owned(),
             row.length.to_string(),
+            hex(&row.sha256),
         ]
     }));
-    let mut widths = [0_usize; 3];
+    let mut widths = [0_usize; 4];
     for line in &lines {
         for (width, cell) in widths.iter_mut().zip(line) {
             *width = (*width).max(cell.chars().count());
         }
     }
-    let [key_width, type_width, bytes_width] = widths;
+    let [key_width, type_width, bytes_width, digest_width] = widths;
     let mut out = String::new();
-    for [key, kind, bytes] in &lines {
+    for [key, kind, bytes, digest] in &lines {
         out.push_str(&format!(
-            "{key:<key_width$}  {kind:<type_width$}  {bytes:>bytes_width$}\n"
+            "{key:<key_width$}  {kind:<type_width$}  {bytes:>bytes_width$}  {digest:<digest_width$}\n"
         ));
     }
     out
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+/// Renders a resident-set size in IEC units, for the one counter that is
+/// inherently approximate.
+fn render_rss(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    match bytes {
+        0..KIB => format!("{bytes} bytes"),
+        KIB..MIB => format!("{:.1} KiB", bytes as f64 / KIB as f64),
+        MIB..GIB => format!("{:.1} MiB", bytes as f64 / MIB as f64),
+        _ => format!("{:.1} GiB", bytes as f64 / GIB as f64),
+    }
+}
+
+/// Peak resident set size of this process so far, from Linux `/proc`. Other
+/// platforms report `None`, which the report renders as unavailable.
+fn peak_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let kibibytes = status
+            .lines()
+            .find(|line| line.starts_with("VmHWM:"))?
+            .split_whitespace()
+            .nth(1)?
+            .parse::<u64>()
+            .ok()?;
+        Some(kibibytes * 1024)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Bytes this process has read and written through syscalls, from Linux
+/// `/proc/self/io`. Other platforms report `None`.
+fn process_io_bytes() -> Option<(u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        let io = std::fs::read_to_string("/proc/self/io").ok()?;
+        let counter = |name: &str| {
+            io.lines()
+                .find(|line| line.starts_with(name))?
+                .split_whitespace()
+                .nth(1)?
+                .parse::<u64>()
+                .ok()
+        };
+        Some((counter("rchar:")?, counter("wchar:")?))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 fn import_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
@@ -221,7 +447,7 @@ fn import_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReportFormat, dry_run_summary, parse_options};
+    use super::{ReportFormat, dry_run_report, parse_options};
     use orna_repository_v1::offline_copy::{OfflineHistoryEntry, OfflineRow, write_offline_copy};
     use sha2::{Digest, Sha256};
     use std::path::Path;
@@ -242,11 +468,44 @@ mod tests {
         }
     }
 
+    /// The report body for one bundle, so the deterministic part of a report can
+    /// be compared exactly while the measured resource line stays out of it.
+    fn body(
+        bundle: &Path,
+        limit: Option<usize>,
+        media_type: Option<&str>,
+        format: ReportFormat,
+        metadata_only: bool,
+    ) -> String {
+        dry_run_report(bundle, limit, media_type, false, format, metadata_only)
+            .unwrap()
+            .body
+    }
+
+    fn resources(
+        bundle: &Path,
+        limit: Option<usize>,
+        media_type: Option<&str>,
+        metadata_only: bool,
+    ) -> String {
+        dry_run_report(
+            bundle,
+            limit,
+            media_type,
+            false,
+            ReportFormat::Human,
+            metadata_only,
+        )
+        .unwrap()
+        .resources
+    }
+
     #[test]
     fn options_take_one_bundle_and_require_dry_run() {
         let plain_words = words(&["bundle", "--dry-run"]);
         let plain = parse_options(&plain_words).unwrap();
         assert_eq!((plain.bundle, plain.limit), ("bundle", None));
+        assert!(!plain.metadata_only);
         let reordered_words = words(&["--dry-run", "bundle"]);
         let reordered = parse_options(&reordered_words).unwrap();
         assert_eq!(reordered.bundle, "bundle");
@@ -254,6 +513,16 @@ mod tests {
         assert!(parse_options(&words(&["--dry-run"])).is_err());
         assert!(parse_options(&words(&["a", "b", "--dry-run"])).is_err());
         assert!(parse_options(&words(&["bundle", "--bogus", "--dry-run"])).is_err());
+    }
+
+    #[test]
+    fn metadata_only_is_accepted_in_any_position() {
+        let leading = words(&["--metadata-only", "bundle", "--dry-run"]);
+        assert!(parse_options(&leading).unwrap().metadata_only);
+        let trailing = words(&["bundle", "--dry-run", "--metadata-only"]);
+        let trailing = parse_options(&trailing).unwrap();
+        assert!(trailing.metadata_only);
+        assert_eq!(trailing.bundle, "bundle");
     }
 
     #[test]
@@ -305,17 +574,15 @@ mod tests {
         write_offline_copy(&bundle, &rows, &history).unwrap();
 
         assert_eq!(
-            dry_run_summary(&bundle, None, None, false, ReportFormat::Human).unwrap(),
+            body(&bundle, None, None, ReportFormat::Human, false),
             "dry run: 2 of 2 rows, 16 payload bytes, 1 history entries; nothing written"
         );
         assert_eq!(
-            dry_run_summary(&bundle, Some(1), None, false, ReportFormat::Human).unwrap(),
+            body(&bundle, Some(1), None, ReportFormat::Human, false),
             "dry run: 1 of 2 rows, 6 payload bytes, 1 history entries; nothing written"
         );
         assert!(
-            dry_run_summary(&bundle, Some(9), None, false, ReportFormat::Human)
-                .unwrap()
-                .starts_with("dry run: 2 of 2")
+            body(&bundle, Some(9), None, ReportFormat::Human, false).starts_with("dry run: 2 of 2")
         );
     }
 
@@ -325,12 +592,64 @@ mod tests {
         let bundle = directory.path().join("bundle");
         let rows = [row("image", b"pixels"), row("song", b"tone-bytes")];
         write_offline_copy(&bundle, &rows, &[]).unwrap();
+        let digest: String = Sha256::digest(b"pixels")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
 
         assert_eq!(
-            dry_run_summary(&bundle, Some(1), None, false, ReportFormat::Table).unwrap(),
-            "key    media_type  bytes\n\
-             image  text/plain      6\n\
-             dry run: 1 of 2 rows, 6 payload bytes, 0 history entries; nothing written"
+            body(&bundle, Some(1), None, ReportFormat::Table, false),
+            format!(
+                "key    media_type  bytes  sha256\n\
+                 image  text/plain      6  {digest}\n\
+                 dry run: 1 of 2 rows, 6 payload bytes, 0 history entries; nothing written"
+            )
+        );
+    }
+
+    #[test]
+    fn metadata_only_reports_the_promised_rows_without_reading_payloads() {
+        let directory = TempDir::new().unwrap();
+        let bundle = directory.path().join("bundle");
+        write_offline_copy(&bundle, &[row("song", b"tone-bytes")], &[]).unwrap();
+
+        assert_eq!(
+            body(&bundle, None, None, ReportFormat::Human, true),
+            "dry run: 1 of 1 rows, 10 promised payload bytes unread, 0 history entries; nothing written"
+        );
+        let line = resources(&bundle, None, None, true);
+        assert!(
+            line.contains("media payload read 0 bytes of 10 bytes in the bundle"),
+            "resource line: {line}"
+        );
+        assert!(
+            line.contains("temp storage bound 0 bytes (metadata only: no payload file opened)"),
+            "resource line: {line}"
+        );
+    }
+
+    #[test]
+    fn verified_report_names_the_verification_buffer_and_a_zero_temp_bound() {
+        let directory = TempDir::new().unwrap();
+        let bundle = directory.path().join("bundle");
+        write_offline_copy(&bundle, &[row("song", b"tone-bytes")], &[]).unwrap();
+
+        assert_eq!(
+            body(&bundle, None, None, ReportFormat::Human, false),
+            "dry run: 1 of 1 rows, 10 payload bytes, 0 history entries; nothing written"
+        );
+        let line = resources(&bundle, None, None, false);
+        assert!(
+            line.contains("media payload read 10 bytes of 10 bytes in the bundle"),
+            "resource line: {line}"
+        );
+        assert!(
+            line.contains("temp storage bound 0 bytes"),
+            "resource line: {line}"
+        );
+        assert!(
+            line.contains("(verification buffer 65536 bytes)"),
+            "resource line: {line}"
         );
     }
 
@@ -341,10 +660,14 @@ mod tests {
         let rows = [row("image", b"pixels"), row("song", b"tone-bytes")];
         write_offline_copy(&bundle, &rows, &[]).unwrap();
 
-        assert_eq!(
-            dry_run_summary(&bundle, Some(1), None, true, ReportFormat::Human).unwrap(),
-            dry_run_summary(&bundle, Some(1), None, false, ReportFormat::Human).unwrap(),
-        );
+        for metadata_only in [false, true] {
+            assert_eq!(
+                dry_run_report(&bundle, Some(1), None, true, ReportFormat::Human, metadata_only)
+                    .unwrap(),
+                dry_run_report(&bundle, Some(1), None, false, ReportFormat::Human, metadata_only)
+                    .unwrap(),
+            );
+        }
     }
 
     #[test]
@@ -359,7 +682,7 @@ mod tests {
         let bundle = directory.path().join("bundle");
         write_offline_copy(&bundle, &[row("song", b"tone-bytes")], &[]).unwrap();
         assert_eq!(
-            dry_run_summary(&bundle, None, Some("audio/wav"), false, ReportFormat::Human).unwrap(),
+            body(&bundle, None, Some("audio/wav"), ReportFormat::Human, false),
             "dry run: 1 of 1 rows as audio/wav, 10 payload bytes, 0 history entries; nothing written"
         );
     }
@@ -367,6 +690,13 @@ mod tests {
     #[test]
     fn dry_run_refuses_a_missing_bundle_without_writing() {
         let missing = Path::new("/nonexistent/orna-import-dry-run-bundle");
-        assert!(dry_run_summary(missing, None, None, true, ReportFormat::Human).is_err());
+        assert!(
+            dry_run_report(missing, None, None, true, ReportFormat::Human, false).is_err(),
+            "a missing bundle must fail"
+        );
+        assert!(
+            dry_run_report(missing, None, None, true, ReportFormat::Human, true).is_err(),
+            "a missing bundle must fail in metadata-only mode too"
+        );
     }
 }
