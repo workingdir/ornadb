@@ -1,18 +1,41 @@
 //! `orna import <bundle> --dry-run` over a multi-row bundle built from the
 //! real media fixtures. The CLI verifies every payload from a fixed buffer and
 //! retains no bytes, so the report and the exit status are identical to the
-//! payload-retaining plan while the bundle itself stays untouched.
+//! payload-retaining plan while the bundle itself stays untouched. The same
+//! command reports ACCEPTANCE Gate B resource counters: peak RSS, bytes read
+//! and written, media-payload bytes, and its temporary-storage bound.
 
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
-use orna_repository_v1::offline_copy::{OfflineHistoryEntry, OfflineRow, write_offline_copy};
+use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_repository_v1::offline_copy::{
+    OfflineHistoryEntry, OfflineRow, PAYLOAD_BUFFER_BYTES, write_offline_copy,
+};
+use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+#[path = "support/format3.rs"]
+mod format3;
+use format3::empty_format3_repository;
+
+#[path = "support/offline_roundtrip.rs"]
+mod offline_roundtrip;
+use offline_roundtrip::row_from_capture;
+
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
+const LARGE_SYNTHETIC_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-large-synthetic.orna"
+);
+const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
+/// The synthetic media file is generated, never committed: the proof is that a
+/// media payload above the 10 MiB floor imports with bounded memory.
+const LARGE_SYNTHETIC_NAME: &str = "large-synthetic.bin";
+const LARGE_SYNTHETIC_BYTES: u64 = 12 * 1024 * 1024;
 
 /// Builds the row a capture would commit for one fixture file, payload
 /// included so the bundle writer can copy it.
