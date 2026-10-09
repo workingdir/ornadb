@@ -31,6 +31,7 @@ mod blob_store;
 mod compact;
 pub mod complete_copy;
 mod init;
+mod mount;
 mod native_graph;
 pub mod offline_copy;
 pub mod publication_describe;
@@ -56,6 +57,7 @@ pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     initialize_repository, inspect_metadata,
 };
+pub use mount::{MountError, MountStatus, MountView};
 pub use native_graph::RowRevision;
 pub use native_graph::{
     AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError, NativeGraphContext,
