@@ -59,7 +59,7 @@ fn blob_tail(row: &[u8]) -> Box<[OvbRaw]> {
     let OvbRaw::Array(fields) = fields.as_ref() else {
         panic!("the stored Blob tag carries an array");
     };
-    fields.clone()
+    fields.clone().into_boxed_slice()
 }
 
 /// The OGS-1 descriptor OID the stored Blob names.
@@ -78,7 +78,7 @@ fn announced_length(row: &[u8]) -> u64 {
     }
 }
 
-fn row_for(rows: &[(Vec<u8>, Vec<u8>)], key: &[u8]) -> &[u8] {
+fn row_for<'a>(rows: &'a [(Vec<u8>, Vec<u8>)], key: &[u8]) -> &'a [u8] {
     rows.iter()
         .find(|(candidate, _)| candidate == key)
         .map(|(_, value)| value.as_slice())
