@@ -1569,9 +1569,17 @@ async fn zero_limit_history_walk_returns_no_revisions() {
 async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     let (directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new().unwrap();
-    for name in ["tone.wav", "pixel.png", "note.wav"] {
+    for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(Path::new(MEDIA_FIXTURES).join(name), source.path().join(name)).unwrap();
     }
+    // The annotated row carries the same payload bytes as the song row under a
+    // different file name. Content identity therefore cannot be what
+    // discriminates them: only the authored annotation coordinate can.
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("note.wav"),
+    )
+    .unwrap();
 
     let runtime_identity = RuntimeIdentity {
         database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
@@ -1613,7 +1621,7 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     let relation = relation_hex(relation_id);
     let payload_bytes: u64 = ["tone.wav", "pixel.png", "note.wav"]
         .iter()
-        .map(|name| std::fs::metadata(Path::new(MEDIA_FIXTURES).join(name)).unwrap().len())
+        .map(|name| std::fs::metadata(source.path().join(name)).unwrap().len())
         .sum();
 
     // An unfiltered listing is the control: the predicate below must not add a
