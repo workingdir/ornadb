@@ -38,6 +38,24 @@ fn git(directory: &Path, arguments: &[&str]) {
     );
 }
 
+/// Runs one read-only Git query and returns its trimmed stdout line.
+fn git_line(directory: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .args(arguments)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git stdout is UTF-8")
+        .trim()
+        .to_owned()
+}
+
 fn commit_database(directory: &Path, database: &str) {
     fs::write(directory.join(".orna/database.orna"), database).expect("update database metadata");
     git(directory, &["add", ".orna/database.orna"]);
@@ -266,4 +284,85 @@ fn does_not_downgrade_an_invalid_database_entry_to_legacy() {
         .open_format_context()
         .unwrap_err();
     assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002");
+}
+
+#[test]
+fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
+    const LEGACY_BLOB: &str = "legacy bytes";
+    const FORMAT_THREE_BLOB: &str = "format three bytes";
+    let directory = repository(None, Some(LEGACY_FORMAT_ONE), false);
+    // The legacy commit's own content, before the format-3 commit exists.
+    fs::create_dir_all(directory.path().join(".orna/store")).unwrap();
+    fs::write(directory.path().join(".orna/store/root"), LEGACY_BLOB).unwrap();
+    git(directory.path(), &["add", "."]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "legacy store root"],
+    );
+    let legacy_commit = git_line(directory.path(), &["rev-parse", "HEAD"]);
+
+    // A later commit converts the workspace to format 3. The legacy commit is
+    // still reachable, so its committed bytes must stay readable and unchanged.
+    fs::remove_file(directory.path().join(".orna/format.orna")).unwrap();
+    fs::write(
+        directory.path().join(".orna/database.orna"),
+        CANONICAL_DATABASE,
+    )
+    .unwrap();
+    fs::write(directory.path().join(".orna/store/root"), FORMAT_THREE_BLOB).unwrap();
+    git(directory.path(), &["add", "--all"]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "publish format 3"],
+    );
+
+    let repository = Repository::discover(directory.path()).expect("discover repository");
+    let legacy = repository
+        .open_format_context_at_selector(&legacy_commit)
+        .expect("reopen the legacy commit read-only");
+    let current = repository
+        .open_format_context_at_selector("HEAD")
+        .expect("reopen the format-3 commit");
+
+    // Both views are open at once and neither rewrites the other's coordinate.
+    assert_eq!(legacy.repository_format_number(), 1);
+    assert!(legacy.is_legacy_format());
+    assert_eq!(current.repository_format_number(), 3);
+    assert!(!current.is_legacy_format());
+    assert!(
+        repository.head().unwrap().unwrap().as_str() != legacy_commit,
+        "the legacy view did not move the workspace HEAD"
+    );
+
+    // The legacy view is genuinely readable: its committed bytes come from its
+    // own snapshot, so the later format-3 write never leaks into it.
+    assert_eq!(
+        legacy
+            .read_committed_file(".orna/store/root", 64)
+            .expect("read the legacy snapshot's own bytes"),
+        LEGACY_BLOB.as_bytes()
+    );
+    assert_eq!(
+        current
+            .read_committed_file(".orna/store/root", 64)
+            .expect("read the current snapshot's bytes"),
+        FORMAT_THREE_BLOB.as_bytes()
+    );
+
+    // The legacy pin admits no native graph, so it can never share the
+    // current store's row authority.
+    assert_eq!(
+        legacy.load_row_map([0; 16]).unwrap_err().code(),
+        "ORNA-REPO-CONTEXT-003"
+    );
+
+    // A read past the bound is refused rather than silently truncated, while
+    // the same path reads exactly at the bound.
+    assert!(legacy.read_committed_file(".orna/store/root", 4).is_err());
+    assert_eq!(
+        legacy
+            .read_committed_file(".orna/store/root", LEGACY_BLOB.len())
+            .expect("read exactly at the bound"),
+        LEGACY_BLOB.as_bytes()
+    );
 }
