@@ -450,6 +450,32 @@ impl RepositoryFormatContext {
         .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
+    /// Reads one committed path's bytes from this context's own pinned
+    /// snapshot.
+    ///
+    /// This is the one read seam every admitted repository format shares. A
+    /// legacy format-1/2 input has no native `.orna/store`, so
+    /// [`Self::load_row_map`] and [`Self::open_native_graph`] refuse it; its
+    /// committed files are still readable through their original path layout,
+    /// which is what keeps a legacy view open without converting it. A
+    /// format-3 context reads the same path from the format-3 commit, so one
+    /// process can hold both views at once without either consulting the
+    /// other, the worktree `HEAD`, or the skipped format's objects.
+    ///
+    /// `max_bytes` bounds the read before the bytes are accumulated.
+    pub fn read_committed_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, FormatContextError> {
+        self.snapshot
+            .read_file(&self.repository, path, max_bytes)
+            .map_err(|error| match error {
+                RepositoryError::GitUnavailable => FormatContextError::GraphContextUnavailable,
+                _ => FormatContextError::GraphContextInvalid,
+            })
+    }
+
     fn require_format3(&self) -> Result<(), FormatContextError> {
         if self.format.supports_writes() {
             Ok(())
@@ -531,6 +557,20 @@ impl HistoricalFormatContext {
         rows: &RowMapSnapshot,
     ) -> Result<NativeGraphContext, FormatContextError> {
         self.context.open_native_graph(rows)
+    }
+
+    /// Reads one committed path's bytes from the pinned commit only.
+    ///
+    /// Available for every admitted format, so a legacy format-1/2 pin is
+    /// readable through its own path layout even though its row map and native
+    /// graph are refused. The bytes come from the resolved commit, never the
+    /// workspace `HEAD`, so this read cannot advance while the pin is held.
+    pub fn read_committed_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, FormatContextError> {
+        self.context.read_committed_file(path, max_bytes)
     }
 }
 
@@ -1260,7 +1300,7 @@ mod graph_bridge_tests {
             1,
             first_payload,
             "audio/mpeg",
-            Some("mp3"),
+            Some("mp2"),
             false,
         );
         let second_payload = b"london take two, remastered".as_slice();
@@ -1270,7 +1310,7 @@ mod graph_bridge_tests {
             1,
             second_payload,
             "audio/mpeg",
-            Some("mp3"),
+            Some("mp2"),
             false,
         );
         assert_ne!(first_descriptor, second_descriptor);
@@ -1303,7 +1343,7 @@ mod graph_bridge_tests {
             .read_stored_blob_value(&row, &first_descriptor, &scope)
             .expect("read the Blob the historical row stores");
         assert_eq!(stored.annotation().media_type(), "audio/mpeg");
-        assert_eq!(stored.annotation().suffix(), Some("mp3"));
+        assert_eq!(stored.annotation().suffix(), Some("mp2"));
         assert_eq!(stored.content_identity().length(), first_payload.len() as u64);
         let range = graph
             .read_blob_range(stored.reference(), 0..first_payload.len() as u64, &scope)
@@ -1353,7 +1393,11 @@ mod graph_bridge_tests {
             remounted.snapshot_id(),
             "one commit always resolves to one snapshot identity"
         );
-        assert_ne!(*mounted.snapshot_id(), head.snapshot_pin().snapshot_id());
+        assert_ne!(
+            *mounted.snapshot_id(),
+            head.snapshot_pin().snapshot_id(),
+            "a historical pin never shares the workspace snapshot identity"
+        );
     }
 
     #[test]
@@ -1368,7 +1412,7 @@ mod graph_bridge_tests {
             1,
             payload,
             "audio/mpeg",
-            Some("mp3"),
+            Some("mp2"),
             true,
         );
 

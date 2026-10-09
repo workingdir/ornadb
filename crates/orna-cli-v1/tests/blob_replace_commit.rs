@@ -50,6 +50,7 @@ fn stored_metadata(row: &[u8]) -> orna_value_v1::BlobMetadata {
     decode_rov3_blob_metadata(row).expect("committed row carries a stored Blob reference")
 }
 
+
 fn row_for<'a>(rows: &'a [(Vec<u8>, Vec<u8>)], key: &[u8]) -> &'a [u8] {
     rows.iter()
         .find(|(candidate, _)| candidate == key)
