@@ -2,14 +2,26 @@
 //! lists the revision history of one committed row through the OGS-1
 //! commit-graph walk. Only commit headers and tree listings are read; no blob
 //! payload is opened or hydrated.
+//!
+//! `orna history <relation-hex> --diff <a> <b>` reports what changed in one
+//! relation between two named commits instead. Both endpoints are pinned
+//! independently through the same repository-owned historical snapshot
+//! context, so the comparison is one pair of immutable reads taken from the
+//! local repository alone: no fetch, no remote, and no media payload.
 
 use super::*;
-use orna_repository_v1::{Repository, TypedKey};
+use orna_repository_v1::{AdmittedRow, KeyRange, Repository, TypedKey};
+
+use std::collections::BTreeMap;
 
 /// Most revisions one history listing reports when `--limit` is not given.
 const DEFAULT_HISTORY_LIMIT: usize = 64;
 /// Largest `--limit` accepted; matches the repository walk bound.
 const MAX_HISTORY_LIMIT: usize = 4096;
+/// Most rows one diff page reads; matches the repository range bound
+/// (`MAX_ROW_RANGE_LIMIT`). A relation larger than one page is walked page by
+/// page so the comparison never materialises an unbounded range.
+const MAX_DIFF_PAGE: usize = 256;
 
 /// Output shape for the revision listing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,7 +34,7 @@ enum HistoryFormat {
 #[derive(Debug, Eq, PartialEq)]
 struct HistoryOptions<'a> {
     relation: &'a str,
-    key: &'a str,
+    key: Option<&'a str>,
     at: Option<&'a str>,
     limit: usize,
     since: Option<&'a str>,
@@ -31,6 +43,9 @@ struct HistoryOptions<'a> {
     quiet: bool,
     count: bool,
     author: Option<&'a str>,
+    /// `--diff <a> <b>`: the two snapshots to compare instead of listing one
+    /// row's revisions.
+    diff: Option<(&'a str, &'a str)>,
 }
 
 fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic> {
@@ -43,6 +58,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     let mut quiet = false;
     let mut count = false;
     let mut author = None;
+    let mut diff = None;
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
@@ -79,6 +95,27 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             "--reverse" => reverse = true,
             "--quiet" => quiet = true,
             "--count" => count = true,
+            "--diff" => {
+                let from = words.next().ok_or_else(|| {
+                    history_error(
+                        "--diff needs two snapshots",
+                        "usage: --diff <from-selector> <to-selector>",
+                    )
+                })?;
+                let to = words.next().ok_or_else(|| {
+                    history_error(
+                        "--diff needs two snapshots",
+                        "usage: --diff <from-selector> <to-selector>",
+                    )
+                })?;
+                if diff.is_some() {
+                    return Err(history_error(
+                        "History compares one pair of snapshots",
+                        "usage: --diff <from-selector> <to-selector>",
+                    ));
+                }
+                diff = Some((from, to));
+            }
             "--author" => {
                 let value = words.next().ok_or_else(|| {
                     history_error("--author needs a value", "usage: --author <substring>")
@@ -103,17 +140,29 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             flag if flag.starts_with("--") => {
                 return Err(history_error(
                     "Unknown history flag",
-                    format!("got {flag:?}; accepted: --at, --limit, --since, --format, --reverse, --author, --count, --quiet"),
+                    format!("got {flag:?}; accepted: --at, --diff, --limit, --since, --format, --reverse, --author, --count, --quiet"),
                 ));
             }
             _ => positional.push(word),
         }
     }
-    let [relation, key] = positional[..] else {
-        return Err(history_error(
-            "History expects a relation and a row key",
-            "usage: orna history <relation-hex> <key> [--at SELECTOR] [--limit N] [--since <commit-hex>]",
-        ));
+    let (relation, key) = match (diff, positional[..].split_first()) {
+        // `--diff` names the relation and both snapshots, so no row key is
+        // read: the comparison is over every row of the relation.
+        (Some(_), Some((relation, []))) => (*relation, None),
+        (Some((_, _)), _) => {
+            return Err(history_error(
+                "History expects a relation for --diff",
+                "usage: orna history <relation-hex> --diff <from-selector> <to-selector>",
+            ));
+        }
+        (None, Some((relation, [key]))) => (*relation, Some(*key)),
+        (None, _) => {
+            return Err(history_error(
+                "History expects a relation and a row key",
+                "usage: orna history <relation-hex> <key> [--at SELECTOR] [--limit N] [--since <commit-hex>]",
+            ));
+        }
     };
     Ok(HistoryOptions {
         relation,
@@ -126,16 +175,23 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
         quiet,
         count,
         author,
+        diff,
     })
 }
 
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
     let relation = parse_relation_id(options.relation)?;
-    let key = options.key;
     let path = local_project_path(endpoint)?;
     let repository = Repository::discover(path)
         .map_err(|error| history_error("Repository could not be opened", format!("{error:?}")))?;
+    if let Some((from, to)) = options.diff {
+        return run_diff(&repository, relation, from, to, options.format);
+    }
+    // `parse_options` yields a key for every invocation without `--diff`.
+    let key = options
+        .key
+        .expect("a history read without --diff names one row key");
     // `--at` pins one named snapshot. The selector is resolved exactly once
     // here; the row map, the read and the revision walk all come from the
     // commit it named, so a branch that advances during the read never changes
@@ -386,6 +442,321 @@ fn bare_ref_selector_is_ambiguous(directory: &str, selector: &str) -> Result<boo
         .filter(|name| wanted.iter().any(|candidate| candidate == name))
         .count();
     Ok(matches > 1)
+}
+
+/// One row's change between the two compared snapshots.
+enum RowChange {
+    Added(AdmittedRow),
+    Removed(AdmittedRow),
+    Changed { before: AdmittedRow, after: AdmittedRow },
+}
+
+/// The payload-free annotation coordinate of one row: the Blob field
+/// descriptors its own stored tuple carries, separately from the row's value.
+fn annotations_of(row: &AdmittedRow) -> Vec<(usize, serde_json::Value)> {
+    row.blob_fields()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(field, metadata)| {
+            (
+                field,
+                serde_json::json!({
+                    "field": field,
+                    "media_type": metadata.media_type(),
+                    "suffix": metadata.suffix(),
+                    "length": metadata.length(),
+                    "sha256": hex(&metadata.sha256()),
+                }),
+            )
+        })
+        .collect()
+}
+
+/// The stored value the row's own tuple holds, in its canonical encoded form.
+fn encoded_value(row: &AdmittedRow) -> Vec<u8> {
+    row.value().encoded_fields().unwrap_or_default().to_vec()
+}
+
+/// Reports what changed in one relation between two named snapshots.
+///
+/// Both endpoints are pinned through the same repository-owned historical
+/// snapshot context used by `--at`, so each side is one immutable read of the
+/// local store. Nothing here contacts a remote, fetches an object, or opens a
+/// media payload: the comparison is over row keys, the row's own field tuple,
+/// and the Blob annotation descriptors that tuple carries. An annotation that
+/// moved between the two sides is therefore reported as its own coordinate
+/// rather than as a change to the row's data.
+fn run_diff(
+    repository: &Repository,
+    relation: [u8; 16],
+    from: &str,
+    to: &str,
+    format: HistoryFormat,
+) -> Result<(), Diagnostic> {
+    let from_label = diff_snapshot_label(repository, from)?;
+    let to_label = diff_snapshot_label(repository, to)?;
+    let (before, before_read) = read_relation_rows(repository, relation, from)?;
+    let (after, after_read) = read_relation_rows(repository, relation, to)?;
+    let payload_bytes_read = before_read.payload_bytes_read() + after_read.payload_bytes_read();
+    let native_objects_read = before_read.objects_read() + after_read.objects_read();
+    let changes = compare_rows(before, after);
+    let (added, changed, removed) = counts(&changes);
+    match format {
+        HistoryFormat::Human => {
+            for change in &changes {
+                println!("{}", human_change(change));
+            }
+            println!(
+                "{added} added; {changed} changed; {removed} removed; {} rows in {to_label}",
+                changes
+                    .iter()
+                    .filter(|change| !matches!(change, RowChange::Removed(_)))
+                    .count(),
+            );
+            println!(
+                "media payload bytes read: {payload_bytes_read}; native objects read: {native_objects_read}"
+            );
+        }
+        HistoryFormat::Json => {
+            let entries: Vec<serde_json::Value> = changes.iter().map(change_json).collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "from": from_label,
+                    "to": to_label,
+                    "added": added,
+                    "changed": changed,
+                    "removed": removed,
+                    "media_payload_bytes_read": payload_bytes_read,
+                    "native_objects_read": native_objects_read,
+                    "changes": entries,
+                })
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Names the commit each side of the comparison is pinned to, refusing a
+/// selector that names no commit rather than reading the current `HEAD`.
+fn diff_snapshot_label(repository: &Repository, selector: &str) -> Result<String, Diagnostic> {
+    repository
+        .resolve_snapshot(selector)
+        .map(|commit| format!("{selector:?} ({})", commit.as_str()))
+        .map_err(|error| {
+            history_error(
+                "Diff snapshot could not be resolved",
+                format!("{selector:?}: {error:?}"),
+            )
+        })
+}
+
+/// The measured cost of one pinned relation read: the media payload bytes and
+/// native objects the read touched.
+struct ReadCost {
+    payload_bytes_read: u64,
+    objects_read: u64,
+}
+
+/// Reads every committed row of one relation at one pinned snapshot, keyed by
+/// canonical key bytes so the two sides join on the committed row identity.
+///
+/// The relation is walked one bounded page at a time and no key is ever
+/// revisited: each page after the first resumes strictly after the last key
+/// already read. The cost returned is the read scope's own accounting, so a
+/// caller can report the payload bytes the comparison did not fetch.
+fn read_relation_rows(
+    repository: &Repository,
+    relation: [u8; 16],
+    selector: &str,
+) -> Result<(BTreeMap<Vec<u8>, AdmittedRow>, ReadCost), Diagnostic> {
+    let format = repository
+        .open_pinned_format_context(selector)
+        .map_err(|error| {
+            history_error(
+                "Diff snapshot could not be pinned",
+                format!("{selector:?}: {error:?}"),
+            )
+        })?;
+    let row_map = format
+        .load_row_map(relation)
+        .map_err(|error| history_error("Row map could not be loaded", format!("{error:?}")))?;
+    let graph = format
+        .open_native_graph(&row_map)
+        .map_err(|error| history_error("Native graph could not be opened", format!("{error:?}")))?;
+    let scope = graph
+        .open_read_scope()
+        .map_err(|error| history_error("Read scope could not be opened", format!("{error:?}")))?;
+    let mut rows: BTreeMap<Vec<u8>, AdmittedRow> = BTreeMap::new();
+    let mut cursor: Option<TypedKey> = None;
+    loop {
+        let range = KeyRange::new(cursor.clone(), None, MAX_DIFF_PAGE)
+            .map_err(|error| history_error("Row range is invalid", format!("{error:?}")))?;
+        let page = graph
+            .range_rows(&range, &scope)
+            .map_err(|error| history_error("Row range could not be read", format!("{error:?}")))?;
+        let read = page.len();
+        let mut last = None;
+        for row in page {
+            // `KeyRange` excludes its lower bound, so a key at or below the
+            // cursor is never read twice even when a page is exactly full.
+            last = Some(row.key().clone());
+            let key = row.key().canonical_bytes().map_err(|error| {
+                history_error("Row key could not be encoded", format!("{error:?}"))
+            })?;
+            rows.insert(key, row);
+        }
+        if read < MAX_DIFF_PAGE {
+            return Ok((
+                rows,
+                ReadCost {
+                    payload_bytes_read: scope.payload_bytes_read(),
+                    objects_read: scope.objects_read(),
+                },
+            ));
+        }
+        match last {
+            // A full page with no advance would re-read the same page.
+            Some(last) => cursor = Some(last),
+            None => {
+                return Ok((
+                    rows,
+                    ReadCost {
+                        payload_bytes_read: scope.payload_bytes_read(),
+                        objects_read: scope.objects_read(),
+                    },
+                ));
+            }
+        }
+    }
+}
+
+/// Joins the two pinned reads by canonical key into one ordered change list.
+fn compare_rows(
+    before: BTreeMap<Vec<u8>, AdmittedRow>,
+    after: BTreeMap<Vec<u8>, AdmittedRow>,
+) -> Vec<RowChange> {
+    let mut changes = Vec::new();
+    for (key, old) in &before {
+        match after.get(key) {
+            None => changes.push(RowChange::Removed(old.clone())),
+            Some(new) if row_identity(old) != row_identity(new) => {
+                changes.push(RowChange::Changed {
+                    before: old.clone(),
+                    after: new.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for (key, new) in &after {
+        if !before.contains_key(key) {
+            changes.push(RowChange::Added(new.clone()));
+        }
+    }
+    changes
+}
+
+/// What makes two readings of one committed row the same row: the stored value
+/// beside the Blob annotation coordinate its tuple carries.
+fn row_identity(row: &AdmittedRow) -> (Vec<u8>, Vec<(usize, serde_json::Value)>) {
+    (encoded_value(row), annotations_of(row))
+}
+
+/// One change as a JSON object. A `changed` entry separates the two
+/// coordinates so a content move and an annotation move are told apart.
+fn change_json(change: &RowChange) -> serde_json::Value {
+    match change {
+        RowChange::Added(row) => serde_json::json!({
+            "change": "added",
+            "key": render_key(row.key()),
+            "annotations": annotations_of(row),
+        }),
+        RowChange::Removed(row) => serde_json::json!({
+            "change": "removed",
+            "key": render_key(row.key()),
+            "annotations": annotations_of(row),
+        }),
+        RowChange::Changed { before, after } => serde_json::json!({
+            "change": "changed",
+            "key": render_key(after.key()),
+            "content_changed": encoded_value(before) != encoded_value(after),
+            "before": { "annotations": annotations_of(before) },
+            "after": { "annotations": annotations_of(after) },
+        }),
+    }
+}
+
+/// One change as a human line. A changed row names which coordinate moved so a
+/// re-annotation is not read as a data change.
+fn human_change(change: &RowChange) -> String {
+    match change {
+        RowChange::Added(row) => format!("added   {}", render_key(row.key())),
+        RowChange::Removed(row) => format!("removed {}", render_key(row.key())),
+        RowChange::Changed { before, after } => {
+            let content = encoded_value(before) != encoded_value(after);
+            let annotation = annotations_of(before) != annotations_of(after);
+            format!(
+                "changed {} (content={}, annotation={})",
+                render_key(after.key()),
+                content,
+                annotation,
+            )
+        }
+    }
+}
+
+/// Counts the changes as `(added, changed, removed)`.
+fn counts(changes: &[RowChange]) -> (usize, usize, usize) {
+    let mut added = 0;
+    let mut changed = 0;
+    let mut removed = 0;
+    for change in changes {
+        match change {
+            RowChange::Added(_) => added += 1,
+            RowChange::Changed { .. } => changed += 1,
+            RowChange::Removed(_) => removed += 1,
+        }
+    }
+    (added, changed, removed)
+}
+
+/// Renders a canonical row key the way `orna query` prints one: a text key as
+/// its text, and a byte key as that same text when its bytes are valid UTF-8,
+/// so a key reported by either verb is greppable the same way.
+fn render_key(key: &TypedKey) -> String {
+    match key {
+        TypedKey::Text(text) => text.clone(),
+        TypedKey::UInt(value) => value.to_string(),
+        TypedKey::Int(value) => value.to_string(),
+        TypedKey::Bool(value) => value.to_string(),
+        TypedKey::Null => "-".to_owned(),
+        TypedKey::Bytes(bytes) => render_bytes(bytes),
+        TypedKey::Tuple(values) => values
+            .iter()
+            .map(render_key)
+            .collect::<Vec<_>>()
+            .join(","),
+    }
+}
+
+fn render_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) if !text.is_empty() && text.chars().all(|character| !character.is_control()) => {
+            text.to_owned()
+        }
+        _ => format!("0x{}", hex(bytes)),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
