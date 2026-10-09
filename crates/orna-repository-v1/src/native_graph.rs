@@ -1035,12 +1035,13 @@ impl NativeGraphContext {
         Ok((stats, reached))
     }
 
-    /// Lists up to `max_commits` commits reachable from `HEAD`, newest first,
+    /// Lists up to `max_commits` commits reachable from `start`, newest first,
     /// each paired with its root tree snapshot. Only commit headers and tree
     /// object kinds are read; no blob or OGB-2 chunk is opened, so history can
     /// be listed without materializing content.
     pub fn list_revision_snapshots(
         &self,
+        start: &str,
         max_commits: usize,
     ) -> Result<Vec<RevisionSnapshot>, GraphError> {
         if max_commits > MAX_REVISION_WALK {
@@ -1051,7 +1052,7 @@ impl NativeGraphContext {
         }
         let limit = format!("--max-count={max_commits}");
         // `%an <%ae>` follows a tab, so names containing spaces stay intact.
-        let output = self.git_output(&["log", "--format=%H %T%x09%an <%ae>", &limit, "HEAD"])?;
+        let output = self.git_output(&["log", "--format=%H %T%x09%an <%ae>", &limit, start])?;
         let text = std::str::from_utf8(&output).map_err(|_| GraphError::GitObjectMalformed)?;
         let mut snapshots = Vec::new();
         for line in text.lines() {
@@ -1081,14 +1082,15 @@ impl NativeGraphContext {
         Ok(snapshots)
     }
 
-    /// Lists up to `max_commits` revisions of one admitted row, newest first.
-    /// Each revision reports whether the row's descriptor tree is reachable
-    /// from that revision's root tree. The walk reads commit headers and tree
-    /// objects only (`ls-tree` never opens blob contents), so no payload is
-    /// materialized and no blob pin is taken.
+    /// Lists up to `max_commits` revisions of one admitted row from `start`,
+    /// newest first. Each revision reports whether the row's descriptor tree
+    /// is reachable from that revision's root tree. The walk reads commit
+    /// headers and tree objects only (`ls-tree` never opens blob contents), so
+    /// no payload is materialized and no blob pin is taken.
     pub fn list_row_revisions(
         &self,
         row: &crate::row_store::AdmittedRow,
+        start: &str,
         max_commits: usize,
         scope: &RepositoryReadScope,
     ) -> Result<Vec<RowRevision>, GraphError> {
@@ -1106,7 +1108,7 @@ impl NativeGraphContext {
         if descriptors.is_empty() {
             return Err(GraphError::DescriptorNotInRow);
         }
-        let snapshots = self.list_revision_snapshots(max_commits)?;
+        let snapshots = self.list_revision_snapshots(start, max_commits)?;
         let mut revisions = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let tree = snapshot.tree().to_hex();
