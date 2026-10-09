@@ -2358,31 +2358,44 @@ impl NativeGraphContext {
         Ok(oid)
     }
 
-    pub(crate) fn write_capture_node(
+    fn write_capture_node(
         &self,
         node: &NodeData,
         written: &mut BTreeSet<NativeOid>,
         object_limit: u64,
     ) -> Result<NativeOid, GraphError> {
-        let data = node.encode_canonical()?;
-        self.write_capture_envelope(&data, node, written, object_limit)
-    }
-
-    /// The stable database identity admitted for this graph context.
-    pub const fn database_id(&self) -> &[u8; 16] {
-        &self.database_id
-    }
-
-    /// The hash algorithm fixed by the admitted repository format.
-    pub const fn algorithm(&self) -> GitHashAlgorithm {
-        self.algorithm
-    }
-
-    /// The admitted `.orna/store` root this context pinned. A candidate commit
-    /// that rewrites the store must nest the replacement tree in its own
-    /// private index rather than reusing this identity.
-    pub fn store_root(&self) -> &NativeOid {
-        &self.store_root
+        let envelope = NativeNodeEnvelope::from_node(node)?;
+        if envelope.data.len() > NODE_DATA_LIMIT {
+            return Err(GraphError::NodeDataTooLarge(envelope.data.len()));
+        }
+        let data_oid = self.write_capture_object("blob", &envelope.data, written, object_limit)?;
+        let mut root_entries = vec![ParsedGitTreeEntry {
+            mode: b"100644".to_vec(),
+            name: b"data".to_vec(),
+            oid: data_oid,
+        }];
+        if !envelope.refs.is_empty() {
+            let mut refs_entries = Vec::with_capacity(envelope.refs.len());
+            for reference in envelope.refs {
+                refs_entries.push(ParsedGitTreeEntry {
+                    mode: match reference.kind {
+                        NativeObjectKind::Blob => b"100644".to_vec(),
+                        NativeObjectKind::Tree => b"40000".to_vec(),
+                    },
+                    name: reference.oid.to_hex().into_bytes(),
+                    oid: reference.oid,
+                });
+            }
+            let refs_bytes = encode_git_tree(refs_entries)?;
+            let refs_oid = self.write_capture_object("tree", &refs_bytes, written, object_limit)?;
+            root_entries.push(ParsedGitTreeEntry {
+                mode: b"40000".to_vec(),
+                name: b"refs".to_vec(),
+                oid: refs_oid,
+            });
+        }
+        let tree = encode_git_tree(root_entries)?;
+        self.write_capture_object("tree", &tree, written, object_limit)
     }
 
     /// Writes one complete OGS-1 node envelope (its canonical `data` blob, its
@@ -2441,7 +2454,7 @@ impl NativeGraphContext {
         let cacheinfo = format!(
             "040000,{},{}",
             store_root.to_hex(),
-            crate::format_context::STORE_PATH
+            crate::init::format_context::STORE_PATH
         );
         let output = self
             .git_command()
@@ -2453,46 +2466,6 @@ impl NativeGraphContext {
             return Err(GraphError::GitCommandFailed);
         }
         Ok(())
-    }
-
-    fn write_capture_envelope(
-        &self,
-        node: &NodeData,
-        written: &mut BTreeSet<NativeOid>,
-        object_limit: u64,
-    ) -> Result<NativeOid, GraphError> {
-        let envelope = NativeNodeEnvelope::from_node(node)?;
-        if envelope.data.len() > NODE_DATA_LIMIT {
-            return Err(GraphError::NodeDataTooLarge(envelope.data.len()));
-        }
-        let data_oid = self.write_capture_object("blob", &envelope.data, written, object_limit)?;
-        let mut root_entries = vec![ParsedGitTreeEntry {
-            mode: b"100644".to_vec(),
-            name: b"data".to_vec(),
-            oid: data_oid,
-        }];
-        if !envelope.refs.is_empty() {
-            let mut refs_entries = Vec::with_capacity(envelope.refs.len());
-            for reference in envelope.refs {
-                refs_entries.push(ParsedGitTreeEntry {
-                    mode: match reference.kind {
-                        NativeObjectKind::Blob => b"100644".to_vec(),
-                        NativeObjectKind::Tree => b"40000".to_vec(),
-                    },
-                    name: reference.oid.to_hex().into_bytes(),
-                    oid: reference.oid,
-                });
-            }
-            let refs_bytes = encode_git_tree(refs_entries)?;
-            let refs_oid = self.write_capture_object("tree", &refs_bytes, written, object_limit)?;
-            root_entries.push(ParsedGitTreeEntry {
-                mode: b"40000".to_vec(),
-                name: b"refs".to_vec(),
-                oid: refs_oid,
-            });
-        }
-        let tree = encode_git_tree(root_entries)?;
-        self.write_capture_object("tree", &tree, written, object_limit)
     }
 
     fn git_command(&self) -> Command {
