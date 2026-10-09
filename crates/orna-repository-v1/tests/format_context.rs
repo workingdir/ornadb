@@ -321,14 +321,14 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
         .open_format_context_at_selector(&legacy_commit)
         .expect("reopen the legacy commit read-only");
     let current = repository
-        .open_format_context_at_selector("HEAD")
+        .open_format_context()
         .expect("reopen the format-3 commit");
 
     // Both views are open at once and neither rewrites the other's coordinate.
     assert_eq!(legacy.repository_format_number(), 1);
     assert!(legacy.is_legacy_format());
     assert_eq!(current.repository_format_number(), 3);
-    assert!(!current.is_legacy_format());
+    assert!(!current.is_read_only());
     assert!(
         repository.head().unwrap().unwrap().as_str() != legacy_commit,
         "the legacy view did not move the workspace HEAD"

@@ -51,6 +51,10 @@ const NEGATION_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-negation.orna"
 );
+const ANNOTATED_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-annotation.orna"
+);
 const PROJECTION_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-projection.orna"
@@ -813,7 +817,7 @@ async fn history_json_lists_each_revision_with_exactly_the_four_keys() {
         let object = entry.as_object().expect("each revision is a JSON object");
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["author", "commit", "present", "tree"]);
+        assert_eq!(keys, ["author", "commit", "committed", "present", "tree"]);
         for field in ["commit", "tree"] {
             let hex = object[field].as_str().expect("hex id is a string");
             assert_eq!(hex.len(), 40, "{field} is a full object id");
@@ -1469,7 +1473,11 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
         "the listing still walked committed graph objects, so the zero above is not vacuous"
     );
     let listings = report["listings"].as_array().unwrap();
-    assert_eq!(listings.len(), 2, "both committed rows carry one Blob field");
+    assert_eq!(
+        listings.len(),
+        2,
+        "both committed rows carry one Blob field: {report}"
+    );
 
     // Every committed payload is described without being fetched: the listed
     // length and digest are the real file's, taken from the row itself.
@@ -1587,5 +1595,210 @@ async fn zero_limit_history_walk_returns_no_revisions() {
     assert_eq!(song_revisions_limited_to(&repository, relation_id, 1).len(), 1);
     // Zero limit returns an empty listing, not an error or the full walk.
     assert!(song_revisions_limited_to(&repository, relation_id, 0).is_empty());
+    drop(directory);
+}
+
+/// QUERY PREDICATE: an annotation predicate over the stored coordinate
+/// (kind/suffix/length) is evaluated from the rows' own annotations, the plan
+/// reports the coordinates it used, and the whole evaluation charges zero
+/// media payload bytes.
+#[tokio::test]
+async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(Path::new(MEDIA_FIXTURES).join(name), source.path().join(name)).unwrap();
+    }
+    // The annotated row carries the same payload bytes as the song row under a
+    // different file name. Content identity therefore cannot be what
+    // discriminates them: only the authored annotation coordinate can.
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("note.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    // Three real rows: two WAVs (one of them carrying the authored "note"
+    // suffix) and one PNG, so the predicate has to discriminate on more than
+    // the media type.
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let annotated = import_expression(ANNOTATED_SONG_IMPORT_FIXTURE, source.path());
+    import_media(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &annotated,
+        "note",
+        0x80,
+        true,
+    )
+    .await;
+    let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x90, true).await;
+    drop(bindings);
+    drop(state);
+
+    let relation = relation_hex(relation_id);
+    let payload_bytes: u64 = ["tone.wav", "pixel.png", "note.wav"]
+        .iter()
+        .map(|name| std::fs::metadata(source.path().join(name)).unwrap().len())
+        .sum();
+
+    // An unfiltered listing is the control: the predicate below must not add a
+    // single payload byte on top of it.
+    let all = query_json(directory.path(), &[&relation]);
+    assert_eq!(all["blobs"].as_u64(), Some(3), "three committed rows: {all}");
+    assert_eq!(all["media_payload_bytes_read"], 0);
+
+    // `--kind` selects on the canonical media type the annotation binds.
+    let wavs = query_json(directory.path(), &[&relation, "--kind", "audio/wav"]);
+    let keys: Vec<&str> = wavs["listings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|listing| listing["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, vec!["note", "song"], "both WAV rows and no PNG: {wavs}");
+    assert_eq!(
+        wavs["media_payload_bytes_read"], 0,
+        "the kind predicate fetched media bytes"
+    );
+    assert!(
+        wavs["native_objects_read"].as_u64().unwrap() > 0,
+        "the filtered listing still walked the committed graph, so its zero is not vacuous"
+    );
+
+    // The plan names the coordinates that answered it, and names the ones a
+    // stored annotation does not bind so their absence is explicit.
+    let plan = &wavs["plan"];
+    assert_eq!(plan["kind"], "annotation-predicate");
+    assert_eq!(
+        plan["coordinates"],
+        serde_json::json!(["kind", "suffix", "length"])
+    );
+    assert_eq!(
+        plan["decode_required_coordinates"],
+        serde_json::json!(["duration", "dimensions"])
+    );
+    assert_eq!(plan["candidates"].as_u64(), Some(3), "all rows: {plan}");
+    assert_eq!(plan["matched"].as_u64(), Some(2), "two WAVs: {plan}");
+    assert_eq!(plan["payload_fetch"], "none");
+
+    // `--suffix` discriminates the two WAVs by their authored annotation, and
+    // an unauthored hint selects nothing rather than falling back to kind.
+    let annotated_only = query_json(directory.path(), &[&relation, "--suffix", "note"]);
+    let annotated_keys: Vec<&str> = annotated_only["listings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|listing| listing["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(annotated_keys, vec!["note"], "only the annotated row");
+    assert_eq!(annotated_only["listings"][0]["suffix"], "note");
+    assert_eq!(annotated_only["media_payload_bytes_read"], 0);
+
+    let absent_suffix = query_json(directory.path(), &[&relation, "--suffix", "absent"]);
+    assert!(
+        absent_suffix["listings"].as_array().unwrap().is_empty(),
+        "an unauthored suffix selects nothing: {absent_suffix}"
+    );
+
+    // `--min-length` and `--max-length` bound the length coordinate: the
+    // filtered set is exactly the unfiltered set's rows that satisfy the
+    // bound, so the predicate neither drops a matching row nor keeps one it
+    // should not.
+    let all_lengths: Vec<u64> = all["listings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|listing| listing["length"].as_u64().unwrap())
+        .collect();
+    let bound = *all_lengths.iter().min().unwrap() + 1;
+    let at_least = query_json(
+        directory.path(),
+        &[&relation, "--min-length", &bound.to_string()],
+    );
+    assert_eq!(
+        at_least["blobs"].as_u64(),
+        Some(all_lengths.iter().filter(|length| **length >= bound).count() as u64),
+        "min-length keeps exactly the rows at or above the bound"
+    );
+    let at_most = query_json(
+        directory.path(),
+        &[&relation, "--max-length", &(bound - 1).to_string()],
+    );
+    assert_eq!(
+        at_most["blobs"].as_u64(),
+        Some(all_lengths.iter().filter(|length| **length < bound).count() as u64),
+        "max-length keeps exactly the rows below the bound"
+    );
+    assert_eq!(at_least["media_payload_bytes_read"], 0);
+    assert_eq!(at_most["media_payload_bytes_read"], 0);
+
+    // `--not-kind` excludes the named annotation from the same coordinate.
+    let not_png = query_json(directory.path(), &[&relation, "--not-kind", "image/png"]);
+    assert_eq!(not_png["blobs"].as_u64(), Some(2), "the PNG is excluded");
+
+    // Combining coordinates selects on all of them, and a conjunction that no
+    // row satisfies is an empty result rather than an unfiltered one.
+    let narrow = query_json(
+        directory.path(),
+        &[&relation, "--kind", "audio/wav", "--suffix", "note"],
+    );
+    assert_eq!(narrow["blobs"].as_u64(), Some(1), "one row: {narrow}");
+    let contradictory = query_json(
+        directory.path(),
+        &[&relation, "--kind", "audio/wav", "--not-kind", "audio/wav"],
+    );
+    assert!(contradictory["listings"].as_array().unwrap().is_empty());
+
+    // Every predicate above answered from annotations, so the whole run
+    // fetched nothing: the summed payload is the figure the plan avoided.
+    assert_eq!(
+        wavs["media_payload_bytes_read"], 0,
+        "a predicate over {payload_bytes} payload bytes read none of them"
+    );
+
+    // The human listing states the plan and the payload it avoided.
+    let human = run_query(directory.path(), &[&relation, "--kind", "audio/wav"]);
+    assert_eq!(human.status.code(), Some(0));
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        text.contains("media payload bytes read: 0"),
+        "the human summary must report the payload it avoided: {text}"
+    );
+    assert!(
+        text.contains("plan: annotation predicate")
+            && text.contains("coordinates kind,suffix,length")
+            && text.contains("decode-required coordinates duration,dimensions"),
+        "the human plan must name the coordinates it used: {text}"
+    );
+    assert!(text.contains("matched 2"), "the plan states the match count: {text}");
+
+    // A flag that names no coordinate the annotation binds is refused rather
+    // than silently ignored.
+    let unknown = run_query(directory.path(), &[&relation, "--dimensions", "100x100"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("--dimensions"),
+        "an unknown predicate flag is named in the refusal"
+    );
     drop(directory);
 }
