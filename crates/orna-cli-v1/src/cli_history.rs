@@ -393,12 +393,14 @@ fn pin_snapshot(
         )
     })?;
     let start = commit.as_str().to_owned();
-    let format = repository.open_pinned_format_context(&start).map_err(|error| {
-        history_error(
-            "Snapshot could not be pinned",
-            format!("{selector:?}: {error:?}"),
-        )
-    })?;
+    let format = repository
+        .open_pinned_format_context(&start)
+        .map_err(|error| {
+            history_error(
+                "Snapshot could not be pinned",
+                format!("{selector:?}: {error:?}"),
+            )
+        })?;
     Ok((start, format))
 }
 
