@@ -27,6 +27,11 @@ use crate::native_graph::{sync_all_pack_files, sync_directory};
 
 const MAX_FETCH_REFS: usize = 4096;
 
+/// Names the Gate D fault-injection seam that orders a fetch between its
+/// object barrier and its ref CAS. Set to a whole number of seconds to hold
+/// the process there so a supervising test can kill it deterministically.
+const FAULT_INJECTION_HOLD_ENV: &str = "ORNA_FAULT_INJECTION_FETCH_HOLD_SECONDS";
+
 /// One ordinary branch or tag requested from a configured remote.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RequestedRef {
@@ -594,6 +599,7 @@ impl Repository {
         )?;
         sync_fetched_objects(self, &all_plans)?;
         install_refs(self, &all_plans)?;
+        sync_fetched_ref_directories(self, &all_plans)?;
 
         Ok(FetchReport {
             ordinary: ordinary_plans.into_iter().map(FetchedRef::from).collect(),
@@ -1107,12 +1113,12 @@ fn verify_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<
     Ok(())
 }
 
-/// Resolves the object database the fetch just wrote into.
-fn git_objects_dir(repository: &Repository) -> Result<PathBuf, FetchError> {
+/// Resolves one repository-relative Git path for this worktree.
+fn git_path(repository: &Repository, name: &str) -> Result<PathBuf, FetchError> {
     let mut command = repository.observer_command();
     scrub_git_routing_environment(&mut command);
     let output = command
-        .args(["rev-parse", "--git-path", "objects"])
+        .args(["rev-parse", "--git-path", name])
         .output()
         .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
     if !output.status.success() {
@@ -1151,7 +1157,7 @@ fn sync_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<()
         objects
             .insert(NativeObjectId::new(plan.object_id.clone()).map_err(FetchError::Repository)?);
     }
-    let objects_dir = git_objects_dir(repository)?;
+    let objects_dir = git_path(repository, "objects")?;
     let alternates = objects_dir.join("info").join("alternates");
     match std::fs::symlink_metadata(&alternates) {
         Ok(metadata) => {
@@ -1190,7 +1196,62 @@ fn sync_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<()
         sync_all_pack_files(&objects_dir.join("pack"))
             .map_err(|_| FetchError::FetchedObjectsNotDurable)?;
     }
-    sync_directory(&objects_dir).map_err(|_| FetchError::FetchedObjectsNotDurable)
+    sync_directory(&objects_dir).map_err(|_| FetchError::FetchedObjectsNotDurable)?;
+    fault_injection_seam();
+    Ok(())
+}
+
+/// Orders this process between the object barrier and the ref CAS.
+///
+/// Gate D injects a fault at each durability boundary by killing the process
+/// exactly here: the fetched bytes are already on disk, but no ref names them
+/// yet, so a fault child that dies at this seam must leave the refs unwritten.
+/// An unset variable makes it a no-op.
+fn fault_injection_seam() {
+    if let Some(seconds) = std::env::var_os(FAULT_INJECTION_HOLD_ENV) {
+        let seconds = seconds
+            .to_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+    }
+}
+
+/// Persists the ref namespace the CAS just named, so the refs survive a crash
+/// together with the objects they name.
+///
+/// The refs are installed first because their directories only exist once
+/// `install_refs` has created them; this pass then syncs each ref's directory
+/// and every existing directory above it up to the worktree, which covers the
+/// components `update-ref` had to create for the ref it wrote.
+fn sync_fetched_ref_directories(
+    repository: &Repository,
+    plans: &[RefPlan],
+) -> Result<(), FetchError> {
+    for plan in plans {
+        let ref_path = git_path(repository, &plan.destination)?;
+        let mut directory = ref_path
+            .parent()
+            .ok_or(FetchError::FetchedObjectsNotDurable)?
+            .to_path_buf();
+        loop {
+            match sync_directory(&directory) {
+                Ok(()) => {}
+                // A component this pass cannot reach needs no durability: the
+                // ref was never written through it.
+                Err(_) if !directory.exists() => {}
+                Err(_) => return Err(FetchError::FetchedObjectsNotDurable),
+            }
+            let Some(parent) = directory.parent() else {
+                break;
+            };
+            if !parent.starts_with(repository.worktree()) {
+                break;
+            }
+            directory = parent.to_path_buf();
+        }
+    }
+    Ok(())
 }
 
 fn install_refs(repository: &Repository, plans: &[RefPlan]) -> Result<(), FetchError> {
@@ -1429,6 +1490,130 @@ mod tests {
             sync_fetched_objects(&repository, &[plan]),
             Err(FetchError::FetchedObjectsNotDurable)
         ));
+    }
+
+    const FETCH_CRASH_ROOT: &str = "ORNA_FETCH_CRASH_ROOT";
+    const FETCH_CRASH_TEST: &str =
+        "transport::tests::crashed_fetch_holds_objects_durable_before_any_ref_names_them";
+
+    fn fetched_object_on_disk(objects: &Path, hex: &str) -> bool {
+        if objects.join(&hex[..2]).join(&hex[2..]).is_file() {
+            return true;
+        }
+        fs::read_dir(objects.join("pack"))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.path().extension().is_some_and(|ext| ext == "idx"))
+            })
+            .unwrap_or(false)
+    }
+
+    /// Fetches the one ref its repository advertises, which parks this process
+    /// inside the durability barrier's fault-injection seam until the
+    /// supervisor kills it.
+    fn crashed_fetch_child_body(root: &Path) {
+        let repository =
+            Repository::discover(&root.join("local")).expect("discover crash repository");
+        let request =
+            FetchRequest::new("origin", [RequestedRef::branch("main").unwrap()], []).unwrap();
+        let _ = repository.fetch(&request);
+    }
+
+    /// Kills a fetch between its object barrier and its ref CAS, which is the
+    /// one boundary Gate D must survive. The fetched commit is on disk when the
+    /// process dies, and no ref names it: the objects the barrier made durable
+    /// authorize nothing, because the publisher never ran.
+    ///
+    /// The child holds the seam instead of racing a real crash, so the object
+    /// appearing with the ref still unwritten and the child still alive is the
+    /// ordering itself, not a timing coincidence.
+    #[test]
+    fn crashed_fetch_holds_objects_durable_before_any_ref_names_them() {
+        use std::time::{Duration, Instant};
+
+        if let Some(root) = std::env::var_os(FETCH_CRASH_ROOT) {
+            crashed_fetch_child_body(Path::new(&root));
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("create crash boundary root");
+        let root = directory.path();
+        let local = root.join("local");
+        let remote = root.join("remote.git");
+        fs::create_dir(&local).unwrap();
+        git(root, &["init", "--bare", remote.to_str().unwrap()]);
+        git(&local, &["init", "-b", "main"]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("state.txt"), "crash boundary payload\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "initial"]);
+        let head = git(&local, &["rev-parse", "HEAD"]);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&local, &["push", "origin", "refs/heads/main"]);
+
+        let repository = Repository::discover(&local).unwrap();
+        assert_eq!(
+            local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
+            None
+        );
+        let objects = local.join(".git").join("objects");
+        assert!(
+            !fetched_object_on_disk(&objects, &head),
+            "the parent repository must not already hold the fetched commit"
+        );
+
+        let mut child = Command::new(std::env::current_exe().expect("resolve test binary"))
+            .args([
+                "--exact",
+                FETCH_CRASH_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(FETCH_CRASH_ROOT, root.as_os_str())
+            .env(FAULT_INJECTION_HOLD_ENV, "30")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn the held fetch");
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !fetched_object_on_disk(&objects, &head) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            fetched_object_on_disk(&objects, &head),
+            "the barrier must persist the fetched commit before the seam"
+        );
+        assert_eq!(
+            local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
+            None,
+            "no ref may name the fetched commit while the fetch is held before its CAS"
+        );
+        assert!(
+            child.try_wait().expect("poll the held fetch").is_none(),
+            "the fetch must still be held in the seam, not finished"
+        );
+
+        child.kill().expect("kill the held fetch");
+        let status = child.wait().expect("await the killed fetch");
+        assert!(
+            !status.success(),
+            "the held fetch must die by signal, not publish an exit status"
+        );
+        assert_eq!(
+            local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
+            None,
+            "a crash before the ref CAS must leave the ref unpublished"
+        );
+        assert!(
+            fetched_object_on_disk(&objects, &head),
+            "the killed fetch must leave the durable bytes its barrier synced"
+        );
     }
 
     #[test]
