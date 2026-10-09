@@ -922,14 +922,16 @@ impl PartialEq for Blob {
         self.value_eq(other).unwrap_or(false)
     }
 }
-/// Payload-free metadata for one Blob value: its annotation and committed
-/// content identity. `hydrated` reports whether the bytes are already local.
+/// Payload-free metadata for one Blob value: its annotation, committed content
+/// identity and the descriptor the reference names. `hydrated` reports whether
+/// the bytes are already local.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobMetadata {
     media_type: String,
     suffix: Option<String>,
     length: u64,
     sha256: [u8; 32],
+    descriptor_oid: Option<NativeOid>,
     hydrated: bool,
 }
 
@@ -938,20 +940,22 @@ impl BlobMetadata {
     /// carries.
     ///
     /// This is the constructor for readers that decode a committed row's own
-    /// field tuple: the stored reference already holds the content identity
-    /// and annotation, so no context and no content read are needed. The
-    /// bytes are not local, so `hydrated` is false.
+    /// field tuple: the stored reference already holds the content identity,
+    /// annotation and descriptor OID, so no context and no content read are
+    /// needed. The bytes are not local, so `hydrated` is false.
     pub fn from_stored_reference(
         length: u64,
         sha256: [u8; 32],
         media_type: &str,
         suffix: Option<&str>,
+        descriptor_oid: Option<NativeOid>,
     ) -> Self {
         Self {
             media_type: media_type.to_owned(),
             suffix: suffix.map(str::to_owned),
             length,
             sha256,
+            descriptor_oid,
             hydrated: false,
         }
     }
@@ -970,6 +974,15 @@ impl BlobMetadata {
 
     pub const fn sha256(&self) -> [u8; 32] {
         self.sha256
+    }
+
+    /// The OGS-1 descriptor OID the stored reference names, when it names one.
+    ///
+    /// A stored ROV-3 Blob always does; an inline or commitment value does not,
+    /// which is a different answer from a reference whose descriptor could not
+    /// be decoded.
+    pub fn descriptor_oid(&self) -> Option<&NativeOid> {
+        self.descriptor_oid.as_ref()
     }
 
     pub const fn is_hydrated(&self) -> bool {
@@ -1111,6 +1124,7 @@ impl Blob {
             suffix: self.suffix().map(str::to_owned),
             length: self.length(),
             sha256: self.content_identity().sha256(),
+            descriptor_oid: self.descriptor_oid().cloned(),
             hydrated: self.is_hydrated(),
         }
     }
@@ -1888,7 +1902,7 @@ pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
         return Err(Error::InvalidProfile);
     };
     let fields = array(&payload)?;
-    let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(_descriptor)] = fields.as_slice()
+    let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice()
     else {
         return Err(Error::InvalidTag);
     };
@@ -1901,6 +1915,7 @@ pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
         suffix: annotation.suffix().map(str::to_owned),
         length: identity.length(),
         sha256: identity.sha256(),
+        descriptor_oid: Some(NativeOid::from_bytes(descriptor)?),
         hydrated: false,
     })
 }
