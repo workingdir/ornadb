@@ -141,7 +141,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
     assert_eq!(before_metadata.length(), ORIGINAL_PIXEL.len() as u64);
     assert_eq!(
         before_metadata.sha256(),
-        Sha256::digest(ORIGINAL_PIXEL).into()
+        <[u8; 32]>::from(Sha256::digest(ORIGINAL_PIXEL))
     );
     assert_eq!(before_metadata.media_type(), "image/png");
 
