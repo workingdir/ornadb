@@ -233,6 +233,131 @@ impl AdmittedRow {
     }
 }
 
+/// Durable production identity for one VFS row directory. The address is
+/// issued only from an admitted ORP row: database/relation identities and the
+/// canonical typed key come from the row-map version, not from a Git worktree
+/// path or generated filename.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryVfsRowIdentity {
+    database_id: [u8; 16],
+    relation_id: [u8; 16],
+    store_root: NativeObjectId,
+    schema_digest: [u8; 32],
+    primary_root: NativeObjectId,
+    generation: u64,
+    key: TypedKey,
+    canonical_key: Vec<u8>,
+}
+
+impl RepositoryVfsRowIdentity {
+    pub fn from_admitted_row(row: &AdmittedRow) -> Result<Self, RowStoreError> {
+        let version = row.version();
+        Ok(Self {
+            database_id: *version.database_id(),
+            relation_id: *version.relation_id(),
+            store_root: version.store_root().clone(),
+            schema_digest: *version.schema().schema_digest(),
+            primary_root: version.primary_root().clone(),
+            generation: version.generation(),
+            key: row.key().clone(),
+            canonical_key: row.key().canonical_bytes()?,
+        })
+    }
+
+    pub const fn database_id(&self) -> &[u8; 16] {
+        &self.database_id
+    }
+
+    pub const fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub fn store_root(&self) -> &NativeObjectId {
+        &self.store_root
+    }
+
+    pub const fn schema_digest(&self) -> &[u8; 32] {
+        &self.schema_digest
+    }
+
+    pub fn primary_root(&self) -> &NativeObjectId {
+        &self.primary_root
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn key(&self) -> &TypedKey {
+        &self.key
+    }
+
+    pub fn canonical_key(&self) -> &[u8] {
+        &self.canonical_key
+    }
+}
+
+/// Stable field path identity within one production VFS row projection. The
+/// digest is derived from row-map identity plus schema-issued field identities,
+/// so long-name aliases cannot be forged from a host filename alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryVfsFieldIdentity {
+    row: RepositoryVfsRowIdentity,
+    field_path: Vec<[u8; 16]>,
+    projection_digest: [u8; 32],
+}
+
+impl RepositoryVfsFieldIdentity {
+    pub fn new(
+        row: RepositoryVfsRowIdentity,
+        field_path: impl Into<Vec<[u8; 16]>>,
+    ) -> Result<Self, RowStoreError> {
+        let field_path = field_path.into();
+        if field_path.is_empty() || field_path.iter().any(|identity| identity == &[0; 16]) {
+            return Err(RowStoreError::VersionIdentityMismatch);
+        }
+        let projection_digest = vfs_field_projection_digest(&row, &field_path);
+        Ok(Self {
+            row,
+            field_path,
+            projection_digest,
+        })
+    }
+
+    pub fn row(&self) -> &RepositoryVfsRowIdentity {
+        &self.row
+    }
+
+    pub fn field_path(&self) -> &[[u8; 16]] {
+        &self.field_path
+    }
+
+    pub const fn projection_digest(&self) -> &[u8; 32] {
+        &self.projection_digest
+    }
+}
+
+fn vfs_field_projection_digest(
+    row: &RepositoryVfsRowIdentity,
+    field_path: &[[u8; 16]],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"orna.vfs.field.identity.v1\0");
+    hasher.update(row.database_id());
+    hasher.update(row.relation_id());
+    hasher.update(row.store_root().as_bytes());
+    hasher.update(row.schema_digest());
+    hasher.update(row.primary_root().as_bytes());
+    hasher.update(row.generation().to_be_bytes());
+    hasher.update((row.canonical_key().len() as u64).to_be_bytes());
+    hasher.update(row.canonical_key());
+    hasher.update((field_path.len() as u64).to_be_bytes());
+    for field in field_path {
+        hasher.update(field);
+    }
+    hasher.finalize().into()
+}
+
 /// Owner-issued immutable row-map view.  The authority token and rows are
 /// private; only repository-context verification can call `issue`.
 #[derive(Clone, Debug)]
@@ -987,5 +1112,73 @@ impl std::error::Error for RowStoreError {}
 impl From<GraphError> for RowStoreError {
     fn from(error: GraphError) -> Self {
         Self::Native(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native_graph::{GitHashAlgorithm, NativeOid};
+
+    fn oid(byte: u8) -> NativeObjectId {
+        NativeOid::new(GitHashAlgorithm::Sha1, [byte; 20]).expect("valid test oid")
+    }
+
+    fn admitted_row(generation: u64) -> AdmittedRow {
+        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
+        let version = RowMapVersion::issue(
+            [0x11; 16],
+            [0x22; 16],
+            oid(0x55),
+            schema,
+            oid(0x66),
+            generation,
+            Some(1),
+        )
+        .expect("coherent row-map version");
+        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty field tuple");
+        AdmittedRow::issue(&version, TypedKey::Text("london".to_owned()), value)
+    }
+
+    #[test]
+    fn repository_vfs_row_identity_is_issued_from_admitted_orp_row() {
+        let row = admitted_row(8);
+        let identity =
+            RepositoryVfsRowIdentity::from_admitted_row(&row).expect("valid row identity");
+
+        assert_eq!(identity.database_id(), &[0x11; 16]);
+        assert_eq!(identity.relation_id(), &[0x22; 16]);
+        assert_eq!(identity.store_root(), &oid(0x55));
+        assert_eq!(identity.primary_root(), &oid(0x66));
+        assert_eq!(identity.schema_digest(), &[0x44; 32]);
+        assert_eq!(identity.generation(), 8);
+        assert_eq!(identity.key(), row.key());
+        assert_eq!(
+            identity.canonical_key(),
+            row.key().canonical_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn repository_vfs_field_identity_binds_row_and_schema_field_path() {
+        let row_identity =
+            RepositoryVfsRowIdentity::from_admitted_row(&admitted_row(8)).expect("row identity");
+        let title = RepositoryVfsFieldIdentity::new(row_identity.clone(), vec![[0x77; 16]])
+            .expect("field identity");
+        let cover = RepositoryVfsFieldIdentity::new(row_identity.clone(), vec![[0x78; 16]])
+            .expect("field identity");
+        let later_row =
+            RepositoryVfsRowIdentity::from_admitted_row(&admitted_row(9)).expect("row identity");
+        let later_title =
+            RepositoryVfsFieldIdentity::new(later_row, vec![[0x77; 16]]).expect("field identity");
+
+        assert_eq!(title.row(), &row_identity);
+        assert_eq!(title.field_path(), &[[0x77; 16]]);
+        assert_ne!(title.projection_digest(), cover.projection_digest());
+        assert_ne!(title.projection_digest(), later_title.projection_digest());
+        assert!(matches!(
+            RepositoryVfsFieldIdentity::new(row_identity, vec![[0; 16]]),
+            Err(RowStoreError::VersionIdentityMismatch)
+        ));
     }
 }
