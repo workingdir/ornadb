@@ -23,12 +23,15 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  unmount DIR                   release a view's record",
     "  mount exit codes: 0 attached, released or reported; 1 snapshot, mountpoint or record unavailable",
     "  diff [GIT_DIFF_ARGS...]",
+    "  log [GIT_LOG_ARGS...]",
     "  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]",
     "  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid",
     "  export DEST --at SELECTOR [--at SELECTOR]... [--dependency PATH=DIR]...",
     "  export ARCHIVE --check                         report what one archive records",
     "  export ARCHIVE --restore DEST [--worktree]     reconstruct, verify, then materialise",
     "  export exit status: 0 archive written, verified, or restored; 1 snapshot, object closure, or pinned dependency unavailable",
+    "  publish [--message MESSAGE]                    commit the durable runtime tail as one publication commit",
+    "  publish exit status: 0 published or nothing to publish; 1 repository, runtime, or publication conflict",
     "Editor tooling:",
     "  semantic-legend [--json|--markdown|--format csv|--quiet] [--limit N]",
     "  semantic-legend                  token types and modifiers as text",
@@ -63,6 +66,7 @@ mod tests {
         assert!(HELP_LINES.contains(&"Repository and maintenance commands:"));
         assert!(HELP_LINES.contains(&"  fetch [REMOTE] [BRANCH]"));
         assert!(HELP_LINES.contains(&"  diff [GIT_DIFF_ARGS...]"));
+        assert!(HELP_LINES.contains(&"  log [GIT_LOG_ARGS...]"));
         assert!(HELP_LINES.contains(
             &"  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]"
         ));

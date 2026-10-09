@@ -17,9 +17,12 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{
-    CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeError, RuntimeState, RuntimeTableIdentity,
-    SafeDiagnostic, TableActivationError, TableMutation, ValidatedTableActivationCommit,
+    CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, RuntimeActivationContext,
+    RuntimeError, RuntimeState, RuntimeTableIdentity, SafeDiagnostic,
+    TableActivationCandidateValidator, TableActivationError, TableMutation,
+    ValidatedTableActivationCommit, WriterLease,
 };
+use orna_repository_v1::{CwdGeneration, ProtectedContentPin};
 
 /// One repository-wide invalidation clock shared by projections in a VFS
 /// repository scope.
@@ -789,6 +792,95 @@ impl<S> ManagedFile<S> {
         EditDraft::open(baseline, max_file_bytes)
     }
 
+    /// Opens the `orna edit` read-to-save route: a retained strong read
+    /// baseline plus a private draft bound to it, captured together.
+    ///
+    /// Unlike [`open_draft`], which baselines on whatever the destination holds
+    /// at open time and accepts any save whose draft still matches it, the
+    /// retained read image stays the baseline for the whole edit: the draft may
+    /// only be saved while the destination still shows exactly the version the
+    /// editor read. Capturing the image and the draft's baseline under one lock
+    /// is what makes the retention exact — no change admitted between the two
+    /// could be missed or double-counted.
+    ///
+    /// [`open_draft`]: ManagedFile::open_draft
+    pub async fn open_read_baseline(
+        self: &Arc<Self>,
+        max_file_bytes: usize,
+    ) -> EditReadBaseline<S> {
+        let image = Arc::clone(&self.state.lock().await.image);
+        EditReadBaseline {
+            image: Arc::clone(&image),
+            draft: EditDraft::open(image, max_file_bytes),
+            epoch: self.cache_epoch.clone(),
+        }
+    }
+
+    /// Saves a strong read-baseline edit through the validated activation
+    /// boundary, refusing whenever the read version is no longer the accepted
+    /// row version.
+    ///
+    /// The retained read image is the sole baseline: this checks that the
+    /// destination still holds it *before* handing the candidate to activation.
+    /// When a concurrent change has moved the destination on, the save returns
+    /// [`TemporaryRenameOutcome::Stale`], the draft keeps its bytes and its
+    /// retained-invalid copy for the caller to keep as a draft, and the
+    /// activation boundary is never reached. This is exactly what a blind
+    /// temp-create save cannot prove: a late temp-create has no witness for the
+    /// version the editor originally read (VFS-011).
+    pub async fn save_strong_with<F, Fut, E>(
+        self: &Arc<Self>,
+        baseline: &EditReadBaseline<S>,
+        activate: F,
+    ) -> Result<TemporaryRenameOutcome<S>, TemporaryRenameError<E>>
+    where
+        S: Send + Sync + 'static,
+        F: FnOnce(ActivationCandidate<S>) -> Fut,
+        Fut: Future<Output = Result<ActivationDecision<S>, E>>,
+    {
+        if !Arc::ptr_eq(&self.cache_epoch.generation, &baseline.epoch.generation) {
+            return Err(TemporaryRenameError::WrongRepositoryScope);
+        }
+        let mut destination = self.state.lock().await;
+        let reads_baseline =
+            !destination.unlinked && Arc::ptr_eq(&destination.image, &baseline.image) && {
+                let draft_state = baseline.draft.state.lock().await;
+                Arc::ptr_eq(&draft_state.baseline, &baseline.image)
+            };
+        if !reads_baseline {
+            let diagnostic = stale_baseline_diagnostic();
+            retain_rejected_draft(&baseline.draft, diagnostic).await;
+            return Ok(TemporaryRenameOutcome::Stale { diagnostic });
+        }
+        let mut cache_generation = self.cache_epoch.generation.lock().await;
+        let next_generation = cache_generation
+            .checked_add(1)
+            .ok_or(TemporaryRenameError::GenerationExhausted)?;
+        match baseline.draft.fsync_with(activate).await {
+            Err(error) => Err(TemporaryRenameError::Activation(error)),
+            Ok(FsyncOutcome::Rejected(diagnostic)) => {
+                Ok(TemporaryRenameOutcome::Rejected { diagnostic })
+            }
+            Ok(FsyncOutcome::Accepted(handle)) => {
+                let image = Arc::new(VfsFileSnapshot::with_projection(
+                    &handle.image,
+                    CacheProjection {
+                        epoch: self.cache_epoch.clone(),
+                        generation: next_generation,
+                    },
+                ));
+                baseline.draft.rebase_accepted(Arc::clone(&image)).await;
+                destination.image = Arc::clone(&image);
+                *cache_generation = next_generation;
+                Ok(TemporaryRenameOutcome::Applied {
+                    generation: next_generation,
+                    handle: SnapshotReadHandle::open(image),
+                })
+            }
+            Ok(FsyncOutcome::Unchanged(_)) => Err(TemporaryRenameError::NoCandidate),
+        }
+    }
+
     /// Commits a direct draft over this destination through the same validated
     /// activation boundary as a temp rename. A draft whose baseline is no longer
     /// this destination's image returns `Stale` without calling activation.
@@ -977,6 +1069,62 @@ impl<S> TemporarySave<S> {
         state.synced_revision = Some(revision);
         Ok(revision)
     }
+}
+
+/// A retained `orna edit` read-to-save baseline.
+///
+/// The image is the exact destination version the editor read at capture time,
+/// kept readable for the whole edit, and the draft holds this edit's private
+/// bytes over it. [`ManagedFile::save_strong_with`] is its only accepting route:
+/// a save proves the retained image is still the accepted version before the
+/// candidate reaches activation. A superseded read still reads its own version,
+/// because this type owns the retained image — a later accepted replacement
+/// only ends what new opens observe, never what this handle already holds.
+pub struct EditReadBaseline<S> {
+    image: Arc<VfsFileSnapshot<S>>,
+    draft: EditDraft<S>,
+    epoch: SharedCacheEpoch,
+}
+
+impl<S> EditReadBaseline<S> {
+    /// Opens the retained read version. This reads the exact image captured at
+    /// edit start, never the destination's live image.
+    pub fn baseline(&self) -> SnapshotReadHandle<S> {
+        SnapshotReadHandle::open(Arc::clone(&self.image))
+    }
+
+    /// This edit's private draft over the retained read version.
+    pub fn draft(&self) -> &EditDraft<S> {
+        &self.draft
+    }
+}
+
+/// The safe diagnostic a superseded read-to-save baseline reports. It carries
+/// no repository detail: the retained draft and its bytes are what the caller
+/// keeps, and the code is the profile's `sys.vfs.stale_edit` refusal.
+fn stale_baseline_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::ExecutionRejected,
+        class: DiagnosticClass::Transient,
+    }
+}
+
+/// Keeps a refused draft's bytes and its stable diagnostic, so a rejected
+/// strong save is recoverable and is never silently dropped.
+///
+/// This records the rejection through the draft's own retention, so a strong
+/// save that is refused because its read baseline went stale keeps the same
+/// retained-draft identity rules as every other rejection (ORNA-VFS-009): the
+/// identity is issued once per rejected revision and reused while that
+/// revision stays unchanged.
+///
+/// [`DraftState::retain_rejection`] is the one authority for a retained
+/// rejection, so this route and the direct draft routes cannot disagree about
+/// a draft's retained identity.
+async fn retain_rejected_draft<S>(draft: &EditDraft<S>, diagnostic: SafeDiagnostic) {
+    let mut draft_state = draft.state.lock().await;
+    let revision = draft_state.revision;
+    draft_state.retain_rejection(revision, diagnostic);
 }
 
 pub enum TemporaryRenameOutcome<S> {
@@ -2007,6 +2155,333 @@ pub async fn commit_vfs_table_activation(
     request: ValidatedTableActivationCommit<'_>,
 ) -> Result<CwdCapture, TableActivationError> {
     runtime.commit_validated_table_activation(request).await
+}
+
+/// The repository-issued coordinates one durable document save commits under.
+///
+/// The writer that owns the repository, the admitted relation identity and
+/// typed key, and the repository-issued CWD and schema generation are one unit:
+/// a save cannot combine a generation from one repository state with a row
+/// identity from another (`ORNA-STATE-003`, VFS-002).
+pub struct VfsDurableSave {
+    owner_id: [u8; 16],
+    cwd_generation: CwdGeneration,
+    table: RuntimeTableIdentity,
+    key: Vec<u8>,
+}
+
+impl VfsDurableSave {
+    pub fn new(
+        owner_id: [u8; 16],
+        cwd_generation: CwdGeneration,
+        table: RuntimeTableIdentity,
+        key: Vec<u8>,
+    ) -> Self {
+        Self {
+            owner_id,
+            cwd_generation,
+            table,
+            key,
+        }
+    }
+
+    /// The admitted committed identity of the saved row's relation.
+    pub fn table(&self) -> &RuntimeTableIdentity {
+        &self.table
+    }
+
+    /// The admitted typed key of the saved row.
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+}
+
+/// The admitted coordinates one save hands to its caller: the committed
+/// relation identity and typed key the candidate row must address. Owned, so a
+/// caller's async candidate builder borrows nothing from the admission.
+pub struct VfsSaveCoordinates {
+    table: RuntimeTableIdentity,
+    key: Vec<u8>,
+}
+
+impl VfsSaveCoordinates {
+    /// The admitted committed identity of the saved row's relation.
+    pub fn table(&self) -> &RuntimeTableIdentity {
+        &self.table
+    }
+
+    /// The admitted typed key of the saved row.
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+}
+
+/// One admitted VFS row save, held open across the activation.
+///
+/// A save is admitted once: the runtime leases the repository, captures the
+/// generation the candidate is based on, and commits under the digest of that
+/// capture. `S` is the repository owner's opaque row-map snapshot, so the
+/// baseline carried by the draft and this admission's capture travel together.
+pub struct VfsSaveAdmission<'a, S> {
+    runtime: &'a RuntimeState,
+    context: RuntimeActivationContext,
+    save: VfsDurableSave,
+    writer: WriterLease,
+    digest: [u8; 32],
+    faults: &'a dyn FaultInjector,
+    _baseline: std::marker::PhantomData<fn() -> S>,
+}
+
+/// One complete VFS row save: the exact row replacement plus the caller's
+/// candidate validator. The validator carries the schema, key/field and
+/// assertion authority for the relation, so this module never invents a second
+/// row authority and never validates rows it does not own (VFS-002).
+pub struct VfsSaveCandidate {
+    replacement: VfsTableRowReplacement,
+    validator: Box<dyn TableActivationCandidateValidator>,
+}
+
+impl VfsSaveCandidate {
+    pub fn new(
+        replacement: VfsTableRowReplacement,
+        validator: Box<dyn TableActivationCandidateValidator>,
+    ) -> Self {
+        Self {
+            replacement,
+            validator,
+        }
+    }
+
+    /// The row replacement the activation will commit.
+    pub fn replacement(&self) -> &VfsTableRowReplacement {
+        &self.replacement
+    }
+}
+
+impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
+    /// Leases the repository and captures the generation this save is based on.
+    ///
+    /// The capture is the runtime's admitted-table activation, so the row's
+    /// committed relation identity is verified against committed metadata in the
+    /// same read transaction that captures the generation (VFS-002).
+    pub async fn begin(
+        runtime: &'a RuntimeState,
+        save: VfsDurableSave,
+        faults: &'a dyn FaultInjector,
+    ) -> Result<Self, TableActivationError> {
+        let writer = runtime
+            .acquire_lease(save.owner_id)
+            .await
+            .map_err(TableActivationError::Runtime)?;
+        let snapshot = runtime
+            .begin_admitted_table_activation(std::slice::from_ref(&save.table))
+            .await
+            .map_err(TableActivationError::Runtime)?;
+        let context = snapshot.context().clone();
+        let digest = context.capture().generation_digest();
+        Ok(Self {
+            runtime,
+            context,
+            save,
+            writer,
+            digest,
+            faults,
+            _baseline: std::marker::PhantomData,
+        })
+    }
+
+    /// The admitted coordinates the candidate row must address. Owned so the
+    /// caller's candidate builder can own them across its own await points.
+    pub fn coordinates(&self) -> VfsSaveCoordinates {
+        VfsSaveCoordinates {
+            table: self.save.table.clone(),
+            key: self.save.key.clone(),
+        }
+    }
+
+    /// The digest the activation commits under.
+    pub fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Commits one complete row replacement through the runtime's single
+    /// validated transaction. The candidate relation is validated before any
+    /// row, mutation record, or checkpoint becomes visible, so a rejected save
+    /// leaves the row store byte-identical and publishes no checkpoint. The
+    /// returned capture is a reopenable durable acknowledgement (VFS-021).
+    pub async fn commit(
+        &self,
+        candidate: VfsSaveCandidate,
+    ) -> Result<CwdCapture, TableActivationError> {
+        let VfsSaveCandidate {
+            replacement,
+            mut validator,
+        } = candidate;
+        let mutation = replacement
+            .mutation()
+            .map_err(TableActivationError::Runtime)?;
+        let mut content_pins: [ProtectedContentPin; 0] = [];
+        commit_vfs_table_activation(
+            self.runtime,
+            ValidatedTableActivationCommit {
+                writer: self.writer,
+                context: &self.context,
+                cwd_generation: &self.save.cwd_generation,
+                mutations: std::slice::from_ref(&mutation),
+                content_pins: &mut content_pins,
+                next_digest: self.digest,
+                validator: validator.as_mut(),
+                faults: self.faults,
+            },
+        )
+        .await
+    }
+}
+
+/// Why a durable save was not admitted. Every variant is decided before the
+/// row store is touched except `Activation`, which the runtime refuses inside
+/// its own transaction.
+#[derive(Debug)]
+pub enum VfsSaveError<E> {
+    /// The activated destination already accepted this draft.
+    AlreadyApplied {
+        /// The cache generation the accepted image was published at.
+        generation: u64,
+    },
+    /// The captured baseline is no longer the destination's image, so the
+    /// candidate is stale and the destination keeps its accepted row (VFS-011).
+    Stale {
+        /// The repository's cache generation observed at admission.
+        generation: u64,
+        diagnostic: SafeDiagnostic,
+    },
+    /// The runtime refused the saved row. The row store keeps the accepted row
+    /// and this is the stable diagnostic association in local state (VFS-009).
+    Rejected {
+        /// The repository's cache generation observed at admission.
+        generation: u64,
+        diagnostic: SafeDiagnostic,
+    },
+    /// The file holds no candidate bytes to admit (VFS-001).
+    NoCandidate,
+    /// The runtime refused the activation itself.
+    Activation(E),
+}
+
+impl<S: Send + Sync + 'static> ManagedFile<S> {
+    /// Adopts one complete VFS row-document save through the same durable
+    /// validation and transaction boundary the CLI uses, then publishes it to
+    /// the projection cache (ORNA-VFS-006, VFS-009, VFS-021).
+    ///
+    /// The row is committed to the runtime's own state database, so an accepted
+    /// save is visible to any reopen of that database and a rejected one is not
+    /// durably accepted at all. `admit` turns the candidate bytes into the
+    /// complete typed row replacement; this module never invents a second row
+    /// authority (VFS-002). Stale and rejected candidates retain their bytes and
+    /// diagnostic through the draft (VFS-009). `faults` is the commit-boundary
+    /// seam: crash recovery is exercised through the same runtime transaction a
+    /// normal save uses.
+    pub async fn commit_durable_document_save<A, AFut>(
+        self: &Arc<Self>,
+        draft: &EditDraft<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
+    {
+        let mut destination = self.state.lock().await;
+        let mut draft_state = draft.state.lock().await;
+        if destination.unlinked || !Arc::ptr_eq(&destination.image, &draft_state.baseline) {
+            let diagnostic = SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Transient,
+            };
+            let generation = *self.cache_epoch.generation.lock().await;
+            let revision = draft_state.revision;
+            draft_state.retain_rejection(revision, diagnostic);
+            return Err(VfsSaveError::Stale {
+                generation,
+                diagnostic,
+            });
+        }
+        let revision = draft_state.revision;
+        // Repeated callbacks for one sequence return the recorded outcome; a
+        // later write begins a new candidate based on accepted state, so one
+        // revision is never admitted twice (VFS-008).
+        if let Some((rejected, diagnostic)) = draft_state.last_rejection
+            && rejected == revision
+        {
+            let generation = *self.cache_epoch.generation.lock().await;
+            return Err(VfsSaveError::Rejected {
+                generation,
+                diagnostic,
+            });
+        }
+        let Some(candidate) = draft_state.candidate.clone() else {
+            return Err(VfsSaveError::NoCandidate);
+        };
+        // One shared image of the candidate bytes is handed to the caller and
+        // published on acceptance, so no second copy is made at either end.
+        let candidate_bytes: Arc<[u8]> = Arc::from(candidate.as_slice());
+
+        // Serialize admissions in this repository epoch and keep the epoch lock
+        // across admission and commit, so no projection observes a partially
+        // advanced generation. A failed or rejected save leaves it unchanged.
+        let mut cache_generation = self.cache_epoch.generation.lock().await;
+        let next_generation = match cache_generation.checked_add(1) {
+            Some(next) => next,
+            None => {
+                return Err(VfsSaveError::Activation(TableActivationError::Runtime(
+                    RuntimeError::RecoveryInvalid,
+                )));
+            }
+        };
+        let admission = VfsSaveAdmission::<S>::begin(runtime, save, faults)
+            .await
+            .map_err(VfsSaveError::Activation)?;
+        let candidate = admit(admission.coordinates(), Arc::clone(&candidate_bytes))
+            .await
+            .map_err(VfsSaveError::Activation)?;
+        match admission.commit(candidate).await {
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                draft_state.retain_rejection(revision, diagnostic);
+                Err(VfsSaveError::Rejected {
+                    generation: *cache_generation,
+                    diagnostic,
+                })
+            }
+            Err(error) => Err(VfsSaveError::Activation(error)),
+            Ok(_capture) => {
+                // Mirror the temp-rename route: the accepted handle carries the
+                // candidate bytes, and the image new opens see carries the
+                // advanced projection (VFS-019).
+                let accepted = Arc::new(VfsFileSnapshot::new(
+                    draft_state.baseline.pin.clone_pin(),
+                    Arc::clone(&candidate_bytes),
+                ));
+                let image = Arc::new(VfsFileSnapshot::with_projection(
+                    &accepted,
+                    CacheProjection {
+                        epoch: self.cache_epoch.clone(),
+                        generation: next_generation,
+                    },
+                ));
+                draft_state.candidate = None;
+                draft_state.last_rejection = None;
+                draft_state.baseline = Arc::clone(&image);
+                destination.image = Arc::clone(&image);
+                *cache_generation = next_generation;
+                Ok(TemporaryRenameOutcome::Applied {
+                    generation: next_generation,
+                    handle: SnapshotReadHandle::open(image),
+                })
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3166,5 +3641,110 @@ mod tests {
             TemporaryRenameOutcome::Applied { generation: 2, .. }
         ));
         assert_eq!(target.open_read().await.read_at(0, 1), [0x5A]);
+    }
+
+    /// A strong read baseline refuses the save once a concurrent REPL change
+    /// has moved the row on, keeps the rejected draft, and never reaches
+    /// activation; a save whose read is still current applies. An open read
+    /// keeps the version it captured in both cases.
+    #[tokio::test]
+    async fn strong_read_baseline_refuses_a_save_after_a_concurrent_repl_change() {
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(fixture_image()).await.unwrap();
+        let read_bytes = include_str!("../tests/fixtures/publication-repository-main.orna");
+        let repl_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let draft_bytes = include_str!("../tests/fixtures/case_closure_edge_tail_sixty.orna");
+
+        // The editor reads the row and retains that exact version, with its own
+        // draft over the version it read.
+        let baseline = target.open_read_baseline(1 << 20).await;
+        let read_handle = baseline.baseline();
+        assert_eq!(
+            read_handle.read_at(0, read_bytes.len()),
+            read_bytes.as_bytes()
+        );
+        baseline.draft().truncate(0).await.unwrap();
+        baseline
+            .draft()
+            .write_at(0, draft_bytes.as_bytes())
+            .await
+            .unwrap();
+
+        // A concurrent REPL change is accepted first, so the row no longer
+        // holds the version the editor read.
+        let repl = target.open_draft(1 << 20).await;
+        repl.truncate(0).await.unwrap();
+        repl.write_at(0, repl_bytes.as_bytes()).await.unwrap();
+        let repl_commit = target
+            .commit_draft_with(&repl, |_| async {
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(8),
+                )))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            repl_commit,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+
+        // The editor's save is refused on its read baseline: activation is
+        // never reached and the draft is retained rather than discarded.
+        let activation_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&activation_calls);
+        let stale = target
+            .save_strong_with(&baseline, move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ()>(ActivationDecision::Rejected(rejected())) }
+            })
+            .await
+            .unwrap();
+        assert!(matches!(stale, TemporaryRenameOutcome::Stale { .. }));
+        assert_eq!(activation_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            baseline
+                .draft()
+                .retained_invalid_draft()
+                .await
+                .expect("a refused read-baseline save keeps its draft")
+                .replacement_bytes(),
+            draft_bytes.as_bytes()
+        );
+        // The REPL change is still what the row holds, and the read handle
+        // still reads the version it captured.
+        assert_eq!(
+            target.open_read().await.read_at(0, repl_bytes.len()),
+            repl_bytes.as_bytes()
+        );
+        assert_eq!(
+            read_handle.read_at(0, read_bytes.len()),
+            read_bytes.as_bytes()
+        );
+
+        // A read whose version is still the accepted one saves normally, so
+        // the refusal above is the baseline check and not a broken route.
+        let current = target.open_read_baseline(1 << 20).await;
+        current.draft().truncate(0).await.unwrap();
+        current
+            .draft()
+            .write_at(0, draft_bytes.as_bytes())
+            .await
+            .unwrap();
+        let applied = target
+            .save_strong_with(&current, |_| async {
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(11),
+                )))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(
+            target.open_read().await.read_at(0, draft_bytes.len()),
+            draft_bytes.as_bytes()
+        );
     }
 }
