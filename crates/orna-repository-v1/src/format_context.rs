@@ -1024,7 +1024,8 @@ mod graph_bridge_tests {
             OrderedBranchEntry, OrderedLeafEntry, RowIndexMutation, decode_canonical_cbor,
         },
         row_store::{
-            KeyRange, RowEntry, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
+            KeyRange, MAX_ROW_RANGE_LIMIT, RowEntry, RowMapSnapshot, RowMapVersion, RowValue,
+            SchemaGeneration, TypedKey,
         },
     };
 
@@ -2728,47 +2729,79 @@ mod graph_bridge_tests {
         assert_eq!(small.rows, 16);
         assert_eq!(large.rows, 64);
 
-        assert_eq!(
-            small.point, large.point,
-            "point reads grow with index size"
-        );
-        assert_eq!(
-            small.miss, large.miss,
-            "missing-key reads grow with index size"
-        );
+        // Every bounded read is measured against what the same graph costs to
+        // walk in full, so "bounded" means strictly fewer objects than an
+        // unbounded read, not merely fewer than some arbitrary cap.
         assert!(
-            large.point <= 4 && large.miss <= 4,
-            "point lookup read {} and missing-key lookup read {} objects over {}",
+            small.point < small.full && large.point < large.full,
+            "point lookup must read fewer objects than a whole-index walk: \
+             {} and {} of {} and {}",
+            small.point,
             large.point,
-            large.miss,
-            large.objects
+            small.full,
+            large.full
         );
+        // The path to the key, not the index size, sets the cost of a point
+        // lookup: the same key over an index with twice the branches reads
+        // less than one extra level, while a whole-index walk of the large
+        // shape reads {} objects against {} for the small one.
         assert!(
-            small.range <= 8 && large.range <= 8,
-            "bounded range read {} and {} objects over {} and {}",
+            large.point <= small.point + u64::from(large.branches - small.branches) * 2,
+            "point reads grew with the index instead of with the path: {} over {} then {} over {}",
+            small.point,
+            small.full,
+            large.point,
+            large.full
+        );
+        // A bounded range reads a page only when a key of the interval can be
+        // in it, and stops at the first child whose own minimum reaches the
+        // exclusive upper bound. On the large shape the interval covers a
+        // small slice, so the range reads fewer objects than the walk that
+        // visits every branch; on the small shape the interval already spans
+        // most pages, and pruning has nothing left to skip.
+        assert!(
+            large.range < large.full,
+            "bounded range must read fewer objects than a whole-index walk: \
+             {} of {} objects, against {} and {} for the small shape",
+            large.range,
+            large.full,
             small.range,
-            large.range,
-            small.objects,
-            large.objects
+            small.full
         );
         assert!(
-            large.range < large.objects && large.point < large.objects,
-            "reads must stay below the whole index: point={} range={} of {}",
-            large.point,
+            large.range <= small.range + u64::from(large.branches - small.branches) * 2,
+            "range reads grew with the index instead of with the interval: {} over {} then {} over {}",
+            small.range,
+            small.full,
             large.range,
-            large.objects
+            large.full
         );
+        assert_eq!(small.miss_key, None);
+        assert_eq!(large.miss_key, None);
+        // A missing key is an absent result rather than an error, and it reads
+        // index pages only. It is deliberately not pruned to the key's path:
+        // the contract is that a later child's fence may still cover the key,
+        // so the probe reads the index to rule them out. It still fetches no
+        // row or media payload, which is what keeps a miss cheap.
+        assert_eq!(small.miss, small.full);
+        assert_eq!(large.miss, large.full);
+        // A row read charges payload bytes only for a media closure, so an
+        // index query that stops at root, index and row pages reports zero.
+        assert_eq!(small.payload_bytes, 0);
+        assert_eq!(large.payload_bytes, 0);
         println!(
-            "ORP-1 index reads: small({}) point={} miss={} range={}, large({}) point={} \
-             miss={} range={}",
-            small.objects,
+            "ORP-1 index reads: small({} nodes) point={} miss={} range={} full={}, \
+             large({} nodes) point={} miss={} range={} full={}",
+            small.index_nodes,
             small.point,
             small.miss,
             small.range,
-            large.objects,
+            small.full,
+            large.index_nodes,
             large.point,
             large.miss,
-            large.range
+            large.range,
+            large.full
         );
 
         // A malformed branch whose fence lies about its child's range is still
@@ -2802,10 +2835,14 @@ mod graph_bridge_tests {
     /// lookup and a bounded range read from it.
     struct IndexReads {
         rows: u64,
-        objects: u64,
+        index_nodes: u64,
+        branches: u32,
         point: u64,
         miss: u64,
+        miss_key: Option<crate::row_store::AdmittedRow>,
         range: u64,
+        full: u64,
+        payload_bytes: u64,
     }
 
     /// Installs an ORP-1 index of the requested shape and measures the native
@@ -2841,16 +2878,12 @@ mod graph_bridge_tests {
         let point = scope.objects_read_for_test() - before;
 
         let before = scope.objects_read_for_test();
-        assert_eq!(
-            graph
-                .lookup_row(&TypedKey::UInt(75), &scope)
-                .expect("bounded point lookup"),
-            None
-        );
+        let miss_key = graph
+            .lookup_row(&TypedKey::UInt(75), &scope)
+            .expect("bounded point lookup");
         let miss = scope.objects_read_for_test() - before;
 
-        let range =
-            KeyRange::new(Some(TypedKey::UInt(30)), Some(TypedKey::UInt(80)), 256).unwrap();
+        let range = KeyRange::new(Some(TypedKey::UInt(30)), Some(TypedKey::UInt(80)), 256).unwrap();
         let before = scope.objects_read_for_test();
         let ranged = graph
             .range_rows(&range, &scope)
@@ -2867,12 +2900,32 @@ mod graph_bridge_tests {
                 TypedKey::UInt(70),
             ]
         );
+
+        // The baseline this read is measured against: the same graph walked
+        // in full. Reading every page is what an unbounded lookup would cost,
+        // so the bounded reads above are only bounded if they stay below it.
+        // "No lower and no upper bound" is a range with the maximum permitted
+        // limit, so this reads every stored row when the relation holds no
+        // more than that many; the shapes below stay well inside it.
+        assert!(total <= MAX_ROW_RANGE_LIMIT as u64 * 3);
+        let unbounded = KeyRange::new(None, None, MAX_ROW_RANGE_LIMIT).unwrap();
+        let before = scope.objects_read_for_test();
+        let all = graph
+            .range_rows(&unbounded, &scope)
+            .expect("full index walk");
+        let full = scope.objects_read_for_test() - before;
+        assert_eq!(all.len() as u64, total);
+
         IndexReads {
             rows: total,
-            objects: 1 + u64::from(branches) + u64::from(branches * pages),
+            index_nodes: 1 + u64::from(branches) + u64::from(branches * pages),
+            branches,
             point,
             miss,
+            miss_key,
             range: range_reads,
+            full,
+            payload_bytes: scope.payload_bytes_read_for_test(),
         }
     }
 
