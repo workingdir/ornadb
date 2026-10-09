@@ -10,11 +10,13 @@ use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
 use orna_repository_v1::{CapturedBlobCandidate, OrpBlobBinding, RepositoryCaptureCapability};
 use orna_syntax_v1::Expr;
 use orna_sys_v1::{
-    system_host_operation_registry, CaptureFileError, ClockProvider, EnvironmentDispatchValue,
-    EnvironmentProvider, EnvironmentProviderError, FilesystemProvider, HostHttpResponse,
-    HostOperationDescriptor, HttpProvider, ProcessProvider,
+    system_host_operation_registry, AbiType, CaptureFileError, ClockProvider,
+    EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError, FilesystemProvider,
+    FailureCode, HostHttpResponse, HostOperationDescriptor, HttpProvider, OperationContract,
+    OperationId, ProcessProvider, ProviderDiagnostic, ProviderFailure, ProviderOffer,
+    SemanticRoleContract, SystemOperationProvider, TypeId, TypedValue,
 };
-use orna_value_v1::{Blob, ContextValue, ValueFormat};
+use orna_value_v1::{Blob, ContextValue, Error as ValueError, OVB2_BLOB_TAG, ValueFormat};
 
 use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
 
@@ -995,6 +997,226 @@ impl SysHostBindingRegistry {
             });
         Ok(value)
     }
+}
+
+/// Generated semantic role that owns the portable annotated-Blob operations.
+const BLOB_ANNOTATION_ROLE: &str = "langitem.sys.blob.annotate";
+
+/// The single portable operation that role currently declares.
+///
+/// This is only an admission filter: parameter names, order, declared types,
+/// defaults, the result type and the declared failure vocabulary all come from
+/// the build-generated typed registry, never from this module.
+const BLOB_ANNOTATION_OPERATION: &str = "sys.blob.annotate";
+
+/// True when `operation` is the generated portable Blob annotation operation.
+pub(crate) fn is_blob_annotation_operation(operation: &str) -> bool {
+    operation == BLOB_ANNOTATION_OPERATION
+}
+
+/// Rewraps a registry-admitted failure code as an evaluator error.
+///
+/// The code already crossed `validate_failure`, so it is a generated qualified
+/// identifier; the fallback only guards the evaluator's own text admission.
+fn redacted_code(code: &str) -> EvaluationError {
+    SafeText::new(code.to_owned())
+        .map(EvaluationError::redacted)
+        .unwrap_or_else(|_| redacted_error("ORNA-EVAL-UNSUPPORTED"))
+}
+
+fn static_failure(code: &'static str) -> FailureCode {
+    FailureCode::new(code).expect("static provider failure code is valid")
+}
+
+/// Resolves one portable Blob operation from the generated typed registry.
+///
+/// Admission requires both a generated contract and that contract's binding to
+/// the portable Blob annotation role, so dispatch follows the same typed
+/// metadata that emits the language declaration.
+fn blob_annotation_contract(
+    operation: &str,
+) -> Result<&'static OperationContract, EvaluationError> {
+    if !is_blob_annotation_operation(operation) {
+        return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    let contract = orna_sys_v1::system_dispatch_table()
+        .operation(operation)
+        .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+    if contract.role.as_ref().map(|role| role.as_str()) != Some(BLOB_ANNOTATION_ROLE) {
+        return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    Ok(contract)
+}
+
+/// Native provider linked to the generated portable Blob annotation role.
+///
+/// The role is a language-level contract over an already validated
+/// OVB-2/ROV-3/SOV-3 Blob: it needs no filesystem, network, clock or process
+/// grant, so it never crosses the host-operation effect boundary. The work
+/// happens in `invoke`, because a protected Blob's bytes and its
+/// `(length, SHA-256)` identity never cross this ABI as anything but already
+/// validated canonical OVB-2 bytes.
+struct BlobAnnotationProvider {
+    offer: ProviderOffer,
+}
+
+impl BlobAnnotationProvider {
+    /// Links a provider offer to the generated role's own offer.
+    fn linked(role: &SemanticRoleContract) -> Result<Self, EvaluationError> {
+        Ok(Self {
+            offer: ProviderOffer {
+                provider: role
+                    .builtin_provider
+                    .clone()
+                    .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?,
+                role: role.id.clone(),
+                version: role.version,
+                effects: role.effects.clone(),
+            },
+        })
+    }
+}
+
+impl SystemOperationProvider for BlobAnnotationProvider {
+    fn offer(&self) -> &ProviderOffer {
+        &self.offer
+    }
+
+    fn invoke(
+        &self,
+        operation: &OperationId,
+        arguments: &[TypedValue],
+    ) -> Result<TypedValue, ProviderFailure> {
+        let table = orna_sys_v1::system_dispatch_table();
+        let Some(contract) = table.operation(operation.as_str()) else {
+            return Err(ProviderFailure {
+                code: static_failure("sys.abi.unavailable"),
+                payload: None,
+            });
+        };
+        let mut values = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let Some(canonical) = argument.canonical() else {
+                return Err(provider_failure());
+            };
+            let value = ContextValue::decode(canonical, ValueFormat::Ovb2)
+                .map_err(|_| provider_failure())?;
+            values.push(value.into_raw());
+        }
+        let raw = apply_blob_annotation(operation.as_str(), &values)
+            .map_err(|code| ProviderFailure { code, payload: None })?;
+        let value =
+            ContextValue::new(ValueFormat::Ovb2, raw).map_err(|_| provider_failure())?;
+        let canonical = value.encode().map_err(|_| provider_failure())?;
+        Ok(TypedValue::public(
+            TypeId::new(contract.signature.result.canonical()),
+            canonical,
+        ))
+    }
+}
+
+fn provider_failure() -> ProviderFailure {
+    ProviderFailure {
+        code: static_failure("sys.abi.provider_failed"),
+        payload: None,
+    }
+}
+
+/// Dispatches one portable annotated-Blob operation through the typed registry.
+///
+/// Parameter count, order, declared types and the result type are checked
+/// against the generated contract, and the provider offer is re-validated
+/// against the same generated role before the value-level result is admitted.
+/// `arguments` is positional and complete: the caller resolves declared
+/// defaults before calling.
+pub(crate) fn dispatch_blob_annotation(
+    operation: &str,
+    arguments: &[ContextValue],
+) -> Result<ContextValue, EvaluationError> {
+    let table = orna_sys_v1::system_dispatch_table();
+    let contract = blob_annotation_contract(operation)?;
+    let parameters = &contract.signature.parameters;
+    if arguments.len() != parameters.len() {
+        return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
+    }
+    let role = table
+        .role(BLOB_ANNOTATION_ROLE)
+        .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+    let provider = BlobAnnotationProvider::linked(role)?;
+    let mut typed = Vec::with_capacity(parameters.len());
+    for (parameter, argument) in parameters.iter().zip(arguments) {
+        let canonical = argument
+            .encode()
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        // An absent optional travels as its own null encoding: this ABI has no
+        // separate null type, so the declared optional is checked against its
+        // inner type and the provider reads the null back out.
+        let static_type = match &parameter.ty {
+            AbiType::Optional(inner) => inner.canonical(),
+            declared => declared.canonical(),
+        };
+        typed.push(TypedValue::public(TypeId::new(static_type), canonical));
+    }
+    match table.dispatch_to_provider(operation, &provider, &typed, |_| Ok(())) {
+        Ok(orna_sys_v1::SystemDispatchResult::Returned(value)) => {
+            let canonical = value
+                .canonical()
+                .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
+            ContextValue::decode(canonical, ValueFormat::Ovb2)
+                .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
+        }
+        Ok(orna_sys_v1::SystemDispatchResult::Failed(code)) => Err(redacted_code(code.as_str())),
+        Err(ProviderDiagnostic::PreconditionFailed { code, .. }) => {
+            Err(redacted_code(code.as_str()))
+        }
+        Err(_) => Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
+    }
+}
+
+/// Applies the value-level semantics of the portable Blob annotation.
+///
+/// Annotation delegates to [`orna_value_v1`], which owns MIME-1
+/// canonicalisation and the `(length, SHA-256)` content identity, so an
+/// annotation-only edit never rehashes or re-materialises payload bytes.
+fn apply_blob_annotation(operation: &str, values: &[OvbRaw]) -> Result<OvbRaw, FailureCode> {
+    if operation != BLOB_ANNOTATION_OPERATION {
+        return Err(static_failure("sys.abi.unavailable"));
+    }
+    let [value, OvbRaw::Text(media_type), suffix] = values else {
+        return Err(static_failure("sys.abi.provider_failed"));
+    };
+    let suffix = blob_suffix_argument(suffix)?;
+    let blob =
+        ContextValue::new(ValueFormat::Ovb2, value.clone()).map_err(blob_value_failure)?;
+    let annotated = blob
+        .with_blob_annotation(media_type, suffix)
+        .map_err(blob_value_failure)?;
+    Ok(annotated.into_raw())
+}
+
+/// Reads the `suffix: Str?` argument of `sys.blob.annotate`.
+fn blob_suffix_argument(raw: &OvbRaw) -> Result<Option<&str>, FailureCode> {
+    match optional_raw(raw) {
+        Some(None) => Ok(None),
+        Some(Some(OvbRaw::Text(text))) => Ok(Some(text.as_str())),
+        _ => Err(static_failure("sys.abi.provider_failed")),
+    }
+}
+
+/// Maps an `orna_value_v1` failure onto the portable Blob failure vocabulary.
+///
+/// A code outside the operation's generated declarations is rejected by the
+/// registry, so this mapping cannot invent an undeclared portable failure.
+fn blob_value_failure(error: ValueError) -> FailureCode {
+    static_failure(match error {
+        ValueError::InvalidMediaType => "sys.blob.invalid_media_type",
+        ValueError::InvalidSuffix => "sys.blob.invalid_suffix",
+        ValueError::IncompatibleSuffix => "sys.blob.incompatible_suffix",
+        ValueError::ContentDigestMismatch => "sys.blob.collision",
+        ValueError::ContentUnavailable => "sys.blob.unavailable",
+        ValueError::InvalidRange | ValueError::Limit => "sys.blob.bounds",
+        _ => "sys.abi.provider_failed",
+    })
 }
 
 fn static_call_name(expression: &Expr) -> Option<String> {
