@@ -3819,7 +3819,11 @@ impl DurableTransactionalEvaluator {
                 orna_runtime_v1::PublicationCommitId::new(commit.as_str().as_bytes().to_vec())
                     .map_err(|_| RuntimeError::StorageUnavailable)?;
             runtime.complete_publication(&freeze, &commit_id).await?;
-            return Ok(index);
+            // The no-op range advanced no ref, so the ordinary index is still
+            // the generation this call captured; re-read it rather than clone.
+            return repository
+                .index_generation()
+                .map_err(|_| RuntimeError::StorageUnavailable);
         };
         let published = coordinator
             .publish(repository)
