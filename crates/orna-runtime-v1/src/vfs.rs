@@ -1518,11 +1518,14 @@ pub enum VfsStoredFieldKind {
     Document { text: String },
     /// A stored optional field present as explicit `null`.
     Null,
-    /// A stored Blob projected as a sibling content file.
+    /// A stored Blob projected as a sibling content file. `required` is the
+    /// schema's declaration: a required Blob can never be removed through the
+    /// VFS, while an optional one may be unlinked to `null` (VFS-013).
     Content {
         media_type: String,
         suffix: Option<String>,
         descriptor_size: u64,
+        required: bool,
     },
 }
 
@@ -1541,11 +1544,34 @@ impl VfsStoredField {
         }
     }
 
+    /// A required stored Blob. Schema validity keeps its exact content
+    /// descriptor, so unlinking its sibling file must fail (VFS-013).
     pub fn content(
         name: impl Into<String>,
         media_type: impl Into<String>,
         suffix: Option<String>,
         descriptor_size: u64,
+    ) -> Self {
+        Self::content_with_class(name, media_type, suffix, descriptor_size, true)
+    }
+
+    /// An optional stored Blob. Unlinking its sibling file may set the stored
+    /// field to `null` after the row validates (VFS-013).
+    pub fn content_optional(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+    ) -> Self {
+        Self::content_with_class(name, media_type, suffix, descriptor_size, false)
+    }
+
+    fn content_with_class(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+        required: bool,
     ) -> Self {
         Self {
             name: name.into(),
@@ -1553,6 +1579,7 @@ impl VfsStoredField {
                 media_type: media_type.into(),
                 suffix,
                 descriptor_size,
+                required,
             },
         }
     }
@@ -1573,6 +1600,7 @@ pub struct VfsProjectedFile {
     name: String,
     media_type: String,
     descriptor_size: u64,
+    required: bool,
 }
 
 impl VfsProjectedFile {
@@ -1586,6 +1614,12 @@ impl VfsProjectedFile {
 
     pub fn descriptor_size(&self) -> u64 {
         self.descriptor_size
+    }
+
+    /// True when the schema declares this Blob required. A required Blob's
+    /// sibling file can never be unlinked (VFS-013).
+    pub const fn is_required(&self) -> bool {
+        self.required
     }
 }
 
@@ -1628,6 +1662,7 @@ impl<S> VfsRowProjection<S> {
                     media_type,
                     suffix,
                     descriptor_size,
+                    required,
                 } => {
                     let name = project_content_name(&field.name, media_type, suffix.as_deref());
                     // Two stored values that claim one host name are refused
@@ -1647,6 +1682,7 @@ impl<S> VfsRowProjection<S> {
                         name,
                         media_type: media_type.clone(),
                         descriptor_size: *descriptor_size,
+                        required: *required,
                     });
                 }
             }
@@ -1706,6 +1742,54 @@ impl<S> VfsRowProjection<S> {
                 Ok(VfsProjectedEntry::Content(file))
             }
             VfsComponent::LongAlias { .. } => Err(VfsPathError::WrongNamespace),
+        }
+    }
+
+    /// Resolves one directory entry to its authorized unlink target (VFS-013).
+    /// The row document is a complete stored-non-key-field document, so
+    /// removing it is refused: row deletion is an explicit database operation,
+    /// never a VFS side effect. A sibling file resolves to its stored Blob
+    /// field, carrying the schema's required/optional class. A name outside the
+    /// projection is resolved to no target, exactly like its lookup (VFS-004).
+    pub fn resolve_unlink(&self, name: &str) -> Result<VfsUnlinkTarget<'_>, VfsPathError> {
+        match self.lookup(name)? {
+            VfsProjectedEntry::Document => Ok(VfsUnlinkTarget::RowDocument),
+            VfsProjectedEntry::Content(file) => Ok(VfsUnlinkTarget::Content(file)),
+        }
+    }
+}
+
+/// The authorized outcome of resolving one unlink inside a row directory. The
+/// projection decides this from schema-issued field classes alone; a host name
+/// never widens what an unlink may remove (VFS-013).
+#[derive(Debug, Eq, PartialEq)]
+pub enum VfsUnlinkTarget<'a> {
+    /// `data.orna` itself: always refused (VFS-013).
+    RowDocument,
+    /// A required stored Blob: refused, because schema validity depends on the
+    /// exact content descriptor (VFS-013).
+    RequiredContent(&'a VfsProjectedFile),
+    /// An optional stored Blob: the unlink may assign that field `null`
+    /// through the validated activation boundary (VFS-013).
+    OptionalContent(&'a VfsProjectedFile),
+}
+
+impl VfsUnlinkTarget<'_> {
+    /// The exact `errno` this target requires, or `None` when the unlink may
+    /// proceed to validation.
+    pub fn refusal_errno(&self) -> Option<i32> {
+        match self {
+            Self::RowDocument | Self::RequiredContent(_) => Some(VFS_EPERM),
+            Self::OptionalContent(_) => None,
+        }
+    }
+
+    /// The stable Orna cause code kept alongside the host `errno` for a
+    /// refused unlink.
+    pub fn refusal_code(&self) -> Option<&'static str> {
+        match self {
+            Self::RowDocument | Self::RequiredContent(_) => Some("sys.vfs.unsupported"),
+            Self::OptionalContent(_) => None,
         }
     }
 }
@@ -1782,6 +1866,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unlink_refuses_row_document_and_required_blob_while_allowing_optional() {
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(17_u64)),
+            &[
+                VfsStoredField::document("title", "\"Live in London\""),
+                VfsStoredField::content("content", "audio/mpeg", None, 99),
+                VfsStoredField::content_optional("cover", "image/jpeg", None, 4096),
+                VfsStoredField::null("booklet"),
+            ],
+        )
+        .expect("row projection");
+
+        let content = project_content_name("content", "audio/mpeg", None);
+        let cover = project_content_name("cover", "image/jpeg", None);
+        assert_eq!(content, "content.mp3");
+        assert_eq!(cover, "cover.jpg");
+
+        // Deleting `data.orna` is refused: row deletion is an explicit database
+        // operation, never a VFS unlink side effect (VFS-013).
+        let document = row.resolve_unlink(VFS_ROW_DOCUMENT).expect("document");
+        assert_eq!(document, VfsUnlinkTarget::RowDocument);
+        assert_eq!(document.refusal_errno(), Some(VFS_EPERM));
+        assert_eq!(document.refusal_code(), Some("sys.vfs.unsupported"));
+
+        // A required Blob cannot be removed, because schema validity depends on
+        // its exact content descriptor (VFS-013).
+        let required = row.resolve_unlink(&content).expect("required blob");
+        let VfsUnlinkTarget::RequiredContent(file) = &required else {
+            panic!("required blob must resolve to a required target");
+        };
+        assert!(file.is_required());
+        assert_eq!(required.refusal_errno(), Some(VFS_EPERM));
+        assert_eq!(required.refusal_code(), Some("sys.vfs.unsupported"));
+
+        // An optional Blob may be unlinked to `null`, so the target authorizes
+        // validation instead of refusing in the projection (VFS-013).
+        let optional = row.resolve_unlink(&cover).expect("optional blob");
+        let VfsUnlinkTarget::OptionalContent(file) = &optional else {
+            panic!("optional blob must resolve to an optional target");
+        };
+        assert!(!file.is_required());
+        assert_eq!(optional.refusal_errno(), None);
+        assert_eq!(optional.refusal_code(), None);
+
+        // Field classes come from the schema, not the host name: a name outside
+        // the projection resolves to no target at all (VFS-004).
+        assert_eq!(
+            row.resolve_unlink("missing.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
+        assert_eq!(
+            row.resolve_unlink("~key-not-a-field.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
+    }
     fn vfs_row_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/vfs-row-music-london.orna");
         Arc::new(VfsFileSnapshot::new(
