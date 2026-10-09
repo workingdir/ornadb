@@ -1121,6 +1121,43 @@ async fn history_at_pins_the_named_snapshot_instead_of_head() {
     drop(directory);
 }
 
+/// A format-1/2 pin is a read-only compatibility input with no native
+/// `.orna/store`, so `--at` must refuse it with an accurate reason instead of
+/// reporting the format-3 store seam's failure or answering from the workspace.
+#[test]
+fn history_at_refuses_a_legacy_snapshot_it_cannot_walk() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let setup: &[&[&str]] = &[
+        &["init", "--quiet"],
+        &["config", "user.email", "kieran@drewett.dev"],
+        &["config", "user.name", "kierandrewett"],
+        &["config", "commit.gpgsign", "false"],
+    ];
+    for words in setup {
+        git(root, words);
+    }
+    std::fs::create_dir_all(root.join(".orna")).unwrap();
+    std::fs::write(root.join("main.orna"), b"module main;\n").unwrap();
+    std::fs::write(root.join(".orna/format.orna"), b"format 1\n").unwrap();
+    git(root, &["add", "--all"]);
+    git(root, &["commit", "--quiet", "-m", "legacy format fixture"]);
+    let legacy = git_output(root, &["rev-parse", "HEAD"], None);
+    let legacy = String::from_utf8(legacy).unwrap().trim().to_owned();
+
+    // The format-1 commit is reachable and pinnable, so the refusal is about
+    // the snapshot's format and not about resolving the selector.
+    let relation = "43434343434343434343434343434343";
+    let refused = run_history(root, &[relation, "song", "--at", &legacy]);
+    assert_history_refused(&refused, "history --at naming a format-1 commit");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("legacy format-1/2"),
+        "the refusal names the pinned format: {stderr}"
+    );
+    drop(directory);
+}
+
 /// Deletes one committed media row through an admitted request, the same path
 /// the import uses for inserts.
 async fn delete_media(
