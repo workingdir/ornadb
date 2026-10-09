@@ -268,6 +268,13 @@ fn revision(directory: &Path, spec: &str) -> String {
 /// Commits `parent`'s tree with `.orna/database.orna` replaced by `database`,
 /// the shape a reinitialized repository commits. Only the commit changes; the
 /// checkout keeps its previous metadata.
+///
+/// The new commit is also pinned by `refs/checks/<message>` and checked out, so
+/// it is a reachable snapshot rather than a dangling object. A repository
+/// resolves a snapshot only when the commit is HEAD or reachable from a ref
+/// (`Repository::resolve_snapshot`); a commit nothing points at is refused, so
+/// the endpoint here must be named by a ref like any real snapshot. Pinning it
+/// also survives the next call, which advances HEAD to a different commit.
 fn commit_metadata(directory: &Path, parent: &str, database: &str, message: &str) -> String {
     let database_oid = git_object(directory, "blob", database.as_bytes());
     let store_oid = revision(directory, &format!("{parent}:.orna/store"));
@@ -293,6 +300,10 @@ fn commit_metadata(directory: &Path, parent: &str, database: &str, message: &str
         .trim()
         .to_owned();
     git(directory, &["update-ref", &head_ref, &commit]);
+    // A dedicated ref keeps this commit a reachable snapshot after HEAD moves
+    // to the next one, so the diff can still name it.
+    let pin = format!("refs/checks/{}", message.replace(' ', "-"));
+    git(directory, &["update-ref", &pin, &commit]);
     commit
 }
 
