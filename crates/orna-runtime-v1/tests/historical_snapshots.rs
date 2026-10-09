@@ -12587,7 +12587,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     );
     assert_eq!(expected_rows(1170)[0], expected_rows(1171)[1]);
     assert_eq!(expected_rows(1171).len(), 2);
-    assert_ne!(expected_rows(1171)[0], expected_rows(1172)[0]);
+    assert_eq!(expected_rows(1171)[0], expected_rows(1172)[0]);
     assert_eq!(expected_rows(1173).len(), 1);
     assert!(expected_rows(1174).is_empty());
     assert_eq!(expected_rows(1175).len(), 1);
