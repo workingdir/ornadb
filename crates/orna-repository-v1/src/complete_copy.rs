@@ -267,16 +267,42 @@ impl CompleteCopyManifest {
                                 "dependency before archive line",
                             ))?
                     };
-                    if dependencies.len() == MAX_EXPORT_DEPENDENCIES {
-                        return Err(CompleteCopyError::ClosureTooLarge);
-                    }
-                    dependencies.push(CompleteCopyDependency {
-                        path: (*path).to_owned(),
-                        commit: (*commit).to_owned(),
-                        origin: (*origin).to_owned(),
-                        bundle: (*bundle).to_owned(),
+                    push_dependency(
+                        &mut dependencies,
+                        path,
+                        commit,
+                        origin,
+                        bundle,
                         member,
-                    });
+                    )?;
+                }
+                // A current archive names the member that pins each dependency,
+                // because two members may pin the same path differently.
+                ["dependency", path, commit, origin, bundle, member] => {
+                    if !valid_object_id(commit)
+                        || path.is_empty()
+                        || origin.is_empty()
+                        || !valid_dependency_bundle(bundle)
+                        || !valid_object_id(member)
+                    {
+                        return Err(CompleteCopyError::InvalidArchive("dependency line"));
+                    }
+                    if !members
+                        .iter()
+                        .any(|candidate| candidate.commit.eq_ignore_ascii_case(member))
+                    {
+                        return Err(CompleteCopyError::InvalidArchive(
+                            "dependency names no member",
+                        ));
+                    }
+                    push_dependency(
+                        &mut dependencies,
+                        path,
+                        commit,
+                        origin,
+                        bundle,
+                        (*member).to_owned(),
+                    )?;
                 }
                 _ => return Err(CompleteCopyError::InvalidArchive("unrecognised line")),
             }
@@ -306,6 +332,28 @@ impl CompleteCopyManifest {
             dependencies,
         })
     }
+}
+
+/// Records one decoded dependency line, bounded by the archive limits.
+fn push_dependency(
+    dependencies: &mut Vec<CompleteCopyDependency>,
+    path: &str,
+    commit: &str,
+    origin: &str,
+    bundle: &str,
+    member: String,
+) -> Result<(), CompleteCopyError> {
+    if dependencies.len() == MAX_EXPORT_DEPENDENCIES {
+        return Err(CompleteCopyError::ClosureTooLarge);
+    }
+    dependencies.push(CompleteCopyDependency {
+        path: path.to_owned(),
+        commit: commit.to_owned(),
+        origin: origin.to_owned(),
+        bundle: bundle.to_owned(),
+        member,
+    });
+    Ok(())
 }
 
 fn decode_object(kind: &str, oid: &str, size: &str) -> Result<CompleteCopyObject, CompleteCopyError> {
@@ -503,8 +551,8 @@ pub fn export_complete_copy_of(
     }
 
     let members = exported
-        .iter()
-        .map(|member| member.into_member())
+        .into_iter()
+        .map(ExportedMember::into_member)
         .collect::<Vec<_>>();
     let mut document = format!("{HEADER}\n");
     document.push_str(&format!("snapshot\t{}\n", members[0].commit));

@@ -148,11 +148,8 @@ pub fn extract_member(archive: &Path, member: &RecordedMember, destination: &Pat
             &format!("+refs/heads/orna-complete-copy:refs/heads/extracted"),
         ],
     );
-    let resolved = String::from_utf8(git(
-        destination,
-        &["rev-parse", "refs/heads/extracted"],
-    ))
-    .expect("git output is UTF-8");
+    let resolved = String::from_utf8(git(destination, &["rev-parse", "refs/heads/extracted"]))
+        .expect("git output is UTF-8");
     assert_eq!(
         resolved.trim(),
         member.commit,
@@ -163,10 +160,12 @@ pub fn extract_member(archive: &Path, member: &RecordedMember, destination: &Pat
 /// Reads every recorded blob of `member` back from `repository` and checks its
 /// raw bytes against the manifest with this module's own object-ID hashing.
 ///
-/// Returns the number of verified blobs.
+/// Only blob objects are read: a commit or tree in the closure is verified by
+/// Git's own transfer and named by the manifest, but it has no raw payload to
+/// re-hash. Returns the number of verified blobs.
 pub fn verify_blobs(repository: &Path, member: &RecordedMember) -> usize {
     let mut verified = 0;
-    for object in &member.objects {
+    for object in member.objects.iter().filter(|o| o.kind == "blob") {
         let bytes = git(repository, &["cat-file", "blob", &object.oid]);
         assert_eq!(
             bytes.len() as u64,
@@ -198,11 +197,8 @@ pub fn blobs_by_oid(member: &RecordedMember) -> BTreeMap<String, u64> {
 
 /// The worktree-relative path a blob is reachable at inside `commit`.
 pub fn tree_paths(repository: &Path, commit: &str) -> Vec<(String, String)> {
-    let listing = String::from_utf8(git(
-        repository,
-        &["ls-tree", "-r", "-t", commit],
-    ))
-    .expect("git output is UTF-8");
+    let listing = String::from_utf8(git(repository, &["ls-tree", "-r", "-t", commit]))
+        .expect("git output is UTF-8");
     listing
         .lines()
         .filter_map(|line| {
@@ -216,7 +212,10 @@ pub fn tree_paths(repository: &Path, commit: &str) -> Vec<(String, String)> {
 
 /// Reads one path's committed bytes at `commit`.
 pub fn read_path(repository: &Path, commit: &str, path: &str) -> Vec<u8> {
-    git(repository, &["cat-file", "blob", &format!("{commit}:{path}")])
+    git(
+        repository,
+        &["cat-file", "blob", &format!("{commit}:{path}")],
+    )
 }
 
 /// Where a helper materialises an extraction.
