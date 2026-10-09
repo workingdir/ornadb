@@ -152,7 +152,11 @@ fn complete_copy_reconstructs_snapshot_and_dependency_without_the_source() {
     assert_eq!(recorded.commit, dependency_commit);
     assert_eq!(recorded.origin, dependency.to_string_lossy());
     assert!(archive.join(&recorded.bundle).is_file());
-    assert!(archive.join("superproject.bundle").is_file());
+    assert!(archive.join(&manifest.members[0].bundle).is_file());
+    assert_eq!(
+        manifest.members[0].bundle,
+        format!("snapshots/{snapshot}.bundle")
+    );
 
     // Reading the manifest back without the source yields the same record.
     let reread = read_complete_copy_manifest(&archive).expect("read manifest");
@@ -328,8 +332,9 @@ fn complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extract
     let paths = extractor::tree_paths(&restored, &previous);
     assert!(paths.iter().any(|(path, _)| path == "main.orna"));
 
-    // Independent blob-hash verification over every member of the copy.
-    for member in &reconstructed.members {
+    // Independent blob-hash verification over every member of the copy, driven
+    // by the extractor's own reading of the archive.
+    for member in &recorded.members {
         assert!(extractor::verify_blobs(&restored, member) > 0);
     }
 
