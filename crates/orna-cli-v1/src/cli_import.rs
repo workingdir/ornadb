@@ -359,11 +359,15 @@ fn render_table(rows: &[ReportRow<'_>], media_type: Option<&str>) -> String {
             *width = (*width).max(cell.chars().count());
         }
     }
-    let [key_width, type_width, bytes_width, digest_width] = widths;
+    let [key_width, type_width, bytes_width, _] = widths;
     let mut out = String::new();
+    // The commitment is the last column, so it is not padded. Padding it would
+    // make every line end in spaces up to the digest width, which adds nothing
+    // to an aligned table and turns the rendered report into a function of the
+    // widest commitment rather than of the row values.
     for [key, kind, bytes, digest] in &lines {
         out.push_str(&format!(
-            "{key:<key_width$}  {kind:<type_width$}  {bytes:>bytes_width$}  {digest:<digest_width$}\n"
+            "{key:<key_width$}  {kind:<type_width$}  {bytes:>bytes_width$}  {digest}\n"
         ));
     }
     out
@@ -661,11 +665,39 @@ mod tests {
         write_offline_copy(&bundle, &rows, &[]).unwrap();
 
         for metadata_only in [false, true] {
-            assert_eq!(
-                dry_run_report(&bundle, Some(1), None, true, ReportFormat::Human, metadata_only)
-                    .unwrap(),
-                dry_run_report(&bundle, Some(1), None, false, ReportFormat::Human, metadata_only)
-                    .unwrap(),
+            // Progress writes one line per verified row to stderr while the
+            // report is built; it must not reach the report. Only the body is
+            // compared: the resource line is process-cumulative (peak RSS and
+            // the syscall counters from `/proc/self/io`), so two runs in one
+            // test process cannot report equal readings. The counters are
+            // checked against the mode instead.
+            let loud = dry_run_report(
+                &bundle,
+                Some(1),
+                None,
+                true,
+                ReportFormat::Human,
+                metadata_only,
+            )
+            .unwrap();
+            let quiet = dry_run_report(
+                &bundle,
+                Some(1),
+                None,
+                false,
+                ReportFormat::Human,
+                metadata_only,
+            )
+            .unwrap();
+            assert_eq!(loud.body, quiet.body);
+            assert!(
+                loud.resources.contains(if metadata_only {
+                    "media payload read 0 bytes of 16 bytes in the bundle"
+                } else {
+                    "media payload read 16 bytes of 16 bytes in the bundle"
+                }),
+                "resource line: {}",
+                loud.resources
             );
         }
     }
