@@ -2126,6 +2126,102 @@ impl Repository {
         result
     }
 
+    /// Builds one publication candidate `N = H + P` from the captured base and
+    /// the frozen native store root (ORNA-PUB-010).
+    ///
+    /// The candidate is built entirely in a private index seeded from
+    /// `expected_head`; the ordinary index and worktree are never read, so no
+    /// human staged or unstaged content can reach the candidate. The frozen
+    /// batch contributes its encoded store root, staged at the fixed
+    /// `.orna/store` position the format-3 reader resolves. Because the
+    /// argument is an encoded OGS-1 store tree rather than a set of managed
+    /// file bytes, a caller cannot smuggle an unrelated edit into a
+    /// publication commit.
+    ///
+    /// Every written object stays unreachable until the returned commit names
+    /// it, and the commit is a direct child of the captured `HEAD`. The
+    /// symbolic branch and ordinary index are untouched; publication advances
+    /// them later under its own lock and compare-and-set.
+    pub fn build_frozen_publication_candidate(
+        &self,
+        expected_head: &GitCommitRef,
+        graph: &NativeGraphContext,
+        store_root: &NativeOid,
+        message: &str,
+    ) -> Result<PrivateCommit, RepositoryError> {
+        if message.is_empty() || message.contains('\0') {
+            return Err(RepositoryError::NoManagedPaths);
+        }
+        let _lock = self.acquire_coordination_lock()?;
+        self.ensure_no_git_operation_in_progress()?;
+        let actual = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        if &actual != expected_head {
+            return Err(RepositoryError::StaleHead);
+        }
+        // A candidate is only built for a batch admitted by this graph
+        // context, so a mismatched identity is refused before any object is
+        // written.
+        if store_root.algorithm() != graph.algorithm() {
+            return Err(RepositoryError::Graph(GraphError::InvalidOidWidth {
+                expected: graph.algorithm().width(),
+                actual: store_root.as_bytes().len(),
+            }));
+        }
+
+        self.runtime.ensure_exists()?;
+        fs::create_dir_all(self.runtime.locks())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let index = self.runtime.locks().join(format!(
+            "private-index-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&index)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::remove_file(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+
+        let result = (|| {
+            let mut read_tree = self.command();
+            read_tree
+                .env("GIT_INDEX_FILE", &index)
+                .args(["read-tree", expected_head.as_str()]);
+            self.run(read_tree)?;
+
+            // The store root must be a real decodable OGS-1 tree, so a raw
+            // object ID cannot be planted at the store position.
+            graph
+                .pin_store_subtree_in_index(&index, store_root)
+                .map_err(RepositoryError::Graph)?;
+
+            let mut write_tree = self.command();
+            write_tree
+                .env("GIT_INDEX_FILE", &index)
+                .args(["write-tree"]);
+            let tree = self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
+
+            let mut commit_tree = self.command();
+            commit_tree.args([
+                "commit-tree",
+                tree.as_str(),
+                "-p",
+                expected_head.as_str(),
+                "-m",
+            ]);
+            commit_tree.arg(message);
+            let commit =
+                self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?;
+            if self.head()?.as_ref() != Some(expected_head) {
+                return Err(RepositoryError::StaleHead);
+            }
+            Ok(PrivateCommit { tree, commit })
+        })();
+        let _ = fs::remove_file(&index);
+        result
+    }
+
     /// Advances the symbolic current branch to a previously built private
     /// candidate using Git's compare-and-set ref transaction. It does not
     /// reconcile the ordinary index or worktree; callers must keep the
@@ -7411,6 +7507,9 @@ pub enum RepositoryError {
     /// remains retained and the caller must use the typed compact recovery
     /// boundary to rebuild or reconcile it.
     CompactReconciliationRequired,
+    /// Native graph work failed while building or pinning a publication
+    /// candidate. The graph context's own error identity is preserved.
+    Graph(GraphError),
     /// This profile implements atomic index replacement only on POSIX
     /// filesystems. Windows requires a separately validated replacement path.
     PlatformUnsupported,
@@ -7482,6 +7581,7 @@ impl fmt::Display for RepositoryError {
             Self::CompactReconciliationRequired => {
                 f.write_str("compact publication requires explicit reconciliation")
             }
+            Self::Graph(error) => write!(f, "native graph operation failed: {error}"),
             Self::PlatformUnsupported => {
                 f.write_str("atomic Git index replacement is unsupported on this platform")
             }
