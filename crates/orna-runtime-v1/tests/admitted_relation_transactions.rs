@@ -693,6 +693,7 @@ async fn admitted_relation_request_reads_and_stages_under_committed_identity() {
     let staged = admitted_mutation(&table, object_id, 2, b"staged");
     let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
     let recorder = seen.clone();
+    let activation_table = table.clone();
     let outcome = TerminalOutcome::new(b"accepted".to_vec()).expect("terminal outcome");
     run_admitted_table_request_activation(
         &state,
@@ -703,14 +704,16 @@ async fn admitted_relation_request_reads_and_stages_under_committed_identity() {
         move |snapshot| {
             let recorder = recorder.clone();
             let staged = staged.clone();
+            // The activation reads rows by the admitted identity, so the
+            // baseline row is visible under the committed key. The read
+            // completes before the activation future starts, so it borrows the
+            // activation snapshot only for the length of the callback.
+            let rows = snapshot
+                .table_rows()
+                .get(&activation_table)
+                .cloned()
+                .unwrap_or_default();
             async move {
-                // The activation reads rows by the admitted identity, so the
-                // baseline row is visible under the committed key.
-                let rows = snapshot
-                    .table_rows()
-                    .get(&table)
-                    .cloned()
-                    .unwrap_or_default();
                 *recorder.lock().expect("lock seen rows") = Some(rows);
                 Ok::<_, ()>(ActivationWork::new(vec![staged], [33; 32], ()))
             }
