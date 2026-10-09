@@ -820,7 +820,10 @@ impl RowMapBuilder {
     }
 }
 
-pub(crate) fn partition_pages(entries: &[RowEntry], height: u8) -> Result<Vec<RowPage>, RowStoreError> {
+pub(crate) fn partition_pages(
+    entries: &[RowEntry],
+    height: u8,
+) -> Result<Vec<RowPage>, RowStoreError> {
     let mut pages = Vec::new();
     let mut current = Vec::new();
     let mut current_size = 16usize;
