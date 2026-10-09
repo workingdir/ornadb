@@ -45,6 +45,11 @@ use crate::{
 /// during an explicit migration. UPGRADE-004 fixes this coordinate.
 pub const LEGACY_ANNOTATION_DEFAULT_FORMAT: &str = "MIME-1";
 
+/// The Git trailer key a journalled migration commit uses to name its own
+/// format coordinate. Git only recognizes a trailer after a blank line, so the
+/// candidate message keeps the summary, a blank line, then this key.
+pub const MIGRATION_MARKER_TRAILER: &str = "Orna-Migration";
+
 /// The copy-local record of the coordinates a prepared migration carries.
 pub const MIGRATION_RECORD: &str = ".orna/migration.json";
 
@@ -354,6 +359,13 @@ fn legacy_format_bytes(format: RepositoryFormat) -> Vec<u8> {
 /// The source commit this candidate descends from stays immutable, so the
 /// message is the only place the copy can state the coordinate that is not
 /// recoverable from the legacy objects themselves.
+///
+/// The coordinate is written as a Git trailer so it stays machine-readable
+/// without becoming part of the prose: a `history` walk can say which commits
+/// established the migrated representation instead of leaving the reader to
+/// infer it from the message text. MIGRATION.md item 9 requires the migration
+/// to be one journalled, reviewed commit, and this trailer is how that commit
+/// names itself.
 fn candidate_message(
     source_format: RepositoryFormat,
     annotation_defaults: MigrationAnnotationDefaults,
@@ -361,12 +373,23 @@ fn candidate_message(
 ) -> String {
     format!(
         "explicit format {} to {} migration: {} rows take the {} default annotation, {} stream \
-         checkpoint identities carried",
+         checkpoint identities carried\n\n{}: {}",
         source_format.number(),
         crate::init::format_context::FINAL_REPOSITORY_FORMAT,
         annotation_defaults.entry_count(),
         LEGACY_ANNOTATION_DEFAULT_FORMAT,
         continuity.predecessors().len(),
+        MIGRATION_MARKER_TRAILER,
+        migration_marker(source_format),
+    )
+}
+
+/// The marker value one legacy source format's migration commit records.
+pub fn migration_marker(source_format: RepositoryFormat) -> String {
+    format!(
+        "format-{}-to-{}",
+        source_format.number(),
+        crate::init::format_context::FINAL_REPOSITORY_FORMAT
     )
 }
 
