@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 
+use orna_repository_v1::NativeObjectId;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -1776,12 +1777,57 @@ pub enum VfsStoredFieldKind {
     /// A stored Blob projected as a sibling content file. `required` is the
     /// schema's declaration: a required Blob can never be removed through the
     /// VFS, while an optional one may be unlinked to `null` (VFS-013).
+    ///
+    /// A sibling file can be renamed to select a compatible suffix, and the
+    /// resulting save rewrites the row. The stored value is then rebuilt from
+    /// the descriptor this variant carries: the captured Blob identity and its
+    /// exact matching values, taken from the field the save was admitted from
+    /// and never re-derived from current state (VFS-008, VFS-020). A file that
+    /// reassembles a row without them has no captured descriptor to preserve.
     Content {
         media_type: String,
         suffix: Option<String>,
         descriptor_size: u64,
         required: bool,
+        captured: Option<CapturedContentDescriptor>,
     },
+}
+
+/// The captured Blob descriptor of one stored content field, as the shared
+/// store reported it for the row version the projection was admitted from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapturedContentDescriptor {
+    length: u64,
+    sha256: [u8; 32],
+    descriptor_oid: NativeObjectId,
+}
+
+impl CapturedContentDescriptor {
+    /// A descriptor for the Blob the store captured: its byte length, the
+    /// SHA-256 of its raw bytes, and the OID of the OGS-1 descriptor node that
+    /// holds its byte range. The OID is what an accepted row keeps, so a save
+    /// that does not replace the payload can name it again instead of minting
+    /// a new one.
+    pub fn new(length: u64, sha256: [u8; 32], descriptor_oid: NativeObjectId) -> Self {
+        Self {
+            length,
+            sha256,
+            descriptor_oid,
+        }
+    }
+
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+
+    pub const fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+
+    /// The OGS-1 descriptor node holding the Blob's byte range.
+    pub fn descriptor_oid(&self) -> &NativeObjectId {
+        &self.descriptor_oid
+    }
 }
 
 impl VfsStoredField {
@@ -1807,7 +1853,26 @@ impl VfsStoredField {
         suffix: Option<String>,
         descriptor_size: u64,
     ) -> Self {
-        Self::content_with_class(name, media_type, suffix, descriptor_size, true)
+        Self::content_with_class(name, media_type, suffix, descriptor_size, true, None)
+    }
+
+    /// A required stored Blob that a save admitted from the captured field can
+    /// rebuild without re-deriving the descriptor (VFS-008).
+    pub fn captured_content(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor: CapturedContentDescriptor,
+        required: bool,
+    ) -> Self {
+        Self::content_with_class(
+            name,
+            media_type,
+            suffix,
+            descriptor.length(),
+            required,
+            Some(descriptor),
+        )
     }
 
     /// An optional stored Blob. Unlinking its sibling file may set the stored
@@ -1818,7 +1883,7 @@ impl VfsStoredField {
         suffix: Option<String>,
         descriptor_size: u64,
     ) -> Self {
-        Self::content_with_class(name, media_type, suffix, descriptor_size, false)
+        Self::content_with_class(name, media_type, suffix, descriptor_size, false, None)
     }
 
     fn content_with_class(
@@ -1827,6 +1892,7 @@ impl VfsStoredField {
         suffix: Option<String>,
         descriptor_size: u64,
         required: bool,
+        captured: Option<CapturedContentDescriptor>,
     ) -> Self {
         Self {
             name: name.into(),
@@ -1835,6 +1901,7 @@ impl VfsStoredField {
                 suffix,
                 descriptor_size,
                 required,
+                captured,
             },
         }
     }
@@ -1856,6 +1923,7 @@ pub struct VfsProjectedFile {
     media_type: String,
     descriptor_size: u64,
     required: bool,
+    captured: Option<CapturedContentDescriptor>,
 }
 
 impl VfsProjectedFile {
@@ -1869,6 +1937,31 @@ impl VfsProjectedFile {
 
     pub fn descriptor_size(&self) -> u64 {
         self.descriptor_size
+    }
+
+    /// The captured Blob descriptor this sibling file was projected from, when
+    /// the store supplied one. A save admitted from this file reuses it instead
+    /// of re-deriving the descriptor (VFS-008).
+    pub fn captured_descriptor(&self) -> Option<&CapturedContentDescriptor> {
+        self.captured.as_ref()
+    }
+
+    /// The captured descriptor one save may rebuild this content field from.
+    ///
+    /// `digest` is the SHA-256 of the bytes the save holds for this file. The
+    /// descriptor belongs to the payload the store captured, so it is returned
+    /// only while the saved bytes are exactly that payload: same length and
+    /// same digest. A save that replaced the payload drops it, and the row's
+    /// value is minted from the new bytes rather than keeping a descriptor that
+    /// no longer names them (VFS-008, VFS-020).
+    pub fn admitted_capture(
+        &self,
+        length: u64,
+        digest: &[u8; 32],
+    ) -> Option<&CapturedContentDescriptor> {
+        self.captured
+            .as_ref()
+            .filter(|descriptor| descriptor.length() == length && descriptor.sha256() == digest)
     }
 
     /// True when the schema declares this Blob required. A required Blob's
@@ -1918,6 +2011,7 @@ impl<S> VfsRowProjection<S> {
                     suffix,
                     descriptor_size,
                     required,
+                    captured,
                 } => {
                     let name = project_content_name(&field.name, media_type, suffix.as_deref());
                     // Two stored values that claim one host name are refused
@@ -1938,6 +2032,7 @@ impl<S> VfsRowProjection<S> {
                         media_type: media_type.clone(),
                         descriptor_size: *descriptor_size,
                         required: *required,
+                        captured: captured.clone(),
                     });
                 }
             }
@@ -2670,6 +2765,76 @@ mod tests {
             row.lookup("~key-not-a-field.mp3"),
             Err(VfsPathError::UnknownRow)
         ));
+    }
+
+    #[test]
+    fn a_saved_row_reuses_the_captured_blob_descriptor_instead_of_re_deriving_it() {
+        // A content sibling that a save admitted from the captured field keeps
+        // the descriptor the store reported for the row version it came from:
+        // the byte length, the raw digest, and the OGS-1 descriptor OID are the
+        // captured ones, so a save that changes only the selected suffix (or
+        // any other field) cannot mint a new descriptor or re-hash the payload
+        // (VFS-008: an unchanged descriptor uses the captured field, not a new
+        // path lookup into current state).
+        let descriptor_oid =
+            NativeObjectId::new("a".repeat(40)).expect("well-formed SHA-1 object id");
+        let captured = CapturedContentDescriptor::new(4096, [0x5a; 32], descriptor_oid.clone());
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            &[VfsStoredField::captured_content(
+                "content",
+                "audio/mpeg",
+                Some("mp1".to_owned()),
+                captured.clone(),
+                true,
+            )],
+        )
+        .expect("captured content projection");
+
+        let VfsProjectedEntry::Content(file) = row
+            .lookup("content.mp1")
+            .expect("the compatible suffix names the content file")
+        else {
+            panic!("content lookup should return the projected file");
+        };
+
+        let projected = file
+            .captured_descriptor()
+            .expect("the captured descriptor reaches the projected file");
+        assert_eq!(projected.length(), 4096);
+        assert_eq!(projected.sha256(), &[0x5a; 32]);
+        assert_eq!(projected.descriptor_oid(), &descriptor_oid);
+        assert_eq!(projected, &captured);
+        assert_eq!(file.descriptor_size(), captured.length());
+        assert!(file.is_required());
+
+        // A projection that was given no captured descriptor reports none, so a
+        // file can never claim an identity the store did not hand it.
+        let plain = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            &[VfsStoredField::content("content", "audio/mpeg", None, 4096)],
+        )
+        .expect("plain content projection");
+        let VfsProjectedEntry::Content(file) = plain.lookup("content.mp3").expect("content file")
+        else {
+            panic!("content lookup should return the projected file");
+        };
+        assert!(file.captured_descriptor().is_none());
+
+        // The descriptor is admitted only for the payload the store captured:
+        // a save that keeps those exact bytes rebuilds the field from it, while
+        // a save that replaced the payload reports no admission, so the new
+        // bytes mint their own descriptor instead of inheriting one that no
+        // longer names them (VFS-008, VFS-020).
+        let VfsProjectedEntry::Content(content) = row
+            .lookup("content.mp1")
+            .expect("the compatible suffix names the content file")
+        else {
+            panic!("content lookup should return the projected file");
+        };
+        assert_eq!(content.admitted_capture(4096, &[0x5a; 32]), Some(&captured));
+        assert!(content.admitted_capture(4096, &[0x5b; 32]).is_none());
+        assert!(content.admitted_capture(4095, &[0x5a; 32]).is_none());
     }
 
     #[test]
