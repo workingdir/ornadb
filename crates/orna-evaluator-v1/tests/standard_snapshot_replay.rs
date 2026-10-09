@@ -5193,6 +5193,7 @@ fn captured_snapshot_identity_survives_paired_divergence_pin_restoration_folds()
         for import in imports.lines() {
             assert_eq!(session.submit(import), Ok(None));
         }
+        assert_eq!(session.submit(closure), Ok(None));
         assert_eq!(
             session.submit(replay),
             Ok(Some(ints(&expected[index]))),
