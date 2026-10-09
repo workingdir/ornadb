@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use super::{
@@ -1091,6 +1092,639 @@ impl<S> EditDraft<S> {
     pub fn release(self) {}
 }
 
+// ---------------------------------------------------------------------------
+// VFS-1 host namespace projection (ORNA-VFS-001, 002, 004, 016, 017, 018)
+//
+// A row directory addresses database/table/typed key. `data.orna` encodes the
+// stored non-key fields and each stored Blob becomes an escaped sibling file
+// named from its MIME-1 annotation. Nothing here materialises a competing
+// authoritative copy: the projection records which stored field owns each host
+// name, and it renders the row document from the stored field values the owner
+// snapshot already holds.
+// ---------------------------------------------------------------------------
+
+/// Encoded component bound from the VFS-1 profile.
+pub const VFS_MAX_COMPONENT_BYTES: usize = 200;
+/// Repository-relative path bound from the VFS-1 profile.
+pub const VFS_MAX_PATH_BYTES: usize = 1024;
+/// The reserved projected name of the row document.
+pub const VFS_ROW_DOCUMENT: &str = "data.orna";
+
+/// `EAGAIN`: the captured baseline is no longer the accepted row (VFS-011).
+pub const VFS_EAGAIN: i32 = 11;
+/// `EINVAL`: malformed candidate, name, or document (VFS-001, VFS-016).
+pub const VFS_EINVAL: i32 = 22;
+/// `ENOENT`: no projected field or row at that address.
+pub const VFS_ENOENT: i32 = 2;
+/// `EPERM`: authority-refusing path or mutation (VFS-004, VFS-013).
+pub const VFS_EPERM: i32 = 1;
+/// `EOPNOTSUPP`: a VFS-1 unsupported operation (VFS-014).
+pub const VFS_EOPNOTSUPP: i32 = 95;
+
+/// Why a projected name, a resolved path, or a candidate document was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VfsPathError {
+    /// Absolute paths, traversal spellings, separators inside one component,
+    /// and any name outside the field's registered projection (VFS-004).
+    OutsideProjection,
+    /// The name does not belong to this row/field namespace (VFS-001).
+    WrongNamespace,
+    /// The encoded component or the whole path exceeds the VFS-1 bound (VFS-016).
+    NameTooLong,
+    /// Two distinct canonical names project to one host name (VFS-016).
+    NameCollision,
+    /// The candidate is not a complete stored non-key-field document (VFS-001).
+    InvalidDocument,
+    /// No stored field or row exists at that address (VFS-001).
+    UnknownRow,
+    /// The operation is unsupported in VFS-1 (VFS-013, VFS-014).
+    Unsupported,
+    /// The write baseline no longer matches the accepted row (VFS-011).
+    StaleBaseline,
+}
+
+impl VfsPathError {
+    /// The exact `errno` required by the VFS-1 profile error table.
+    pub const fn errno(self) -> i32 {
+        match self {
+            Self::OutsideProjection => VFS_EPERM,
+            Self::WrongNamespace | Self::NameTooLong | Self::NameCollision => VFS_EINVAL,
+            Self::InvalidDocument => VFS_EINVAL,
+            Self::UnknownRow => VFS_ENOENT,
+            Self::Unsupported => VFS_EOPNOTSUPP,
+            Self::StaleBaseline => VFS_EAGAIN,
+        }
+    }
+
+    /// The stable Orna cause code kept alongside the host `errno`. Unknown
+    /// rows report `ENOENT` with no Orna failure code of their own.
+    pub const fn failure_code(self) -> Option<&'static str> {
+        match self {
+            Self::OutsideProjection | Self::Unsupported => Some("sys.vfs.unsupported"),
+            Self::WrongNamespace | Self::NameTooLong | Self::InvalidDocument => {
+                Some("sys.vfs.invalid_document")
+            }
+            Self::NameCollision => Some("sys.vfs.name_collision"),
+            Self::StaleBaseline => Some("sys.vfs.stale_edit"),
+            Self::UnknownRow => None,
+        }
+    }
+}
+
+/// One addressable projected component.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VfsComponent {
+    /// A component that spells its canonical typed key/field text directly.
+    Canonical(String),
+    /// A `~key-`/`~field-<digest>` long alias for a canonical name over the
+    /// byte bound. Resolving it needs the snapshot-bound long-name index; the
+    /// digest is verified there against the full retained name (VFS-016).
+    LongAlias { digest: [u8; 32] },
+}
+
+/// The projection namespace a canonical component belongs to. Key and field
+/// components share one host shape but keep distinct alias prefixes, so a key
+/// alias can never resolve as a field name and vice versa (VFS-016).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VfsNameNamespace {
+    /// One component of a typed table key.
+    Key,
+    /// One stored field path inside a row.
+    Field,
+}
+
+impl VfsNameNamespace {
+    const fn alias_prefix(self) -> &'static str {
+        match self {
+            Self::Key => "~key-",
+            Self::Field => "~field-",
+        }
+    }
+}
+
+/// Projects one canonical typed key component to its host component, escaping
+/// every byte outside `[A-Za-z0-9._-]` as uppercase `%HH` and escaping the
+/// reserved names, trailing dots and DOS device basenames that would otherwise
+/// alias. Names over the component bound become a deterministic `~key-` digest
+/// alias instead of being dropped or merged (VFS-016).
+pub fn project_component(text: &str) -> String {
+    project_namespaced(text, VfsNameNamespace::Key)
+}
+
+/// Projects one stored field name to its host component. Field components use
+/// the `~field-` alias prefix for names over the byte bound, so the same long
+/// text in a key and in a field never lands on one host name (VFS-016).
+pub fn project_field_name(text: &str) -> String {
+    project_namespaced(text, VfsNameNamespace::Field)
+}
+
+fn project_namespaced(text: &str, namespace: VfsNameNamespace) -> String {
+    if text.is_empty() {
+        return "~empty".to_owned();
+    }
+    let out = escape_component_bytes(text.bytes().enumerate(), is_reserved_component(text));
+    // A canonical name under the bound that already spells an alias prefix
+    // (`~`, or any `%` spelling) is respelled, because the alias namespace is
+    // reserved for names over the bound. The respelling is still an exact
+    // `%HH` encoding of the same canonical text, so the name stays reversible
+    // (VFS-016). Over the bound the digest alias is unreachable for a literal
+    // `~key-` name only when the digest input is the canonical text itself.
+    if out.len() <= VFS_MAX_COMPONENT_BYTES && !out.starts_with('~') {
+        return out;
+    }
+    if out.len() > VFS_MAX_COMPONENT_BYTES {
+        return long_alias(text, namespace);
+    }
+    // A canonical name under the bound whose own spelling starts with the
+    // alias prefix is respelled by escaping its first byte, so it never claims
+    // the alias namespace. The respelling is an exact `%HH` encoding of the
+    // same canonical text and stays reversible (VFS-016).
+    escape_component_bytes(text.bytes().enumerate(), true)
+}
+
+/// Escapes one canonical component's bytes: every byte outside
+/// `[A-Za-z0-9._-]` becomes uppercase `%HH`, a reserved first byte is escaped,
+/// and trailing dots are escaped so no host spelling ends in `.`.
+fn escape_component_bytes<I>(bytes: I, force_first: bool) -> String
+where
+    I: Iterator<Item = (usize, u8)>,
+{
+    let mut out = String::new();
+    for (index, byte) in bytes {
+        let allowed = byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-');
+        if allowed && !(force_first && index == 0) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&percent_byte(byte));
+        }
+    }
+    let trailing = out.len() - out.trim_end_matches('.').len();
+    if trailing > 0 {
+        let stem = out.len() - trailing;
+        out.truncate(stem);
+        for _ in 0..trailing {
+            out.push_str(&percent_byte(b'.'));
+        }
+    }
+    out
+}
+
+fn percent_byte(byte: u8) -> String {
+    format!("%{byte:02X}")
+}
+
+/// True for the names the profile reserves: `.`, `..`, `.git`, `.orna`, and
+/// Windows device basenames in any case with any extension.
+fn is_reserved_component(text: &str) -> bool {
+    if matches!(text, "." | ".." | ".git" | ".orna") {
+        return true;
+    }
+    let stem = text
+        .trim_end_matches([' ', '.'])
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let bytes = stem.as_bytes();
+    bytes.len() == 4
+        && matches!(stem.get(..3), Some("COM" | "LPT"))
+        && matches!(bytes[3], b'1'..=b'9')
+}
+
+/// `~key-<64 hex SHA-256 of the canonical typed key component>` for keys and
+/// `~field-<same digest>` for stored field names, per the VFS-1 long-name
+/// rule. One derivation serves projection and verification, so a digest can
+/// never name a component it did not come from (VFS-016).
+fn long_alias(text: &str, namespace: VfsNameNamespace) -> String {
+    format!(
+        "{}{}",
+        namespace.alias_prefix(),
+        hex_digest(component_digest_input(text).as_bytes())
+    )
+}
+
+/// The digest input for one long alias: the canonical typed component text
+/// itself. Key and field namespaces stay distinct through the alias prefix, so
+/// the same canonical text in a key and in a field never shares a host name.
+fn component_digest_input(text: &str) -> &str {
+    text
+}
+
+/// The digest bound into a `~field-` alias for one canonical field name. The
+/// snapshot-bound long-name index re-derives it from the full retained name,
+/// so a colliding digest is detected instead of merged (VFS-016).
+pub fn field_name_digest(field: &str) -> [u8; 32] {
+    Sha256::digest(component_digest_input(field).as_bytes()).into()
+}
+
+/// Resolves one `~field-` alias digest against a retained candidate field
+/// name. The full name is re-derived and verified rather than trusted, so a
+/// colliding digest is detected instead of merged (VFS-016).
+pub fn resolve_field_alias(
+    digest: &[u8; 32],
+    candidates: &[&str],
+) -> Result<String, VfsPathError> {
+    let mut resolved: Option<&str> = None;
+    for candidate in candidates {
+        if &field_name_digest(candidate) != digest {
+            continue;
+        }
+        if resolved.is_some_and(|found| found != *candidate) {
+            return Err(VfsPathError::NameCollision);
+        }
+        resolved = Some(candidate);
+    }
+    resolved
+        .map(str::to_owned)
+        .ok_or(VfsPathError::UnknownRow)
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Projects one stored Blob field name to its sibling content-file name:
+/// escaped field name plus the MIME-1 selected suffix. A field that would spell
+/// the reserved row document keeps its own distinct name (VFS-016).
+pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>) -> String {
+    let selected = match suffix {
+        Some(hint) => hint.to_owned(),
+        None => media_suffixes(media_type),
+    };
+    let mut name = project_component(field);
+    name.push('.');
+    name.push_str(&selected);
+    if name == VFS_ROW_DOCUMENT {
+        name.replace_range(..1, &format!("%{:02X}", b'd'));
+    }
+    name
+}
+
+/// The preferred MIME-1 suffix for an essence. Unknown essences keep the
+/// profile's `bin` hint instead of guessing from the media type text.
+fn media_suffixes(media_type: &str) -> String {
+    let essence = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    let preferred = match essence.as_str() {
+        "application/gzip" => "gz",
+        "application/json" => "json",
+        "application/octet-stream" => "bin",
+        "application/pdf" => "pdf",
+        "application/wasm" => "wasm",
+        "application/zip" => "zip",
+        "audio/flac" => "flac",
+        "audio/mp4" => "m4a",
+        "audio/mpeg" => "mp3",
+        "audio/ogg" => "ogg",
+        "audio/wav" => "wav",
+        "image/gif" => "gif",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/svg+xml" => "svg",
+        "image/webp" => "webp",
+        "text/css" => "css",
+        "text/javascript" => "js",
+        "text/plain" => "txt",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        _ => "bin",
+    };
+    preferred.to_owned()
+}
+
+/// Splits one mount-relative path and refuses absolute paths, empty
+/// components, and traversal spellings before any name is resolved (VFS-004).
+pub fn split_vfs_relative(path: &str) -> Result<Vec<&str>, VfsPathError> {
+    if path.is_empty() || path.starts_with('/') || path.len() > VFS_MAX_PATH_BYTES {
+        return Err(VfsPathError::OutsideProjection);
+    }
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(VfsPathError::OutsideProjection);
+        }
+        if component.contains('\\') {
+            return Err(VfsPathError::OutsideProjection);
+        }
+        components.push(component);
+    }
+    Ok(components)
+}
+
+/// Decodes one projected component back to its canonical text, refusing any
+/// spelling that is not exactly what the projection would produce. Aliases
+/// therefore cannot target a different row or field.
+pub fn unproject_component(component: &str) -> Result<VfsComponent, VfsPathError> {
+    if let Some(hex) = component.strip_prefix("~key-") {
+        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            let mut digest = [0u8; 32];
+            for (index, slot) in digest.iter_mut().enumerate() {
+                *slot = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+                    .map_err(|_| VfsPathError::NameCollision)?;
+            }
+            return Ok(VfsComponent::LongAlias { digest });
+        }
+        return Err(VfsPathError::WrongNamespace);
+    }
+    if component == "~empty" {
+        return Ok(VfsComponent::Canonical(String::new()));
+    }
+    if component.contains('~') {
+        return Err(VfsPathError::WrongNamespace);
+    }
+    if component.len() > VFS_MAX_COMPONENT_BYTES {
+        return Err(VfsPathError::NameTooLong);
+    }
+    let mut text = Vec::with_capacity(component.len());
+    let bytes = component.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = component
+                .get(at + 1..at + 3)
+                .ok_or(VfsPathError::WrongNamespace)?;
+            if !hex.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)) {
+                return Err(VfsPathError::WrongNamespace);
+            }
+            text.push(u8::from_str_radix(hex, 16).map_err(|_| VfsPathError::WrongNamespace)?);
+            at += 3;
+            continue;
+        }
+        let byte = bytes[at];
+        if !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')) {
+            return Err(VfsPathError::WrongNamespace);
+        }
+        text.push(byte);
+        at += 1;
+    }
+    let text = String::from_utf8(text).map_err(|_| VfsPathError::WrongNamespace)?;
+    if project_component(&text) != component {
+        return Err(VfsPathError::WrongNamespace);
+    }
+    Ok(VfsComponent::Canonical(text))
+}
+
+/// One stored field of a row as the shared store reports it. Content fields
+/// carry only the MIME-1 annotation and descriptor size, never payload bytes,
+/// so projecting a row reads no media (VFS-003, VFS-018).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VfsStoredField {
+    name: String,
+    kind: VfsStoredFieldKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VfsStoredFieldKind {
+    /// A stored field rendered inside `data.orna` from its canonical text.
+    Document { text: String },
+    /// A stored optional field present as explicit `null`.
+    Null,
+    /// A stored Blob projected as a sibling content file.
+    Content {
+        media_type: String,
+        suffix: Option<String>,
+        descriptor_size: u64,
+    },
+}
+
+impl VfsStoredField {
+    pub fn document(name: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: VfsStoredFieldKind::Document { text: text.into() },
+        }
+    }
+
+    pub fn null(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: VfsStoredFieldKind::Null,
+        }
+    }
+
+    pub fn content(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind: VfsStoredFieldKind::Content {
+                media_type: media_type.into(),
+                suffix,
+                descriptor_size,
+            },
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> &VfsStoredFieldKind {
+        &self.kind
+    }
+}
+
+/// One sibling content file of a row directory. Its size is the exact content
+/// descriptor size, so `stat` never touches payload bytes (VFS-018).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VfsProjectedFile {
+    name: String,
+    media_type: String,
+    descriptor_size: u64,
+}
+
+impl VfsProjectedFile {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn descriptor_size(&self) -> u64 {
+        self.descriptor_size
+    }
+}
+
+/// The `data.orna` document and sibling content files projected for one and the
+/// same row, pinned to the snapshot that admitted them (VFS-001, VFS-002).
+pub struct VfsRowProjection<S> {
+    pin: SnapshotPin<S>,
+    document: String,
+    files: Vec<VfsProjectedFile>,
+}
+
+impl<S> VfsRowProjection<S> {
+    /// Projects one row's stored non-key fields. Document and null fields are
+    /// encoded in order inside `data.orna`; content fields become escaped
+    /// sibling files. Two distinct fields that would share one host name are
+    /// refused rather than merged (VFS-016).
+    pub fn project(pin: SnapshotPin<S>, fields: &[VfsStoredField]) -> Result<Self, VfsPathError> {
+        let mut document = String::from("{\n");
+        let mut files = Vec::new();
+        let mut names = vec![VFS_ROW_DOCUMENT.to_owned()];
+        let mut fields_seen = std::collections::BTreeSet::new();
+        for field in fields {
+            if !fields_seen.insert(field.name().to_owned()) {
+                return Err(VfsPathError::InvalidDocument);
+            }
+            match field.kind() {
+                VfsStoredFieldKind::Document { text } => {
+                    document.push_str("    ");
+                    document.push_str(&render_field_name(&field.name)?);
+                    document.push_str(": ");
+                    document.push_str(text);
+                    document.push_str(",\n");
+                }
+                VfsStoredFieldKind::Null => {
+                    document.push_str("    ");
+                    document.push_str(&render_field_name(&field.name)?);
+                    document.push_str(": null,\n");
+                }
+                VfsStoredFieldKind::Content {
+                    media_type,
+                    suffix,
+                    descriptor_size,
+                } => {
+                    let name = project_content_name(&field.name, media_type, suffix.as_deref());
+                    // Two stored values that claim one host name are refused
+                    // rather than merged into one directory entry (VFS-016).
+                    if names.contains(&name) {
+                        return Err(VfsPathError::NameCollision);
+                    }
+                    document.push_str("    ");
+                    document.push_str(&render_field_name(&field.name)?);
+                    document.push_str(": { path: \"./");
+                    document.push_str(&name);
+                    document.push_str("\", media_type: \"");
+                    document.push_str(&escape_text(media_type));
+                    document.push_str("\" },\n");
+                    names.push(name.clone());
+                    files.push(VfsProjectedFile {
+                        name,
+                        media_type: media_type.clone(),
+                        descriptor_size: *descriptor_size,
+                    });
+                }
+            }
+        }
+        document.push_str("}\n");
+        if document.len() > VFS_MAX_PATH_BYTES * 1024 {
+            return Err(VfsPathError::NameTooLong);
+        }
+        Ok(Self {
+            pin,
+            document,
+            files,
+        })
+    }
+
+    /// The snapshot this projection was admitted from. A projection never
+    /// synthesizes a row version of its own (VFS-002, VFS-005).
+    pub fn pin(&self) -> &SnapshotPin<S> {
+        &self.pin
+    }
+
+    /// The complete stored-non-key-field document, ready to serve as
+    /// `data.orna`.
+    pub fn document_text(&self) -> &str {
+        &self.document
+    }
+
+    /// Binds the served document bytes to the snapshot that produced them, so
+    /// a read handle observes exactly the admitted row.
+    pub fn document_snapshot(&self) -> VfsFileSnapshot<S> {
+        VfsFileSnapshot::new(self.pin.clone_pin(), self.document.as_bytes())
+    }
+
+    /// Directory entries of this row, document first, then content files.
+    pub fn entry_names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(VFS_ROW_DOCUMENT).chain(self.files.iter().map(VfsProjectedFile::name))
+    }
+
+    pub fn files(&self) -> &[VfsProjectedFile] {
+        &self.files
+    }
+
+    /// Resolves one entry name inside this row directory. A name outside the
+    /// projection is refused, so a lookup can never retarget another row's
+    /// field (VFS-004, VFS-017).
+    pub fn lookup(&self, name: &str) -> Result<VfsProjectedEntry<'_>, VfsPathError> {
+        match unproject_component(name)? {
+            VfsComponent::Canonical(text) if text == VFS_ROW_DOCUMENT => {
+                Ok(VfsProjectedEntry::Document)
+            }
+            VfsComponent::Canonical(text) => {
+                let file = self
+                    .files
+                    .iter()
+                    .find(|file| file.name == text)
+                    .ok_or(VfsPathError::UnknownRow)?;
+                Ok(VfsProjectedEntry::Content(file))
+            }
+            VfsComponent::LongAlias { .. } => Err(VfsPathError::WrongNamespace),
+        }
+    }
+}
+
+/// One resolved entry of a projected row directory.
+#[derive(Debug)]
+pub enum VfsProjectedEntry<'a> {
+    Document,
+    Content(&'a VfsProjectedFile),
+}
+
+/// Escapes one Orna string-literal body. Stored field names are plain
+/// identifiers, but a MIME-1 annotation can carry RFC 9110 quoting that must be
+/// re-escaped to stay inside the row document.
+fn escape_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Renders one stored field name as the Orna record key used inside
+/// `data.orna`. Only plain identifiers are valid, so a name that would need
+/// quoting is refused instead of being written ambiguously.
+fn render_field_name(name: &str) -> Result<String, VfsPathError> {
+    let mut bytes = name.bytes();
+    let valid = match bytes.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == b'_' => bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+        _ => false,
+    };
+    if !valid {
+        return Err(VfsPathError::InvalidDocument);
+    }
+    Ok(name.to_owned())
+}
+
 /// The VFS call boundary into the runtime's single validated table transaction.
 /// Callers prepare complete typed row mutations and graph-issued pin transfers
 /// in the request; this wrapper adds no journal or publication authority.
@@ -1104,152 +1738,7 @@ pub async fn commit_vfs_table_activation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        NoFault, RuntimeIdentity, RuntimeTableRows, TableActivationCandidateValidator,
-        TableMutation, WriterLease,
-    };
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct ExactRuntimeCandidateValidator {
-        tables: Vec<String>,
-        key: Vec<u8>,
-        value: Vec<u8>,
-        accept: bool,
-    }
-
-    impl TableActivationCandidateValidator for ExactRuntimeCandidateValidator {
-        fn tables(&self) -> &[String] {
-            &self.tables
-        }
-
-        fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
-            let expected = vec![(self.key.clone(), self.value.clone())];
-            if self.accept && rows.get("books") == Some(&expected) {
-                Ok(())
-            } else {
-                Err(rejected())
-            }
-        }
-    }
-
-    async fn activate_runtime_candidate(
-        runtime: Arc<RuntimeState>,
-        writer: WriterLease,
-        candidate: ActivationCandidate<CwdCapture>,
-        key: Vec<u8>,
-        mutation_id: [u8; 16],
-        accept: bool,
-    ) -> Result<ActivationDecision<CwdCapture>, TableActivationError> {
-        let context = runtime
-            .begin_activation()
-            .await
-            .map_err(TableActivationError::Runtime)?;
-        assert_eq!(context.capture(), candidate.baseline().snapshot());
-
-        let value = candidate.replacement_bytes().to_vec();
-        let mutation = TableMutation::new(mutation_id, "books", key.clone(), Some(value.clone()))
-            .map_err(TableActivationError::Runtime)?;
-        let mutations = [mutation];
-        let mut validator = ExactRuntimeCandidateValidator {
-            tables: vec!["books".into()],
-            key,
-            value,
-            accept,
-        };
-        let faults = NoFault;
-
-        match commit_vfs_table_activation(
-            &runtime,
-            ValidatedTableActivationCommit {
-                writer,
-                context: &context,
-                mutations: &mutations,
-                next_digest: [mutation_id[0]; 32],
-                validator: &mut validator,
-                faults: &faults,
-            },
-        )
-        .await
-        {
-            Ok(next_capture) => Ok(ActivationDecision::Accepted(SnapshotPin::capture(
-                Arc::new(next_capture),
-            ))),
-            Err(TableActivationError::ValidationFailed(diagnostic)) => {
-                Ok(ActivationDecision::Rejected(diagnostic))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Routes an unlink candidate through the same validated runtime
-    /// transaction as a write. The row is deleted only when `accept` is set.
-    async fn activate_runtime_removal(
-        runtime: Arc<RuntimeState>,
-        writer: WriterLease,
-        candidate: ActivationCandidate<CwdCapture>,
-        key: Vec<u8>,
-        mutation_id: [u8; 16],
-        accept: bool,
-    ) -> Result<ActivationDecision<CwdCapture>, TableActivationError> {
-        assert!(candidate.is_removal());
-        let context = runtime
-            .begin_activation()
-            .await
-            .map_err(TableActivationError::Runtime)?;
-        let mutation = TableMutation::new(mutation_id, "books", key.clone(), None)
-            .map_err(TableActivationError::Runtime)?;
-        let mutations = [mutation];
-        let mut validator = ExactRuntimeRemovalValidator {
-            tables: vec!["books".into()],
-            key,
-            accept,
-        };
-        let faults = NoFault;
-        match commit_vfs_table_activation(
-            &runtime,
-            ValidatedTableActivationCommit {
-                writer,
-                context: &context,
-                mutations: &mutations,
-                next_digest: [mutation_id[0]; 32],
-                validator: &mut validator,
-                faults: &faults,
-            },
-        )
-        .await
-        {
-            Ok(next_capture) => Ok(ActivationDecision::Accepted(SnapshotPin::capture(
-                Arc::new(next_capture),
-            ))),
-            Err(TableActivationError::ValidationFailed(diagnostic)) => {
-                Ok(ActivationDecision::Rejected(diagnostic))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    struct ExactRuntimeRemovalValidator {
-        tables: Vec<String>,
-        key: Vec<u8>,
-        accept: bool,
-    }
-
-    impl TableActivationCandidateValidator for ExactRuntimeRemovalValidator {
-        fn tables(&self) -> &[String] {
-            &self.tables
-        }
-
-        fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
-            let still_present = rows
-                .get("books")
-                .is_some_and(|rows| rows.iter().any(|(key, _)| key == &self.key));
-            if self.accept && !still_present {
-                Ok(())
-            } else {
-                Err(rejected())
-            }
-        }
-    }
 
     fn fixture_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/publication-repository-main.orna");
@@ -1268,32 +1757,11 @@ mod tests {
 
     #[tokio::test]
     async fn direct_draft_commit_publishes_through_destination_and_rejects_stale_drafts() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(
-            RuntimeState::open_path(
-                &temp.path().join("state.db"),
-                RuntimeIdentity {
-                    database_id: [0x11; 16],
-                    repository_id: [0x22; 16],
-                },
-                [0x33; 32],
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let writer = runtime.acquire_lease([0x44; 16]).await.unwrap();
-
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(fixture_image()).await.unwrap();
         let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
         let accepted_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
         let rejected_bytes = include_str!("../tests/fixtures/case_closure_edge_tail_sixty.orna");
-
-        let initial_capture = Arc::new(runtime.capture().await.unwrap());
-        let image = Arc::new(VfsFileSnapshot::new(
-            SnapshotPin::capture(Arc::clone(&initial_capture)),
-            Arc::<[u8]>::from(baseline.as_bytes()),
-        ));
-        let target = runtime.manage_vfs_file(image).await.unwrap();
         let old_handle = target.open_read().await;
         assert!(old_handle.projection_is_current().await.unwrap());
 
@@ -1302,17 +1770,12 @@ mod tests {
 
         draft.truncate(0).await.unwrap();
         draft.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
-        let accepted_runtime = Arc::clone(&runtime);
         let accepted = target
-            .commit_draft_with(&draft, move |candidate| {
-                activate_runtime_candidate(
-                    accepted_runtime,
-                    writer,
-                    candidate,
-                    vec![0x51],
-                    [0x61; 16],
-                    true,
-                )
+            .commit_draft_with(&draft, |candidate| async move {
+                assert_eq!(candidate.replacement_bytes(), accepted_bytes.as_bytes());
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(8),
+                )))
             })
             .await
             .unwrap();
@@ -1320,19 +1783,15 @@ mod tests {
             panic!("validated direct draft commit should be accepted");
         };
         assert_eq!(generation, 1);
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
         assert!(!old_handle.projection_is_current().await.unwrap());
         assert!(handle.projection_is_current().await.unwrap());
         assert_eq!(
             target.open_read().await.read_at(0, accepted_bytes.len()),
             accepted_bytes.as_bytes()
         );
-        assert_eq!(
-            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
-            Some(accepted_bytes.as_bytes().to_vec())
-        );
 
-        // A draft opened before the accepted commit cannot publish over it.
+        // A draft opened before the accepted commit cannot publish over it, so
+        // the activation boundary is never reached.
         let stale_calls = Arc::new(AtomicUsize::new(0));
         let stale_calls_by_route = Arc::clone(&stale_calls);
         stale_draft.truncate(0).await.unwrap();
@@ -1349,22 +1808,14 @@ mod tests {
             .unwrap();
         assert!(matches!(stale, TemporaryRenameOutcome::Stale { .. }));
         assert_eq!(stale_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
 
-        // A validation rejection leaves the destination image and generation alone.
+        // A rejection retains the candidate and leaves the destination, the
+        // generation, and the earlier handle's bytes alone.
         draft.truncate(0).await.unwrap();
         draft.write_at(0, rejected_bytes.as_bytes()).await.unwrap();
-        let rejected_runtime = Arc::clone(&runtime);
         let rejected_commit = target
-            .commit_draft_with(&draft, move |candidate| {
-                activate_runtime_candidate(
-                    rejected_runtime,
-                    writer,
-                    candidate,
-                    vec![0x52],
-                    [0x62; 16],
-                    false,
-                )
+            .commit_draft_with(&draft, |_| async {
+                Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
             })
             .await
             .unwrap();
@@ -1372,278 +1823,89 @@ mod tests {
             rejected_commit,
             TemporaryRenameOutcome::Rejected { .. }
         ));
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
         assert_eq!(
             target.open_read().await.read_at(0, accepted_bytes.len()),
             accepted_bytes.as_bytes()
         );
-        assert!(draft.retained_invalid_draft().await.is_some());
         assert_eq!(
-            runtime.committed_table_row("books", &[0x52]).await.unwrap(),
-            None
+            draft
+                .retained_invalid_draft()
+                .await
+                .unwrap()
+                .replacement_bytes(),
+            rejected_bytes.as_bytes()
         );
+        assert_ne!(baseline.as_bytes(), accepted_bytes.as_bytes());
     }
 
     #[tokio::test]
-    async fn unlink_deletes_row_through_validated_commit_and_hides_new_opens() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(
-            RuntimeState::open_path(
-                &temp.path().join("state.db"),
-                RuntimeIdentity {
-                    database_id: [0x11; 16],
-                    repository_id: [0x22; 16],
-                },
-                [0x33; 32],
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let writer = runtime.acquire_lease([0x44; 16]).await.unwrap();
-
-        let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
+    async fn unlink_hides_new_opens_and_keeps_earlier_handle_bytes() {
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(fixture_image()).await.unwrap();
         let accepted_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
 
-        let initial_capture = Arc::new(runtime.capture().await.unwrap());
-        let image = Arc::new(VfsFileSnapshot::new(
-            SnapshotPin::capture(Arc::clone(&initial_capture)),
-            Arc::<[u8]>::from(baseline.as_bytes()),
-        ));
-        let target = runtime.manage_vfs_file(image).await.unwrap();
-
-        // Seed the file's row through the validated write path so the unlink
-        // has a committed row to delete.
         let draft = target.open_draft(1 << 20).await;
         draft.truncate(0).await.unwrap();
         draft.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
-        let seed_runtime = Arc::clone(&runtime);
         let seeded = target
-            .commit_draft_with(&draft, move |candidate| {
-                activate_runtime_candidate(
-                    seed_runtime,
-                    writer,
-                    candidate,
-                    vec![0x51],
-                    [0x61; 16],
-                    true,
-                )
+            .commit_draft_with(&draft, |_| async {
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(8),
+                )))
             })
             .await
             .unwrap();
         assert!(matches!(seeded, TemporaryRenameOutcome::Applied { .. }));
         let live = target.open_current().await.expect("linked before unlink");
 
-        let rejected_runtime = Arc::clone(&runtime);
-        let rejected = target
-            .unlink_with(move |candidate| {
-                activate_runtime_removal(
-                    rejected_runtime,
-                    writer,
-                    candidate,
-                    vec![0x51],
-                    [0x71; 16],
-                    false,
-                )
-            })
+        let refused = target
+            .unlink_with(|_| async { Ok::<_, ()>(ActivationDecision::Rejected(rejected())) })
             .await
             .unwrap();
-        assert!(matches!(rejected, UnlinkOutcome::Rejected { .. }));
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
+        assert!(matches!(refused, UnlinkOutcome::Rejected { .. }));
+        assert_eq!(repository.generation().await, 1);
         assert!(target.open_current().await.is_some());
-        assert_eq!(
-            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
-            Some(accepted_bytes.as_bytes().to_vec())
-        );
 
-        let unlink_runtime = Arc::clone(&runtime);
         let unlinked = target
-            .unlink_with(move |candidate| {
-                activate_runtime_removal(
-                    unlink_runtime,
-                    writer,
-                    candidate,
-                    vec![0x51],
-                    [0x72; 16],
-                    true,
-                )
+            .unlink_with(|candidate| async move {
+                assert!(candidate.is_removal());
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(9),
+                )))
             })
             .await
             .unwrap();
         assert_eq!(unlinked, UnlinkOutcome::Applied { generation: 2 });
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 2);
+        assert_eq!(repository.generation().await, 2);
         assert!(target.open_current().await.is_none());
         assert!(!live.projection_is_current().await.unwrap());
         assert_eq!(
-            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
-            None
+            live.read_at(0, accepted_bytes.len()),
+            accepted_bytes.as_bytes()
         );
 
-        // Replacements against the removed file are refused, and a second
-        // unlink is a no-op rather than another activation.
+        // Replacements against the removed destination are refused before any
+        // activation, and a second unlink is a no-op rather than another one.
+        let late_calls = Arc::new(AtomicUsize::new(0));
+        let late_calls_by_route = Arc::clone(&late_calls);
         let late = target.open_draft(1 << 20).await;
         late.truncate(0).await.unwrap();
         late.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
         let stale = target
-            .commit_draft_with(&late, |_| async {
+            .commit_draft_with(&late, move |_| async move {
+                late_calls_by_route.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
             })
             .await
             .unwrap();
         assert!(matches!(stale, TemporaryRenameOutcome::Stale { .. }));
+        assert_eq!(late_calls.load(Ordering::SeqCst), 0);
         let again = target
             .unlink_with(|_| async { Ok::<_, ()>(ActivationDecision::Rejected(rejected())) })
             .await
             .unwrap();
         assert_eq!(again, UnlinkOutcome::AlreadyUnlinked);
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 2);
-    }
-
-    #[tokio::test]
-    async fn fresh_projection_observes_committed_write_exactly_once() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(
-            RuntimeState::open_path(
-                &temp.path().join("state.db"),
-                RuntimeIdentity {
-                    database_id: [0x11; 16],
-                    repository_id: [0x22; 16],
-                },
-                [0x33; 32],
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let writer = runtime.acquire_lease([0x44; 16]).await.unwrap();
-
-        let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
-        let accepted_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
-        let rejected_bytes = include_str!("../tests/fixtures/case_closure_edge_tail_sixty.orna");
-
-        let initial_capture = Arc::new(runtime.capture().await.unwrap());
-        let image = Arc::new(VfsFileSnapshot::new(
-            SnapshotPin::capture(Arc::clone(&initial_capture)),
-            Arc::<[u8]>::from(baseline.as_bytes()),
-        ));
-        let target = runtime.manage_vfs_file(image).await.unwrap();
-        let before_write = target.open_read().await;
-        let activations = Arc::new(AtomicUsize::new(0));
-
-        // One draft commit: one activation, one generation, one committed row.
-        let draft = target.open_draft(1 << 20).await;
-        draft.truncate(0).await.unwrap();
-        draft.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
-        let draft_calls = Arc::clone(&activations);
-        let draft_runtime = Arc::clone(&runtime);
-        let committed = target
-            .commit_draft_with(&draft, move |candidate| {
-                draft_calls.fetch_add(1, Ordering::SeqCst);
-                activate_runtime_candidate(
-                    draft_runtime,
-                    writer,
-                    candidate,
-                    vec![0x51],
-                    [0x61; 16],
-                    true,
-                )
-            })
-            .await
-            .unwrap();
-        assert!(matches!(
-            committed,
-            TemporaryRenameOutcome::Applied { generation: 1, .. }
-        ));
-        assert_eq!(activations.load(Ordering::SeqCst), 1);
-
-        // Every fresh projection observes the write, current and with the bytes.
-        for _ in 0..2 {
-            let fresh = target.open_read().await;
-            assert_eq!(fresh.projection_is_current().await, Some(true));
-            assert_eq!(fresh.len() as usize, accepted_bytes.len());
-            assert_eq!(
-                fresh.read_at(0, accepted_bytes.len()),
-                accepted_bytes.as_bytes()
-            );
-        }
-        assert!(!before_write.projection_is_current().await.unwrap());
-
-        // Re-syncing the committed draft is a no-op: no second activation and
-        // no generation bump.
-        let retry_calls = Arc::clone(&activations);
-        let retry = target
-            .commit_draft_with(&draft, move |_| async move {
-                retry_calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
-            })
-            .await;
-        assert!(matches!(retry, Err(TemporaryRenameError::NoCandidate)));
-        assert_eq!(activations.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
-
-        // A temp-file rename applied twice activates once and returns the same
-        // generation and handle the first time did.
-        let save = target.begin_temporary_replacement(1 << 20).await;
-        save.write_at(0, rejected_bytes.as_bytes()).await.unwrap();
-        let rename_calls = Arc::clone(&activations);
-        let rename_runtime = Arc::clone(&runtime);
-        let first = runtime
-            .rename_vfs_temporary_over(&target, &save, move |candidate| {
-                rename_calls.fetch_add(1, Ordering::SeqCst);
-                activate_runtime_candidate(
-                    rename_runtime,
-                    writer,
-                    candidate,
-                    vec![0x51],
-                    [0x62; 16],
-                    true,
-                )
-            })
-            .await
-            .unwrap();
-        let TemporaryRenameOutcome::Applied {
-            generation: first_generation,
-            handle: first_handle,
-        } = first
-        else {
-            panic!("validated temp rename should be accepted");
-        };
-        assert_eq!(first_generation, 2);
-        assert_eq!(activations.load(Ordering::SeqCst), 2);
-
-        let second_calls = Arc::clone(&activations);
-        let second = runtime
-            .rename_vfs_temporary_over(&target, &save, move |candidate| {
-                second_calls.fetch_add(1, Ordering::SeqCst);
-                activate_runtime_candidate(
-                    Arc::clone(&runtime),
-                    writer,
-                    candidate,
-                    vec![0x51],
-                    [0x63; 16],
-                    true,
-                )
-            })
-            .await
-            .unwrap();
-        assert!(matches!(
-            second,
-            TemporaryRenameOutcome::Applied { generation: 2, .. }
-        ));
-        assert_eq!(activations.load(Ordering::SeqCst), 2);
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 2);
-
-        assert!(first_handle.projection_is_current().await.unwrap());
-        let latest = target.open_read().await;
-        assert_eq!(latest.projection_is_current().await, Some(true));
-        assert_eq!(
-            latest.read_at(0, rejected_bytes.len()),
-            rejected_bytes.as_bytes()
-        );
-        assert_eq!(
-            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
-            Some(rejected_bytes.as_bytes().to_vec())
-        );
+        assert_eq!(repository.generation().await, 2);
     }
 
     #[tokio::test]
@@ -2004,57 +2266,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exported_temp_rename_uses_validated_runtime_commit_and_shared_cache_epoch() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(
-            RuntimeState::open_path(
-                &temp.path().join("state.db"),
-                RuntimeIdentity {
-                    database_id: [0x11; 16],
-                    repository_id: [0x22; 16],
-                },
-                [0x33; 32],
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let writer = runtime.acquire_lease([0x44; 16]).await.unwrap();
-
-        let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
-        let accepted_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
-        let rejected_bytes = include_str!("../tests/fixtures/case_closure_edge_tail_sixty.orna");
-        assert_ne!(baseline.as_bytes(), accepted_bytes.as_bytes());
-        assert_ne!(accepted_bytes.as_bytes(), rejected_bytes.as_bytes());
-
-        let initial_capture = Arc::new(runtime.capture().await.unwrap());
-        let image = Arc::new(VfsFileSnapshot::new(
-            SnapshotPin::capture(Arc::clone(&initial_capture)),
-            Arc::<[u8]>::from(baseline.as_bytes()),
+    async fn repository_scoped_rename_refuses_a_foreign_cache_scope() {
+        let repository = VfsRepositoryCache::new();
+        let unrelated = VfsRepositoryCache::new();
+        let target = repository.managed_file(fixture_image()).await.unwrap();
+        let foreign_image = Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            Arc::<[u8]>::from(
+                include_str!("../tests/fixtures/publication-repository-main.orna").as_bytes(),
+            ),
         ));
-        let target = runtime.manage_vfs_file(image).await.unwrap();
-        let old_handle = target.open_read().await;
-        let directory =
-            SnapshotReaddirCursor::new(SnapshotPin::capture(Arc::clone(&initial_capture)), 0_u64);
-        assert!(old_handle.projection_is_current().await.unwrap());
-        assert!(directory.projection_is_current().await.unwrap());
+        let foreign = unrelated.managed_file(foreign_image).await.unwrap();
+        let foreign_save = foreign.begin_temporary_replacement(1 << 20).await;
+        foreign_save.write_at(0, &[0x58]).await.unwrap();
 
-        let unrelated_cache = VfsRepositoryCache::new();
-        let unrelated_image = Arc::new(VfsFileSnapshot::new(
-            SnapshotPin::capture(Arc::new(initial_capture.as_ref().clone())),
-            Arc::<[u8]>::from(baseline.as_bytes()),
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_by_route = Arc::clone(&calls);
+        let outcome = repository
+            .rename_over(&target, &foreign_save, move |_| async move {
+                calls_by_route.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
+            })
+            .await;
+        assert!(matches!(
+            outcome,
+            Err(TemporaryRenameError::WrongDestination)
         ));
-        let unrelated_file = unrelated_cache.managed_file(unrelated_image).await.unwrap();
-        let unrelated_save = unrelated_file.begin_temporary_replacement(1 << 20).await;
-        unrelated_save
-            .write_at(0, accepted_bytes.as_bytes())
-            .await
-            .unwrap();
-        let callback_calls = Arc::new(AtomicUsize::new(0));
-        let callback_calls_by_route = Arc::clone(&callback_calls);
-        let foreign_route = runtime
-            .rename_vfs_temporary_over(&unrelated_file, &unrelated_save, move |_| async move {
-                callback_calls_by_route.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(repository.generation().await, 0);
+        assert_eq!(unrelated.generation().await, 0);
+
+        // A scratch tied to a destination in a different repository scope is
+        // refused the same way, and the target keeps its accepted bytes.
+        let save = target.begin_temporary_replacement(1 << 20).await;
+        save.write_at(0, &[0x59]).await.unwrap();
+        let foreign_route = unrelated
+            .rename_over(&target, &save, |_| async {
                 Ok::<_, ()>(ActivationDecision::Rejected(rejected()))
             })
             .await;
@@ -2062,81 +2309,56 @@ mod tests {
             foreign_route,
             Err(TemporaryRenameError::WrongRepositoryScope)
         ));
-        assert_eq!(callback_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 0);
+        assert_eq!(repository.generation().await, 0);
+        let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
+        assert_eq!(
+            target.open_read().await.read_at(0, baseline.len()),
+            baseline.as_bytes()
+        );
+    }
 
-        let accepted_save = target.begin_temporary_replacement(1 << 20).await;
-        accepted_save
-            .write_at(0, accepted_bytes.as_bytes())
-            .await
-            .unwrap();
-        let accepted_runtime = Arc::clone(&runtime);
-        let accepted = runtime
-            .rename_vfs_temporary_over(&target, &accepted_save, move |candidate| {
-                activate_runtime_candidate(
-                    accepted_runtime,
-                    writer,
-                    candidate,
-                    vec![0x51],
-                    [0x61; 16],
-                    true,
-                )
+    #[tokio::test]
+    async fn accepted_rename_rebases_the_next_draft_on_the_live_image() {
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(fixture_image()).await.unwrap();
+        let accepted_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+
+        let save = target.begin_temporary_replacement(1 << 20).await;
+        save.write_at(0, accepted_bytes.as_bytes()).await.unwrap();
+        let applied = target
+            .rename_over(&save, |_| async {
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(8),
+                )))
             })
             .await
             .unwrap();
-        let TemporaryRenameOutcome::Applied { generation, handle } = accepted else {
-            panic!("validated runtime activation should accept the editor replacement");
-        };
-        assert_eq!(generation, 1);
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
-        assert!(!old_handle.projection_is_current().await.unwrap());
-        assert!(!directory.projection_is_current().await.unwrap());
-        assert!(handle.projection_is_current().await.unwrap());
+        assert!(matches!(
+            applied,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+
+        // A draft opened after the accepted rename compares against the live
+        // image, so it is not stale and it commits instead of being refused.
+        let next = target.open_draft(1 << 20).await;
         assert_eq!(
-            handle.read_at(0, accepted_bytes.len()),
+            next.baseline().await.read_at(0, accepted_bytes.len()),
             accepted_bytes.as_bytes()
         );
-        assert_eq!(
-            runtime.committed_table_row("books", &[0x51]).await.unwrap(),
-            Some(accepted_bytes.as_bytes().to_vec())
-        );
-
-        let rejected_save = target.begin_temporary_replacement(1 << 20).await;
-        rejected_save
-            .write_at(0, rejected_bytes.as_bytes())
-            .await
-            .unwrap();
-        let rejected_runtime = Arc::clone(&runtime);
-        let rejected = runtime
-            .rename_vfs_temporary_over(&target, &rejected_save, move |candidate| {
-                activate_runtime_candidate(
-                    rejected_runtime,
-                    writer,
-                    candidate,
-                    vec![0x52],
-                    [0x62; 16],
-                    false,
-                )
+        next.write_at(0, &[0x5A]).await.unwrap();
+        let committed = target
+            .commit_draft_with(&next, |candidate| async move {
+                assert_eq!(*candidate.baseline().snapshot(), 8);
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(11),
+                )))
             })
             .await
             .unwrap();
-        assert!(matches!(rejected, TemporaryRenameOutcome::Rejected { .. }));
-        assert_eq!(runtime.vfs_repository_cache().generation().await, 1);
-        assert_eq!(
-            target.open_read().await.read_at(0, accepted_bytes.len()),
-            accepted_bytes.as_bytes()
-        );
-        assert_eq!(
-            rejected_save
-                .retained_invalid_draft()
-                .await
-                .unwrap()
-                .replacement_bytes(),
-            rejected_bytes.as_bytes()
-        );
-        assert_eq!(
-            runtime.committed_table_row("books", &[0x52]).await.unwrap(),
-            None
-        );
+        assert!(matches!(
+            committed,
+            TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(target.open_read().await.read_at(0, 1), [0x5A]);
     }
 }
