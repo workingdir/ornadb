@@ -1,1 +1,1 @@
-sys.blob.capture_file(__MEDIA_ROOT__, "replacement.png", 65536)
+sys.blob.capture_file(__MEDIA_ROOT__, "replacement.wav", 65536)

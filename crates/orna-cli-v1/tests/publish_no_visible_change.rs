@@ -194,7 +194,13 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
     let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root);
 
     // One committed insert, unpublished: the next publish has a real change.
-    let writer = state.acquire_lease([0x73; 16]).await.unwrap();
+    // The durable writer lease is a singleton keyed by owner, and `orna publish`
+    // takes it as the repository-derived id (see `invocation_owner_id`), so a
+    // later CLI process resumes this same local owner instead of failing.
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     commit_capture(
         &state,
         writer,
@@ -231,7 +237,10 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
     let state = RuntimeState::open(&repository, runtime_identity, [0x72; 32])
         .await
         .unwrap();
-    let writer = state.acquire_lease([0x74; 16]).await.unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     commit_capture(
         &state,
         writer,
