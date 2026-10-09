@@ -18,7 +18,12 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",
     "  serve [--port PORT]",
+    "  mount DIR --at SELECTOR       read-only view of one resolved snapshot",
+    "  mount status [--json]         report attached read-only views",
+    "  unmount DIR                   release a view's record",
+    "  mount exit codes: 0 attached, released or reported; 1 snapshot, mountpoint or record unavailable",
     "  diff [GIT_DIFF_ARGS...]",
+    "  log [GIT_LOG_ARGS...]",
     "  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]",
     "  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid",
     "  export DEST --at SELECTOR [--at SELECTOR]... [--dependency PATH=DIR]...",
@@ -65,6 +70,7 @@ mod tests {
         assert!(HELP_LINES.contains(&"Repository and maintenance commands:"));
         assert!(HELP_LINES.contains(&"  fetch [REMOTE] [BRANCH]"));
         assert!(HELP_LINES.contains(&"  diff [GIT_DIFF_ARGS...]"));
+        assert!(HELP_LINES.contains(&"  log [GIT_LOG_ARGS...]"));
         assert!(HELP_LINES.contains(
             &"  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]"
         ));

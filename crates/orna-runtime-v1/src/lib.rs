@@ -56,12 +56,11 @@ use uuid::Uuid;
 mod activation;
 pub use activation::{
     ActivationError, ActivationWork, run_admitted_table_activation,
-    run_admitted_table_request_activation, run_table_activation,
-    with_activation_scope,
+    run_admitted_table_request_activation, run_table_activation, with_activation_scope,
     with_terminal_admin_effect,
 };
-mod checkpoint_bootstrap;
 mod catalogue;
+mod checkpoint_bootstrap;
 mod invocation;
 /// FUSE-free projected file and EDIT-1 replacement APIs for runtime owners.
 pub mod vfs;
@@ -74,9 +73,8 @@ pub use catalogue::{
 pub use invocation::{
     InvocationArgumentInput, InvocationArgumentObservation, InvocationCompletion,
     InvocationLaunchOwner, InvocationObservation, InvocationObservationRegistration,
-    InvocationObservationStatus, InvocationObservationTailCursor,
-    InvocationObservationTailEntry, InvocationObservationTailPage, MaterializedProcedure,
-    MaterializedProcedureParameter,
+    InvocationObservationStatus, InvocationObservationTailCursor, InvocationObservationTailEntry,
+    InvocationObservationTailPage, MaterializedProcedure, MaterializedProcedureParameter,
 };
 
 const SCHEMA: &str = r#"
@@ -793,8 +791,14 @@ fn publication_metadata_record(
         ("publication_policy", policy),
         ("pending_rows", OvbRaw::Int(metadata.pending_rows.into())),
         ("pending_bytes", OvbRaw::Int(metadata.pending_bytes.into())),
-        ("published_rows", OvbRaw::Int(metadata.published_rows.into())),
-        ("published_bytes", OvbRaw::Int(metadata.published_bytes.into())),
+        (
+            "published_rows",
+            OvbRaw::Int(metadata.published_rows.into()),
+        ),
+        (
+            "published_bytes",
+            OvbRaw::Int(metadata.published_bytes.into()),
+        ),
         ("last_publication", last_publication),
     ]))
     .map_err(|_| RuntimeError::RecoveryInvalid)
@@ -843,10 +847,7 @@ pub struct RuntimeTableIdentity {
 }
 
 impl RuntimeTableIdentity {
-    pub fn new(
-        table: impl Into<String>,
-        object_id: TableObjectId,
-    ) -> Result<Self, RuntimeError> {
+    pub fn new(table: impl Into<String>, object_id: TableObjectId) -> Result<Self, RuntimeError> {
         let table = table.into();
         validate_table_name(&table)?;
         Ok(Self { table, object_id })
@@ -1026,9 +1027,9 @@ impl TableMutation {
         let transfer = ProtectedContentTransferEvidence::from_transfer(&pin.transfer_record());
         if transfer.pin_id() == &[0; 16]
             || self
-            .protected_content
-            .iter()
-            .any(|existing| existing.pin_id() == transfer.pin_id())
+                .protected_content
+                .iter()
+                .any(|existing| existing.pin_id() == transfer.pin_id())
         {
             return Err(RuntimeError::InvalidTableMutation);
         }
@@ -1041,10 +1042,7 @@ impl TableMutation {
     /// retains its native pin through the caller's transaction and retries.
     /// The transfer evidence and descriptor-bearing row value are created
     /// from the same graph-issued binding.
-    pub fn with_orp_blob_binding(
-        mut self,
-        binding: OrpBlobBinding,
-    ) -> Result<Self, RuntimeError> {
+    pub fn with_orp_blob_binding(mut self, binding: OrpBlobBinding) -> Result<Self, RuntimeError> {
         if (!self.protected_content_from_pins && !self.protected_content.is_empty())
             || self.protected_content.len() >= MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
         {
@@ -1064,7 +1062,8 @@ impl TableMutation {
         self.value = Some(value);
         self.protected_content.push(transfer);
         self.protected_content_from_pins = true;
-        self.protected_pin_holds.push(PendingContentPin(Arc::new(pin)));
+        self.protected_pin_holds
+            .push(PendingContentPin(Arc::new(pin)));
         Ok(self)
     }
 
@@ -1085,20 +1084,11 @@ impl TableMutation {
         if digest != mutation.digest {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        let (mut cursor, version) = if mutation
-            .payload
-            .starts_with(b"ORNA-TABLE-MUTATION-4\0")
-        {
+        let (mut cursor, version) = if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION-4\0") {
             (b"ORNA-TABLE-MUTATION-4\0".len(), 4_u8)
-        } else if mutation
-            .payload
-            .starts_with(b"ORNA-TABLE-MUTATION-3\0")
-        {
+        } else if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION-3\0") {
             (b"ORNA-TABLE-MUTATION-3\0".len(), 3_u8)
-        } else if mutation
-            .payload
-            .starts_with(b"ORNA-TABLE-MUTATION-2\0")
-        {
+        } else if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION-2\0") {
             (b"ORNA-TABLE-MUTATION-2\0".len(), 2_u8)
         } else if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION\0") {
             (b"ORNA-TABLE-MUTATION\0".len(), 1_u8)
@@ -1183,11 +1173,14 @@ impl TableMutation {
         decoded.table_object_id = table_object_id;
         if protected_content.len() > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
             || (!protected_content.is_empty() && decoded.value.is_none())
-            || protected_content.iter().enumerate().any(|(index, transfer)| {
-                protected_content[..index]
-                    .iter()
-                    .any(|previous| previous.pin_id() == transfer.pin_id())
-            })
+            || protected_content
+                .iter()
+                .enumerate()
+                .any(|(index, transfer)| {
+                    protected_content[..index]
+                        .iter()
+                        .any(|previous| previous.pin_id() == transfer.pin_id())
+                })
         {
             return Err(RuntimeError::InvalidTableMutation);
         }
@@ -1226,17 +1219,18 @@ impl TableMutation {
         if !self.protected_content_from_pins
             || self.value.is_none()
             || self.protected_content.len() > MAX_TABLE_CONTENT_TRANSFERS_PER_MUTATION
+            || self.protected_content.iter().any(|transfer| {
+                transfer.database_id() != database_id || transfer.pin_id() == &[0; 16]
+            })
             || self
                 .protected_content
                 .iter()
-                .any(|transfer| {
-                    transfer.database_id() != database_id || transfer.pin_id() == &[0; 16]
+                .enumerate()
+                .any(|(index, transfer)| {
+                    self.protected_content[..index]
+                        .iter()
+                        .any(|previous| previous.pin_id() == transfer.pin_id())
                 })
-            || self.protected_content.iter().enumerate().any(|(index, transfer)| {
-                self.protected_content[..index]
-                    .iter()
-                    .any(|previous| previous.pin_id() == transfer.pin_id())
-            })
         {
             return Err(RuntimeError::InvalidTableMutation);
         }
@@ -2371,8 +2365,12 @@ impl fmt::Display for RuntimeError {
             Self::InvalidDigest => "invalid durable digest",
             Self::InvalidObservationReference => "invalid runtime observation reference",
             Self::ObservationCoordinateMismatch => "runtime observation coordinates do not match",
-            Self::ProcedureMaterializationConflict => "runtime procedure materialization conflicts with its catalogue row",
-            Self::InvocationObservationConflict => "runtime invocation observation conflicts with retained state",
+            Self::ProcedureMaterializationConflict => {
+                "runtime procedure materialization conflicts with its catalogue row"
+            }
+            Self::InvocationObservationConflict => {
+                "runtime invocation observation conflicts with retained state"
+            }
             Self::InvocationStateConflict => "runtime invocation state transition conflicts",
             Self::InvocationChildrenActive => "runtime invocation has active child invocations",
             Self::InvocationOwnerInvalid => "runtime invocation owner or arguments are invalid",
@@ -2759,7 +2757,10 @@ impl RuntimeQuerySession<'_> {
         self.overlay
             .entry(mutation.table().to_owned())
             .or_default()
-            .insert(mutation.key().to_vec(), mutation.value().map(<[u8]>::to_vec));
+            .insert(
+                mutation.key().to_vec(),
+                mutation.value().map(<[u8]>::to_vec),
+            );
         self.mutations.push(mutation);
         Ok(())
     }
@@ -3125,9 +3126,7 @@ impl fmt::Display for CheckpointSnapshotCodecError {
             Self::InvalidComponent => "invalid checkpoint snapshot component",
             Self::InvalidPartitionMarker => "invalid checkpoint snapshot partition marker",
             Self::InvalidTransition => "invalid checkpoint snapshot transition",
-            Self::ZeroCheckpointVersion => {
-                "checkpoint snapshot watermark version must be positive"
-            }
+            Self::ZeroCheckpointVersion => "checkpoint snapshot watermark version must be positive",
             Self::MissingCommittedPosition => "checkpoint snapshot has no committed position",
         })
     }
@@ -3315,8 +3314,8 @@ fn read_checkpoint_snapshot_watermark_bounded(
         let bytes = repository
             .read_committed_file(selected_commit, path, max_record_bytes)
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let watermark =
-            decode_checkpoint_snapshot_watermark(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let watermark = decode_checkpoint_snapshot_watermark(&bytes)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
         if watermark.checkpoint.key == *key {
             if matching.is_some() {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -3333,8 +3332,8 @@ fn append_component(
     component: &Component,
 ) -> Result<(), CheckpointSnapshotCodecError> {
     let value = component.as_str();
-    let length = u32::try_from(value.len())
-        .map_err(|_| CheckpointSnapshotCodecError::InvalidComponent)?;
+    let length =
+        u32::try_from(value.len()).map_err(|_| CheckpointSnapshotCodecError::InvalidComponent)?;
     append_decimal(bytes, u64::from(length));
     bytes.extend_from_slice(value.as_bytes());
     bytes.push(b'\n');
@@ -3395,10 +3394,7 @@ impl CheckpointSnapshotReader<'_> {
         Ok(())
     }
 
-    fn decimal(
-        &mut self,
-        delimiter: u8,
-    ) -> Result<u64, CheckpointSnapshotCodecError> {
+    fn decimal(&mut self, delimiter: u8) -> Result<u64, CheckpointSnapshotCodecError> {
         let start = self.cursor;
         while let Some(&byte) = self.bytes.get(self.cursor) {
             if byte == delimiter {
@@ -3432,7 +3428,6 @@ impl CheckpointSnapshotReader<'_> {
         Component::new(value).map_err(|_| CheckpointSnapshotCodecError::InvalidComponent)
     }
 }
-
 
 /// A provider failure retained against the exact checkpoint that was being
 /// polled. It has no delivery identity because no item was admitted.
@@ -3729,9 +3724,9 @@ impl StreamProviderEffect {
 fn valid_provider_effect_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/'))
 }
 
 const MAX_STREAM_PROVIDER_EFFECTS: usize = 64;
@@ -4089,18 +4084,14 @@ fn admin_stream_result(
     }
 }
 
-fn admin_checkpoint_result(
-    result: AdminOperationResult,
-) -> Result<StreamCheckpoint, RuntimeError> {
+fn admin_checkpoint_result(result: AdminOperationResult) -> Result<StreamCheckpoint, RuntimeError> {
     match result {
         AdminOperationResult::Checkpoint(result) => Ok(result),
         AdminOperationResult::Stream(_) => Err(RuntimeError::RecoveryInvalid),
     }
 }
 
-fn admin_invocation_descriptor(
-    operation: &AdminInvocationOperation,
-) -> AdminInvocationDescriptor {
+fn admin_invocation_descriptor(operation: &AdminInvocationOperation) -> AdminInvocationDescriptor {
     admin_invocation_descriptor_with_id(operation, Uuid::new_v4().into_bytes())
 }
 
@@ -4144,7 +4135,11 @@ fn admin_invocation_descriptor_with_id(
             reason,
         } => {
             let reason_redacted = admin_argument_redacted(reason);
-            let reason_marker = if reason_redacted { "<redacted>" } else { "<safe>" };
+            let reason_marker = if reason_redacted {
+                "<redacted>"
+            } else {
+                "<safe>"
+            };
             let reason_digest = admin_digest(reason.as_bytes());
             let expected_position = expected
                 .committed
@@ -4355,8 +4350,9 @@ impl RuntimeState {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
         let system_dispatch = orna_sys_v1::system_dispatch_table();
-        let system_provider_roles = orna_sys_v1::ProviderRoleRegistry::from_baked_abi(system_dispatch)
-            .map_err(|_| RuntimeError::SystemProviderAbiInvalid)?;
+        let system_provider_roles =
+            orna_sys_v1::ProviderRoleRegistry::from_baked_abi(system_dispatch)
+                .map_err(|_| RuntimeError::SystemProviderAbiInvalid)?;
         let database = Builder::new_local(path)
             .build()
             .await
@@ -4426,9 +4422,7 @@ impl RuntimeState {
         &self,
         operation: &str,
         check: impl FnMut(&orna_sys_v1::Precondition) -> Result<(), orna_sys_v1::FailureCode>,
-        invoke: impl FnOnce(
-            &orna_sys_v1::OperationContract,
-        ) -> Result<T, orna_sys_v1::FailureCode>,
+        invoke: impl FnOnce(&orna_sys_v1::OperationContract) -> Result<T, orna_sys_v1::FailureCode>,
     ) -> Result<orna_sys_v1::SystemDispatchResult<T>, orna_sys_v1::ProviderDiagnostic> {
         self.system_dispatch.dispatch(operation, check, invoke)
     }
@@ -5393,12 +5387,8 @@ impl RuntimeState {
         } else {
             "sys.admin.pause_stream"
         };
-        let descriptor = admin_reference_descriptor(
-            invocation_id,
-            function,
-            &reference,
-            reason.as_deref(),
-        );
+        let descriptor =
+            admin_reference_descriptor(invocation_id, function, &reference, reason.as_deref());
         if let Some(result) = self
             .replay_admin_invocation_receipt(lease, None, &descriptor)
             .await?
@@ -5414,7 +5404,11 @@ impl RuntimeState {
             .and_then(decode_row_ref)
         {
             Ok(row) => row,
-            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+            Err(error) => {
+                return Err(self
+                    .record_failed_admin_and_return(&descriptor, lease, error)
+                    .await);
+            }
         };
         let requested = match validate_stream_reference(row, expected_capture) {
             Ok(requested) => requested,
@@ -5430,7 +5424,11 @@ impl RuntimeState {
         };
         let fence = match self.runtime_observation_fence(lease).await {
             Ok(fence) => fence,
-            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+            Err(error) => {
+                return Err(self
+                    .record_failed_admin_and_return(&descriptor, lease, error)
+                    .await);
+            }
         };
         if fence.capture() != expected_capture {
             return Err(self
@@ -5445,7 +5443,11 @@ impl RuntimeState {
         }
         let view = match self.current_runtime_observations(&fence).await {
             Ok(view) => view,
-            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+            Err(error) => {
+                return Err(self
+                    .record_failed_admin_and_return(&descriptor, lease, error)
+                    .await);
+            }
         };
         let key = view
             .streams
@@ -5458,7 +5460,11 @@ impl RuntimeState {
             .ok_or(RuntimeError::InvalidObservationReference);
         let key = match key {
             Ok(key) => key,
-            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+            Err(error) => {
+                return Err(self
+                    .record_failed_admin_and_return(&descriptor, lease, error)
+                    .await);
+            }
         };
         let operation = AdminInvocationOperation::Pause { key, reason };
         self.apply_admin_invocation_with_descriptor(
@@ -5525,12 +5531,8 @@ impl RuntimeState {
         lease: WriterLease,
         request: CheckpointResetRequest,
     ) -> Result<StreamCheckpoint, RuntimeError> {
-        self.reset_checkpoint_with_invocation_id(
-            lease,
-            request,
-            Uuid::new_v4().into_bytes(),
-        )
-        .await
+        self.reset_checkpoint_with_invocation_id(lease, request, Uuid::new_v4().into_bytes())
+            .await
     }
 
     /// Replays a checkpoint reset receipt for a caller-stable invocation ID.
@@ -5618,12 +5620,7 @@ impl RuntimeState {
                 Err(audit_error) => Err(audit_error),
             };
         }
-        self.apply_admin_invocation_with_descriptor(
-            lease,
-            expected_capture,
-            operation,
-            descriptor,
-        )
+        self.apply_admin_invocation_with_descriptor(lease, expected_capture, operation, descriptor)
             .await
             .and_then(admin_checkpoint_result)
     }
@@ -5668,9 +5665,7 @@ impl RuntimeState {
     /// Reads redaction-safe generic administrative invocation audits in
     /// admission order. Specialized checkpoint-reset audits remain available
     /// through [`Self::checkpoint_reset_audits`].
-    pub async fn admin_invocation_audits(
-        &self,
-    ) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
+    pub async fn admin_invocation_audits(&self) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
         load_admin_invocation_audits(&self.connection).await
     }
 
@@ -5700,12 +5695,8 @@ impl RuntimeState {
         ) {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        let descriptor = admin_reference_descriptor(
-            invocation_id,
-            function,
-            &reference,
-            reason.as_deref(),
-        );
+        let descriptor =
+            admin_reference_descriptor(invocation_id, function, &reference, reason.as_deref());
         match self
             .record_failed_admin_descriptor(&descriptor, lease, &RuntimeError::AdminBusy)
             .await
@@ -5776,12 +5767,8 @@ impl RuntimeState {
         expected_capture: &CwdCapture,
         invocation_id: [u8; 16],
     ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        let descriptor = admin_reference_descriptor(
-            invocation_id,
-            "sys.admin.resume_stream",
-            &reference,
-            None,
-        );
+        let descriptor =
+            admin_reference_descriptor(invocation_id, "sys.admin.resume_stream", &reference, None);
         if let Some(result) = self
             .replay_admin_invocation_receipt(lease, None, &descriptor)
             .await?
@@ -6373,8 +6360,12 @@ impl RuntimeState {
             .map_err(TableActivationError::Runtime)?;
         validate_id(writer.owner_id).map_err(TableActivationError::Runtime)?;
         validate_mutations(&encoded, next_digest).map_err(TableActivationError::Runtime)?;
-        validate_table_candidate_scope(mutations, validator.tables(), &validator.table_object_ids())
-            .map_err(TableActivationError::Runtime)?;
+        validate_table_candidate_scope(
+            mutations,
+            validator.tables(),
+            &validator.table_object_ids(),
+        )
+        .map_err(TableActivationError::Runtime)?;
         validate_admitted_table_identities(context, mutations)
             .map_err(TableActivationError::Runtime)?;
         if validator.cwd_generation() != cwd_generation {
@@ -6416,30 +6407,26 @@ impl RuntimeState {
                 ));
             };
             let mut runtime_meta = transaction
-                .query("SELECT database_id FROM runtime_meta WHERE singleton = 1", ())
+                .query(
+                    "SELECT database_id FROM runtime_meta WHERE singleton = 1",
+                    (),
+                )
                 .await
-                .map_err(|_| {
-                    TableActivationError::Runtime(RuntimeError::StorageUnavailable)
-                })?;
+                .map_err(|_| TableActivationError::Runtime(RuntimeError::StorageUnavailable))?;
             let row = runtime_meta
                 .next()
                 .await
-                .map_err(|_| {
-                    TableActivationError::Runtime(RuntimeError::StorageUnavailable)
-                })?
+                .map_err(|_| TableActivationError::Runtime(RuntimeError::StorageUnavailable))?
                 .ok_or(TableActivationError::Runtime(RuntimeError::RecoveryInvalid))?;
             let database_id: [u8; 16] = fixed(
                 row.get(0)
                     .map_err(|_| TableActivationError::Runtime(RuntimeError::RecoveryInvalid))?,
             )
             .map_err(TableActivationError::Runtime)?;
-            if transfers
-                .iter()
-                .any(|transfer| {
-                    transfer.database_id() != &database_id
-                        || transfer.repository_id() != expected_graph_repository_id
-                })
-            {
+            if transfers.iter().any(|transfer| {
+                transfer.database_id() != &database_id
+                    || transfer.repository_id() != expected_graph_repository_id
+            }) {
                 return Err(TableActivationError::Runtime(
                     RuntimeError::InvalidTableMutation,
                 ));
@@ -6450,9 +6437,13 @@ impl RuntimeState {
                 .await
                 .map_err(TableActivationError::Runtime)?;
         }
-        let rows = table_rows_tx(&transaction, validator.tables(), &validator.table_object_ids())
-            .await
-            .map_err(TableActivationError::Runtime)?;
+        let rows = table_rows_tx(
+            &transaction,
+            validator.tables(),
+            &validator.table_object_ids(),
+        )
+        .await
+        .map_err(TableActivationError::Runtime)?;
         validator
             .validate(&rows)
             .map_err(TableActivationError::ValidationFailed)?;
@@ -6477,18 +6468,15 @@ impl RuntimeState {
             .first()
             .copied()
             .unwrap_or(0);
-        let checkpoint_generation = i64::try_from(checkpoint_generation).map_err(|_| {
-            TableActivationError::Runtime(RuntimeError::RecoveryInvalid)
-        })?;
-        let owner_epoch = i64::try_from(writer.epoch).map_err(|_| {
-            TableActivationError::Runtime(RuntimeError::InvalidTableMutation)
-        })?;
+        let checkpoint_generation = i64::try_from(checkpoint_generation)
+            .map_err(|_| TableActivationError::Runtime(RuntimeError::RecoveryInvalid))?;
+        let owner_epoch = i64::try_from(writer.epoch)
+            .map_err(|_| TableActivationError::Runtime(RuntimeError::InvalidTableMutation))?;
         let mut manifest_entries = Vec::with_capacity(transfers.len());
         for transfer in &transfers {
             let identity = transfer.content_identity();
-            let content_length = i64::try_from(identity.length()).map_err(|_| {
-                TableActivationError::Runtime(RuntimeError::InvalidTableMutation)
-            })?;
+            let content_length = i64::try_from(identity.length())
+                .map_err(|_| TableActivationError::Runtime(RuntimeError::InvalidTableMutation))?;
             let oid_algorithm = match transfer.descriptor_oid().algorithm() {
                 orna_repository_v1::GitHashAlgorithm::Sha1 => 1_i64,
                 orna_repository_v1::GitHashAlgorithm::Sha256 => 2_i64,
@@ -6534,9 +6522,7 @@ impl RuntimeState {
                     params![manifest_digest.to_vec(), checkpoint_generation],
                 )
                 .await
-                .map_err(|_| {
-                    TableActivationError::Runtime(RuntimeError::StorageUnavailable)
-                })?;
+                .map_err(|_| TableActivationError::Runtime(RuntimeError::StorageUnavailable))?;
             if updated != 1 {
                 return Err(TableActivationError::Runtime(RuntimeError::RecoveryInvalid));
             }
@@ -7383,7 +7369,8 @@ impl RuntimeState {
         {
             let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let row_digest: [u8; 32] = fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let row_digest: [u8; 32] =
+                fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
             if <[u8; 32]>::from(Sha256::digest(&value)) != row_digest {
                 return Err(RuntimeError::SnapshotIncomplete);
             }
@@ -7416,11 +7403,9 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let rows = load_admin_invocation_audits_through(
-            &self.connection,
-            snapshot.admin_audit_sequence,
-        )
-        .await?;
+        let rows =
+            load_admin_invocation_audits_through(&self.connection, snapshot.admin_audit_sequence)
+                .await?;
         Ok(HistoricalAuditRows {
             capture: snapshot.capture.clone(),
             rows,
@@ -7487,8 +7472,10 @@ impl RuntimeState {
                          AND newer.mutation_sequence > history.mutation_sequence
                    )
                  ORDER BY history.table_id, history.row_key",
-                params![i64::try_from(snapshot.mutation_sequence)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                params![
+                    i64::try_from(snapshot.mutation_sequence)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?
+                ],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -7566,7 +7553,6 @@ impl RuntimeState {
     ) -> Result<Vec<StreamCheckpointWatermark>, RuntimeError> {
         load_stream_checkpoint_history(&self.connection, key, selected).await
     }
-
 
     /// Counts private durable stream-failure rows for bounded implementation
     /// evidence only.
@@ -8015,10 +8001,7 @@ impl RuntimeState {
                     }
                 };
 
-                match handler
-                    .apply_provider_effect_once(effect_key, effect)
-                    .await
-                {
+                match handler.apply_provider_effect_once(effect_key, effect).await {
                     Ok(receipt) if receipt.len() <= MAX_TERMINAL_OUTCOME_BYTES => {
                         self.complete_stream_provider_effect(
                             writer,
@@ -8033,14 +8016,9 @@ impl RuntimeState {
                         break;
                     }
                     Ok(_) => {
-                        self.fail_stream_provider_effect(
-                            writer,
-                            lease,
-                            &identity,
-                            false,
-                        )
-                        .await
-                        .map_err(ProviderEffectDispatchError::Runtime)?;
+                        self.fail_stream_provider_effect(writer, lease, &identity, false)
+                            .await
+                            .map_err(ProviderEffectDispatchError::Runtime)?;
                         return Err(ProviderEffectDispatchError::Provider(
                             ProviderEffectFailure::Permanent,
                         ));
@@ -8051,14 +8029,9 @@ impl RuntimeState {
                             ProviderEffectFailure::Retryable
                                 | ProviderEffectFailure::OutcomeUnknown
                         );
-                        self.fail_stream_provider_effect(
-                            writer,
-                            lease,
-                            &identity,
-                            retryable,
-                        )
-                        .await
-                        .map_err(ProviderEffectDispatchError::Runtime)?;
+                        self.fail_stream_provider_effect(writer, lease, &identity, retryable)
+                            .await
+                            .map_err(ProviderEffectDispatchError::Runtime)?;
                         if retryable && attempt < MAX_STREAM_PROVIDER_EFFECT_ATTEMPTS {
                             continue;
                         }
@@ -8134,7 +8107,8 @@ impl RuntimeState {
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let current_fence = i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let current_fence =
+            i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let effect_key = effect_key.as_bytes().to_vec();
         let preparation = if let Some(row) = rows
             .next()
@@ -8531,17 +8505,11 @@ impl RuntimeState {
         };
         if matches!(
             &handler_result,
-            StreamHandlerResult::Commit(_)
-                | StreamHandlerResult::CommitValidatedTable(_)
+            StreamHandlerResult::Commit(_) | StreamHandlerResult::CommitValidatedTable(_)
         ) && !effects.is_empty()
         {
             match self
-                .dispatch_stream_provider_effects(
-                    writer,
-                    &lease_for_cleanup,
-                    handler,
-                    &effects,
-                )
+                .dispatch_stream_provider_effects(writer, &lease_for_cleanup, handler, &effects)
                 .await
             {
                 Ok(()) => {}
@@ -10161,8 +10129,12 @@ impl RuntimeState {
         validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
         validate_stream_mutations(&encoded, next_digest)
             .map_err(StreamTableDeliveryError::Runtime)?;
-        validate_table_candidate_scope(mutations, validator.tables(), &validator.table_object_ids())
-            .map_err(StreamTableDeliveryError::Runtime)?;
+        validate_table_candidate_scope(
+            mutations,
+            validator.tables(),
+            &validator.table_object_ids(),
+        )
+        .map_err(StreamTableDeliveryError::Runtime)?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -10390,8 +10362,12 @@ impl RuntimeState {
         validate_id(writer.owner_id).map_err(StreamTableDeliveryError::Runtime)?;
         validate_stream_mutations(&encoded, next_digest)
             .map_err(StreamTableDeliveryError::Runtime)?;
-        validate_table_candidate_scope(mutations, validator.tables(), &validator.table_object_ids())
-            .map_err(StreamTableDeliveryError::Runtime)?;
+        validate_table_candidate_scope(
+            mutations,
+            validator.tables(),
+            &validator.table_object_ids(),
+        )
+        .map_err(StreamTableDeliveryError::Runtime)?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -10934,8 +10910,8 @@ impl RuntimeState {
         let pending_rows: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let pending_bytes: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let compressed_target_bytes: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let compressed_target_bytes = u64::try_from(compressed_target_bytes)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let compressed_target_bytes =
+            u64::try_from(compressed_target_bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
         if !(8 * 1024 * 1024..=32 * 1024 * 1024).contains(&compressed_target_bytes) {
             return Err(RuntimeError::RecoveryInvalid);
         }
@@ -10953,9 +10929,7 @@ impl RuntimeState {
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
             published_bytes: u64::try_from(published_bytes)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
-            last_publication_ms: row
-                .get(5)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            last_publication_ms: row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?,
         })
     }
 
@@ -12822,13 +12796,11 @@ impl RuntimeState {
             previous = sequence;
         }
         if checkpoint.mutation_sequence != 0
-            && decoded.last().map(|(sequence, _)| *sequence)
-                != Some(checkpoint.mutation_sequence)
+            && decoded.last().map(|(sequence, _)| *sequence) != Some(checkpoint.mutation_sequence)
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        let candidate_digest =
-            publication_candidate_digest(checkpoint.generation, &decoded);
+        let candidate_digest = publication_candidate_digest(checkpoint.generation, &decoded);
         decoded
             .iter()
             .map(|(sequence, mutation)| {
@@ -12897,7 +12869,8 @@ impl RuntimeState {
             .frozen_intent(intent_id)
             .await?
             .ok_or(RuntimeError::RecoveryInvalid)?;
-        self.freeze_compact(intent_id, &checkpoint, identities).await
+        self.freeze_compact(intent_id, &checkpoint, identities)
+            .await
     }
 
     fn verify_compact_receipt(&self, receipt: &CompactRuntimeReceipt) -> Result<(), RuntimeError> {
@@ -13021,45 +12994,36 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
-            let pin_id: [u8; 16] = fixed(
-                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let repository_id: [u8; 32] = fixed(
-                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let database_id: [u8; 16] = fixed(
-                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let pin_id: [u8; 16] = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let repository_id: [u8; 32] =
+                fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let database_id: [u8; 16] =
+                fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?;
             let descriptor_oid_algorithm: i64 =
                 row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let descriptor_oid: Vec<u8> =
-                row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let descriptor_oid: Vec<u8> = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let expected_oid_length = match descriptor_oid_algorithm {
                 1 => 20,
                 2 => 32,
                 _ => return Err(RuntimeError::RecoveryInvalid),
             };
             let content_length: i64 = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let content_sha256: [u8; 32] = fixed(
-                row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let owner_id: [u8; 16] = fixed(
-                row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let content_sha256: [u8; 32] =
+                fixed(row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let owner_id: [u8; 16] = fixed(row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
             let owner_epoch: i64 = row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let checkpoint_generation: Option<i64> =
                 row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let anchored_generation: Option<i64> =
                 row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let runtime_database_id: [u8; 16] = fixed(
-                row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let runtime_database_id: [u8; 16] =
+                fixed(row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?;
             validate_id(pin_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
             validate_id(owner_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let Some(checkpoint_generation) = checkpoint_generation else {
@@ -13109,11 +13073,12 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
             let generation: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let stored_digest: [u8; 32] = fixed(
-                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            )
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let entries = entries_by_generation.remove(&generation).unwrap_or_default();
+            let stored_digest: [u8; 32] =
+                fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let entries = entries_by_generation
+                .remove(&generation)
+                .unwrap_or_default();
             let expected_digest = if entries.is_empty() {
                 [0; 32]
             } else {
@@ -13129,7 +13094,10 @@ impl RuntimeState {
         Ok(())
     }
 
-    async fn validate_request_admissions(&self, current_generation: u64) -> Result<(), RuntimeError> {
+    async fn validate_request_admissions(
+        &self,
+        current_generation: u64,
+    ) -> Result<(), RuntimeError> {
         let mut rows = self
             .connection
             .query(
@@ -13159,8 +13127,7 @@ impl RuntimeState {
             validate_id(identity.request_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
             validate_id(owner_id).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if owner_epoch <= 0
-                || u64::try_from(generation)
-                    .map_err(|_| RuntimeError::RecoveryInvalid)?
+                || u64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?
                     > current_generation
             {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -13518,8 +13485,10 @@ impl RuntimeState {
                     .connection
                     .query(
                         "SELECT digest FROM checkpoint WHERE generation = ?1",
-                        params![i64::try_from(history_generation)
-                            .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                        params![
+                            i64::try_from(history_generation)
+                                .map_err(|_| RuntimeError::RecoveryInvalid)?
+                        ],
                     )
                     .await
                     .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -13575,8 +13544,7 @@ impl RuntimeState {
                 previous_version = 0;
                 checkpoint_version = joined_version;
                 checkpoint_position = joined_position;
-            } else if joined_version != checkpoint_version
-                || joined_position != checkpoint_position
+            } else if joined_version != checkpoint_version || joined_position != checkpoint_position
             {
                 return Err(RuntimeError::RecoveryInvalid);
             }
@@ -13637,20 +13605,13 @@ impl RuntimeState {
                 row.get::<i64>(1)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?;
-            let position: Option<String> =
-                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let position: Option<String> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
             reset_only_checkpoints.push((key_id, version, position));
         }
         drop(reset_only);
         for (key_id, version, position) in reset_only_checkpoints {
-            if validate_stream_checkpoint_reset_bridge(
-                &self.connection,
-                &key_id,
-                0,
-                None,
-                version,
-            )
-            .await?
+            if validate_stream_checkpoint_reset_bridge(&self.connection, &key_id, 0, None, version)
+                .await?
                 != position
             {
                 return Err(RuntimeError::RecoveryInvalid);
@@ -15238,7 +15199,9 @@ async fn ensure_stream_position_format_compatible(
                 key.source_format.as_str().to_owned(),
                 key.source.as_str().to_owned(),
                 key.partition_format.as_str().to_owned(),
-                key.partition.as_ref().map(|value| value.as_str().to_owned()),
+                key.partition
+                    .as_ref()
+                    .map(|value| value.as_str().to_owned()),
                 key.position_format.as_str().to_owned(),
             ],
         )
@@ -15395,7 +15358,6 @@ async fn record_stream_checkpoint_watermark_tx(
     Ok(())
 }
 
-
 async fn load_stream_status(
     connection: &Connection,
     key: &CheckpointKey,
@@ -15474,20 +15436,25 @@ async fn apply_admin_operation_tx(
 ) -> Result<AdminOperationResult, RuntimeError> {
     match operation {
         AdminInvocationOperation::Pause { key, reason } => {
-            if reason.as_ref().is_some_and(|reason| reason.len() > 16_777_216) {
+            if reason
+                .as_ref()
+                .is_some_and(|reason| reason.len() > 16_777_216)
+            {
                 return Err(RuntimeError::InvalidIdentity);
             }
-            let result = apply_stream_intent_tx(connection, CommitIntent::Pause { key: key.clone() })
-                .await?;
+            let result =
+                apply_stream_intent_tx(connection, CommitIntent::Pause { key: key.clone() })
+                    .await?;
             if stream_pause_changed(&result) {
                 if let Some(reason) = reason {
-                    store_stream_pause_reason(connection, stream_pause_key(&result)?, reason).await?;
+                    store_stream_pause_reason(connection, stream_pause_key(&result)?, reason)
+                        .await?;
                 }
             }
             sync_stream_observation_tx(connection, &result).await?;
-            Ok(AdminOperationResult::Stream(
-                stream_administration_outcome(result)?,
-            ))
+            Ok(AdminOperationResult::Stream(stream_administration_outcome(
+                result,
+            )?))
         }
         AdminInvocationOperation::Reset {
             key,
@@ -15540,9 +15507,9 @@ async fn apply_admin_operation_tx(
                 apply_stream_intent_tx(connection, CommitIntent::Resume { key: key.clone() })
                     .await?;
             sync_stream_observation_tx(connection, &result).await?;
-            Ok(AdminOperationResult::Stream(
-                stream_administration_outcome(result)?,
-            ))
+            Ok(AdminOperationResult::Stream(stream_administration_outcome(
+                result,
+            )?))
         }
     }
 }
@@ -15556,12 +15523,12 @@ fn admin_operation_outcome(result: &AdminOperationResult) -> String {
         AdminOperationResult::Stream(StreamAdministrationOutcome::Paused { changed: false }) => {
             "paused_noop".into()
         }
-        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending { changed: true }) => {
-            "pause_pending".into()
-        }
-        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending { changed: false }) => {
-            "pause_pending_noop".into()
-        }
+        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending {
+            changed: true,
+        }) => "pause_pending".into(),
+        AdminOperationResult::Stream(StreamAdministrationOutcome::PausePending {
+            changed: false,
+        }) => "pause_pending_noop".into(),
         AdminOperationResult::Stream(StreamAdministrationOutcome::Running { changed: true }) => {
             "resumed".into()
         }
@@ -15679,7 +15646,10 @@ async fn load_admin_invocation_audits_through(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?
     {
-        let sequence = decode_u64(row.get::<i64>(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let sequence = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
         let invocation_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         validate_id(invocation_id)?;
         let function: String = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -15688,11 +15658,16 @@ async fn load_admin_invocation_audits_through(
         validate_observation_text(&safe_arguments)?;
         let owner = WriterLease {
             owner_id: fixed(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-            epoch: decode_u64(row.get::<i64>(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            epoch: decode_u64(
+                row.get::<i64>(5)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
         };
         validate_writer_lease(owner)?;
-        let observed_generation =
-            decode_u64(row.get::<i64>(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let observed_generation = decode_u64(
+            row.get::<i64>(6)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
         let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&terminal_outcome)?;
         let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
@@ -15711,10 +15686,12 @@ async fn load_admin_invocation_audits_through(
             effect,
             checkpoint_reset_result,
             succeeded: decode_bool(
-                row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get::<i64>(8)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
             redacted: decode_bool(
-                row.get::<i64>(9).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get::<i64>(9)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
         });
     }
@@ -15746,7 +15723,10 @@ async fn load_admin_invocation_receipt(
     else {
         return Ok(None);
     };
-    let sequence = decode_u64(row.get::<i64>(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let sequence = decode_u64(
+        row.get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
     let invocation_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     validate_id(invocation_id)?;
     let function: String = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -15755,11 +15735,16 @@ async fn load_admin_invocation_receipt(
     validate_observation_text(&safe_arguments)?;
     let owner = WriterLease {
         owner_id: fixed(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        epoch: decode_u64(row.get::<i64>(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        epoch: decode_u64(
+            row.get::<i64>(5)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
     };
     validate_writer_lease(owner)?;
-    let observed_generation =
-        decode_u64(row.get::<i64>(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let observed_generation = decode_u64(
+        row.get::<i64>(6)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
     let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
     validate_observation_text(&terminal_outcome)?;
     let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
@@ -15777,8 +15762,14 @@ async fn load_admin_invocation_receipt(
         terminal_outcome,
         effect,
         checkpoint_reset_result,
-        succeeded: decode_bool(row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        redacted: decode_bool(row.get::<i64>(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        succeeded: decode_bool(
+            row.get::<i64>(8)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        redacted: decode_bool(
+            row.get::<i64>(9)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
     }))
 }
 
@@ -15876,10 +15867,9 @@ async fn migrate_admin_checkpoint_reset_receipts(
     for (invocation_id, safe_arguments, stored_version, stored_position) in receipts {
         let stored_result = match (stored_version, stored_position) {
             (None, None) => None,
-            (Some(version), Some(position)) => Some((
-                decode_u64(version)?,
-                decode_position(position)?,
-            )),
+            (Some(version), Some(position)) => {
+                Some((decode_u64(version)?, decode_position(position)?))
+            }
             _ => return Err(RuntimeError::RecoveryInvalid),
         };
         let fields = safe_arguments
@@ -16039,7 +16029,11 @@ async fn load_stream_checkpoint_reset_audits_through(
             params![
                 stream_key_id(key),
                 i64::try_from(through_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                if include_unpinned_legacy { 1_i64 } else { 0_i64 }
+                if include_unpinned_legacy {
+                    1_i64
+                } else {
+                    0_i64
+                }
             ],
         )
         .await
@@ -16771,10 +16765,8 @@ async fn apply_stream_intent(
     let result = apply_stream_intent_tx(&transaction, intent).await;
     match result {
         Ok(result) => {
-            if let (
-                Some(transition),
-                CommitResult::CheckpointAdvanced { checkpoint },
-            ) = (transition, &result)
+            if let (Some(transition), CommitResult::CheckpointAdvanced { checkpoint }) =
+                (transition, &result)
             {
                 let capture = capture_tx(&transaction).await?;
                 record_stream_checkpoint_watermark_tx(
@@ -18038,9 +18030,7 @@ fn publication_freeze_mutation(
         return Err(RuntimeError::RecoveryInvalid);
     }
     let state = publication_mutation_state(mutation);
-    let value_digest = mutation
-        .value()
-        .map(|value| Sha256::digest(value).into());
+    let value_digest = mutation.value().map(|value| Sha256::digest(value).into());
     let witness = PublicationEquivalenceWitness {
         key_digest: Sha256::digest(mutation.key()).into(),
         value_digest,
@@ -18070,10 +18060,7 @@ fn publication_mutation_state(mutation: &TableMutation) -> PublicationMutationSt
     }
 }
 
-fn publication_candidate_digest(
-    generation: u64,
-    mutations: &[(u64, TableMutation)],
-) -> [u8; 32] {
+fn publication_candidate_digest(generation: u64, mutations: &[(u64, TableMutation)]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"ORNA-COMPACT-CANDIDATE-1\0");
     hasher.update(generation.to_be_bytes());
@@ -18175,7 +18162,11 @@ fn validate_table_identity(table: &str, key: &[u8]) -> Result<(), RuntimeError> 
 fn table_storage_key(name: &str, object_id: Option<TableObjectId>) -> String {
     match object_id {
         Some(object_id) => {
-            let hex: String = object_id.bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+            let hex: String = object_id
+                .bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
             format!("oid:{hex}")
         }
         None => name.to_owned(),
@@ -18394,8 +18385,8 @@ fn decode_protected_content_transfers(
             GitHashAlgorithm::Sha1 => take_fixed::<20>(payload, cursor)?.to_vec(),
             GitHashAlgorithm::Sha256 => take_fixed::<32>(payload, cursor)?.to_vec(),
         };
-        let descriptor_oid = NativeOid::new(algorithm, oid_bytes)
-            .map_err(|_| RuntimeError::InvalidTableMutation)?;
+        let descriptor_oid =
+            NativeOid::new(algorithm, oid_bytes).map_err(|_| RuntimeError::InvalidTableMutation)?;
         let identity = ContentIdentity::new(length, identity_sha256)
             .map_err(|_| RuntimeError::InvalidTableMutation)?;
         let transfer = ProtectedContentTransferEvidence {
@@ -18498,9 +18489,7 @@ async fn apply_table_mutation_tx(
         {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        let value = mutation
-            .value()
-            .ok_or(RuntimeError::InvalidTableMutation)?;
+        let value = mutation.value().ok_or(RuntimeError::InvalidTableMutation)?;
         let digest: [u8; 32] = Sha256::digest(value).into();
         connection
             .execute(
@@ -18776,7 +18765,11 @@ async fn append_mutations_with_catalogue_tx(
                         "INSERT INTO runtime_table_history
                          (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
                          VALUES (?1, ?2, ?3, NULL, NULL, 1)",
-                        params![sequence, table_mutation.storage_table(), table_mutation.key()],
+                        params![
+                            sequence,
+                            table_mutation.storage_table(),
+                            table_mutation.key()
+                        ],
                     )
                     .await
                     .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -18894,8 +18887,7 @@ async fn migrate_runtime_table_history(connection: &Connection) -> Result<(), Ru
             row.get::<i64>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?;
-        let floor_digest: [u8; 32] =
-            fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let floor_digest: [u8; 32] = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let mut runtime_meta = transaction
             .query(
                 "SELECT generation FROM runtime_meta WHERE singleton = 1",
@@ -18919,8 +18911,10 @@ async fn migrate_runtime_table_history(connection: &Connection) -> Result<(), Ru
             let mut checkpoint = transaction
                 .query(
                     "SELECT digest FROM checkpoint WHERE generation = ?1",
-                    params![i64::try_from(floor_generation)
-                        .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                    params![
+                        i64::try_from(floor_generation)
+                            .map_err(|_| RuntimeError::RecoveryInvalid)?
+                    ],
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -18954,14 +18948,15 @@ async fn migrate_runtime_table_history(connection: &Connection) -> Result<(), Ru
             row.get::<i64>(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?;
-        let floor_digest: [u8; 32] =
-            fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let floor_digest: [u8; 32] = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         if floor_generation > 0 {
             let mut checkpoint = transaction
                 .query(
                     "SELECT digest FROM checkpoint WHERE generation = ?1",
-                    params![i64::try_from(floor_generation)
-                        .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                    params![
+                        i64::try_from(floor_generation)
+                            .map_err(|_| RuntimeError::RecoveryInvalid)?
+                    ],
                 )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -18983,8 +18978,7 @@ async fn migrate_runtime_table_history(connection: &Connection) -> Result<(), Ru
                 "INSERT INTO runtime_table_history_metadata
                  (singleton, floor_generation, floor_digest) VALUES (1, ?1, ?2)",
                 params![
-                    i64::try_from(floor_generation)
-                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    i64::try_from(floor_generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
                     floor_digest.to_vec(),
                 ],
             )
@@ -19286,8 +19280,7 @@ async fn validate_stream_checkpoint_reset_bridge(
             row.get::<i64>(5)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?;
-        let observed_generation: i64 =
-            row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let observed_generation: i64 = row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
         if observed_generation < -1
             || old_version != version
             || old_position != position
@@ -19688,7 +19681,10 @@ async fn migrate_accepted_content_pin_checkpoint(
     drop(archived_table);
     if archived_exists {
         let mut archived_count = transaction
-            .query("SELECT COUNT(*) FROM accepted_content_pin_legacy_unverified_v1", ())
+            .query(
+                "SELECT COUNT(*) FROM accepted_content_pin_legacy_unverified_v1",
+                (),
+            )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let count = archived_count
@@ -19722,10 +19718,7 @@ async fn migrate_accepted_content_pin_checkpoint(
             return Err(RuntimeError::RecoveryInvalid);
         }
         transaction
-            .execute(
-                "DROP TABLE accepted_content_pin",
-                (),
-            )
+            .execute("DROP TABLE accepted_content_pin", ())
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         transaction
@@ -19842,14 +19835,16 @@ struct AcceptedContentPinManifestEntry {
     checkpoint_generation: i64,
 }
 
-fn accepted_content_pin_manifest_digest(
-    entries: &[AcceptedContentPinManifestEntry],
-) -> [u8; 32] {
+fn accepted_content_pin_manifest_digest(entries: &[AcceptedContentPinManifestEntry]) -> [u8; 32] {
     let mut ordered = entries.to_vec();
     ordered.sort_by_key(|entry| entry.pin_id);
     let mut digest = Sha256::new();
     digest.update(b"orna.runtime.accepted-content-pin-manifest.v1\0");
-    digest.update(u64::try_from(ordered.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(
+        u64::try_from(ordered.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
     for entry in ordered {
         digest.update(entry.pin_id);
         digest.update(entry.repository_id);
@@ -19934,12 +19929,7 @@ mod tests {
         digest: u8,
     ) -> CwdCapture {
         CwdCapture::new(
-            Snapshot::cwd(
-                [database; 16],
-                [runtime; 16],
-                BigInt::from(generation),
-            )
-            .unwrap(),
+            Snapshot::cwd([database; 16], [runtime; 16], BigInt::from(generation)).unwrap(),
             [digest; 32],
         )
         .unwrap()
@@ -19988,12 +19978,7 @@ mod tests {
                 "offset:0001/β",
                 StreamCheckpointTransition::Complete,
             ),
-            (
-                None,
-                1,
-                "opaque:one",
-                StreamCheckpointTransition::Skip,
-            ),
+            (None, 1, "opaque:one", StreamCheckpointTransition::Skip),
             (
                 Some("partition/β"),
                 u64::MAX,
@@ -20001,8 +19986,7 @@ mod tests {
                 StreamCheckpointTransition::Skip,
             ),
         ] {
-            let watermark =
-                checkpoint_snapshot_watermark(partition, version, position, transition);
+            let watermark = checkpoint_snapshot_watermark(partition, version, position, transition);
             let portable = PortableStreamCheckpointWatermark {
                 checkpoint: watermark.checkpoint.clone(),
                 transition,
@@ -20027,7 +20011,10 @@ mod tests {
         another_local_capture.capture = checkpoint_snapshot_capture(91, 92, 93, 94);
 
         let first = encode_checkpoint_snapshot_watermark(&watermark).unwrap();
-        assert_eq!(first, encode_checkpoint_snapshot_watermark(&watermark).unwrap());
+        assert_eq!(
+            first,
+            encode_checkpoint_snapshot_watermark(&watermark).unwrap()
+        );
         assert_eq!(
             first,
             encode_checkpoint_snapshot_watermark(&another_local_capture).unwrap()
@@ -20096,7 +20083,6 @@ mod tests {
             decode_checkpoint_snapshot_watermark(&invalid_partition),
             Err(CheckpointSnapshotCodecError::InvalidPartitionMarker)
         );
-
 
         assert_eq!(
             decode_checkpoint_snapshot_watermark(&fixture[..transition_end]),
@@ -20348,17 +20334,17 @@ mod tests {
         let encoded = mutation.runtime_mutation().unwrap();
         assert!(encoded.payload.starts_with(b"ORNA-TABLE-MUTATION-4\0"));
         assert_eq!(
-            TableMutation::decode(&encoded)
-                .unwrap()
-                .table_object_id(),
+            TableMutation::decode(&encoded).unwrap().table_object_id(),
             Some(object_id)
         );
 
         let legacy = TableMutation::insert(id(6), "books", vec![2], vec![10]).unwrap();
         let legacy_encoded = legacy.runtime_mutation().unwrap();
-        assert!(legacy_encoded
-            .payload
-            .starts_with(b"ORNA-TABLE-MUTATION-2\0"));
+        assert!(
+            legacy_encoded
+                .payload
+                .starts_with(b"ORNA-TABLE-MUTATION-2\0")
+        );
         let legacy_decoded = TableMutation::decode(&legacy_encoded).unwrap();
         assert_eq!(legacy_decoded.table_object_id(), None);
         assert_eq!(legacy_decoded.table(), legacy.table());
@@ -20482,9 +20468,8 @@ mod tests {
         let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
         let relation_id = id(0x43);
         let database_uuid = "00000000-0000-4000-8000-000000000001";
-        let database = format!(
-            "{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n"
-        );
+        let database =
+            format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
         let schema_source = b"capture transaction test schema";
         std::fs::create_dir_all(root.join(".orna/store")).unwrap();
         std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
@@ -20502,7 +20487,8 @@ mod tests {
         append_cbor_head(&mut byte_index, 0, schema_source.len());
         append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
         append_cbor_bytes(&mut byte_index, &schema_digest);
-        let byte_index_oid = native_fixture_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
+        let byte_index_oid =
+            native_fixture_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
         let mut schema = vec![0x85, 0x01, 0x06];
         append_cbor_head(&mut schema, 0, schema_source.len());
@@ -20535,7 +20521,10 @@ mod tests {
         let relation_map_oid = native_fixture_node(
             root,
             &relation_map,
-            &[(schema_oid.as_str(), "tree"), (row_root_oid.as_str(), "tree")],
+            &[
+                (schema_oid.as_str(), "tree"),
+                (row_root_oid.as_str(), "tree"),
+            ],
         );
 
         let mut store_root = vec![0x83, 0x01, 0x00];
@@ -20553,9 +20542,7 @@ mod tests {
         );
         let root_tree = git_tree(
             root,
-            &format!(
-                "040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"
-            ),
+            &format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"),
         );
         let parent = String::from_utf8(git_output(root, &["rev-parse", "HEAD"], None))
             .unwrap()
@@ -20563,7 +20550,14 @@ mod tests {
             .to_owned();
         let commit = String::from_utf8(git_output(
             root,
-            &["commit-tree", &root_tree, "-p", &parent, "-m", "format3 graph fixture"],
+            &[
+                "commit-tree",
+                &root_tree,
+                "-p",
+                &parent,
+                "-m",
+                "format3 graph fixture",
+            ],
             None,
         ))
         .unwrap()
@@ -20639,6 +20633,211 @@ mod tests {
             .unwrap();
     }
 
+    /// Reads one admitted relation row through the runtime's committed table
+    /// read, so the assertion observes the same durable state a reopen does.
+    async fn admitted_row(
+        state: &RuntimeState,
+        identity: &RuntimeTableIdentity,
+        key: &[u8],
+    ) -> Option<Vec<u8>> {
+        let snapshot = state
+            .begin_admitted_table_activation(std::slice::from_ref(identity))
+            .await
+            .unwrap();
+        snapshot
+            .query_exact(identity.table(), key)
+            .unwrap()
+            .map(<[u8]>::to_vec)
+    }
+
+    /// A caller-owned candidate validator that accepts exactly one row value
+    /// and otherwise fails the way a real schema/assertion authority would.
+    struct AcceptingRowValidator {
+        tables: Vec<String>,
+        table_object_ids: BTreeMap<String, TableObjectId>,
+        accepted: Vec<u8>,
+        calls: usize,
+    }
+
+    impl TableActivationCandidateValidator for AcceptingRowValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn table_object_ids(&self) -> BTreeMap<String, TableObjectId> {
+            self.table_object_ids.clone()
+        }
+
+        fn cwd_generation(&self) -> &CwdGeneration {
+            activation_test_cwd_generation(0)
+        }
+
+        fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            self.calls += 1;
+            let seen = rows
+                .get(&self.tables[0])
+                .and_then(|rows| rows.first())
+                .map(|(_, value)| value.as_slice());
+            if seen != Some(self.accepted.as_slice()) {
+                return Err(SafeDiagnostic {
+                    code: DiagnosticCode::TableAssertionFalse,
+                    class: DiagnosticClass::Permanent,
+                });
+            }
+            Ok(())
+        }
+    }
+
+    /// VFS-021/VFS-009: a VFS row-document save goes through the runtime's own
+    /// validated table transaction, so reopening the database sees the accepted
+    /// row and never sees a refused one.
+    #[tokio::test]
+    async fn vfs_durable_save_survives_reopen_and_refusal_leaves_no_row() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(9));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let accepted_row = vec![0x42_u8, 0x43];
+        let repository_cache = vfs::VfsRepositoryCache::new();
+        let target = repository_cache
+            .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
+                vfs::SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(accepted_row.as_slice()),
+            )))
+            .await
+            .unwrap();
+
+        let draft = target.open_draft(1 << 20).await;
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, &accepted_row).await.unwrap();
+        let save = vfs::VfsDurableSave::new(
+            id(4),
+            activation_test_cwd_generation(0).clone(),
+            identity.clone(),
+            vec![1],
+        );
+        let identity_for_admit = identity.clone();
+        let accepted_for_validator = accepted_row.clone();
+        let applied = target
+            .commit_durable_document_save(
+                &draft,
+                &state,
+                save,
+                move |coordinates, bytes| {
+                    let identity = identity_for_admit.clone();
+                    let accepted = accepted_for_validator.clone();
+                    async move {
+                        assert_eq!(coordinates.table(), &identity);
+                        assert_eq!(coordinates.key(), &[1]);
+                        let replacement = vfs::VfsTableRowReplacement::new(
+                            id(7),
+                            identity.clone(),
+                            vec![1],
+                            Some(bytes.to_vec()),
+                        )
+                        .map_err(TableActivationError::Runtime)?;
+                        let mut table_object_ids = BTreeMap::new();
+                        table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                        Ok(vfs::VfsSaveCandidate::new(
+                            replacement,
+                            Box::new(AcceptingRowValidator {
+                                tables: vec![identity.table().to_owned()],
+                                table_object_ids,
+                                accepted,
+                                calls: 0,
+                            }),
+                        ))
+                    }
+                },
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            vfs::TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(accepted_row.as_slice())
+        );
+
+        // The same boundary refuses a candidate the caller's authority rejects:
+        // the draft retains the rejection and the accepted row stays in place.
+        let refused_draft = target.open_draft(1 << 20).await;
+        refused_draft.truncate(0).await.unwrap();
+        refused_draft.write_at(0, b"refused").await.unwrap();
+        let identity_for_refusal = identity.clone();
+        let refusal = target
+            .commit_durable_document_save(
+                &refused_draft,
+                &state,
+                vfs::VfsDurableSave::new(
+                    id(4),
+                    activation_test_cwd_generation(0).clone(),
+                    identity.clone(),
+                    vec![1],
+                ),
+                move |coordinates, bytes| {
+                    let identity = identity_for_refusal.clone();
+                    async move {
+                        let replacement = vfs::VfsTableRowReplacement::new(
+                            id(8),
+                            identity.clone(),
+                            coordinates.key().to_vec(),
+                            Some(bytes.to_vec()),
+                        )
+                        .map_err(TableActivationError::Runtime)?;
+                        let mut table_object_ids = BTreeMap::new();
+                        table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                        Ok(vfs::VfsSaveCandidate::new(
+                            replacement,
+                            Box::new(AcceptingRowValidator {
+                                tables: vec![identity.table().to_owned()],
+                                table_object_ids,
+                                accepted: vec![0x42, 0x43],
+                                calls: 0,
+                            }),
+                        ))
+                    }
+                },
+                &NoFault,
+            )
+            .await;
+        assert!(
+            matches!(refusal, Err(vfs::VfsSaveError::Rejected { .. })),
+            "a refused candidate is reported as a retained rejection"
+        );
+        assert_eq!(
+            refused_draft
+                .retained_invalid_draft()
+                .await
+                .unwrap()
+                .replacement_bytes(),
+            b"refused"
+        );
+
+        // The durable row proves the save crossed the runtime transaction: a
+        // fresh runtime over the same repository reads it back, and the refused
+        // candidate never replaced it.
+        drop(state);
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            admitted_row(&reopened, &identity, &[1]).await.as_deref(),
+            Some(accepted_row.as_slice()),
+            "an accepted save is visible to a reopen of the same database"
+        );
+        assert_eq!(
+            reopened
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("an accepted save publishes its checkpoint")
+                .generation,
+            1
+        );
+    }
+
     fn recovery_pin_entry(
         repository_id: [u8; 32],
         content_sha256: [u8; 32],
@@ -20701,10 +20900,17 @@ mod tests {
     async fn open_configures_full_synchronous_durability() {
         let (_temp, repository) = repository();
         let state = open_state(&repository).await;
-        let mut rows = state.connection.query("PRAGMA synchronous", ()).await.unwrap();
+        let mut rows = state
+            .connection
+            .query("PRAGMA synchronous", ())
+            .await
+            .unwrap();
         let row = rows.next().await.unwrap().expect("synchronous pragma row");
         let synchronous: i64 = row.get(0).unwrap();
-        assert_eq!(synchronous, 2, "RuntimeState must use SQLite FULL synchronous mode");
+        assert_eq!(
+            synchronous, 2,
+            "RuntimeState must use SQLite FULL synchronous mode"
+        );
     }
 
     #[tokio::test]
@@ -20733,9 +20939,11 @@ mod tests {
 
         let precondition_failure = orna_sys_v1::FailureCode::new("sys.abi.precondition_failed")
             .expect("shared precondition failure code is valid");
-        assert!(state
-            .validate_system_failure(checkout.id.as_str(), &precondition_failure)
-            .is_ok());
+        assert!(
+            state
+                .validate_system_failure(checkout.id.as_str(), &precondition_failure)
+                .is_ok()
+        );
 
         let dispatched = state
             .dispatch_system_operation(
@@ -20764,7 +20972,10 @@ mod tests {
             rejected,
             orna_sys_v1::SystemDispatchResult::Failed(precondition_failure.clone())
         );
-        assert!(!native_handler_ran, "failed checks must stop native dispatch");
+        assert!(
+            !native_handler_ran,
+            "failed checks must stop native dispatch"
+        );
 
         let undeclared_failure = orna_sys_v1::FailureCode::new("sys.storage.corrupt")
             .expect("failure code syntax is valid");
@@ -20798,7 +21009,10 @@ mod tests {
             .commit_table_activation(
                 writer,
                 &first_context,
-                &[table_mutation(5, 1, Some(11)), table_mutation(6, 2, Some(22))],
+                &[
+                    table_mutation(5, 1, Some(11)),
+                    table_mutation(6, 2, Some(22)),
+                ],
                 digest(7),
                 &NoFault,
             )
@@ -20837,7 +21051,11 @@ mod tests {
         );
         let latest = reopened.select_historical_snapshot(2).await.unwrap();
         assert_eq!(
-            reopened.read_table_at(&latest, "books").await.unwrap().rows(),
+            reopened
+                .read_table_at(&latest, "books")
+                .await
+                .unwrap()
+                .rows(),
             &[(vec![1], vec![33]), (vec![2], vec![22])]
         );
     }
@@ -21391,8 +21609,7 @@ mod tests {
             .unwrap();
 
         let context = state.begin_activation().await.unwrap();
-        let duplicate_insert =
-            TableMutation::insert(id(12), "books", vec![1], vec![11]).unwrap();
+        let duplicate_insert = TableMutation::insert(id(12), "books", vec![1], vec![11]).unwrap();
         let before = context.capture().clone();
         assert_eq!(
             state
@@ -21407,18 +21624,23 @@ mod tests {
             Err(RuntimeError::InvalidTableMutation)
         );
         assert_eq!(state.capture().await.unwrap(), before);
-        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), Some(vec![9]));
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
 
         let insert = TableMutation::insert(id(13), "books", vec![3], vec![7]).unwrap();
         state
             .commit_table_activation(lease, &context, &[insert], digest(13), &NoFault)
             .await
             .unwrap();
-        assert_eq!(state.committed_table_row("books", &[3]).await.unwrap(), Some(vec![7]));
+        assert_eq!(
+            state.committed_table_row("books", &[3]).await.unwrap(),
+            Some(vec![7])
+        );
 
         let context = state.begin_activation().await.unwrap();
-        let occupied = TableMutation::rekey(id(8), "books", vec![1], vec![2], vec![10])
-            .unwrap();
+        let occupied = TableMutation::rekey(id(8), "books", vec![1], vec![2], vec![10]).unwrap();
         let before = context.capture().clone();
         assert_eq!(
             state
@@ -21427,22 +21649,40 @@ mod tests {
             Err(RuntimeError::InvalidTableMutation)
         );
         assert_eq!(state.capture().await.unwrap(), before);
-        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), Some(vec![9]));
-        assert_eq!(state.committed_table_row("books", &[2]).await.unwrap(), Some(vec![8]));
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(
+            state.committed_table_row("books", &[2]).await.unwrap(),
+            Some(vec![8])
+        );
 
         let rekey = TableMutation::rekey(id(10), "books", vec![1], vec![4], vec![10]).unwrap();
         state
             .commit_table_activation(lease, &context, &[rekey], digest(11), &NoFault)
             .await
             .unwrap();
-        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), None);
-        assert_eq!(state.committed_table_row("books", &[4]).await.unwrap(), Some(vec![10]));
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            state.committed_table_row("books", &[4]).await.unwrap(),
+            Some(vec![10])
+        );
 
         let pending = state.pending().await.unwrap();
         let retained = TableMutation::decode(pending.last().unwrap()).unwrap();
         assert_eq!(retained.key(), &[1]);
         assert_eq!(retained.rekey_to(), Some(&[4][..]));
-        assert!(pending.last().unwrap().payload.starts_with(b"ORNA-TABLE-MUTATION-2\0"));
+        assert!(
+            pending
+                .last()
+                .unwrap()
+                .payload
+                .starts_with(b"ORNA-TABLE-MUTATION-2\0")
+        );
     }
 
     #[tokio::test]
@@ -21596,8 +21836,14 @@ mod tests {
         assert_eq!(state.capture().await.unwrap(), before_duplicate);
         assert!(state.pending().await.unwrap().is_empty());
         assert_eq!(state.latest_checkpoint().await.unwrap(), None);
-        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), None);
-        assert_eq!(state.committed_table_row("books", &[2]).await.unwrap(), None);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            state.committed_table_row("books", &[2]).await.unwrap(),
+            None
+        );
 
         let mut validator = ObservingTableActivationValidator {
             tables: vec!["books".into()],
@@ -21649,9 +21895,7 @@ mod tests {
         let committed = pending.last().unwrap();
         assert_eq!(committed.payload, encoded.payload);
         assert_eq!(committed.digest, encoded.digest);
-        assert!(committed
-            .payload
-            .starts_with(b"ORNA-TABLE-MUTATION-3\0"));
+        assert!(committed.payload.starts_with(b"ORNA-TABLE-MUTATION-3\0"));
         assert_eq!(
             TableMutation::decode(committed)
                 .unwrap()
@@ -21778,7 +22022,12 @@ mod tests {
             Some(vec![9])
         );
         assert_eq!(
-            reopened.latest_checkpoint().await.unwrap().unwrap().generation,
+            reopened
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .unwrap()
+                .generation,
             1
         );
 
@@ -21847,7 +22096,12 @@ mod tests {
             None
         );
         assert_eq!(
-            recovered.latest_checkpoint().await.unwrap().unwrap().generation,
+            recovered
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .unwrap()
+                .generation,
             1
         );
         let mut pins = recovered
@@ -21855,7 +22109,10 @@ mod tests {
             .query("SELECT COUNT(*) FROM accepted_content_pin", ())
             .await
             .unwrap();
-        assert_eq!(pins.next().await.unwrap().unwrap().get::<i64>(0).unwrap(), 0);
+        assert_eq!(
+            pins.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -21950,14 +22207,9 @@ mod tests {
                     .await
                     .unwrap();
             }
-            let create_table = format!(
-                "CREATE TABLE {table} (pin_id BLOB PRIMARY KEY, payload BLOB NOT NULL)"
-            );
-            state
-                .connection
-                .execute(&create_table, ())
-                .await
-                .unwrap();
+            let create_table =
+                format!("CREATE TABLE {table} (pin_id BLOB PRIMARY KEY, payload BLOB NOT NULL)");
+            state.connection.execute(&create_table, ()).await.unwrap();
             let insert_row = format!("INSERT INTO {table} (pin_id, payload) VALUES (?1, ?2)");
             state
                 .connection
@@ -21984,7 +22236,10 @@ mod tests {
             let connection = database.connect().unwrap();
             let count_query = format!("SELECT COUNT(*) FROM {table}");
             let mut rows = connection.query(&count_query, ()).await.unwrap();
-            assert_eq!(rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(), 1);
+            assert_eq!(
+                rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                1
+            );
         }
     }
 
@@ -22091,11 +22346,14 @@ mod tests {
             source: &str,
         ) -> Result<(), orna_evaluator_v1::EvaluationError> {
             self.session.ensure_table_admitted(source).map_err(|error| {
-                orna_evaluator_v1::EvaluationError::redacted(SafeText::new(match error {
-                    RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
-                    RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
-                    RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
-                }).expect("static diagnostic code"))
+                orna_evaluator_v1::EvaluationError::redacted(
+                    SafeText::new(match error {
+                        RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
+                        RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                        RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
+                    })
+                    .expect("static diagnostic code"),
+                )
             })
         }
 
@@ -22122,19 +22380,20 @@ mod tests {
             let [key] = arguments else {
                 return Err(failure("ORNA-EVAL-TABLE-ARGUMENT"));
             };
-            let encoded_key = key
-                .encode()
-                .map_err(|_| failure("ORNA-EVAL-TABLE-KEY"))?;
-            let row = self.session.lookup_exact(&table, &encoded_key).map_err(|error| {
-                // The reference leaves runtime diagnostic spelling open; use
-                // the table layer's established missing-row code and keep an
-                // unadmitted relation distinct from a present-but-empty one.
-                failure(match error {
-                    RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
-                    RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
-                    RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
-                })
-            })?;
+            let encoded_key = key.encode().map_err(|_| failure("ORNA-EVAL-TABLE-KEY"))?;
+            let row = self
+                .session
+                .lookup_exact(&table, &encoded_key)
+                .map_err(|error| {
+                    // The reference leaves runtime diagnostic spelling open; use
+                    // the table layer's established missing-row code and keep an
+                    // unadmitted relation distinct from a present-but-empty one.
+                    failure(match error {
+                        RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
+                        RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                        RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
+                    })
+                })?;
             CanonicalValue::decode(row)
                 .map(Some)
                 .map_err(|_| failure("ORNA-EVAL-QUERY-ROW"))
@@ -22146,7 +22405,8 @@ mod tests {
             after: Option<&[u8]>,
             limit: usize,
             budget: &mut orna_evaluator_v1::StepBudget,
-        ) -> Result<Option<orna_evaluator_v1::RelationPage>, orna_evaluator_v1::EvaluationError> {
+        ) -> Result<Option<orna_evaluator_v1::RelationPage>, orna_evaluator_v1::EvaluationError>
+        {
             let failure = |code| {
                 orna_evaluator_v1::EvaluationError::redacted(
                     SafeText::new(code).expect("static diagnostic code"),
@@ -22170,8 +22430,7 @@ mod tests {
                 .rows
                 .into_iter()
                 .map(|(_, row)| {
-                    CanonicalValue::decode(&row)
-                        .map_err(|_| failure("ORNA-EVAL-QUERY-ROW"))
+                    CanonicalValue::decode(&row).map_err(|_| failure("ORNA-EVAL-QUERY-ROW"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Some(orna_evaluator_v1::RelationPage {
@@ -22219,7 +22478,10 @@ mod tests {
         effects: &mut QuerySessionEffects<'_, '_>,
     ) -> Result<CanonicalValue, orna_evaluator_v1::EvaluationError> {
         let parsed = orna_syntax_v1::parse_expression(source);
-        assert!(parsed.is_ok(), "the in-crate query fixture must parse: {source}");
+        assert!(
+            parsed.is_ok(),
+            "the in-crate query fixture must parse: {source}"
+        );
         let result = orna_evaluator_v1::invoke_named_with_effects(
             "query",
             &orna_evaluator_v1::Functions::from([(
@@ -22334,7 +22596,10 @@ mod tests {
             CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
         );
         assert_eq!(lookups, 4, "each projected callback re-runs both effects");
-        assert_eq!(scans, 2, "the scan sees the updated row and staged insert only");
+        assert_eq!(
+            scans, 2,
+            "the scan sees the updated row and staged insert only"
+        );
 
         let (taken, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -22344,7 +22609,11 @@ mod tests {
             taken.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
         );
-        assert_eq!((lookups, scans), (1, 1), "take stops projected effects at its boundary");
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "take stops projected effects at its boundary"
+        );
 
         let behind_cursor = query_test_row(6, "behind", 6);
         let beyond_cursor = query_test_row(10, "new", 10);
@@ -22360,7 +22629,10 @@ mod tests {
         let continued = session
             .query_page("sys.Storage", first.next.as_deref(), 1)
             .unwrap();
-        assert_eq!(continued.rows, vec![(query_test_key(10), beyond_cursor.clone())]);
+        assert_eq!(
+            continued.rows,
+            vec![(query_test_key(10), beyond_cursor.clone())]
+        );
         assert_eq!(continued.next, None);
 
         let old_row_8 = query_test_row(8, "remove", 8);
@@ -22439,7 +22711,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_closes_after_six_leading_and_seven_intermatch_rejects_before_four_tail() {
+    async fn query_take_two_closes_after_six_leading_and_seven_intermatch_rejects_before_four_tail()
+    {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -22451,11 +22724,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -22463,7 +22732,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves this more balanced reject split implicit.
         // After six leading and seven inter-match rejects, take(2) must
@@ -22486,7 +22758,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_closes_after_six_leading_and_seven_intermatch_rejects_before_twenty_nine_tail() {
+    async fn query_take_two_closes_after_six_leading_and_seven_intermatch_rejects_before_twenty_nine_tail()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -22498,11 +22771,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -22510,7 +22779,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves this more balanced reject split implicit.
         // After six leading and seven inter-match rejects, take(2) must
@@ -22533,7 +22805,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_closes_after_seven_leading_and_six_intermatch_rejects_before_four_tail() {
+    async fn query_take_two_closes_after_seven_leading_and_six_intermatch_rejects_before_four_tail()
+    {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -22545,11 +22818,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -22557,7 +22826,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // This complementary split is not specified by the reference: after
         // seven leading and six inter-match rejects, take(2) closes before
@@ -22592,11 +22864,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -22604,7 +22872,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves this continuation implicit: unlike take(2),
         // take(3) must traverse the four rejects after the second match to
@@ -22639,11 +22910,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -22651,7 +22918,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves the third-match boundary with an explicit
         // rejected tail implicit. Once take(3) accepts row 20, the four
@@ -22686,11 +22956,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -22698,7 +22964,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves the shortest nonempty tail implicit. Once
         // take(3) accepts row 20 after the seven/six reject split, row 21
@@ -22733,11 +23002,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -22745,7 +23010,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference does not specify continuation after match three.
         // A rejecting row followed by a fourth match makes that boundary
@@ -22780,11 +23048,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -22792,7 +23056,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves take(3)'s immediate fourth-match boundary
         // implicit. Stop on row 20 and keep the adjacent fourth match and
@@ -22840,7 +23107,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves a same-stream lookup failure immediately
         // beyond the third accepted row implicit. take(3) must close before
@@ -22888,7 +23158,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves a rejected row followed by a failing lookup
         // beyond match three implicit. take(3) must close before row 21's
@@ -22936,7 +23209,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this take-two tail. After the second
         // match, close before the following rejects and missing lookup.
@@ -22979,7 +23255,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this still-short take(2) tail. After
         // its sole match, rejected candidates do not close the query; keep
@@ -23020,7 +23299,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this immediate failure edge. One
         // accepted row and the following rejection leave take(2) short, so
@@ -23061,7 +23343,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on the two-reject tail. Neither rejection
         // fills take(2), so preserve the missing-lookup failure that follows.
@@ -23101,7 +23386,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on the three-reject continuation. The
         // short take(2) must cross all three rejects and preserve the next
@@ -23142,7 +23430,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this four-reject tail. One match and
         // four rejected candidates leave take(2) short, preserving the next
@@ -23183,7 +23474,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this initial edge: four rejects leave
         // take(2) unfilled, so preserve the subsequent missing-lookup failure.
@@ -23223,7 +23517,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this initial edge: twenty-nine rejects leave
         // take(2) unfilled, so preserve the subsequent missing-lookup failure.
@@ -23263,7 +23560,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this boundary: four rejects followed
         // by one match still leave take(2) short, preserving the next lookup failure.
@@ -23303,7 +23603,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four rejects, one match,
         // and another reject leave take(2) short before the failing lookup.
@@ -23343,7 +23646,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and two further rejects leave take(2) short before failure.
@@ -23383,7 +23689,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and three trailing rejects leave take(2) short before failure.
@@ -23423,7 +23732,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and four trailing rejects leave take(2) short before failure.
@@ -23463,7 +23775,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and five trailing rejects leave take(2) short before failure.
@@ -23503,7 +23818,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and six trailing rejects leave take(2) short before failure.
@@ -23543,7 +23861,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and seven trailing rejects leave take(2) short before failure.
@@ -23583,7 +23904,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and eight trailing rejects leave take(2) short before failure.
@@ -23623,7 +23947,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and nine trailing rejects leave take(2) short before failure.
@@ -23663,7 +23990,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and ten trailing rejects leave take(2) short before failure.
@@ -23703,7 +24033,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and eleven trailing rejects leave take(2) short before failure.
@@ -23743,7 +24076,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twelve trailing rejects leave take(2) short before failure.
@@ -23762,7 +24098,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_thirteen_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_thirteen_rejects()
+    {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -23783,7 +24120,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and thirteen trailing rejects leave take(2) short before failure.
@@ -23802,7 +24142,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_fourteen_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_fourteen_rejects()
+    {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -23823,7 +24164,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and fourteen trailing rejects leave take(2) short before failure.
@@ -23842,7 +24186,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_fifteen_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_fifteen_rejects()
+    {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -23863,7 +24208,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and fifteen trailing rejects leave take(2) short before failure.
@@ -23882,7 +24230,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_sixteen_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_sixteen_rejects()
+    {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -23903,7 +24252,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and sixteen trailing rejects leave take(2) short before failure.
@@ -23922,7 +24274,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_seventeen_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_seventeen_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -23943,7 +24296,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and seventeen trailing rejects leave take(2) short before failure.
@@ -23962,7 +24318,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_eighteen_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_eighteen_rejects()
+    {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -23983,7 +24340,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and eighteen trailing rejects leave take(2) short before failure.
@@ -24002,7 +24362,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_nineteen_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_nineteen_rejects()
+    {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24023,7 +24384,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and nineteen trailing rejects leave take(2) short before failure.
@@ -24063,7 +24427,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty trailing rejects leave take(2) short before failure.
@@ -24082,7 +24449,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_one_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_one_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24103,7 +24471,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty-one trailing rejects leave take(2) short before failure.
@@ -24122,7 +24493,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_two_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_two_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24143,7 +24515,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty-two trailing rejects leave take(2) short before failure.
@@ -24162,7 +24537,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_three_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_three_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24183,7 +24559,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty-three trailing rejects leave take(2) short before failure.
@@ -24202,7 +24581,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_four_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_four_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24223,7 +24603,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty-four trailing rejects leave take(2) short before failure.
@@ -24242,7 +24625,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_five_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_five_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24263,7 +24647,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty-five trailing rejects leave take(2) short before failure.
@@ -24282,7 +24669,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_six_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_six_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24303,7 +24691,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty-six trailing rejects leave take(2) short before failure.
@@ -24322,7 +24713,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_seven_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_seven_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24343,7 +24735,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty-seven trailing rejects leave take(2) short before failure.
@@ -24362,7 +24757,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_eight_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_eight_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24383,7 +24779,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty-eight trailing rejects leave take(2) short before failure.
@@ -24402,7 +24801,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_nine_rejects() {
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_nine_rejects()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
@@ -24423,7 +24823,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this edge: four leading rejects, one
         // match, and twenty-nine trailing rejects leave take(2) short before failure.
@@ -24463,7 +24866,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this split tail. One reject before the
         // sole match and two after it still leave take(2) short, so preserve
@@ -24504,7 +24910,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this four-reject split. Two rejects on
         // either side of the sole match leave take(2) short, so preserve the
@@ -24545,7 +24954,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this asymmetric split. Three rejects
         // before and two after the sole match leave take(2) short, so retain
@@ -24586,7 +24998,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this six-reject split. Four rejects
         // before and two after the sole match leave take(2) short, so retain
@@ -24627,7 +25042,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this seven-reject split. Five rejects
         // before and two after the sole match leave take(2) short, so retain
@@ -24668,7 +25086,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this eight-reject split. Six rejects
         // before and two after the sole match leave take(2) short, so retain
@@ -24709,7 +25130,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this 8-reject split. 2 rejects
         // before and 6 after the sole match leave take(2) short, so
@@ -24750,7 +25174,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this 8-reject split. 4 rejects
         // before and 4 after the sole match leave take(2) short, so
@@ -24791,7 +25218,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this 9-reject split. 2 rejects
         // before and 7 after the sole match leave take(2) short, so
@@ -24832,7 +25262,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this 9-reject split. 7 rejects
         // before and 2 after the sole match leave take(2) short, so
@@ -24873,7 +25306,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on an assignment feeding the union tail.
         // Resolve its missing key before the query, then preserve the tail
@@ -24914,7 +25350,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this 14/7 split across the assigned
         // union boundary. One late match leaves take(2) short, so preserve
@@ -24955,7 +25394,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on assignment inside the union-tail
         // predicate. Its one matching row leaves take(2) short, so retain
@@ -24996,7 +25438,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on a prefilter ahead of the fallible
         // post-filter. It accepts one match, rejects the rest of the left
@@ -25037,7 +25482,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on the second projection before a failing
         // filter. Projection shifts the candidate key, then the filter maps
@@ -25078,7 +25526,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on a missing lookup in a nested union
         // tail. One left-source match plus a nested reject leaves take(2)
@@ -25119,7 +25570,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on successive rejects at nested union
         // levels. Their rows do not fill take(2), so keep evaluating through
@@ -25160,7 +25614,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on three successive nested rejects. None
         // satisfy take(2), so preserve the failure at the innermost lookup.
@@ -25200,7 +25657,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on four successive nested rejects. None
         // satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25240,7 +25700,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on five successive nested rejects. None
         // satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25280,7 +25743,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on six successive nested rejects. None
         // satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25320,7 +25786,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on seven successive nested rejects. None
         // satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25360,7 +25829,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on eight successive nested rejects. None
         // satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25400,7 +25872,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on nine successive nested rejects. None
         // satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25440,7 +25915,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on ten successive nested rejects. None
         // satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25480,7 +25958,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on eleven successive nested rejects. None
         // satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25520,7 +26001,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on twelve successive nested rejects. None
         // satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25560,7 +26044,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on thirteen successive nested rejects.
         // None satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25600,7 +26087,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on fourteen successive nested rejects.
         // None satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25640,7 +26130,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on fifteen successive nested rejects.
         // None satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25680,7 +26173,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on sixteen successive nested rejects.
         // None satisfy take(2), so preserve the innermost missing-lookup failure.
@@ -25724,7 +26220,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on this one-match-short boundary. A reject
         // does not satisfy take(4), so continue into the following missing
@@ -25756,11 +26255,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -25768,7 +26263,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves this split implicit. Traverse one leading
         // and twelve inter-match rejects, then close before the four-row
@@ -25803,11 +26301,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -25815,7 +26309,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves this two-match edge implicit. After thirteen
         // rejects between the matches, take(2) must close before four more
@@ -25850,11 +26347,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -25862,7 +26355,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves this longer interleaving implicit. After
         // twelve rejects between thirteen matches, the four-row trailing
@@ -25897,11 +26393,7 @@ mod tests {
                 } else {
                     "current"
                 };
-                query_test_mutation(
-                    row_id + 40,
-                    row_id,
-                    Some(query_test_row(row_id, title, 99)),
-                )
+                query_test_mutation(row_id + 40, row_id, Some(query_test_row(row_id, title, 99)))
             })
             .collect::<Vec<_>>();
         state
@@ -25909,7 +26401,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves this longer interleaving implicit. The
         // thirteenth rejection is followed by the four-row trailing reject
@@ -25953,7 +26448,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
 
         // The reference requires take to avoid enumeration beyond the
@@ -26017,7 +26515,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // A child limit excludes later rows; it does not suppress a failure
         // in the two rows needed to fill that limit. Preserve the second-row
@@ -26065,7 +26566,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The filter rejects row eight, so take(2) must continue to the
         // second match at row nine. Once those two child rows are accepted,
@@ -26114,7 +26618,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference guarantees ordered base scans and order-preserving
         // filters, but leaves page demand for a chain of selective filters
@@ -26159,7 +26666,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // When only candidate eight matches, candidate sixteen is rejected
         // by the lookup predicate and candidate twenty then fails. The
@@ -26208,7 +26718,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference gives filter order and take's bounded observation,
         // but not the page demand for this seven-stage selectivity cascade.
@@ -26253,7 +26766,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Only candidate ten matches before candidate twenty is rejected and
         // candidate thirty fails lookup. The selectivity cascade cannot treat
@@ -26295,7 +26811,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // This eight-filter cascade retains only ids 12, 24, and 36 before
         // lookup. Since all three lookup predicates reject, take(2) must
@@ -26338,7 +26857,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The first two cascade survivors reject at lookup and only the last
         // survivor matches. An underfilled take must continue to source end.
@@ -26385,16 +26907,17 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The compiled filters retain candidates ten and twenty in the left
         // union leaf. take(2) closes there before candidate thirty's missing
         // lookup or any scan of the right leaf.
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
-            include_str!(
-                "../tests/fixtures/query-session-union-filter-storm-cascade.orna"
-            ),
+            include_str!("../tests/fixtures/query-session-union-filter-storm-cascade.orna"),
         );
         assert_eq!(
             result.unwrap(),
@@ -26429,16 +26952,17 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // One match and the rejection at twenty leave take(2) short. The
         // pushed cascade must continue in left-to-right union order and keep
         // candidate thirty's lookup failure visible before the right leaf.
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
-            include_str!(
-                "../tests/fixtures/query-session-union-filter-storm-cascade.orna"
-            ),
+            include_str!("../tests/fixtures/query-session-union-filter-storm-cascade.orna"),
         );
         assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
         assert_eq!(
@@ -26473,7 +26997,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference guarantees that filters retain input order and union
         // is left-first, but leaves unknown-source traversal under a storm to
@@ -26517,7 +27044,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // With only one match, the required left scan exhausts under take(2).
         // Pragmatically, the first unknown source in the nested right storm
@@ -26560,7 +27090,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -26599,7 +27132,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -26639,7 +27175,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -26678,7 +27217,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -26718,16 +27260,17 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference specifies filter order and left-first union order,
         // but not demand for a long cascade over unknown batch operands. Keep
         // those operands unopened after the first ordered match.
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
-            include_str!(
-                "../tests/fixtures/query-session-union-cascade-storm-unknown-batch.orna"
-            ),
+            include_str!("../tests/fixtures/query-session-union-cascade-storm-unknown-batch.orna"),
         );
         assert_eq!(
             result.unwrap(),
@@ -26760,15 +27303,16 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Pragmatically, exhaust each admitted leaf in order before reporting
         // the first unknown batch operand when the cascade finds no match.
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
-            include_str!(
-                "../tests/fixtures/query-session-union-cascade-storm-unknown-batch.orna"
-            ),
+            include_str!("../tests/fixtures/query-session-union-cascade-storm-unknown-batch.orna"),
         );
         assert_eq!(
             result.unwrap(),
@@ -26802,7 +27346,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Unknown operands carry their own filter batches as well as the
         // outer cascade. Keep both batches deferred until ordered demand
@@ -26844,7 +27391,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -26883,7 +27433,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -26922,7 +27475,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Keep the filters owned by the nested unknown union operand ordered
         // when the surrounding cascade is compiled through that union.
@@ -26963,13 +27519,14 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
-            include_str!(
-                "../tests/fixtures/query-session-shared-unknown-union-batch-reuse.orna"
-            ),
+            include_str!("../tests/fixtures/query-session-shared-unknown-union-batch-reuse.orna"),
         );
         assert_eq!(
             result.unwrap(),
@@ -27002,7 +27559,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -27041,7 +27601,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -27080,7 +27643,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -27119,7 +27685,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -27158,7 +27727,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -27197,7 +27769,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -27236,7 +27811,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         let (result, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -27282,7 +27860,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // ORNA-CFLOW-002 fixes && order and short-circuiting. The reference
         // does not state whether splitting that conjunction into ordered
@@ -27290,9 +27871,7 @@ mod tests {
         // prefix and skip the bad lookup on the first-conjunct rejection.
         let (combined, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
-            include_str!(
-                "../tests/fixtures/query-session-take-two-conjunctive-leaf-prefix.orna"
-            ),
+            include_str!("../tests/fixtures/query-session-take-two-conjunctive-leaf-prefix.orna"),
         );
         assert_eq!(
             combined.unwrap(),
@@ -27343,7 +27922,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The first row supplies one accepted result. Row eight is rejected
         // by the first conjunct, so its bad lookup must be skipped. Row nine
@@ -27408,7 +27990,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference defines take's nonnegative bound and requires avoiding
         // work beyond the result, but leaves mixed limits across split filters
@@ -27458,7 +28043,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The intermediate take limits the rows reaching the second
         // conjunct. The larger final take cannot demand rows beyond that
@@ -27502,7 +28090,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The failure lies inside the three-row intermediate cap but after
         // one final match. Since take(2) remains short, the later conjunct's
@@ -27554,7 +28145,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference requires input-order filtering and bounded take work,
         // but is silent on this split-pressure mix. The first filter rejects
@@ -27604,7 +28198,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Row eight is rejected before the intermediate take. Row ten consumes
         // one of its four slots and is rejected afterward. Row nine supplies
@@ -27658,7 +28255,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Reference behavior does not specify how different branch-local
         // take caps interact with filters after union. The left leaf admits
@@ -27709,7 +28309,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Branch-local caps still bound each leaf, but the outer demand is
         // not satisfied by the one surviving left match and the nonmatching
@@ -27758,7 +28361,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves sustained outer demand across differently
         // capped union leaves implicit. Keep the leaf caps local (2, 7, 8)
@@ -27791,7 +28397,11 @@ mod tests {
         let mutations = (7u8..=23)
             .map(|row_id| {
                 let title = if row_id == 7 { "later" } else { "current" };
-                let target = if matches!(row_id, 22 | 23) { 99 } else { row_id };
+                let target = if matches!(row_id, 22 | 23) {
+                    99
+                } else {
+                    row_id
+                };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -27804,7 +28414,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The same local caps and fourteen rejects leave outer take(2) short
         // after its first match. Failure at row twenty-two is still in the
@@ -27853,7 +28466,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on sustained demand across leaf-local
         // chains. Preserve pipeline order within each leaf: its take cap is
@@ -27887,7 +28503,11 @@ mod tests {
         let mutations = (7u8..=23)
             .map(|row_id| {
                 let title = if row_id == 7 { "later" } else { "current" };
-                let target = if matches!(row_id, 22 | 23) { 99 } else { row_id };
+                let target = if matches!(row_id, 22 | 23) {
+                    99
+                } else {
+                    row_id
+                };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -27900,7 +28520,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The same fourteen rejects leave only row seven counted toward the
         // global take. Row twenty-two fails inside the third leaf's local
@@ -27948,7 +28571,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference does not define this mixed placement of filters
         // around leaf-local takes and sustained outer demand. Preserve each
@@ -27981,7 +28607,11 @@ mod tests {
         let mutations = (7u8..=32)
             .map(|row_id| {
                 let title = if row_id == 7 { "later" } else { "current" };
-                let target = if matches!(row_id, 31 | 32) { 99 } else { row_id };
+                let target = if matches!(row_id, 31 | 32) {
+                    99
+                } else {
+                    row_id
+                };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -27994,7 +28624,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // All ten leaf-local rejects and thirteen outer rejects precede the
         // failure at row thirty-one. Only row seven matched, so take(2) is
@@ -28043,7 +28676,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference does not specify how sustained conjunctive filters
         // are re-split around nested leaf takes. Preserve the two-match
@@ -28075,7 +28711,11 @@ mod tests {
         let mutations = (7u8..=32)
             .map(|row_id| {
                 let title = if row_id == 7 { "later" } else { "current" };
-                let target = if matches!(row_id, 31 | 32) { 99 } else { row_id };
+                let target = if matches!(row_id, 31 | 32) {
+                    99
+                } else {
+                    row_id
+                };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -28088,7 +28728,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Here the reference is silent on a short outer take crossing the
         // same conjunct re-splits. Only row seven matches; row thirty-one's
@@ -28137,7 +28780,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves this conjunction placement around nested
         // leaf takes implicit. The compound predicate and its ordered filter
@@ -28175,7 +28821,11 @@ mod tests {
         let mutations = (7u8..=32)
             .map(|row_id| {
                 let title = if row_id == 7 { "later" } else { "current" };
-                let target = if matches!(row_id, 31 | 32) { 99 } else { row_id };
+                let target = if matches!(row_id, 31 | 32) {
+                    99
+                } else {
+                    row_id
+                };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -28188,7 +28838,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // With only one match, row thirty-one reaches the late missing
         // lookup. The reference leaves the interaction between this failure,
@@ -28206,8 +28859,7 @@ mod tests {
                 "../tests/fixtures/query-session-take-two-leaf-chain-conjunct-resplit-split-failure.orna"
             ),
         );
-        let expected =
-            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap();
+        let expected = CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap();
         assert_eq!(compound.unwrap(), expected);
         assert_eq!(split.unwrap(), expected);
         assert_eq!((compound_lookups, compound_scans), (10, 47));
@@ -28244,7 +28896,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference is silent on repeated local limits crossing
         // re-split conjuncts in a sustained leaf chain. Keep the compound and
@@ -28281,7 +28936,11 @@ mod tests {
         let mutations = (7u8..=32)
             .map(|row_id| {
                 let title = if row_id == 7 { "later" } else { "current" };
-                let target = if matches!(row_id, 31 | 32) { 99 } else { row_id };
+                let target = if matches!(row_id, 31 | 32) {
+                    99
+                } else {
+                    row_id
+                };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -28294,7 +28953,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Here the first result cannot fill take-two. After the repeated
         // branch-local caps and outer rejects, row thirty-one's missing
@@ -28311,8 +28973,7 @@ mod tests {
                 "../tests/fixtures/query-session-take-two-conjunct-resplit-leaf-limit-storm-split-failure.orna"
             ),
         );
-        let expected =
-            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap();
+        let expected = CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap();
         assert_eq!(compound.unwrap(), expected);
         assert_eq!(split.unwrap(), expected);
         assert_eq!(
@@ -28348,7 +29009,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference leaves a storm of split rejects across four capped
         // leaf chains implicit. Preserve branch and filter order: the second
@@ -28363,7 +29027,10 @@ mod tests {
             result.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
         );
-        assert_eq!(lookups, 2, "the tail lookup remains beyond completed take-two");
+        assert_eq!(
+            lookups, 2,
+            "the tail lookup remains beyond completed take-two"
+        );
     }
 
     #[tokio::test]
@@ -28375,7 +29042,11 @@ mod tests {
         let mutations = (7u8..=42)
             .map(|row_id| {
                 let title = if row_id == 7 { "later" } else { "current" };
-                let target = if matches!(row_id, 41 | 42) { 99 } else { row_id };
+                let target = if matches!(row_id, 41 | 42) {
+                    99
+                } else {
+                    row_id
+                };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -28388,7 +29059,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // Only row seven matches before row forty-one fails its lookup. The
         // split reject storm and chained local limits must not hide a failure
@@ -28403,7 +29077,10 @@ mod tests {
             result.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
         );
-        assert_eq!(lookups, 2, "the late missing lookup follows the first match");
+        assert_eq!(
+            lookups, 2,
+            "the late missing lookup follows the first match"
+        );
     }
 
     #[tokio::test]
@@ -28432,7 +29109,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The reference does not specify the closure for five unioned leaf
         // runs with deliberately unequal take bounds and interleaved rejects.
@@ -28460,7 +29140,11 @@ mod tests {
         let mutations = (7u8..=47)
             .map(|row_id| {
                 let title = if row_id == 7 { "later" } else { "current" };
-                let target = if matches!(row_id, 46 | 47) { 99 } else { row_id };
+                let target = if matches!(row_id, 46 | 47) {
+                    99
+                } else {
+                    row_id
+                };
                 query_test_mutation(
                     row_id + 40,
                     row_id,
@@ -28473,7 +29157,10 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let session = snapshot.query_session();
         // The same five unequal leaf bounds leave the outer take underfilled
         // after row seven. Its later lookup failure must cross every chained
@@ -28488,7 +29175,10 @@ mod tests {
             result.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
         );
-        assert_eq!(lookups, 2, "the first post-prefix lookup failure is preserved");
+        assert_eq!(
+            lookups, 2,
+            "the first post-prefix lookup failure is preserved"
+        );
     }
 
     #[tokio::test]
@@ -28524,8 +29214,15 @@ mod tests {
             empty.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 0), "admitted empty take(0) avoids row scans");
-        let unavailable_snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "admitted empty take(0) avoids row scans"
+        );
+        let unavailable_snapshot = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let unavailable_session = unavailable_snapshot.query_session();
         let (unadmitted, lookups, scans) = invoke_query_fixture_with_counts(
             &unavailable_session,
@@ -28551,7 +29248,11 @@ mod tests {
             union_zero.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 0), "admitted zero-take union does no query work");
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "admitted zero-take union does no query work"
+        );
 
         // A later missing source in a nested union must remain visible after
         // earlier nested sources pass admission, even though take(0) skips them.
@@ -28563,9 +29264,16 @@ mod tests {
             nested_union_zero.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 0), "admitted nested union does no query work");
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "admitted nested union does no query work"
+        );
 
-        let storage_only = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let storage_only = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
         let storage_only = storage_only.query_session();
         let (missing_right, lookups, scans) = invoke_query_fixture_with_counts(
             &storage_only,
@@ -28575,7 +29283,11 @@ mod tests {
             missing_right.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 0), "unadmitted right source fails before scanning");
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "unadmitted right source fails before scanning"
+        );
 
         let (missing_nested_tail, lookups, scans) = invoke_query_fixture_with_counts(
             &storage_only,
@@ -28604,7 +29316,11 @@ mod tests {
             missing_left.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 0), "unadmitted left source fails before scanning");
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "unadmitted left source fails before scanning"
+        );
 
         let (missing_nested_head, lookups, scans) = invoke_query_fixture_with_counts(
             &maintenance_only,
@@ -28631,7 +29347,11 @@ mod tests {
             right_zero.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 2), "left rows run before the empty right branch");
+        assert_eq!(
+            (lookups, scans),
+            (0, 2),
+            "left rows run before the empty right branch"
+        );
 
         let (right_zero_missing, lookups, scans) = invoke_query_fixture_with_counts(
             &storage_only,
@@ -28657,7 +29377,11 @@ mod tests {
             left_zero.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 1), "right rows run after the empty left branch");
+        assert_eq!(
+            (lookups, scans),
+            (0, 1),
+            "right rows run after the empty left branch"
+        );
 
         let (left_zero_missing, lookups, scans) = invoke_query_fixture_with_counts(
             &maintenance_only,
@@ -28683,7 +29407,11 @@ mod tests {
             both_zero.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 0), "both admitted zero-take children do no row work");
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "both admitted zero-take children do no row work"
+        );
 
         let (both_zero_missing_right, lookups, scans) =
             invoke_query_fixture_with_counts(&storage_only, both_zero_fixture);
@@ -28691,7 +29419,11 @@ mod tests {
             both_zero_missing_right.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 0), "zero-take right child retains visibility");
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "zero-take right child retains visibility"
+        );
 
         let (both_zero_missing_left, lookups, scans) =
             invoke_query_fixture_with_counts(&maintenance_only, both_zero_fixture);
@@ -28699,7 +29431,11 @@ mod tests {
             both_zero_missing_left.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
         );
-        assert_eq!((lookups, scans), (0, 0), "zero-take left child retains visibility");
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "zero-take left child retains visibility"
+        );
 
         // An empty union child must not suppress an effectful sibling's
         // projection failure, regardless of whether the failure is on the
@@ -28714,7 +29450,11 @@ mod tests {
             left_projection_failure.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
         );
-        assert_eq!((lookups, scans), (2, 2), "left projection fails before the zero-take right child");
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "left projection fails before the zero-take right child"
+        );
 
         let (right_projection_failure, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -28726,7 +29466,11 @@ mod tests {
             right_projection_failure.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
         );
-        assert_eq!((lookups, scans), (2, 2), "right projection runs after the zero-take left child");
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "right projection runs after the zero-take left child"
+        );
 
         // Union siblings are separate effectful projection calls, processed
         // left to right. Identical projection source must not reuse results.
@@ -28782,7 +29526,11 @@ mod tests {
             union_take_one.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
         );
-        assert_eq!((lookups, scans), (1, 1), "take(1) never enters the right sibling");
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "take(1) never enters the right sibling"
+        );
 
         let (union_take_two, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -28847,9 +29595,7 @@ mod tests {
 
         let (right_failure, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
-            include_str!(
-                "../tests/fixtures/query-session-union-project-take-right-failure.orna"
-            ),
+            include_str!("../tests/fixtures/query-session-union-project-take-right-failure.orna"),
         );
         assert_eq!(
             right_failure.unwrap(),
@@ -29025,13 +29771,12 @@ mod tests {
         // but not demand propagation when an outer filter rejects one nested
         // child's match. Continue to the next child; once it supplies the
         // outer match, stop before the deeper failing projection.
-        let (nested_filter_reject_then_stop, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-nested-filter-reject-child-then-stop.orna"
-                ),
-            );
+        let (nested_filter_reject_then_stop, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-nested-filter-reject-child-then-stop.orna"
+            ),
+        );
         assert_eq!(
             nested_filter_reject_then_stop.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
@@ -29069,13 +29814,12 @@ mod tests {
         // bounded sibling. Each of the first two siblings stops at its bound
         // before filtering out its row; the next nested filter finds the
         // match, so its failing sibling must remain untouched.
-        let (bounded_filter_after_nested_stop, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-nested-filter-after-take-bound.orna"
-                ),
-            );
+        let (bounded_filter_after_nested_stop, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-nested-filter-after-take-bound.orna"
+            ),
+        );
         assert_eq!(
             bounded_filter_after_nested_stop.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
@@ -29110,13 +29854,12 @@ mod tests {
         // With a larger take bound, one rejected row does not exhaust the
         // parent relation. Continue in order until a later match consumes the
         // bound, then stop before the following nested projection failure.
-        let (outer_take_two_filter_stops_tail, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-outer-take-two-filter-stops-tail.orna"
-                ),
-            );
+        let (outer_take_two_filter_stops_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-take-two-filter-stops-tail.orna"
+            ),
+        );
         assert_eq!(
             outer_take_two_filter_stops_tail.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
@@ -29172,13 +29915,12 @@ mod tests {
         // silent on `first()` continuing through a rejected child into a
         // nested union. Reject both direct rows, then stop on the nested
         // child's match before its following missing target is evaluated.
-        let (first_after_rejected_child, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-outer-filter-first-stops-after-rejected-child.orna"
-                ),
-            );
+        let (first_after_rejected_child, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-first-stops-after-rejected-child.orna"
+            ),
+        );
         assert_eq!(
             first_after_rejected_child.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(107u8))).unwrap()
@@ -29234,13 +29976,12 @@ mod tests {
         // implicit. Unlike first(), last() must consume the whole three-row
         // prefix to return its boundary match, while the failing fourth row
         // remains outside the closed outer bound.
-        let (last_closes_filtered_outer_bound, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-outer-filter-last-closes-bound.orna"
-                ),
-            );
+        let (last_closes_filtered_outer_bound, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-closes-bound.orna"
+            ),
+        );
         assert_eq!(
             last_closes_filtered_outer_bound.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(107u8))).unwrap()
@@ -29254,13 +29995,12 @@ mod tests {
         // The reference leaves `last()`'s empty result at a filtered outer
         // edge implicit. Consume the full three-row prefix, but keep its
         // matching fourth row outside the bound so the result stays empty.
-        let (last_excludes_next_filtered_match, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-outer-filter-last-excludes-next-match.orna"
-                ),
-            );
+        let (last_excludes_next_filtered_match, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-excludes-next-match.orna"
+            ),
+        );
         assert_eq!(
             last_excludes_next_filtered_match.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
@@ -29275,13 +30015,12 @@ mod tests {
         // leaves this nested-union closure edge implicit. The fourth row's
         // filter lookup would fail; last() consumes only the three admitted
         // rows and returns their final match without evaluating that predicate.
-        let (last_skips_next_filtered_predicate, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-outer-filter-last-skips-next-predicate.orna"
-                ),
-            );
+        let (last_skips_next_filtered_predicate, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-skips-next-predicate.orna"
+            ),
+        );
         assert_eq!(
             last_skips_next_filtered_predicate.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
@@ -29994,15 +30733,19 @@ mod tests {
         // Natural exhaustion may follow another rejected row after the
         // interleaved matches. Keep the last accepted value through both
         // rejections instead of treating the final one as a lost boundary.
-        let (last_returns_interleaved_multirow_short_post_filter_take_with_trailing_nonmatch, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-interleaved-matches-trailing-nonmatch.orna"
-                ),
-            );
+        let (
+            last_returns_interleaved_multirow_short_post_filter_take_with_trailing_nonmatch,
+            lookups,
+            scans,
+        ) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-interleaved-matches-trailing-nonmatch.orna"
+            ),
+        );
         assert_eq!(
-            last_returns_interleaved_multirow_short_post_filter_take_with_trailing_nonmatch.unwrap(),
+            last_returns_interleaved_multirow_short_post_filter_take_with_trailing_nonmatch
+                .unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
         );
         assert_eq!(
@@ -30034,13 +30777,16 @@ mod tests {
         // A rejected row between matches must not make the short prefix look
         // complete: continue in source order and preserve a later predicate
         // failure while take(3) still lacks its third match.
-        let (last_surfaces_interleaved_failure_after_multirow_short_post_filter_take, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-multi-match-interleaved-nonmatch-failing-tail.orna"
-                ),
-            );
+        let (
+            last_surfaces_interleaved_failure_after_multirow_short_post_filter_take,
+            lookups,
+            scans,
+        ) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-multi-match-interleaved-nonmatch-failing-tail.orna"
+            ),
+        );
         let predicate_failure =
             last_surfaces_interleaved_failure_after_multirow_short_post_filter_take.unwrap_err();
         assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
@@ -30151,13 +30897,12 @@ mod tests {
         // The reference leaves the first matching row immediately beyond a
         // filtered outer bound implicit. The three-row prefix has no match;
         // do not scan its fourth row, which would satisfy `first()`.
-        let (first_excludes_next_filtered_match, lookups, scans) =
-            invoke_query_fixture_with_counts(
-                &session,
-                include_str!(
-                    "../tests/fixtures/query-session-union-outer-filter-first-excludes-next-match.orna"
-                ),
-            );
+        let (first_excludes_next_filtered_match, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-first-excludes-next-match.orna"
+            ),
+        );
         assert_eq!(
             first_excludes_next_filtered_match.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
@@ -30256,7 +31001,11 @@ mod tests {
             missing.unwrap(),
             CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
         );
-        assert_eq!((lookups, scans), (2, 2), "the later-page miss stops projection");
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the later-page miss stops projection"
+        );
 
         // A downstream filter cannot erase an effectful projection failure;
         // pipeline stage order remains observable even when no row survives.
@@ -30296,7 +31045,11 @@ mod tests {
             taken.unwrap(),
             CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
         );
-        assert_eq!((lookups, scans), (1, 1), "take does not evaluate a later failing projection");
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "take does not evaluate a later failing projection"
+        );
 
         // A failed read does not pin a result: the next invocation sees a
         // repair staged into this same activation session.
@@ -30322,7 +31075,10 @@ mod tests {
         );
 
         session
-            .stage_mutation(TableMutation::new(id(43), "sys.Storage", query_test_key(9), Some(vec![0xff])).unwrap())
+            .stage_mutation(
+                TableMutation::new(id(43), "sys.Storage", query_test_key(9), Some(vec![0xff]))
+                    .unwrap(),
+            )
             .unwrap();
         let (corrupt, lookups, scans) = invoke_query_fixture_with_counts(
             &session,
@@ -30345,13 +31101,8 @@ mod tests {
             .unwrap();
         session
             .stage_mutation(
-                TableMutation::new(
-                    id(45),
-                    "sys.Storage",
-                    query_test_key(99),
-                    Some(vec![0xff]),
-                )
-                .unwrap(),
+                TableMutation::new(id(45), "sys.Storage", query_test_key(99), Some(vec![0xff]))
+                    .unwrap(),
             )
             .unwrap();
         let (corrupt_lookup, lookups, scans) = invoke_query_fixture_with_counts(
@@ -30385,20 +31136,20 @@ mod tests {
             .commit_table_activation(
                 lease,
                 &context,
-                &[TableMutation::new(
-                    id(40),
-                    "books",
-                    key.clone(),
-                    Some(original_bytes.clone()),
-                )
-                .unwrap()],
+                &[
+                    TableMutation::new(id(40), "books", key.clone(), Some(original_bytes.clone()))
+                        .unwrap(),
+                ],
                 digest(41),
                 &NoFault,
             )
             .await
             .unwrap();
 
-        let snapshot = state.begin_table_activation(&["books", "unused"]).await.unwrap();
+        let snapshot = state
+            .begin_table_activation(&["books", "unused"])
+            .await
+            .unwrap();
         assert_eq!(
             snapshot.query_exact("books", &key).unwrap(),
             Some(&original_bytes[..])
@@ -30453,12 +31204,13 @@ mod tests {
             ]))
             .unwrap()
         );
-        assert_eq!(lookup_calls, 2, "matching calls are evaluated independently");
+        assert_eq!(
+            lookup_calls, 2,
+            "matching calls are evaluated independently"
+        );
 
         session
-            .stage_mutation(
-                TableMutation::new(id(43), "books", key.clone(), None).unwrap(),
-            )
+            .stage_mutation(TableMutation::new(id(43), "books", key.clone(), None).unwrap())
             .unwrap();
         assert_eq!(session.query_exact("books", &key).unwrap(), None);
         let (missing, lookup_calls) = invoke_query_fixture(
@@ -30493,7 +31245,10 @@ mod tests {
             &session,
             include_str!("../tests/fixtures/exact-query-invalid-arity.orna"),
         );
-        assert_eq!(invalid_arity.unwrap_err().code(), "ORNA-EVAL-TABLE-ARGUMENT");
+        assert_eq!(
+            invalid_arity.unwrap_err().code(),
+            "ORNA-EVAL-TABLE-ARGUMENT"
+        );
         assert_eq!(lookup_calls, 1);
 
         assert_eq!(
@@ -30515,7 +31270,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(state.committed_table_row("books", &key).await.unwrap(), None);
+        assert_eq!(
+            state.committed_table_row("books", &key).await.unwrap(),
+            None
+        );
         let fresh = state.begin_table_activation(&["books"]).await.unwrap();
         assert_eq!(fresh.query_exact("books", &key).unwrap(), None);
     }
@@ -30699,12 +31457,8 @@ mod tests {
         ));
 
         // An evaluator error never reaches the commit boundary at all.
-        let failed_evaluation = run_admitted_table_activation(
-            &state,
-            lease,
-            &identity,
-            &NoFault,
-            |_snapshot| {
+        let failed_evaluation =
+            run_admitted_table_activation(&state, lease, &identity, &NoFault, |_snapshot| {
                 let insert = TableMutation::new(id(7), "books", vec![2], Some(vec![9]))
                     .unwrap()
                     .with_table_object_id(object_id);
@@ -30712,12 +31466,17 @@ mod tests {
                     let _staged = ActivationWork::new(vec![insert], digest(8), ());
                     Err::<ActivationWork<()>, _>("evaluator rejected")
                 }
-            },
-        )
-        .await;
-        assert!(matches!(failed_evaluation, Err(ActivationError::Evaluator(_))));
+            })
+            .await;
+        assert!(matches!(
+            failed_evaluation,
+            Err(ActivationError::Evaluator(_))
+        ));
 
-        let visible = state.begin_admitted_table_activation(&identity).await.unwrap();
+        let visible = state
+            .begin_admitted_table_activation(&identity)
+            .await
+            .unwrap();
         assert!(visible.table_rows()["books"].is_empty());
     }
 
@@ -30730,19 +31489,14 @@ mod tests {
         let other = TableObjectId::new([0x94; 16]);
         let identity = [RuntimeTableIdentity::new("books", admitted).unwrap()];
 
-        let wrong_identity = run_admitted_table_activation(
-            &state,
-            lease,
-            &identity,
-            &NoFault,
-            |_snapshot| {
+        let wrong_identity =
+            run_admitted_table_activation(&state, lease, &identity, &NoFault, |_snapshot| {
                 let insert = TableMutation::new(id(5), "books", vec![1], Some(vec![9]))
                     .unwrap()
                     .with_table_object_id(other);
                 async move { Ok::<_, ()>(ActivationWork::new(vec![insert], digest(6), ())) }
-            },
-        )
-        .await;
+            })
+            .await;
         assert!(matches!(
             wrong_identity,
             Err(ActivationError::Runtime(RuntimeError::InvalidTableMutation))
@@ -30750,51 +31504,44 @@ mod tests {
 
         // A name-only write to an identity-addressed table would land under a key
         // the admitted reader never observes, so it is refused as well.
-        let name_only = run_admitted_table_activation(
-            &state,
-            lease,
-            &identity,
-            &NoFault,
-            |_snapshot| {
+        let name_only =
+            run_admitted_table_activation(&state, lease, &identity, &NoFault, |_snapshot| {
                 let insert = TableMutation::new(id(7), "books", vec![1], Some(vec![9])).unwrap();
                 async move { Ok::<_, ()>(ActivationWork::new(vec![insert], digest(8), ())) }
-            },
-        )
-        .await;
+            })
+            .await;
         assert!(matches!(
             name_only,
             Err(ActivationError::Runtime(RuntimeError::InvalidTableMutation))
         ));
 
-        let visible = state.begin_admitted_table_activation(&identity).await.unwrap();
+        let visible = state
+            .begin_admitted_table_activation(&identity)
+            .await
+            .unwrap();
         assert!(visible.table_rows()["books"].is_empty());
     }
 
     #[tokio::test]
-    async fn reusable_table_activation_runner_admits_reads_commits_and_rolls_back_evaluator_failure() {
+    async fn reusable_table_activation_runner_admits_reads_commits_and_rolls_back_evaluator_failure()
+     {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
 
-        let observed = run_table_activation(
-            &state,
-            lease,
-            &["books"],
-            &NoFault,
-            |snapshot| {
-                let rows = snapshot.table_rows().clone();
-                let activation_time = snapshot.context().activation_time();
-                async move {
-                    assert!(rows["books"].is_empty());
-                    assert!(activation_time <= SystemTime::now());
-                    Ok::<_, &'static str>(ActivationWork::new(
-                        vec![table_mutation(20, 1, Some(9))],
-                        digest(21),
-                        rows.len(),
-                    ))
-                }
-            },
-        )
+        let observed = run_table_activation(&state, lease, &["books"], &NoFault, |snapshot| {
+            let rows = snapshot.table_rows().clone();
+            let activation_time = snapshot.context().activation_time();
+            async move {
+                assert!(rows["books"].is_empty());
+                assert!(activation_time <= SystemTime::now());
+                Ok::<_, &'static str>(ActivationWork::new(
+                    vec![table_mutation(20, 1, Some(9))],
+                    digest(21),
+                    rows.len(),
+                ))
+            }
+        })
         .await
         .unwrap();
         assert_eq!(observed, 1);
@@ -30822,20 +31569,14 @@ mod tests {
         let before_failure_capture = state.capture().await.unwrap();
         let before_failure_rows = state.committed_table_rows("books").await.unwrap();
         let expected_failure_rows = before_failure_rows.clone();
-        let failure = run_table_activation(
-            &state,
-            lease,
-            &["books"],
-            &NoFault,
-            |snapshot| {
-                let rows = snapshot.table_rows().clone();
-                let expected_failure_rows = expected_failure_rows.clone();
-                async move {
-                    assert_eq!(rows["books"], expected_failure_rows);
-                    Err::<ActivationWork<()>, _>("evaluator rejected")
-                }
-            },
-        )
+        let failure = run_table_activation(&state, lease, &["books"], &NoFault, |snapshot| {
+            let rows = snapshot.table_rows().clone();
+            let expected_failure_rows = expected_failure_rows.clone();
+            async move {
+                assert_eq!(rows["books"], expected_failure_rows);
+                Err::<ActivationWork<()>, _>("evaluator rejected")
+            }
+        })
         .await;
         assert!(matches!(
             failure,
@@ -30854,29 +31595,20 @@ mod tests {
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let evaluated = std::cell::Cell::new(false);
-        let result = run_table_activation(
-            &state,
-            lease,
-            &[""],
-            &NoFault,
-            |_| {
-                evaluated.set(true);
-                async {
-                    Ok::<_, &'static str>(ActivationWork::new(
-                        Vec::new(),
-                        digest(31),
-                        (),
-                    ))
-                }
-            },
-        )
+        let result = run_table_activation(&state, lease, &[""], &NoFault, |_| {
+            evaluated.set(true);
+            async { Ok::<_, &'static str>(ActivationWork::new(Vec::new(), digest(31), ())) }
+        })
         .await;
         assert!(matches!(
             result,
             Err(ActivationError::Runtime(RuntimeError::InvalidTableMutation))
         ));
         assert!(!evaluated.get());
-        assert_eq!(state.capture().await.unwrap().generation(), &BigInt::from(0));
+        assert_eq!(
+            state.capture().await.unwrap().generation(),
+            &BigInt::from(0)
+        );
     }
 
     #[tokio::test]
@@ -31069,13 +31801,16 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].checkpoint.version, 1);
         assert_eq!(
-            first[0].checkpoint.committed.as_ref().unwrap().token.as_str(),
+            first[0]
+                .checkpoint
+                .committed
+                .as_ref()
+                .unwrap()
+                .token
+                .as_str(),
             "history-complete-next"
         );
-        assert_eq!(
-            first[0].transition,
-            StreamCheckpointTransition::Complete
-        );
+        assert_eq!(first[0].transition, StreamCheckpointTransition::Complete);
 
         let capture_after_table = state
             .commit(
@@ -31168,7 +31903,13 @@ mod tests {
             StreamCheckpointTransition::Skip
         );
         assert_eq!(
-            selected_current[1].checkpoint.committed.as_ref().unwrap().token.as_str(),
+            selected_current[1]
+                .checkpoint
+                .committed
+                .as_ref()
+                .unwrap()
+                .token
+                .as_str(),
             "history-skip-next"
         );
         assert_eq!(current, capture_after_table);
@@ -31183,10 +31924,7 @@ mod tests {
             .as_str()
             .to_owned();
         let snapshot = encode_capture(&selected_current[0].capture).unwrap();
-        let generation_digest = selected_current[0]
-            .capture
-            .generation_digest()
-            .to_vec();
+        let generation_digest = selected_current[0].capture.generation_digest().to_vec();
         state
             .connection
             .execute(
@@ -32936,7 +33674,6 @@ mod tests {
         }
     }
 
-
     struct CancellingTableHandler {
         calls: usize,
     }
@@ -33222,7 +33959,9 @@ mod tests {
 
         assert_eq!(
             result,
-            Err(StreamStepError::Runtime(RuntimeError::StreamIdentityMismatch))
+            Err(StreamStepError::Runtime(
+                RuntimeError::StreamIdentityMismatch
+            ))
         );
         assert_eq!(source.polls, 0);
         assert_eq!(handler.calls, 0);
@@ -33853,10 +34592,7 @@ mod tests {
         assert!(cancelled.arguments[0].redacted);
         assert_eq!(cancelled.arguments[0].value_digest, None);
 
-        let first_tail = reopened
-            .invocation_observation_tail(None, 2)
-            .await
-            .unwrap();
+        let first_tail = reopened.invocation_observation_tail(None, 2).await.unwrap();
         assert_eq!(first_tail.entries.len(), 2);
         assert!(first_tail.has_more);
         assert_eq!(
@@ -33879,10 +34615,12 @@ mod tests {
             second_tail.entries[1].status,
             InvocationObservationStatus::Cancelled
         );
-        assert!(second_tail
-            .entries
-            .windows(2)
-            .all(|pair| pair[0].sequence < pair[1].sequence));
+        assert!(
+            second_tail
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
         assert_eq!(
             reopened
                 .invocation_observation_tail(Some(cursor.clone()), 0)
@@ -33895,9 +34633,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            reopened
-                .invocation_observation_tail(Some(cursor), 2)
-                .await,
+            reopened.invocation_observation_tail(Some(cursor), 2).await,
             Err(RuntimeError::InvocationTailInvalid),
             "continuations cannot splice pages across CWD captures"
         );
@@ -33937,14 +34673,14 @@ mod tests {
             .await
             .unwrap();
 
-        let first = state
-            .invocation_observation_tail(None, 1)
-            .await
-            .unwrap();
+        let first = state.invocation_observation_tail(None, 1).await.unwrap();
         assert_eq!(first.entries.len(), 1);
         assert!(!first.has_more, "the page ends exactly at the current tail");
         assert_eq!(first.entries[0].sequence, 1);
-        assert_eq!(first.entries[0].status, InvocationObservationStatus::Running);
+        assert_eq!(
+            first.entries[0].status,
+            InvocationObservationStatus::Running
+        );
         let cursor = first.next_cursor.expect("the page boundary is resumable");
 
         let empty = state
@@ -33955,8 +34691,8 @@ mod tests {
         assert!(!empty.has_more);
         assert_eq!(empty.next_cursor, Some(cursor.clone()));
 
-        let key = stream_delivery("tail-empty-poll-receipt", "tail-empty-poll-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("tail-empty-poll-receipt", "tail-empty-poll-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key,
@@ -34000,7 +34736,10 @@ mod tests {
         assert!(!later.has_more);
         assert_eq!(later.entries[0].sequence, 2);
         assert_eq!(later.entries[0].invocation_id, invocation_id);
-        assert_eq!(later.entries[0].status, InvocationObservationStatus::Succeeded);
+        assert_eq!(
+            later.entries[0].status,
+            InvocationObservationStatus::Succeeded
+        );
     }
 
     #[tokio::test]
@@ -34046,8 +34785,8 @@ mod tests {
         assert!(!end_page.has_more);
         let cursor = end_page.next_cursor.expect("tail end has a cursor");
 
-        let key = stream_delivery("tail-admission-reset", "tail-admission-reset-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("tail-admission-reset", "tail-admission-reset-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key,
@@ -34105,7 +34844,10 @@ mod tests {
         assert!(!admitted.has_more);
         assert_eq!(admitted.entries[0].sequence, 3);
         assert_eq!(admitted.entries[0].invocation_id, registration.id);
-        assert_eq!(admitted.entries[0].status, InvocationObservationStatus::Running);
+        assert_eq!(
+            admitted.entries[0].status,
+            InvocationObservationStatus::Running
+        );
 
         assert_eq!(
             state
@@ -34154,10 +34896,12 @@ mod tests {
             .unwrap();
         let first_page = state.invocation_observation_tail(None, 1).await.unwrap();
         assert_eq!(first_page.entries[0].sequence, 1);
-        let cursor = first_page.next_cursor.expect("end cursor after initial admission");
+        let cursor = first_page
+            .next_cursor
+            .expect("end cursor after initial admission");
 
-        let key = stream_delivery("shared-admission-receipt", "shared-admission-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("shared-admission-receipt", "shared-admission-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key,
@@ -34174,11 +34918,13 @@ mod tests {
             .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
             .await
             .unwrap();
-        assert!(state
-            .admin_invocation_receipt(shared_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            state
+                .admin_invocation_receipt(shared_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         let no_admin_tail = state
             .invocation_observation_tail(Some(cursor.clone()), 1)
             .await
@@ -34199,11 +34945,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(state
-            .admin_invocation_receipt(shared_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            state
+                .admin_invocation_receipt(shared_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             state
                 .invocation_observation(shared_id)
@@ -34221,7 +34969,10 @@ mod tests {
         assert!(!admission.has_more);
         assert_eq!(admission.entries[0].sequence, 2);
         assert_eq!(admission.entries[0].invocation_id, shared_id);
-        assert_eq!(admission.entries[0].status, InvocationObservationStatus::Running);
+        assert_eq!(
+            admission.entries[0].status,
+            InvocationObservationStatus::Running
+        );
 
         assert_eq!(
             state
@@ -34273,8 +35024,8 @@ mod tests {
         assert_eq!(admitted.entries[0].invocation_id, shared_id);
         let cursor = admitted.next_cursor.expect("admission has a tail cursor");
 
-        let key = stream_delivery("terminal-shared-receipt", "terminal-shared-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("terminal-shared-receipt", "terminal-shared-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key,
@@ -34291,11 +35042,13 @@ mod tests {
             .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
             .await
             .unwrap();
-        assert!(state
-            .admin_invocation_receipt(shared_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            state
+                .admin_invocation_receipt(shared_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         state
             .finish_invocation_observation(writer, shared_id, InvocationCompletion::Succeeded)
             .await
@@ -34303,11 +35056,13 @@ mod tests {
         drop(state);
 
         let reopened = open_state(&repo).await;
-        assert!(reopened
-            .admin_invocation_receipt(shared_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            reopened
+                .admin_invocation_receipt(shared_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         let retained = reopened
             .invocation_observation(shared_id)
             .await
@@ -34330,7 +35085,10 @@ mod tests {
         assert!(!terminal.has_more);
         assert_eq!(terminal.entries[0].sequence, 2);
         assert_eq!(terminal.entries[0].invocation_id, shared_id);
-        assert_eq!(terminal.entries[0].status, InvocationObservationStatus::Succeeded);
+        assert_eq!(
+            terminal.entries[0].status,
+            InvocationObservationStatus::Succeeded
+        );
         let whole_tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             whole_tail
@@ -34372,10 +35130,11 @@ mod tests {
             .unwrap();
         let admission = state.invocation_observation_tail(None, 1).await.unwrap();
         assert_eq!(admission.entries[0].sequence, 1);
-        let cursor = admission.next_cursor.expect("running admission has a cursor");
+        let cursor = admission
+            .next_cursor
+            .expect("running admission has a cursor");
 
-        let key = stream_delivery("orphan-shared-receipt", "orphan-shared-next")
-            .checkpoint_key();
+        let key = stream_delivery("orphan-shared-receipt", "orphan-shared-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key: key.clone(),
@@ -34405,7 +35164,10 @@ mod tests {
             Ok(receipt.clone())
         );
         assert_eq!(
-            reopened.orphan_abandoned_invocations(replacement).await.unwrap(),
+            reopened
+                .orphan_abandoned_invocations(replacement)
+                .await
+                .unwrap(),
             1
         );
         assert_eq!(
@@ -34415,11 +35177,13 @@ mod tests {
             Ok(receipt)
         );
 
-        assert!(reopened
-            .admin_invocation_receipt(shared_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            reopened
+                .admin_invocation_receipt(shared_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         let retained = reopened
             .invocation_observation(shared_id)
             .await
@@ -34435,7 +35199,10 @@ mod tests {
         assert!(!terminal.has_more);
         assert_eq!(terminal.entries[0].sequence, 2);
         assert_eq!(terminal.entries[0].invocation_id, shared_id);
-        assert_eq!(terminal.entries[0].status, InvocationObservationStatus::Orphaned);
+        assert_eq!(
+            terminal.entries[0].status,
+            InvocationObservationStatus::Orphaned
+        );
         let whole_tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             whole_tail
@@ -34503,7 +35270,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cancelled.status, InvocationObservationStatus::Cancelled);
-        assert_eq!(cancelled.failure_code.as_deref(), Some(diagnostic_code.as_str()));
+        assert_eq!(
+            cancelled.failure_code.as_deref(),
+            Some(diagnostic_code.as_str())
+        );
         assert_eq!(
             state
                 .finish_invocation_observation(
@@ -34526,18 +35296,23 @@ mod tests {
 
         let reopened = open_state(&repo).await;
         assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
-        assert!(reopened
-            .admin_invocation_receipt(shared_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            reopened
+                .admin_invocation_receipt(shared_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
         let retained = reopened
             .invocation_observation(shared_id)
             .await
             .unwrap()
             .expect("cancelled sys.Invocation remains tracked after reopen");
         assert_eq!(retained.status, InvocationObservationStatus::Cancelled);
-        assert_eq!(retained.failure_code.as_deref(), Some(diagnostic_code.as_str()));
+        assert_eq!(
+            retained.failure_code.as_deref(),
+            Some(diagnostic_code.as_str())
+        );
         assert_eq!(retained.idempotency_key_hash, Some(idempotency_hash));
         assert_eq!(
             reopened
@@ -34554,7 +35329,10 @@ mod tests {
         assert!(!terminal.has_more);
         assert_eq!(terminal.entries[0].sequence, 2);
         assert_eq!(terminal.entries[0].invocation_id, shared_id);
-        assert_eq!(terminal.entries[0].status, InvocationObservationStatus::Cancelled);
+        assert_eq!(
+            terminal.entries[0].status,
+            InvocationObservationStatus::Cancelled
+        );
         assert_eq!(
             terminal.entries[0].observation.failure_code.as_deref(),
             Some(diagnostic_code.as_str())
@@ -34611,7 +35389,10 @@ mod tests {
             .unwrap();
         assert_eq!(later_admission.entries.len(), 1);
         assert_eq!(later_admission.entries[0].sequence, 3);
-        assert_eq!(later_admission.entries[0].invocation_id, later_invocation_id);
+        assert_eq!(
+            later_admission.entries[0].invocation_id,
+            later_invocation_id
+        );
         assert_eq!(
             later_admission.entries[0].status,
             InvocationObservationStatus::Running
@@ -34649,10 +35430,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
-        assert_eq!(whole_tail.entries[0].status, InvocationObservationStatus::Running);
-        assert_eq!(whole_tail.entries[1].status, InvocationObservationStatus::Cancelled);
-        assert_eq!(whole_tail.entries[2].status, InvocationObservationStatus::Running);
-        assert_eq!(whole_tail.entries[3].status, InvocationObservationStatus::Succeeded);
+        assert_eq!(
+            whole_tail.entries[0].status,
+            InvocationObservationStatus::Running
+        );
+        assert_eq!(
+            whole_tail.entries[1].status,
+            InvocationObservationStatus::Cancelled
+        );
+        assert_eq!(
+            whole_tail.entries[2].status,
+            InvocationObservationStatus::Running
+        );
+        assert_eq!(
+            whole_tail.entries[3].status,
+            InvocationObservationStatus::Succeeded
+        );
     }
 
     #[tokio::test]
@@ -34735,7 +35528,10 @@ mod tests {
         assert_eq!(middle_page.entries.len(), 1);
         assert_eq!(middle_page.entries[0].sequence, 2);
         assert_eq!(middle_page.entries[0].invocation_id, earlier_invocations[1]);
-        assert!(middle_page.has_more, "new admission extends the partial tail");
+        assert!(
+            middle_page.has_more,
+            "new admission extends the partial tail"
+        );
         let middle_cursor = middle_page.next_cursor.expect("middle page has a cursor");
 
         let admission_page = state
@@ -34744,7 +35540,10 @@ mod tests {
             .unwrap();
         assert_eq!(admission_page.entries.len(), 1);
         assert_eq!(admission_page.entries[0].sequence, 3);
-        assert_eq!(admission_page.entries[0].invocation_id, admitted_invocation_id);
+        assert_eq!(
+            admission_page.entries[0].invocation_id,
+            admitted_invocation_id
+        );
         assert_eq!(
             admission_page.entries[0].status,
             InvocationObservationStatus::Running
@@ -34815,8 +35614,7 @@ mod tests {
             .next_cursor
             .expect("the tail-end page provides a continuation");
 
-        let key = stream_delivery("tail-cursor-reconcile", "tail-cursor-next")
-            .checkpoint_key();
+        let key = stream_delivery("tail-cursor-reconcile", "tail-cursor-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key,
@@ -34854,10 +35652,7 @@ mod tests {
             Err(RuntimeError::InvocationTailInvalid),
             "a receipt replay cannot make a prior CWD cursor valid again"
         );
-        let retained = state
-            .invocation_observation_tail(None, 4)
-            .await
-            .unwrap();
+        let retained = state.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             retained
                 .entries
@@ -34904,8 +35699,8 @@ mod tests {
         assert!(!end_page.has_more);
         let stale_cursor = end_page.next_cursor.expect("tail end has a cursor");
 
-        let key = stream_delivery("stale-tail-reset-chain", "stale-tail-reset-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("stale-tail-reset-chain", "stale-tail-reset-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let first_request = CheckpointResetRequest {
             key: key.clone(),
@@ -34920,11 +35715,7 @@ mod tests {
         };
         let first_receipt_id = id(112);
         let first_reset = state
-            .reset_checkpoint_with_invocation_id(
-                writer,
-                first_request.clone(),
-                first_receipt_id,
-            )
+            .reset_checkpoint_with_invocation_id(writer, first_request.clone(), first_receipt_id)
             .await
             .unwrap();
 
@@ -34943,21 +35734,13 @@ mod tests {
         };
         let second_receipt_id = id(115);
         let second_reset = state
-            .reset_checkpoint_with_invocation_id(
-                writer,
-                second_request.clone(),
-                second_receipt_id,
-            )
+            .reset_checkpoint_with_invocation_id(writer, second_request.clone(), second_receipt_id)
             .await
             .unwrap();
 
         assert_eq!(
             state
-                .reset_checkpoint_with_invocation_id(
-                    writer,
-                    first_request,
-                    first_receipt_id,
-                )
+                .reset_checkpoint_with_invocation_id(writer, first_request, first_receipt_id,)
                 .await,
             Ok(first_reset),
             "replaying the older receipt keeps its original result"
@@ -34965,11 +35748,7 @@ mod tests {
         assert_eq!(state.stream_checkpoint(&key).await.unwrap(), second_reset);
         assert_eq!(
             state
-                .reset_checkpoint_with_invocation_id(
-                    writer,
-                    second_request,
-                    second_receipt_id,
-                )
+                .reset_checkpoint_with_invocation_id(writer, second_request, second_receipt_id,)
                 .await,
             Ok(second_reset),
             "replaying the newer receipt preserves the latest checkpoint"
@@ -34981,10 +35760,7 @@ mod tests {
             Err(RuntimeError::InvocationTailInvalid),
             "neither receipt replay revives a cursor from the old CWD capture"
         );
-        let tail = state
-            .invocation_observation_tail(None, 4)
-            .await
-            .unwrap();
+        let tail = state.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             tail.entries
                 .iter()
@@ -35079,17 +35855,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            state
-                .invocation_observation_tail(Some(cursor), 2)
-                .await,
+            state.invocation_observation_tail(Some(cursor), 2).await,
             Err(RuntimeError::InvocationTailInvalid),
             "only the committed CWD generation invalidates the cursor"
         );
         assert_eq!(state.stream_checkpoint(&key).await.unwrap(), receipt);
-        let tail = state
-            .invocation_observation_tail(None, 4)
-            .await
-            .unwrap();
+        let tail = state.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             tail.entries
                 .iter()
@@ -35130,8 +35901,8 @@ mod tests {
         assert!(!end_page.has_more);
         let cursor = end_page.next_cursor.expect("tail end has a cursor");
 
-        let key = stream_delivery("cursor-same-digest-reset", "cursor-same-digest-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("cursor-same-digest-reset", "cursor-same-digest-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key: key.clone(),
@@ -35176,16 +35947,11 @@ mod tests {
         );
         assert_eq!(state.stream_checkpoint(&key).await.unwrap(), receipt);
         assert_eq!(
-            state
-                .invocation_observation_tail(Some(cursor), 2)
-                .await,
+            state.invocation_observation_tail(Some(cursor), 2).await,
             Err(RuntimeError::InvocationTailInvalid),
             "cursor invalidation follows the committed generation even when the digest repeats"
         );
-        let tail = state
-            .invocation_observation_tail(None, 4)
-            .await
-            .unwrap();
+        let tail = state.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             tail.entries
                 .iter()
@@ -35227,8 +35993,8 @@ mod tests {
         assert!(!end_page.has_more);
         let stale_cursor = end_page.next_cursor.expect("tail end has a cursor");
 
-        let key = stream_delivery("generation-cursor-reopen", "generation-cursor-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("generation-cursor-reopen", "generation-cursor-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key: key.clone(),
@@ -35271,10 +36037,7 @@ mod tests {
             Err(RuntimeError::InvocationTailInvalid),
             "reopening preserves the committed generation mismatch"
         );
-        let current_tail = reopened
-            .invocation_observation_tail(None, 4)
-            .await
-            .unwrap();
+        let current_tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             current_tail
                 .entries
@@ -35284,7 +36047,9 @@ mod tests {
             vec![1, 2],
             "the lifecycle tail remains durable while its old generation cursor expires"
         );
-        let fresh_cursor = current_tail.next_cursor.expect("non-empty tail has a cursor");
+        let fresh_cursor = current_tail
+            .next_cursor
+            .expect("non-empty tail has a cursor");
         let empty = reopened
             .invocation_observation_tail(Some(fresh_cursor.clone()), 2)
             .await
@@ -35324,8 +36089,7 @@ mod tests {
         assert!(!end_page.has_more);
         let stale_cursor = end_page.next_cursor.expect("tail end has a cursor");
 
-        let key = stream_delivery("cursor-digest-aba", "cursor-digest-aba-next")
-            .checkpoint_key();
+        let key = stream_delivery("cursor-digest-aba", "cursor-digest-aba-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key: key.clone(),
@@ -35346,13 +36110,7 @@ mod tests {
         let initial = state.capture().await.unwrap();
         let initial_digest = initial.generation_digest();
         let intermediate = state
-            .commit(
-                writer,
-                &initial,
-                &mutation(154),
-                digest(155),
-                &NoFault,
-            )
+            .commit(writer, &initial, &mutation(154), digest(155), &NoFault)
             .await
             .unwrap();
         assert_ne!(intermediate.generation_digest(), initial_digest);
@@ -35382,10 +36140,7 @@ mod tests {
             Err(RuntimeError::InvocationTailInvalid),
             "restoring the old digest and reopening cannot revive the old generation cursor"
         );
-        let tail = reopened
-            .invocation_observation_tail(None, 4)
-            .await
-            .unwrap();
+        let tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             tail.entries
                 .iter()
@@ -35426,10 +36181,11 @@ mod tests {
             initial_page.entries[0].status,
             InvocationObservationStatus::Running
         );
-        let stale_cursor = initial_page.next_cursor.expect("running event has a cursor");
+        let stale_cursor = initial_page
+            .next_cursor
+            .expect("running event has a cursor");
 
-        let key = stream_delivery("stale-cursor-post-reopen", "stale-cursor-next")
-            .checkpoint_key();
+        let key = stream_delivery("stale-cursor-post-reopen", "stale-cursor-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key: key.clone(),
@@ -35465,7 +36221,10 @@ mod tests {
         assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
         let replacement = reopened.acquire_lease(replacement.owner_id).await.unwrap();
         assert_eq!(
-            reopened.orphan_abandoned_invocations(replacement).await.unwrap(),
+            reopened
+                .orphan_abandoned_invocations(replacement)
+                .await
+                .unwrap(),
             1
         );
         assert_eq!(
@@ -35475,10 +36234,7 @@ mod tests {
             Err(RuntimeError::InvocationTailInvalid),
             "a cursor from before commit cannot splice in a terminal event appended after reopen"
         );
-        let tail = reopened
-            .invocation_observation_tail(None, 4)
-            .await
-            .unwrap();
+        let tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(
             tail.entries
                 .iter()
@@ -35507,9 +36263,10 @@ mod tests {
         let procedure = materialize_echo_procedure(&state, writer).await;
         let first_invocation_id = id(181);
         let second_invocation_id = id(182);
-        for (invocation_id, session_id) in
-            [(first_invocation_id, id(183)), (second_invocation_id, id(184))]
-        {
+        for (invocation_id, session_id) in [
+            (first_invocation_id, id(183)),
+            (second_invocation_id, id(184)),
+        ] {
             state
                 .begin_invocation_observation(
                     writer,
@@ -35533,8 +36290,8 @@ mod tests {
         assert_eq!(first_page.entries[0].invocation_id, first_invocation_id);
         let cursor = first_page.next_cursor.expect("partial page has a cursor");
 
-        let key = stream_delivery("cursor-reset-reopen", "cursor-reset-reopen-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("cursor-reset-reopen", "cursor-reset-reopen-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let request = CheckpointResetRequest {
             key: key.clone(),
@@ -35571,7 +36328,10 @@ mod tests {
             Ok(receipt)
         );
         assert_eq!(
-            reopened.orphan_abandoned_invocations(replacement).await.unwrap(),
+            reopened
+                .orphan_abandoned_invocations(replacement)
+                .await
+                .unwrap(),
             2
         );
 
@@ -35671,17 +36431,19 @@ mod tests {
         assert_eq!(grandchild.owner, InvocationLaunchOwner::Parent(child_id));
         assert_eq!(
             state
-                .finish_invocation_observation(
-                    writer,
-                    parent_id,
-                    InvocationCompletion::Succeeded,
-                )
+                .finish_invocation_observation(writer, parent_id, InvocationCompletion::Succeeded,)
                 .await,
             Err(RuntimeError::InvocationChildrenActive)
         );
 
         let replacement = state.takeover_lease(writer, id(74)).await.unwrap();
-        assert_eq!(state.orphan_abandoned_invocations(replacement).await.unwrap(), 3);
+        assert_eq!(
+            state
+                .orphan_abandoned_invocations(replacement)
+                .await
+                .unwrap(),
+            3
+        );
         assert_eq!(
             state
                 .invocation_observation(parent.id)
@@ -35697,7 +36459,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(orphaned_child.status, InvocationObservationStatus::Orphaned);
-        assert_eq!(orphaned_child.failure_code.as_deref(), Some("sys.invoke.orphaned"));
+        assert_eq!(
+            orphaned_child.failure_code.as_deref(),
+            Some("sys.invoke.orphaned")
+        );
         assert!(!orphaned_child.live);
         assert_eq!(
             state
@@ -35709,10 +36474,7 @@ mod tests {
             InvocationObservationStatus::Orphaned
         );
 
-        let first_tail = state
-            .invocation_observation_tail(None, 8)
-            .await
-            .unwrap();
+        let first_tail = state.invocation_observation_tail(None, 8).await.unwrap();
         assert_eq!(first_tail.entries.len(), 6);
         assert_eq!(
             first_tail
@@ -35742,7 +36504,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![grandchild_id, child_id, parent_id]
         );
-        assert_eq!(state.orphan_abandoned_invocations(replacement).await.unwrap(), 0);
+        assert_eq!(
+            state
+                .orphan_abandoned_invocations(replacement)
+                .await
+                .unwrap(),
+            0
+        );
         assert_eq!(
             state
                 .invocation_observation_tail(None, 8)
@@ -35823,7 +36591,10 @@ mod tests {
             assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
             assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
             assert_eq!(failure.attempts, 1);
-            assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint_before);
+            assert_eq!(
+                state.stream_checkpoint(&key).await.unwrap(),
+                checkpoint_before
+            );
             failure
         };
 
@@ -35879,8 +36650,8 @@ mod tests {
     async fn stream_provider_receipt_survives_restart_after_later_commit_rejection() {
         assert!(orna_syntax_v1::parse_module(PROVIDER_EFFECT_FIXTURE).is_ok());
         let (_temp, repo) = repository();
-        let key = stream_delivery("provider-effect-receipt", "provider-effect-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("provider-effect-receipt", "provider-effect-next").checkpoint_key();
         let provider = Arc::new(MockIdempotentProvider::new(0));
         let failure = {
             let state = open_state(&repo).await;
@@ -35906,7 +36677,10 @@ mod tests {
             };
             assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
             assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
-            assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint_before);
+            assert_eq!(
+                state.stream_checkpoint(&key).await.unwrap(),
+                checkpoint_before
+            );
             failure
         };
 
@@ -36280,7 +37054,10 @@ mod tests {
             state.committed_table_row("books", &[42]).await.unwrap(),
             None
         );
-        assert_eq!(state.stream_failure_row_count_for_evidence().await.unwrap(), 1);
+        assert_eq!(
+            state.stream_failure_row_count_for_evidence().await.unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -38009,10 +38786,13 @@ mod tests {
             .await
             .unwrap()
             .expect("replayable result remains retained in its generic audit receipt");
-        assert_eq!(receipt.checkpoint_reset_result, Some(AdminCheckpointResetResult {
-            version: first_result.version,
-            committed_position: first_result.committed.unwrap(),
-        }));
+        assert_eq!(
+            receipt.checkpoint_reset_result,
+            Some(AdminCheckpointResetResult {
+                version: first_result.version,
+                committed_position: first_result.committed.unwrap(),
+            })
+        );
     }
 
     #[tokio::test]
@@ -38068,11 +38848,14 @@ mod tests {
             .await
             .unwrap();
         let replacement = state.takeover_lease(writer, id(74)).await.unwrap();
-        assert_eq!(state.orphan_abandoned_invocations(replacement).await.unwrap(), 3);
-        let first_tail = state
-            .invocation_observation_tail(None, 4)
-            .await
-            .unwrap();
+        assert_eq!(
+            state
+                .orphan_abandoned_invocations(replacement)
+                .await
+                .unwrap(),
+            3
+        );
+        let first_tail = state.invocation_observation_tail(None, 4).await.unwrap();
         assert_eq!(first_tail.entries.len(), 4);
         assert!(first_tail.has_more);
         assert_eq!(
@@ -38097,8 +38880,7 @@ mod tests {
             .next_cursor
             .expect("partial lifecycle page provides a cursor");
 
-        let key = stream_delivery("receipt-tail-interplay", "receipt-tail-next")
-            .checkpoint_key();
+        let key = stream_delivery("receipt-tail-interplay", "receipt-tail-next").checkpoint_key();
         state.pause_stream(replacement, key.clone()).await.unwrap();
         let first_request = CheckpointResetRequest {
             key: key.clone(),
@@ -38113,11 +38895,7 @@ mod tests {
         };
         let first_reset_id = id(84);
         let first_reset = state
-            .reset_checkpoint_with_invocation_id(
-                replacement,
-                first_request.clone(),
-                first_reset_id,
-            )
+            .reset_checkpoint_with_invocation_id(replacement, first_request.clone(), first_reset_id)
             .await
             .unwrap();
         let second_request = CheckpointResetRequest {
@@ -38142,8 +38920,7 @@ mod tests {
         let reset_receipt_order = receipts_before_reopen
             .iter()
             .filter(|receipt| {
-                receipt.invocation_id == first_reset_id
-                    || receipt.invocation_id == second_reset_id
+                receipt.invocation_id == first_reset_id || receipt.invocation_id == second_reset_id
             })
             .map(|receipt| (receipt.invocation_id, receipt.sequence))
             .collect::<Vec<_>>();
@@ -38155,9 +38932,11 @@ mod tests {
             vec![first_reset_id, second_reset_id],
             "reset receipts retain their independent admission order"
         );
-        assert!(reset_receipt_order
-            .windows(2)
-            .all(|pair| pair[0].1 < pair[1].1));
+        assert!(
+            reset_receipt_order
+                .windows(2)
+                .all(|pair| pair[0].1 < pair[1].1)
+        );
         let reset_audits_before_reopen = state.checkpoint_reset_audits(&key).await.unwrap();
         assert_eq!(
             reset_audits_before_reopen
@@ -38221,35 +39000,26 @@ mod tests {
 
         assert_eq!(
             reopened
-                .reset_checkpoint_with_invocation_id(
-                    writer,
-                    first_request.clone(),
-                    first_reset_id,
-                )
+                .reset_checkpoint_with_invocation_id(writer, first_request.clone(), first_reset_id,)
                 .await,
             Ok(first_reset.clone()),
             "a replayed old reset receipt keeps its original result after a later reset"
         );
         assert_eq!(
             reopened
-                .reset_checkpoint_with_invocation_id(
-                    writer,
-                    second_request,
-                    second_reset_id,
-                )
+                .reset_checkpoint_with_invocation_id(writer, second_request, second_reset_id,)
                 .await,
             Ok(second_reset.clone())
         );
-        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), second_reset);
+        assert_eq!(
+            reopened.stream_checkpoint(&key).await.unwrap(),
+            second_reset
+        );
         let mut changed_request = first_request;
         changed_request.reason = "different request under the retained ID".into();
         assert_eq!(
             reopened
-                .reset_checkpoint_with_invocation_id(
-                    writer,
-                    changed_request,
-                    first_reset_id,
-                )
+                .reset_checkpoint_with_invocation_id(writer, changed_request, first_reset_id,)
                 .await,
             Err(RuntimeError::AdminInvocationConflict),
             "argument drift conflicts before changing either ordered journal"
@@ -38259,11 +39029,11 @@ mod tests {
             receipts_before_reopen,
             "replays and conflicts do not allocate new audit sequence entries"
         );
-        assert_eq!(reopened.orphan_abandoned_invocations(writer).await.unwrap(), 0);
-        let full_tail = reopened
-            .invocation_observation_tail(None, 8)
-            .await
-            .unwrap();
+        assert_eq!(
+            reopened.orphan_abandoned_invocations(writer).await.unwrap(),
+            0
+        );
+        let full_tail = reopened.invocation_observation_tail(None, 8).await.unwrap();
         assert_eq!(full_tail.entries.len(), 6);
         assert_eq!(
             full_tail
@@ -38304,8 +39074,8 @@ mod tests {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
-        let key = stream_delivery("conflicting-reset-receipt", "conflicting-reset-next")
-            .checkpoint_key();
+        let key =
+            stream_delivery("conflicting-reset-receipt", "conflicting-reset-next").checkpoint_key();
         state.pause_stream(writer, key.clone()).await.unwrap();
         let invocation_id = id(88);
         let request = CheckpointResetRequest {
@@ -48219,7 +48989,9 @@ mod tests {
         let key = checkpoint_snapshot_key(Some("tenant:west/17"));
         let writer = state.acquire_lease(id(222)).await.unwrap();
 
-        ensure_stream_checkpoint(&state.connection, &key).await.unwrap();
+        ensure_stream_checkpoint(&state.connection, &key)
+            .await
+            .unwrap();
         state
             .connection
             .execute(
@@ -48308,12 +49080,7 @@ mod tests {
         assert_eq!(staged.mutations(), mutations.as_slice());
         assert_eq!(staged.next_digest(), digest(8));
         assert!(matches!(
-            StagedTableActivation::from_source(
-                context,
-                Vec::new(),
-                digest(8),
-                Arc::new(NoFault),
-            ),
+            StagedTableActivation::from_source(context, Vec::new(), digest(8), Arc::new(NoFault),),
             Err(RuntimeError::EmptyMutationBatch)
         ));
     }
@@ -48334,7 +49101,10 @@ mod tests {
             Err(RuntimeError::EmptyMutationBatch)
         );
         assert_eq!(state.capture().await.unwrap(), before);
-        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), None);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            None
+        );
 
         // The refusal does not consume the context: a real batch still commits.
         state
@@ -48381,9 +49151,14 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(TableActivationError::Runtime(RuntimeError::EmptyMutationBatch))
+            Err(TableActivationError::Runtime(
+                RuntimeError::EmptyMutationBatch
+            ))
         ));
-        assert_eq!(validator.calls, 0, "validation must not run for an empty batch");
+        assert_eq!(
+            validator.calls, 0,
+            "validation must not run for an empty batch"
+        );
         assert_eq!(state.capture().await.unwrap(), before);
     }
 }

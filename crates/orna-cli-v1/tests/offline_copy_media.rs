@@ -54,11 +54,14 @@ fn offline_copy_answers_metadata_queries_without_media_files() {
     assert_eq!(copy.history(), &history);
     assert!(copy.metadata(b"missing").is_none());
 
-    // Hydration is the only path that reads media, and it now fails cleanly.
-    assert!(matches!(
-        copy.hydrate(b"song"),
-        Err(OfflineCopyError::Io(_))
-    ));
+    // Hydration is the only path that reads media. A media file that the copy
+    // no longer holds is reported as a typed absent payload naming exactly
+    // which row and digest are missing, not a bare I/O failure.
+    let Err(OfflineCopyError::PayloadAbsent { key, sha256 }) = copy.hydrate(b"song") else {
+        panic!("an absent media file must be a typed absent-payload error");
+    };
+    assert_eq!(key, b"song");
+    assert_eq!(sha256, rows[1].sha256);
 }
 
 #[test]
