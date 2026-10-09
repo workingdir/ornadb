@@ -219,7 +219,14 @@ fn diff_refuses_an_endpoint_carried_by_more_than_one_ref() {
     let relation = "00000000000000000000000000000001";
     let refused = run_history(
         root,
-        &[relation, "--diff", "twin", "refs/heads/twin", "--format", "json"],
+        &[
+            relation,
+            "--diff",
+            "twin",
+            "refs/heads/twin",
+            "--format",
+            "json",
+        ],
     );
     assert_eq!(
         refused.status.code(),
