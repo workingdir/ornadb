@@ -3,6 +3,10 @@ pub table Note(id: Int) {
     assert every(row => row.text != "");
 }
 
+pub table Tag(id: Int) {
+    label: Str,
+}
+
 fn insert_note(key: Int, text: Str): Int {
     Note.insert({ id: key, text: text });
     key
@@ -17,10 +21,22 @@ fn read_note_text(key: Int): Str? {
     Note | where(row => row.id == key) | map(row => row.text) | first()
 }
 
+fn insert_tag(key: Int, label: Str): Int {
+    Tag.insert({ id: key, label: label });
+    key
+}
+
+fn read_one_note_with_tags(): Int {
+    let note = Note | where(row => row.id == 1) | first() ?? { id: 0, text: "" };
+    let tags = Tag | where(row => row.id == note.id) | map(row => row.label) | count();
+    tags
+}
+
 pub fn main(): Int {
     insert_note(1, "published");
     let second = insert_note(2, "unpublished tail");
     rename_note(1, "published edited");
+    insert_tag(1, "published tag");
     let _ = read_note_text(1);
-    second
+    second + read_one_note_with_tags()
 }
