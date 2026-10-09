@@ -20991,6 +20991,160 @@ mod tests {
         );
     }
 
+    /// One complete VFS row save candidate for `identity`, exactly as a caller's
+    /// admission callback must build it: the typed row replacement plus the
+    /// validator that carries the relation's schema authority (VFS-002).
+    async fn admit_vfs_save(
+        identity: RuntimeTableIdentity,
+        mutation_id: [u8; 16],
+        accepted: Vec<u8>,
+        coordinates: vfs::VfsSaveCoordinates,
+        bytes: Arc<[u8]>,
+    ) -> Result<vfs::VfsSaveCandidate, TableActivationError> {
+        let replacement = vfs::VfsTableRowReplacement::new(
+            mutation_id,
+            identity.clone(),
+            coordinates.key().to_vec(),
+            Some(bytes.to_vec()),
+        )
+        .map_err(TableActivationError::Runtime)?;
+        let mut table_object_ids = BTreeMap::new();
+        table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+        Ok(vfs::VfsSaveCandidate::new(
+            replacement,
+            Box::new(AcceptingRowValidator {
+                tables: vec![identity.table().to_owned()],
+                table_object_ids,
+                accepted,
+                calls: 0,
+            }),
+        ))
+    }
+
+    /// Gate E: two editors save one row from the same captured baseline. The
+    /// first save commits and stays committed; the second, whose baseline the
+    /// first save superseded, is refused with the typed stale-baseline
+    /// diagnostic, keeps its own bytes in its retained draft, and leaves the
+    /// accepted row and the durable generation exactly as the first save left
+    /// them (ORNA-VFS-008, VFS-009, VFS-011).
+    #[tokio::test]
+    async fn two_vfs_saves_from_one_stale_baseline_refuse_only_the_second() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let identity = RuntimeTableIdentity::new("books", TableObjectId::new(id(11))).unwrap();
+        let first_row = b"saved-a".to_vec();
+        let second_row = b"saved-b".to_vec();
+        let repository_cache = vfs::VfsRepositoryCache::new();
+        let target = repository_cache
+            .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
+                vfs::SnapshotPin::capture(Arc::new(3_u64)),
+                Arc::<[u8]>::from(b"draft".as_slice()),
+            )))
+            .await
+            .unwrap();
+        // The profile pairs the stale-edit cause with EAGAIN, so the host errno
+        // and the Orna cause a refusal reports are one story (VFS-011).
+        assert_eq!(vfs::VfsPathError::StaleBaseline.errno(), vfs::VFS_EAGAIN);
+        assert_eq!(
+            vfs::VfsPathError::StaleBaseline.failure_code(),
+            vfs::vfs_stale_failure_code(DiagnosticCode::StaleBaseline)
+        );
+
+        let save = || {
+            vfs::VfsDurableSave::new(
+                id(4),
+                activation_test_cwd_generation(0).clone(),
+                identity.clone(),
+                vec![1],
+            )
+        };
+        // Both editors open from the same captured baseline before either save
+        // lands, which is what makes the loser stale rather than a replay.
+        let first_draft = target.open_draft(1 << 20).await;
+        first_draft.truncate(0).await.unwrap();
+        first_draft.write_at(0, &first_row).await.unwrap();
+        let second_draft = target.open_draft(1 << 20).await;
+        second_draft.truncate(0).await.unwrap();
+        second_draft.write_at(0, &second_row).await.unwrap();
+
+        let first = target
+            .commit_durable_document_save(
+                &first_draft,
+                &state,
+                save(),
+                |coordinates, bytes| {
+                    admit_vfs_save(identity.clone(), id(7), first_row.clone(), coordinates, bytes)
+                },
+                &NoFault,
+            )
+            .await;
+        assert!(matches!(
+            first,
+            Ok(vfs::TemporaryRenameOutcome::Applied { generation: 1, .. })
+        ));
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(first_row.as_slice())
+        );
+
+        // The second editor's baseline is no longer the destination's image, so
+        // its save is a stale edit and the runtime is never asked to admit it.
+        let refusal = target
+            .commit_durable_document_save(
+                &second_draft,
+                &state,
+                save(),
+                |coordinates, bytes| {
+                    admit_vfs_save(identity.clone(), id(7), second_row.clone(), coordinates, bytes)
+                },
+                &NoFault,
+            )
+            .await;
+        let Err(vfs::VfsSaveError::Stale {
+            generation,
+            diagnostic,
+        }) = refusal
+        else {
+            panic!("a save from a superseded baseline must be refused as stale");
+        };
+        assert_eq!(generation, 1, "the refusal reports the generation it lost to");
+        assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
+        assert_eq!(diagnostic.class, DiagnosticClass::Transient);
+        assert_eq!(
+            vfs::vfs_stale_failure_code(diagnostic.code),
+            Some("sys.vfs.stale_edit")
+        );
+
+        // The refused save keeps its own bytes and diagnostic, and the first
+        // save's accepted row and durable generation are untouched.
+        let retained = second_draft
+            .retained_invalid_draft()
+            .await
+            .expect("the refused save retains its draft");
+        assert_eq!(retained.replacement_bytes(), second_row.as_slice());
+        assert_eq!(retained.diagnostic(), diagnostic);
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(first_row.as_slice()),
+            "the refused save leaves the first save's row in place"
+        );
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("the first save keeps its checkpoint")
+                .generation,
+            1,
+            "the refused save appends no checkpoint"
+        );
+        assert_eq!(
+            state.pending().await.unwrap().len(),
+            1,
+            "the refused save appends no durable mutation"
+        );
+    }
+
     fn recovery_pin_entry(
         repository_id: [u8; 32],
         content_sha256: [u8; 32],
