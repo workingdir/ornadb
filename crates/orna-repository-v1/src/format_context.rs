@@ -1156,9 +1156,13 @@ mod graph_bridge_tests {
         suffix: Option<&str>,
         repeat_field: bool,
     ) -> NativeOid {
-        // A relation must exist before capture resolves the relation map.
+        // A relation must exist before capture resolves the relation map. Seed
+        // it only once, so a second call publishes a plain successor commit
+        // instead of a commit that drops the earlier row.
         let seeding = context(directory);
-        install_overflow_row_store(directory, &seeding, relation_id, None);
+        if seeding.load_row_map(relation_id).is_err() {
+            install_overflow_row_store(directory, &seeding, relation_id, None);
+        }
 
         let writing = context(directory);
         let (schema_oid, schema_digest) = schema_node(directory, &writing);
