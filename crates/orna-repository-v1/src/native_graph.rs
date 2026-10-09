@@ -688,13 +688,10 @@ impl NativeGraphContext {
             let NodeData::OrderedLeaf { entries, .. } = &node else {
                 unreachable!("constructed ordered leaf")
             };
-            let max_key = entries
-                .last()
-                .map(|entry| {
-                    crate::row_store::TypedKey::decode_canonical(&entry.key)
-                        .map_err(|_| GraphError::NonCanonicalData)
-                })
-                .transpose()?;
+            // The candidate fence is the last entry's canonical key bytes: the
+            // branch entry stores them verbatim and readers decode them, so
+            // re-decoding here would only round-trip what the leaf already holds.
+            let max_key = entries.last().map_or_else(Vec::new, |entry| entry.key.clone());
             let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
             level.push(BranchCandidate {
                 max_key,
