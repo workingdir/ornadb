@@ -47,7 +47,7 @@ mod ui;
 mod unicode_16_case_properties;
 
 #[cfg(feature = "project-repl")]
-pub use admitted_repl::{AdmittedReplSession, RepositoryScope, ReplError};
+pub use admitted_repl::{AdmittedReplSession, ReplError, RepositoryScope};
 pub use cancellation::CancellationToken;
 use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
@@ -5866,27 +5866,30 @@ impl Context<'_, '_> {
         })
     }
 
-    fn call_sys_blob_annotate(
+    /// Dispatches one portable annotated-Blob call declared by the generated
+    /// typed registry.
+    ///
+    /// Parameter names, order, declared types, `null` defaults and the result
+    /// type all come from the generated contract, and the seam itself is
+    /// admitted only for operations bound to the generated Blob annotation
+    /// role, so a source-level `sys.blob.*` call cannot reach native code the
+    /// registry has not declared.
+    fn call_blob_annotation(
         &mut self,
+        operation: &str,
         arguments: &[orna_syntax_v1::Argument],
         input: Option<Value>,
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        const OPERATION: &str = "sys.blob.annotate";
-        let table = orna_sys_v1::system_dispatch_table();
-        let contract = table
-            .operation(OPERATION)
-            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
-        let parameters = &contract.signature.parameters;
-        if parameters.len() != 3
-            || parameters[0].name != "value"
-            || parameters[1].name != "media_type"
-            || parameters[2].name != "suffix"
-            || parameters[2].default.as_deref() != Some("null")
-        {
+        if !crate::sys_bindings::is_blob_annotation_operation(operation) {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
+        let table = orna_sys_v1::system_dispatch_table();
+        let contract = table
+            .operation(operation)
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        let parameters = &contract.signature.parameters;
 
         let mut supplied = (0..parameters.len()).map(|_| None).collect::<Vec<_>>();
         let has_input = input.is_some();
@@ -5927,63 +5930,52 @@ impl Context<'_, '_> {
                 }
             }
         }
-        let mut values = Vec::with_capacity(parameters.len());
+
+        let mut supplied_values = Vec::with_capacity(parameters.len());
         for (position, parameter) in parameters.iter().enumerate() {
             let value = match supplied[position].take() {
                 Some(value) => value,
                 None if parameter.default.as_deref() == Some("null") => Value::Null,
                 None => return Err(error("ORNA-EVAL-ARGUMENT")),
             };
-            values.push(value);
+            supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
         }
+        let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
+        Value::from_raw(annotated.raw(), self, 0)
+    }
 
-        let [Value::AnnotatedBlob(raw), Value::String(media_type), suffix] = values.as_slice()
-        else {
-            return Err(if matches!(values.first(), Some(Value::Blob(_))) {
-                error("ORNA-EVAL-UNSUPPORTED")
-            } else {
-                error("ORNA-EVAL-TYPE")
-            });
+    /// Converts one source-level argument into the registry-typed OVB-2 value
+    /// a portable Blob operation accepts.
+    ///
+    /// The declared type comes from the generated contract, so the conversion
+    /// cannot invent a shape the generated declaration does not allow. Bytes
+    /// without an OVB-2 annotation stay unsupported rather than being given a
+    /// lossy fallback annotation.
+    fn blob_annotation_argument(
+        value: Value,
+        declared: &orna_sys_v1::AbiType,
+    ) -> Result<ContextValue, EvaluationError> {
+        let optional = matches!(declared, orna_sys_v1::AbiType::Optional(_));
+        let expected = match declared {
+            orna_sys_v1::AbiType::Named(name) => name.as_str(),
+            orna_sys_v1::AbiType::Optional(inner) => match inner.as_ref() {
+                orna_sys_v1::AbiType::Named(name) => name.as_str(),
+                _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+            },
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         };
-        let suffix = match suffix {
-            Value::Null | Value::Option(None) => None,
-            Value::String(value) => Some(value.as_str()),
-            Value::Option(Some(value)) => match value.as_ref() {
-                Value::String(value) => Some(value.as_str()),
+        let raw = match (expected, value) {
+            ("Blob", Value::AnnotatedBlob(raw)) => raw,
+            ("Blob", Value::Blob(_)) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+            ("Str", Value::String(text)) => Raw::Text(text),
+            ("Str", Value::Null | Value::Option(None)) if optional => Raw::Null,
+            ("Str", Value::Option(Some(value))) if optional => match *value {
+                Value::String(text) => Raw::Text(text),
                 _ => return Err(error("ORNA-EVAL-TYPE")),
             },
             _ => return Err(error("ORNA-EVAL-TYPE")),
         };
-        let blob = ContextValue::new(ValueFormat::Ovb2, raw.clone())
-            .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-        let annotated = match blob.with_blob_annotation(media_type, suffix) {
-            Ok(value) => Ok(value),
-            Err(ValueError::InvalidMediaType) => {
-                Err(orna_sys_v1::FailureCode::new("sys.blob.invalid_media_type")
-                    .expect("registered MIME failure code is valid"))
-            }
-            Err(ValueError::InvalidSuffix) => {
-                Err(orna_sys_v1::FailureCode::new("sys.blob.invalid_suffix")
-                    .expect("registered MIME failure code is valid"))
-            }
-            Err(ValueError::IncompatibleSuffix) => Err(orna_sys_v1::FailureCode::new(
-                "sys.blob.incompatible_suffix",
-            )
-            .expect("registered MIME failure code is valid")),
-            Err(_) => return Err(error("ORNA-EVAL-VALUE")),
-        };
-        let result = table
-            .dispatch(OPERATION, |_| Ok(()), |_| annotated)
-            .map_err(|_| error("ORNA-EVAL-UNSUPPORTED"))?;
-        match result {
-            orna_sys_v1::SystemDispatchResult::Returned(value) => {
-                Ok(Value::AnnotatedBlob(value.into_raw()))
-            }
-            orna_sys_v1::SystemDispatchResult::Failed(code) => Err(EvaluationError::redacted(
-                SafeText::new(code.as_str().to_owned())
-                    .expect("generated system failure code is safe"),
-            )),
-        }
+        ContextValue::new(ValueFormat::Ovb2, raw).map_err(|_| error("ORNA-EVAL-TYPE"))
     }
 
     fn call(
@@ -6199,16 +6191,31 @@ impl Context<'_, '_> {
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
         let source_function_name = function_name(callee);
-        let sys_blob_annotate_resolved = resolved_function.as_deref() == Some("sys.blob.annotate")
-            || (resolved_function.is_none()
-                && source_function_name.as_deref() == Some("sys.blob.annotate")
-                && !scope.0.contains_key("sys"));
-        if sys_blob_annotate_resolved
-            && orna_sys_v1::system_dispatch_table()
-                .operation("sys.blob.annotate")
+        // A portable Blob call is admitted only when the generated typed
+        // registry declares the operation. The resolved name wins when a
+        // declaration was reachable; an unresolved, unshadowed source-level
+        // `sys.blob.*` call is accepted so the generated declarations stay
+        // callable, and a resolved non-Blob function never falls through.
+        let declared = match resolved_function.as_deref() {
+            Some(name) if crate::sys_bindings::is_blob_annotation_operation(name) => {
+                Some(name.to_owned())
+            }
+            Some(_) => None,
+            None => source_function_name
+                .as_deref()
+                .filter(|name| {
+                    !scope.0.contains_key("sys")
+                        && crate::sys_bindings::is_blob_annotation_operation(name)
+                })
+                .map(str::to_owned),
+        }
+        .filter(|name| {
+            orna_sys_v1::system_dispatch_table()
+                .operation(name)
                 .is_some()
-        {
-            return self.call_sys_blob_annotate(arguments, input, scope, depth);
+        });
+        if let Some(operation) = declared {
+            return self.call_blob_annotation(&operation, arguments, input, scope, depth);
         }
         if let Some(operation_name) = resolved_function.as_deref()
             && let Some(operation) =
