@@ -11,8 +11,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    fs::File,
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -21,6 +22,8 @@ use super::{
     RequiredInternalRef, scrub_git_routing_environment, trim_output, valid_branch_name,
     valid_remote_name,
 };
+
+use native_graph::{sync_all_pack_files, sync_directory};
 
 const MAX_FETCH_REFS: usize = 4096;
 
@@ -281,6 +284,7 @@ pub enum FetchError {
     ObjectNotPromised,
     PromisorUnavailable,
     HydrationFailed,
+    FetchedObjectsNotDurable,
     PushFailed,
 }
 
@@ -303,6 +307,9 @@ impl fmt::Display for FetchError {
             Self::ObjectNotPromised => "Git object is not a proven promised object",
             Self::PromisorUnavailable => "no usable Git promisor remote is configured",
             Self::HydrationFailed => "Git promised-object hydration failed",
+            Self::FetchedObjectsNotDurable => {
+                "fetched objects could not be made durable before installing refs"
+            }
             Self::PushFailed => "Git push failed before the requested refs were published",
         })
     }
@@ -585,6 +592,7 @@ impl Repository {
             },
             &all_plans,
         )?;
+        sync_fetched_objects(self, &all_plans)?;
         install_refs(self, &all_plans)?;
 
         Ok(FetchReport {
@@ -1099,6 +1107,92 @@ fn verify_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<
     Ok(())
 }
 
+/// Resolves the object database the fetch just wrote into.
+fn git_objects_dir(repository: &Repository) -> Result<PathBuf, FetchError> {
+    let mut command = repository.observer_command();
+    scrub_git_routing_environment(&mut command);
+    let output = command
+        .args(["rev-parse", "--git-path", "objects"])
+        .output()
+        .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
+    if !output.status.success() {
+        return Err(FetchError::Repository(RepositoryError::GitOperationFailed));
+    }
+    let value = std::str::from_utf8(&output.stdout)
+        .map_err(|_| FetchError::Repository(RepositoryError::GitOperationFailed))?
+        .trim();
+    let path = Path::new(value);
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repository.worktree().join(path)
+    })
+}
+
+/// Makes the objects a fetch just wrote durable before any ref names them.
+///
+/// `git fetch` reports success with the new loose objects and packs still in
+/// the page cache. Installing refs first would let a crash publish a ref whose
+/// objects never reached the disk, so this barrier runs between verification
+/// and the ref CAS: every fetched object is fsynced, the pack set is fsynced
+/// when an object is not loose, and both the loose-object shards and the object
+/// directory are persisted so the names survive with the bytes.
+///
+/// A mirrored object database is refused rather than half-synced: when
+/// `objects/info/alternates` is non-empty the fetched closure may live outside
+/// this repository, and silently skipping those objects would turn an
+/// unverifiable fetch into a silent one.
+fn sync_fetched_objects(repository: &Repository, plans: &[RefPlan]) -> Result<(), FetchError> {
+    if plans.is_empty() {
+        return Ok(());
+    }
+    let mut objects = BTreeSet::new();
+    for plan in plans {
+        objects
+            .insert(NativeObjectId::new(plan.object_id.clone()).map_err(FetchError::Repository)?);
+    }
+    let objects_dir = git_objects_dir(repository)?;
+    let alternates = objects_dir.join("info").join("alternates");
+    match std::fs::symlink_metadata(&alternates) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() || metadata.len() != 0 {
+                return Err(FetchError::FetchedObjectsNotDurable);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(FetchError::FetchedObjectsNotDurable),
+    }
+    let mut needs_pack_sync = false;
+    for object_id in &objects {
+        let hex = object_id.as_str();
+        let shard = hex.get(..2).ok_or(FetchError::FetchedObjectsNotDurable)?;
+        let path = objects_dir
+            .join(shard)
+            .join(hex.get(2..).ok_or(FetchError::FetchedObjectsNotDurable)?);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(FetchError::FetchedObjectsNotDurable);
+                }
+                File::open(&path)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| FetchError::FetchedObjectsNotDurable)?;
+                sync_directory(path.parent().ok_or(FetchError::FetchedObjectsNotDurable)?)
+                    .map_err(|_| FetchError::FetchedObjectsNotDurable)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                needs_pack_sync = true;
+            }
+            Err(_) => return Err(FetchError::FetchedObjectsNotDurable),
+        }
+    }
+    if needs_pack_sync {
+        sync_all_pack_files(&objects_dir.join("pack"))
+            .map_err(|_| FetchError::FetchedObjectsNotDurable)?;
+    }
+    sync_directory(&objects_dir).map_err(|_| FetchError::FetchedObjectsNotDurable)
+}
+
 fn install_refs(repository: &Repository, plans: &[RefPlan]) -> Result<(), FetchError> {
     if plans.is_empty() {
         return Ok(());
@@ -1198,6 +1292,143 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// The durability barrier is ordered between object verification and the
+    /// ref CAS, and a barrier that cannot make the fetched closure durable must
+    /// leave the ref unpublished.
+    ///
+    /// A mirrored object database is the one shape the barrier refuses: the
+    /// fetched closure may live outside this repository, so claiming durability
+    /// for it would be a silent lie. The refusal also makes the ordering
+    /// observable. If the barrier ran after `install_refs`, the ref below would
+    /// already be installed when the barrier failed, and this test would see it.
+    #[test]
+    fn fetch_leaves_refs_unpublished_when_it_cannot_make_fetched_objects_durable() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        let remote = root.path().join("remote.git");
+        fs::create_dir(&local).unwrap();
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(&local, &["init", "-b", "main"]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("state.txt"), "durability barrier state\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "initial"]);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&local, &["push", "origin", "refs/heads/main"]);
+
+        let repository = Repository::discover(&local).unwrap();
+        let request =
+            FetchRequest::new("origin", [RequestedRef::branch("main").unwrap()], []).unwrap();
+        assert_eq!(
+            local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
+            None
+        );
+
+        // A non-empty alternates file marks a mirrored object database, which
+        // the barrier must refuse rather than half-sync.
+        let alternates = local
+            .join(".git")
+            .join("objects")
+            .join("info")
+            .join("alternates");
+        fs::create_dir_all(alternates.parent().unwrap()).unwrap();
+        fs::write(
+            &alternates,
+            format!("{}\n", remote.join("objects").display()),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            repository.fetch(&request),
+            Err(FetchError::FetchedObjectsNotDurable)
+        ));
+        assert_eq!(
+            local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
+            None,
+            "a failed durability barrier must not leave the ref published"
+        );
+    }
+
+    /// A real fetch arrives as a pack, so the barrier's pack-set path is the
+    /// one that runs on the normal fetch route. The fetched commit must be on
+    /// disk, and the ref that names it installed.
+    #[test]
+    fn fetch_installs_refs_for_objects_the_barrier_made_durable() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        let remote = root.path().join("remote.git");
+        fs::create_dir(&local).unwrap();
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(&local, &["init", "-b", "main"]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("state.txt"), "durable fetch payload\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "initial"]);
+        let head = git(&local, &["rev-parse", "HEAD"]);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&local, &["push", "origin", "refs/heads/main"]);
+
+        let repository = Repository::discover(&local).unwrap();
+        let request =
+            FetchRequest::new("origin", [RequestedRef::branch("main").unwrap()], []).unwrap();
+        repository.fetch(&request).unwrap();
+
+        assert_eq!(
+            local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
+            Some(head.clone())
+        );
+        // The commit the published ref names must physically exist in the local
+        // object database the barrier synced: loose, or inside a pack set.
+        let objects = local.join(".git").join("objects");
+        let loose = objects.join(&head[..2]).join(&head[2..]);
+        let packed = fs::read_dir(objects.join("pack"))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.path().extension().is_some_and(|ext| ext == "idx"))
+            })
+            .unwrap_or(false);
+        assert!(
+            loose.is_file() || packed,
+            "fetched commit {head} is neither loose nor packed in the object database"
+        );
+    }
+
+    /// The barrier never claims durability for an object it cannot see: with no
+    /// loose copy and no pack set, the pass is rejected.
+    #[test]
+    fn durability_barrier_rejects_objects_it_cannot_find() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        fs::create_dir(&local).unwrap();
+        git(&local, &["init", "-b", "main"]);
+        let repository = Repository::discover(&local).unwrap();
+
+        let absent = "0123456789abcdef0123456789abcdef01234567".to_owned();
+        let plan = RefPlan {
+            source: "refs/heads/main".to_owned(),
+            destination: "refs/remotes/origin/main".to_owned(),
+            object_id: absent,
+            old: None,
+            kind: RefKind::Branch,
+            updated: true,
+        };
+        assert!(matches!(
+            sync_fetched_objects(&repository, &[plan]),
+            Err(FetchError::FetchedObjectsNotDurable)
+        ));
     }
 
     #[test]
