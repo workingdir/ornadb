@@ -8323,6 +8323,52 @@ fn resumed_legacy_migration_reports_the_recorded_successor_identity_without_rese
             .unwrap(),
         defaults
     );
+    // The stream/checkpoint inventory resumes the same way: the journal already
+    // carries it, so the resumed publisher re-admits what is recorded rather
+    // than re-deriving an identity. The returned record is the durable one.
+    assert_eq!(
+        resumed_journal
+            .resume_migration_continuity(continuity.clone())
+            .unwrap(),
+        continuity
+    );
+    // A substituted inventory cannot replace the recorded one: a publisher that
+    // re-keys the migrated stream is refused instead of resetting its identity.
+    let rekeyed = MigrationContinuityRecord::new(vec![
+        StreamCheckpointIdentityPredecessor::new(
+            legacy_consumer,
+            legacy_source.clone(),
+            legacy_partition.clone(),
+            [77; 32],
+            b"stream-rekeyed".to_vec(),
+            format3_partition.clone(),
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    assert!(matches!(
+        resumed_journal
+            .resume_migration_continuity(rekeyed)
+            .unwrap_err(),
+        RepositoryError::InvalidFormatMigration
+    ));
+    // The re-admitted inventory answers the migrated stream's successor, and it
+    // is still the one the resumed publisher captured before publication.
+    let resumed_continuity = resumed_journal.migration_continuity().unwrap();
+    assert_eq!(
+        resumed_continuity
+            .successor_for(legacy_consumer, &legacy_source, legacy_partition.as_deref())
+            .map(|(consumer, source, partition)| (
+                consumer,
+                source.to_vec(),
+                partition.map(<[u8]>::to_vec)
+            )),
+        Some((
+            format3_consumer,
+            format3_source.clone(),
+            format3_partition.clone()
+        ))
+    );
     let source_identity = resumed
         .successor_for(legacy_consumer, &legacy_source, legacy_partition.as_deref())
         .expect("the resumed stream keeps its successor identity");
@@ -8349,6 +8395,137 @@ fn resumed_legacy_migration_reports_the_recorded_successor_identity_without_rese
             .repository_format_number(),
         3
     );
+}
+
+#[test]
+fn interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer_identity() {
+    // Gate F resume: a migrated stream must survive a process interruption with
+    // its consumer/checkpoint identity intact. The journal crosses the failure
+    // at a durable stage, and recovery completes the migration from the record
+    // instead of re-keying the streams it already carried.
+    let format = include_str!("fixtures/format-context/format-1.orna");
+    let root = repository_with_legacy_format(format);
+    let repo = Repository::discover(root.path()).unwrap();
+    let old_head = repo.head().unwrap().unwrap();
+    let expected_index = repo.index_generation().unwrap();
+    let database = include_str!("fixtures/format-context/database-final.orna");
+    let store_root = b"verified candidate store root";
+    let candidate = repo
+        .build_private_commit(
+            &old_head,
+            &[
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/database.orna").unwrap(),
+                    Some(database.as_bytes().to_vec()),
+                ),
+                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/store/root").unwrap(),
+                    Some(store_root.to_vec()),
+                ),
+            ],
+            "interrupted format 3 migration",
+        )
+        .unwrap();
+    let journal_entries = vec![
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/database.orna").unwrap(),
+            None,
+            Some(database.as_bytes().to_vec()),
+        ),
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/format.orna").unwrap(),
+            Some(format.as_bytes().to_vec()),
+            None,
+        ),
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/store/root").unwrap(),
+            None,
+            Some(store_root.to_vec()),
+        ),
+    ];
+    let legacy_consumer = [81; 32];
+    let legacy_source = b"ledger".to_vec();
+    let format3_consumer = [82; 32];
+    let format3_source = b"stream-ledger".to_vec();
+    let continuity = MigrationContinuityRecord::new(vec![
+        StreamCheckpointIdentityPredecessor::new(
+            legacy_consumer,
+            legacy_source.clone(),
+            Some(b"shard-0".to_vec()),
+            format3_consumer,
+            format3_source.clone(),
+            Some(b"partition-0".to_vec()),
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    let intent = [91; 16];
+    let mut journal = PublicationJournal::new_with_runtime_intent(
+        old_head.clone(),
+        candidate.commit().clone(),
+        expected_index.tree().unwrap().clone(),
+        intent,
+        journal_entries,
+    )
+    .unwrap()
+    .with_migration_continuity(continuity.clone())
+    .unwrap()
+    .with_migration_annotation_defaults(MigrationAnnotationDefaults::new(0).unwrap())
+    .unwrap();
+
+    // The migration reaches its durable stage, then the process dies before the
+    // embedder records runtime completion.
+    repo.publish_legacy_format_migration(&expected_index, &candidate, &mut journal)
+        .unwrap();
+    assert_eq!(journal.stage(), PublicationJournalStage::WorktreeReconciled);
+    assert_eq!(
+        repo.open_format_context()
+            .unwrap()
+            .repository_format_number(),
+        3
+    );
+
+    // A fresh process reopens the durable journal. It recovers the recorded
+    // stream identity rather than reconstructing it from the migrated rows.
+    let mut resumed = repo.read_publication_journal().unwrap().unwrap();
+    assert_eq!(resumed.runtime_intent_id(), Some(intent));
+    assert_eq!(resumed.migration_continuity(), Some(&continuity));
+    assert_eq!(
+        resumed.migration_continuity().unwrap().successor_for(
+            legacy_consumer,
+            &legacy_source,
+            Some(b"shard-0")
+        ),
+        Some((
+            format3_consumer,
+            format3_source.as_slice(),
+            Some(b"partition-0".as_slice())
+        )),
+        "recovery must not re-derive the successor identity"
+    );
+
+    // Completion still requires the runtime intent, which the resumed embedder
+    // holds; recovery refuses to finish it independently.
+    assert!(matches!(
+        repo.recover_publication().unwrap_err(),
+        RepositoryError::RuntimeCompletionRequired
+    ));
+    assert_eq!(
+        repo.read_publication_journal().unwrap().unwrap(),
+        resumed,
+        "a refused recovery leaves the durable record untouched"
+    );
+
+    // The resumed embedder completes the migration under its recorded identity.
+    repo.mark_runtime_complete(intent, &mut resumed).unwrap();
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap().unwrap(), candidate.commit().clone());
+    assert_eq!(
+        fs::read(root.path().join(".orna/database.orna")).unwrap(),
+        database.as_bytes()
+    );
+    assert!(!root.path().join(".orna/format.orna").exists());
 }
 
 #[test]
