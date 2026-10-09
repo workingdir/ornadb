@@ -19,6 +19,7 @@
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
+use crate::cli_row_key::key_candidates;
 use orna_repository_v1::{KeyRange, Repository, TypedKey};
 use orna_value_v1::BlobMetadataFilter;
 
@@ -464,33 +465,6 @@ fn render_bytes(bytes: &[u8]) -> String {
 /// The canonical keys one `--key` spelling names, in the order a lookup tries
 /// them: the text spelling, then the same spelling's own bytes, then the bytes
 /// a `0x` hex spelling names.
-fn key_candidates(value: &str) -> Result<Vec<TypedKey>, Diagnostic> {
-    let mut candidates = vec![
-        TypedKey::Text(value.to_owned()),
-        TypedKey::Bytes(value.as_bytes().to_vec()),
-    ];
-    if let Some(digits) = value.strip_prefix("0x") {
-        if digits.is_empty()
-            || !digits.len().is_multiple_of(2)
-            || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Err(query_error(
-                "--key is not a byte key",
-                format!("got {value:?}; a byte key is 0x followed by an even number of hex digits"),
-            ));
-        }
-        let bytes = digits
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                u8::from_str_radix(std::str::from_utf8(pair).expect("hex digits are ASCII"), 16)
-                    .expect("hexadecimal digits were checked above")
-            })
-            .collect();
-        candidates.push(TypedKey::Bytes(bytes));
-    }
-    Ok(candidates)
-}
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -530,8 +504,7 @@ fn query_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::{
-        key_candidates, parse_options, parse_relation_id, render_key, QueryFormat,
-        DEFAULT_QUERY_LIMIT,
+        parse_options, parse_relation_id, render_key, QueryFormat, DEFAULT_QUERY_LIMIT,
     };
     use crate::Exit;
     use orna_repository_v1::TypedKey;
@@ -593,31 +566,6 @@ mod tests {
         assert_eq!(parsed.field, Some(0));
     }
 
-    #[test]
-    fn key_spelling_names_the_text_bytes_and_hex_candidates() {
-        // A listing prints a byte key that is UTF-8 as its text, so `--key`
-        // must find that row by the printed spelling as well as by its bytes.
-        assert_eq!(
-            key_candidates("song").unwrap(),
-            vec![
-                TypedKey::Text("song".to_owned()),
-                TypedKey::Bytes(b"song".to_vec()),
-            ]
-        );
-        assert_eq!(
-            key_candidates("0x736f6e67").unwrap(),
-            vec![
-                TypedKey::Text("0x736f6e67".to_owned()),
-                TypedKey::Bytes(b"0x736f6e67".to_vec()),
-                TypedKey::Bytes(b"song".to_vec()),
-            ]
-        );
-        // An odd digit count or a non-hex digit is not a byte key, and is
-        // refused rather than silently truncated into a different key.
-        assert!(key_candidates("0x736f6").is_err());
-        assert!(key_candidates("0xzz").is_err());
-        assert!(key_candidates("0x").is_err());
-    }
 
     #[test]
     fn rendered_keys_follow_the_spelling_the_row_carries() {

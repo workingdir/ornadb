@@ -3,6 +3,11 @@
 //! commit-graph walk. Only commit headers and tree listings are read; no blob
 //! payload is opened or hydrated.
 //!
+//! `<key>` is one canonical Orna key expression. A row committed from imported
+//! media is keyed by the bytes the capture was given, so the spelling a
+//! `orna query` listing printed resolves to that row here too, whether the
+//! caller spells it as text or as `0x`-prefixed hex.
+//!
 //! `orna history <relation-hex> --diff <a> <b>` reports what changed in one
 //! relation between two named commits instead. Both endpoints are pinned
 //! independently through the same repository-owned historical snapshot
@@ -230,9 +235,22 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let scope = graph
         .open_read_scope()
         .map_err(|error| history_error("Read scope could not be opened", format!("{error:?}")))?;
-    let row = graph
-        .lookup_row(&TypedKey::Text(key.to_owned()), &scope)
-        .map_err(|error| history_error("Row lookup failed", format!("{error:?}")))?
+    // The key is one canonical Orna key expression (ORNA-CLI-005), and the
+    // same spelling names both a text key and the bytes that spell it: a row
+    // committed from imported media is keyed by the bytes the capture was
+    // given, while a row written by hand may be keyed by canonical text. Both
+    // are bounded point reads of the committed row map, so the row that answers
+    // is a real committed row rather than a reinterpretation of the argument.
+    let mut row = None;
+    for candidate in cli_row_key::key_candidates(key)? {
+        row = graph
+            .lookup_row(&candidate, &scope)
+            .map_err(|error| history_error("Row lookup failed", format!("{error:?}")))?;
+        if row.is_some() {
+            break;
+        }
+    }
+    let row = row
         .ok_or_else(|| history_error("Row is not committed", format!("no row with key {key:?}")))?;
     // `--since` needs the walk far enough to reach its commit, so walk the
     // full bound and cut afterwards; otherwise walk only what is printed.
@@ -849,7 +867,7 @@ mod tests {
         assert_eq!(parsed.at, None);
         let flagged_arguments = words(&["--limit", "3", "0102", "--since", "abc", "song"]);
         let parsed = parse_options(&flagged_arguments).unwrap();
-        assert_eq!((parsed.relation, parsed.key), ("0102", "song"));
+        assert_eq!((parsed.relation, parsed.key), ("0102", Some("song")));
         assert_eq!((parsed.limit, parsed.since), (3, Some("abc")));
         assert_eq!(parsed.format, HistoryFormat::Human);
         let json = words(&["--format", "json", "0102", "song"]);
@@ -1014,7 +1032,7 @@ mod tests {
         assert_eq!(parsed.format, HistoryFormat::Json);
         assert_eq!(
             (parsed.limit, parsed.relation, parsed.key),
-            (2, "0102", "song")
+            (2, "0102", Some("song"))
         );
     }
 
