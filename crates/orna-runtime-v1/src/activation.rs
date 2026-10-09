@@ -2,8 +2,9 @@ use std::cell::RefCell;
 use std::future::Future;
 
 use super::{
-    CatalogueAdmission, FaultInjector, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, TableMutation, WriterLease, validate_mutation_identities,
+    CatalogueAdmission, FaultInjector, RunningTableRequestContinuation, RuntimeError, RuntimeState,
+    RuntimeTableActivationSnapshot, RuntimeTableIdentity, TableMutation, TerminalOutcome,
+    WriterLease, validate_mutation_identities,
 };
 
 tokio::task_local! {
@@ -227,6 +228,100 @@ where
     ACTIVE_ACTIVATION_STATES
         .scope(RefCell::new(active), async {
             run_table_activation_inner(state, lease, tables, faults, evaluator).await
+        })
+        .await
+}
+
+/// Runs one admitted table activation through the durable request boundary.
+///
+/// The relations are read by committed identity from the request's own
+/// admission capture and the staged rows, the request's terminal claim, and
+/// the checkpoint commit as one transaction (`ORNA-STATE-003`, `ORNA-ROW-001`).
+/// A staged write that disagrees with an admitted identity, or an admission
+/// that no longer matches the running request's capture, fails closed before
+/// any row, ledger record, or checkpoint becomes visible.
+///
+/// A catalogue-bearing activation is rejected here: a resolved source
+/// catalogue must commit through the validated catalogue request boundary so
+/// its predecessor and revision evidence are checked, not bypassed.
+pub async fn run_admitted_table_request_activation<T, E, F, Fut>(
+    state: &RuntimeState,
+    continuation: RunningTableRequestContinuation,
+    tables: &[RuntimeTableIdentity],
+    faults: &dyn FaultInjector,
+    outcome: TerminalOutcome,
+    evaluator: F,
+) -> Result<T, ActivationError<E>>
+where
+    F: FnOnce(&RuntimeTableActivationSnapshot) -> Fut,
+    Fut: Future<Output = Result<ActivationWork<T>, E>>,
+{
+    let state_id = std::ptr::from_ref(state) as usize;
+    let mut active = ACTIVE_ACTIVATION_STATES
+        .try_with(|states| states.borrow().clone())
+        .unwrap_or_default();
+    if active.contains(&state_id) {
+        return Err(ActivationError::Runtime(RuntimeError::AdminBusy));
+    }
+    active.push(state_id);
+
+    ACTIVE_ACTIVATION_STATES
+        .scope(RefCell::new(active), async {
+            // The activation must read the capture the running request was
+            // admitted under. A capture that already advanced is stale and is
+            // refused before the evaluator stages anything.
+            if state
+                .current_lease()
+                .await
+                .map_err(ActivationError::Runtime)?
+                != Some(continuation.writer_lease())
+            {
+                return Err(ActivationError::Runtime(RuntimeError::OwnerLost));
+            }
+            let snapshot = state
+                .begin_admitted_table_activation(tables)
+                .await
+                .map_err(ActivationError::Runtime)?;
+            if snapshot.context().capture() != continuation.context().capture() {
+                return Err(ActivationError::Runtime(RuntimeError::StaleCapture {
+                    current: Box::new(snapshot.context().capture().clone()),
+                }));
+            }
+            let work = evaluator(&snapshot)
+                .await
+                .map_err(ActivationError::Evaluator)?;
+            let ActivationWork {
+                mutations,
+                next_digest,
+                result,
+                catalogue_admission,
+            } = work;
+            // A resolved source catalogue must commit through the validated
+            // catalogue request boundary, which checks its predecessor capture
+            // and revision evidence. This runner would bypass that validation,
+            // so catalogue-bearing work is refused here rather than committed
+            // without it.
+            if catalogue_admission.is_some() {
+                return Err(ActivationError::Runtime(
+                    RuntimeError::InvalidTableMutation,
+                ));
+            }
+            validate_mutation_identities(&mutations, snapshot.table_object_ids())
+                .map_err(ActivationError::Runtime)?;
+            state
+                .commit_table_request_activation(
+                    continuation.writer_lease(),
+                    continuation.identity(),
+                    continuation.fingerprint(),
+                    snapshot.context(),
+                    &mutations,
+                    next_digest,
+                    outcome,
+                    faults,
+                )
+                .await
+                .map_err(ActivationError::Runtime)?;
+            Ok(result)
         })
         .await
 }
