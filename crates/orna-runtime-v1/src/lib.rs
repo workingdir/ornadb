@@ -20838,6 +20838,161 @@ mod tests {
         );
     }
 
+    /// ORNA-VFS-008/VFS-021: a VFS save whose durable commit succeeded but
+    /// whose acknowledgement was lost is not committed a second time. The
+    /// replay of the identical candidate publishes the accepted image and
+    /// leaves exactly one durable mutation and one checkpoint behind, so one
+    /// revision is never admitted twice.
+    #[tokio::test]
+    async fn replaying_an_already_durable_vfs_save_does_not_commit_twice() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(11));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let accepted_row = b"saved".to_vec();
+        let repository_cache = vfs::VfsRepositoryCache::new();
+        let target = repository_cache
+            .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
+                vfs::SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(b"draft".as_slice()),
+            )))
+            .await
+            .unwrap();
+        let durable_save = || {
+            vfs::VfsDurableSave::new(
+                id(4),
+                activation_test_cwd_generation(0).clone(),
+                identity.clone(),
+                vec![1],
+            )
+        };
+        // Both saves build the same candidate, so the second one is the replay
+        // of a save the relation already holds.
+        let admit = |accepted: Vec<u8>| {
+            move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| {
+                let identity = identity.clone();
+                let accepted = accepted.clone();
+                async move {
+                    let replacement = vfs::VfsTableRowReplacement::new(
+                        id(7),
+                        identity.clone(),
+                        coordinates.key().to_vec(),
+                        Some(bytes.to_vec()),
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    let mut table_object_ids = BTreeMap::new();
+                    table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                    Ok(vfs::VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(AcceptingRowValidator {
+                            tables: vec![identity.table().to_owned()],
+                            table_object_ids,
+                            accepted,
+                            calls: 0,
+                        }),
+                    ))
+                }
+            }
+        };
+
+        let first_draft = target.open_draft(1 << 20).await;
+        first_draft.truncate(0).await.unwrap();
+        first_draft.write_at(0, &accepted_row).await.unwrap();
+        let applied = target
+            .commit_durable_document_save(
+                &first_draft,
+                &state,
+                durable_save(),
+                admit(accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            vfs::TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("the save publishes its checkpoint")
+                .generation,
+            1
+        );
+
+        // The replay carries the same candidate bytes. The relation already
+        // holds them, so the accepted image is published again but no second
+        // mutation or checkpoint is appended.
+        let replay_draft = target.open_draft(1 << 20).await;
+        replay_draft.truncate(0).await.unwrap();
+        replay_draft.write_at(0, &accepted_row).await.unwrap();
+        let replayed = target
+            .commit_durable_document_save(
+                &replay_draft,
+                &state,
+                durable_save(),
+                admit(accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            replayed,
+            vfs::TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("the acknowledged save keeps its checkpoint")
+                .generation,
+            1,
+            "the replay must not advance the durable generation"
+        );
+        assert_eq!(
+            state.pending().await.unwrap().len(),
+            1,
+            "the replay must not append a second durable mutation"
+        );
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(accepted_row.as_slice()),
+            "the replay leaves the accepted row in place"
+        );
+
+        // A different candidate is a new revision, not a replay: it commits.
+        let changed_draft = target.open_draft(1 << 20).await;
+        changed_draft.truncate(0).await.unwrap();
+        changed_draft.write_at(0, b"changed").await.unwrap();
+        let changed = target
+            .commit_durable_document_save(
+                &changed_draft,
+                &state,
+                durable_save(),
+                admit(b"changed".to_vec()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            changed,
+            vfs::TemporaryRenameOutcome::Applied { generation: 3, .. }
+        ));
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("a changed candidate commits")
+                .generation,
+            2,
+            "a changed candidate is a new revision and does commit"
+        );
+    }
+
     fn recovery_pin_entry(
         repository_id: [u8; 32],
         content_sha256: [u8; 32],
