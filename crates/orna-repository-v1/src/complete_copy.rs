@@ -49,8 +49,11 @@ use std::{
     process::{Command, Stdio},
 };
 
-use sha1::Sha1;
-use sha2::{Digest, Sha256};
+// Two incompatible `digest` major versions are in the graph: `sha2` 0.11 uses
+// `digest` 0.11 while `sha1` 0.10 uses `digest` 0.10. Name each trait through
+// its own crate so both hashers implement the trait this module calls.
+use sha1::{Digest as Sha1Digest, Sha1};
+use sha2::{Digest as Sha2Digest, Sha256};
 
 use crate::{
     CommittedTreeEntryKind, GitCommitRef, Repository, scrub_git_routing_environment,
@@ -560,7 +563,7 @@ fn parse_gitmodules(text: &str) -> Result<Vec<(String, String)>, CompleteCopyErr
     let mut in_section = false;
     let mut path: Option<String> = None;
     let mut url: Option<String> = None;
-    let mut flush = |path: &mut Option<String>, url: &mut Option<String>, pairs: &mut Vec<_>| {
+    let flush = |path: &mut Option<String>, url: &mut Option<String>, pairs: &mut Vec<_>| {
         if let (Some(path), Some(url)) = (path.take(), url.take()) {
             pairs.push((path, url));
         }
@@ -766,23 +769,23 @@ enum ObjectHasher {
 impl ObjectHasher {
     fn update(&mut self, bytes: &[u8]) {
         match self {
-            Self::Sha1(hasher) => hasher.update(bytes),
-            Self::Sha256(hasher) => hasher.update(bytes),
+            Self::Sha1(hasher) => Sha1Digest::update(hasher, bytes),
+            Self::Sha256(hasher) => Sha2Digest::update(hasher, bytes),
         }
     }
 
     fn finalize(self) -> Vec<u8> {
         match self {
-            Self::Sha1(hasher) => hasher.finalize().to_vec(),
-            Self::Sha256(hasher) => hasher.finalize().to_vec(),
+            Self::Sha1(hasher) => Sha1Digest::finalize(hasher).to_vec(),
+            Self::Sha256(hasher) => Sha2Digest::finalize(hasher).to_vec(),
         }
     }
 }
 
 fn object_hasher(oid: &str) -> Result<ObjectHasher, CompleteCopyError> {
     match oid.len() {
-        40 => Ok(ObjectHasher::Sha1(Sha1::new())),
-        64 => Ok(ObjectHasher::Sha256(Sha256::new())),
+        40 => Ok(ObjectHasher::Sha1(<Sha1 as Sha1Digest>::new())),
+        64 => Ok(ObjectHasher::Sha256(<Sha256 as Sha2Digest>::new())),
         _ => Err(CompleteCopyError::InvalidArchive("object id length")),
     }
 }
