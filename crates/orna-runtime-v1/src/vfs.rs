@@ -646,6 +646,28 @@ impl<S> ManagedFile<S> {
         }
     }
 
+    /// Creates a private sibling backup from this destination's currently
+    /// accepted bytes. Backup saves preserve the old row image as scratch only:
+    /// fsyncing the backup persists the private file and never removes,
+    /// replaces, or admits the managed `data.orna` row. A later editor temp
+    /// rename must still pass through [`ManagedFile::rename_over`] and the
+    /// validated activation boundary.
+    pub async fn begin_temporary_backup(
+        self: &Arc<Self>,
+        max_file_bytes: usize,
+    ) -> TemporarySave<S> {
+        let baseline = Arc::clone(&self.state.lock().await.image);
+        TemporarySave {
+            target: Arc::clone(self),
+            baseline: Arc::clone(&baseline),
+            state: Mutex::new(TemporarySaveState {
+                draft: EditDraft::open(baseline, max_file_bytes),
+                synced_revision: None,
+                applied: None,
+            }),
+        }
+    }
+
     /// Applies a sibling temporary file over this managed destination. The
     /// temp must have been created from this exact entry; stale and rejected
     /// candidates keep their scratch bytes and leave this image untouched.
@@ -1795,7 +1817,10 @@ pub async fn commit_vfs_table_activation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex as TestMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     fn fixture_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/publication-repository-main.orna");
@@ -1861,6 +1886,61 @@ mod tests {
             row.lookup("~key-not-a-field.mp3"),
             Err(VfsPathError::UnknownRow)
         );
+    }
+
+    fn vfs_row_image() -> Arc<VfsFileSnapshot<u64>> {
+        let contents = include_str!("../tests/fixtures/vfs-row-music-london.orna");
+        Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::new(17)),
+            Arc::<[u8]>::from(contents.as_bytes()),
+        ))
+    }
+
+    struct ValidatedRowStore {
+        accepted: TestMutex<Vec<u8>>,
+        expected: Vec<u8>,
+        transactions: AtomicUsize,
+    }
+
+    impl ValidatedRowStore {
+        fn new(expected: &[u8]) -> Self {
+            Self {
+                accepted: TestMutex::new(expected.to_vec()),
+                expected: expected.to_vec(),
+                transactions: AtomicUsize::new(0),
+            }
+        }
+
+        fn accepted(&self) -> Vec<u8> {
+            self.accepted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn transaction_count(&self) -> usize {
+            self.transactions.load(Ordering::SeqCst)
+        }
+
+        async fn activate(
+            self: Arc<Self>,
+            candidate: ActivationCandidate<u64>,
+            accepted_snapshot: u64,
+        ) -> Result<ActivationDecision<u64>, ()> {
+            self.transactions.fetch_add(1, Ordering::SeqCst);
+            if candidate.replacement_bytes() == self.expected.as_slice() {
+                *self
+                    .accepted
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    candidate.replacement_bytes().to_vec();
+                Ok(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(accepted_snapshot),
+                )))
+            } else {
+                Ok(ActivationDecision::Rejected(rejected()))
+            }
+        }
     }
 
     #[tokio::test]
@@ -2142,6 +2222,196 @@ mod tests {
         draft.write_at(1, &[0x59]).await.unwrap();
         draft.release();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn vfs_editor_backup_temp_and_truncate_patterns_share_one_validated_transaction() {
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(vfs_row_image()).await.unwrap();
+        let row_text = include_str!("../tests/fixtures/vfs-row-music-london.orna").as_bytes();
+        let row_store = Arc::new(ValidatedRowStore::new(row_text));
+
+        // A backup file is private scratch seeded with the accepted row bytes.
+        // Fsyncing it persists only that scratch and cannot admit a row.
+        let backup = target.begin_temporary_backup(1 << 20).await;
+        assert_eq!(backup.candidate_bytes().await.as_ref(), row_text);
+        let backup_syncs = Arc::new(AtomicUsize::new(0));
+        let backup_syncs_by_route = Arc::clone(&backup_syncs);
+        let backup_revision = backup
+            .fsync_scratch_with(move |revision, bytes| {
+                backup_syncs_by_route.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(revision, 0);
+                    assert_eq!(bytes.as_ref(), row_text);
+                    Ok::<_, ()>(())
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(backup_revision, 0);
+        let backup_syncs_by_route = Arc::clone(&backup_syncs);
+        let repeated_backup_revision = backup
+            .fsync_scratch_with(move |_, _| {
+                backup_syncs_by_route.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ()>(()) }
+            })
+            .await
+            .unwrap();
+        assert_eq!(repeated_backup_revision, 0);
+        assert_eq!(backup_syncs.load(Ordering::SeqCst), 1);
+        assert_eq!(row_store.transaction_count(), 0);
+        assert_eq!(repository.generation().await, 0);
+
+        // A temp-file editor may fsync scratch first; only rename over the
+        // managed target crosses the validated row-store transaction boundary.
+        let save = target.begin_temporary_replacement(1 << 20).await;
+        save.write_at(0, row_text).await.unwrap();
+        let temp_syncs = Arc::new(AtomicUsize::new(0));
+        let temp_syncs_by_route = Arc::clone(&temp_syncs);
+        let temp_revision = save
+            .fsync_scratch_with(move |revision, bytes| {
+                temp_syncs_by_route.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(revision, 2);
+                    assert_eq!(bytes.as_ref(), row_text);
+                    Ok::<_, ()>(())
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(temp_revision, 2);
+        let temp_syncs_by_route = Arc::clone(&temp_syncs);
+        let repeated_temp_revision = save
+            .fsync_scratch_with(move |_, _| {
+                temp_syncs_by_route.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ()>(()) }
+            })
+            .await
+            .unwrap();
+        assert_eq!(repeated_temp_revision, 2);
+        assert_eq!(temp_syncs.load(Ordering::SeqCst), 1);
+        assert_eq!(row_store.transaction_count(), 0);
+
+        let row_store_for_rename = Arc::clone(&row_store);
+        let applied = target
+            .rename_over(&save, move |candidate| {
+                Arc::clone(&row_store_for_rename).activate(candidate, 18)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(row_store.transaction_count(), 1);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(repository.generation().await, 1);
+
+        let row_store_for_repeat = Arc::clone(&row_store);
+        let repeated = target
+            .rename_over(&save, move |candidate| {
+                Arc::clone(&row_store_for_repeat).activate(candidate, 19)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            repeated,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(row_store.transaction_count(), 1);
+
+        // In-place truncate+write is a distinct editor pattern, but it uses
+        // the same single validated activation boundary as temp rename.
+        let draft = target.open_draft(1 << 20).await;
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, row_text).await.unwrap();
+        let row_store_for_direct = Arc::clone(&row_store);
+        let direct = target
+            .commit_draft_with(&draft, move |candidate| {
+                Arc::clone(&row_store_for_direct).activate(candidate, 19)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            direct,
+            TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(row_store.transaction_count(), 2);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(repository.generation().await, 2);
+    }
+
+    #[tokio::test]
+    async fn vfs_rejected_editor_saves_keep_row_store_and_expose_typed_diagnostic() {
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(vfs_row_image()).await.unwrap();
+        let row_text = include_str!("../tests/fixtures/vfs-row-music-london.orna").as_bytes();
+        let invalid = &row_text[..row_text.len() / 2];
+        let row_store = Arc::new(ValidatedRowStore::new(row_text));
+
+        let save = target.begin_temporary_replacement(1 << 20).await;
+        save.write_at(0, invalid).await.unwrap();
+        let row_store_for_rename = Arc::clone(&row_store);
+        let rejected_rename = target
+            .rename_over(&save, move |candidate| {
+                Arc::clone(&row_store_for_rename).activate(candidate, 18)
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Rejected { diagnostic } = rejected_rename else {
+            panic!("invalid temp rename must be rejected");
+        };
+        assert_eq!(diagnostic, rejected());
+        assert_eq!(row_store.transaction_count(), 1);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(
+            target.open_read().await.read_at(0, row_text.len()),
+            row_text
+        );
+        let retained = save.retained_invalid_draft().await.unwrap();
+        assert_eq!(retained.replacement_bytes(), invalid);
+        assert_eq!(retained.diagnostic(), rejected());
+
+        let row_store_for_repeat = Arc::clone(&row_store);
+        let repeated = target
+            .rename_over(&save, move |candidate| {
+                Arc::clone(&row_store_for_repeat).activate(candidate, 19)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            repeated,
+            TemporaryRenameOutcome::Rejected {
+                diagnostic
+            } if diagnostic == rejected()
+        ));
+        assert_eq!(row_store.transaction_count(), 1);
+        assert_eq!(repository.generation().await, 0);
+
+        let draft = target.open_draft(1 << 20).await;
+        draft.truncate(0).await.unwrap();
+        draft.write_at(0, invalid).await.unwrap();
+        let row_store_for_direct = Arc::clone(&row_store);
+        let rejected_direct = target
+            .commit_draft_with(&draft, move |candidate| {
+                Arc::clone(&row_store_for_direct).activate(candidate, 20)
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Rejected { diagnostic } = rejected_direct else {
+            panic!("invalid direct write must be rejected");
+        };
+        assert_eq!(diagnostic, rejected());
+        assert_eq!(row_store.transaction_count(), 2);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(
+            target.open_read().await.read_at(0, row_text.len()),
+            row_text
+        );
+        let retained = draft.retained_invalid_draft().await.unwrap();
+        assert_eq!(retained.replacement_bytes(), invalid);
+        assert_eq!(retained.diagnostic(), rejected());
+        assert_eq!(repository.generation().await, 0);
     }
 
     #[tokio::test]
