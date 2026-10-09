@@ -60,6 +60,7 @@ pub(super) enum Command {
     },
     Serve { port: u16 },
     Diff(Vec<String>),
+    Log(Vec<String>),
     History(Vec<String>),
     Import(Vec<String>),
     Export(Vec<String>),
@@ -354,6 +355,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             }
             Command::Diff(arguments)
         }
+        Some("log") => Command::Log(words.by_ref().map(str::to_owned).collect()),
         Some("explain") => Command::Explain(
             words
                 .next()
@@ -575,6 +577,29 @@ mod tests {
             Command::Diff(vec![
                 "--no-color".into(),
                 "--exit-code".into(),
+                "--".into(),
+                "changed path.orna".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn parser_preserves_git_log_argument_boundaries_and_options() {
+        let parsed = parse_cli(&args(&[
+            "log",
+            "--oneline",
+            "-n",
+            "3",
+            "--",
+            "changed path.orna",
+        ]))
+        .expect("log arguments parse");
+        assert_eq!(
+            parsed.command,
+            Command::Log(vec![
+                "--oneline".into(),
+                "-n".into(),
+                "3".into(),
                 "--".into(),
                 "changed path.orna".into(),
             ])
