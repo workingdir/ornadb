@@ -414,7 +414,11 @@ fn pin_snapshot(
     directory: &str,
     selector: &str,
 ) -> Result<(String, RepositoryFormatContext), Diagnostic> {
-    if bare_ref_selector_is_ambiguous(directory, selector)? {
+    if bare_ref_selector_is_ambiguous(
+        directory,
+        selector,
+        "run `orna history <relation-hex> <key>` inside an initialized repository",
+    )? {
         return Err(Diagnostic::target_with_detail(
             "E2000",
             "Snapshot name is ambiguous",
