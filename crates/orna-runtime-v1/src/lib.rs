@@ -2237,6 +2237,11 @@ pub enum FaultPoint {
     AfterMutation,
     AfterCheckpoint,
     AfterCapture,
+    /// The writer transaction has already committed when the injector runs.
+    /// Only a whole-process abort here models a crash between durable commit
+    /// and the caller observing the result; an in-process `Err` would report
+    /// a rollback that did not happen.
+    AfterCommit,
     AfterFailureRecord,
     AfterFailurePayload,
     AfterReplayFailureRecord,
@@ -6255,6 +6260,7 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        faults.check(FaultPoint::AfterCommit)?;
         Ok(next)
     }
 
@@ -6472,6 +6478,9 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| TableActivationError::Runtime(RuntimeError::StorageUnavailable))?;
+        if let Err(error) = faults.check(FaultPoint::AfterCommit) {
+            return Err(TableActivationError::Runtime(error));
+        }
         Ok(next)
     }
 
@@ -6876,6 +6885,9 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        // The row, terminal claim and capture are already durable. A crash
+        // probe here must not report a rollback it did not perform.
+        faults.check(FaultPoint::AfterCommit)?;
         Ok(RequestActivationCommit {
             capture,
             request: RequestStatus {
@@ -9980,6 +9992,7 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        faults.check(FaultPoint::AfterCommit)?;
         Ok(next)
     }
 
@@ -19494,6 +19507,7 @@ fn legacy_controlled_rollback_proof(marker: [u8; 32], point: FaultPoint) -> [u8;
         FaultPoint::AfterReplayFailureRecord => 8,
         FaultPoint::BeforeTerminalClaim => 9,
         FaultPoint::AfterTerminalClaim => 10,
+        FaultPoint::AfterCommit => 11,
     }]);
     digest.finalize().into()
 }
