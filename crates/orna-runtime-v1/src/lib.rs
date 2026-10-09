@@ -55,7 +55,8 @@ use uuid::Uuid;
 
 mod activation;
 pub use activation::{
-    ActivationError, ActivationWork, run_admitted_table_activation, run_table_activation,
+    ActivationError, ActivationWork, run_admitted_table_activation,
+    run_admitted_table_request_activation, run_table_activation,
     with_activation_scope,
     with_terminal_admin_effect,
 };
@@ -7045,6 +7046,50 @@ impl RuntimeState {
             admin_audit_sequence,
             checkpoint_reset_audit_sequence,
         })
+    }
+
+    /// Selects the published `HEAD` pin for admitted relation reads.
+    ///
+    /// `HEAD` is the highest checkpoint generation whose publication completed
+    /// with a Git commit (`ORNA-STATE-001`). A frozen intent that never
+    /// completed, and every unpublished CWD generation after the last
+    /// completed publication, are excluded, so an admitted read of
+    /// `relation.as_of(HEAD)` never observes the unpublished tail
+    /// (`ORNA-STATE-003`).
+    ///
+    /// With no completed publication this fails closed rather than resolving
+    /// an empty baseline: an unpublished store has no `HEAD` to read.
+    pub async fn select_published_snapshot(&self) -> Result<HistoricalSnapshot, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT MAX(publication_freeze.checkpoint_generation) \
+                 FROM publication_freeze JOIN publication_commit \
+                 ON publication_commit.intent_id = publication_freeze.intent_id",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let published: Option<i64> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let generation = u64::try_from(published.ok_or(RuntimeError::SnapshotNotFound)?)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        self.select_historical_snapshot(generation).await
+    }
+
+    /// Reads one admitted relation at published `HEAD` by its committed
+    /// identity, so the rows match the live relation across a rename while the
+    /// unpublished tail stays invisible (`ORNA-STATE-003`).
+    pub async fn read_admitted_table_at_head(
+        &self,
+        identity: &RuntimeTableIdentity,
+    ) -> Result<HistoricalTableRows, RuntimeError> {
+        let snapshot = self.select_published_snapshot().await?;
+        self.read_admitted_table_at(&snapshot, identity).await
     }
 
     /// Resolves one already-pinned CWD snapshot descriptor to its retained
