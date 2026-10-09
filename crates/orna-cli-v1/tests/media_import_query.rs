@@ -124,6 +124,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         };
         let expression = import_expression(fixture, source.path());
         import_media(
+            &repository,
             &state,
             writer,
             &mut bindings,
