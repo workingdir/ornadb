@@ -6401,7 +6401,8 @@ impl Context<'_, '_> {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         let native_collection = native_binding.is_some_and(|binding| {
-            binding.kind == StandardBindingKind::Collection && binding.operation.starts_with("__")
+            binding.kind == StandardBindingKind::Collection
+                && (binding.operation.starts_with("__") || binding.operation == "map")
         });
         let native_asof_join = portable_collection_name(callee) == Some("asof_join")
             && !self.restrict_function_names
@@ -6417,8 +6418,9 @@ impl Context<'_, '_> {
         }
         // Portable collection/query exports and selected exact arithmetic
         // leaves are admitted by their captured source declarations. Public
-        // list functions execute their Orna bodies; private evaluator leaves
-        // retain bounded primitive access to captured values and callbacks.
+        // functions execute their Orna bodies; `map` and private leaves use
+        // bounded primitives so callbacks retain the evaluator's captured
+        // namespace and module-pin context.
         if !native_asof_join
             && !native_collection
             && root_stream_operation.is_none()
