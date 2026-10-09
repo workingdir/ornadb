@@ -23,7 +23,7 @@ use super::{
     valid_remote_name,
 };
 
-use native_graph::{sync_all_pack_files, sync_directory};
+use crate::native_graph::{sync_all_pack_files, sync_directory};
 
 const MAX_FETCH_REFS: usize = 4096;
 
