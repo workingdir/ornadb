@@ -3205,6 +3205,55 @@ fn accepted_content_ref(owner_id: &[u8; 16], pin_id: &[u8; 16]) -> String {
     )
 }
 
+/// Native hash algorithm for one hexadecimal object id, by its exact width.
+fn algorithm_for_hex(hex: &str) -> Option<GitHashAlgorithm> {
+    match hex.len() {
+        40 => Some(GitHashAlgorithm::Sha1),
+        64 => Some(GitHashAlgorithm::Sha256),
+        _ => None,
+    }
+}
+
+/// Reclaims the private pin refs of a runtime owner that exited without
+/// running its drop-time cleanup, for example under `SIGKILL`.
+///
+/// Capture, promotion and row-candidate preparation root their OGB-2 closure
+/// through `refs/orna/pins/<owner>/...` and release it from `Drop`. A killed
+/// owner never runs that cleanup, so those refs outlive the process and would
+/// pin objects forever. The surviving runtime owner lock records the departed
+/// identity, so a restart that re-acquires the lock for this worktree can
+/// reclaim exactly the departed owner's pin refs.
+///
+/// Only refs under the departed owner's own namespace are considered, and only
+/// when the name resolves to a native object id this repository can verify; an
+/// unresolvable ref is left in place rather than guessed at.
+pub fn reclaim_dead_owner_pin_refs(
+    repository: &crate::Repository,
+    dead_owner: [u8; 16],
+) -> Result<usize, GraphError> {
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    let prefix = format!("refs/orna/pins/{}/", hex_encode(&dead_owner));
+    let listing = owner.git_output(&["for-each-ref", "--format=%(refname)", &prefix])?;
+    let listing = String::from_utf8(listing).map_err(|_| GraphError::MalformedReferenceName)?;
+    let mut reclaimed = 0;
+    for name in listing.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let resolved = owner.git_output(&["rev-parse", "--verify", name])?;
+        let resolved =
+            String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
+        let resolved = resolved.trim();
+        let algorithm = algorithm_for_hex(resolved).ok_or(GraphError::MalformedReferenceName)?;
+        let oid = NativeOid::from_hex(algorithm, resolved)?;
+        owner.delete_protected_ref(name, &oid)?;
+        reclaimed += 1;
+    }
+    Ok(reclaimed)
+}
+
 fn resolve_git_path(worktree: &Path, output: &[u8]) -> Result<PathBuf, GraphError> {
     let value = std::str::from_utf8(output)
         .map_err(|_| GraphError::GitObjectMalformed)?
@@ -5384,7 +5433,16 @@ mod persisted_orp_tests {
 
     fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
         let directory = tempfile::tempdir().expect("create capture repository");
-        let root = directory.path();
+        let graph = capture_context_in(directory.path());
+        (directory, graph)
+    }
+
+    /// Builds the capture fixture context for a repository path, creating the
+    /// repository if it does not exist yet. Every fixture object is
+    /// content-addressed and the owner identity is fixed, so the same path
+    /// yields the same context in a killed child and in the restarting parent
+    /// that reclaims its pin namespace.
+    fn capture_context_in(root: &Path) -> NativeGraphContext {
         let init = Command::new("git")
             .current_dir(root)
             .args(["init", "--quiet", "--template="])
@@ -5460,7 +5518,7 @@ mod persisted_orp_tests {
             snapshot,
         )
         .expect("issue graph context after verifying fixture schema");
-        (directory, graph)
+        graph
     }
 
     fn fixture_ref_exists(directory: &Path, reference: &str) -> bool {
@@ -6097,6 +6155,143 @@ mod persisted_orp_tests {
         drop(candidate);
 
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    const KILLED_OWNER_ROOT: &str = "ORNA_DEAD_OWNER_CAPTURE_ROOT";
+    const KILLED_OWNER_TEST: &str =
+        "native_graph::persisted_orp_tests::restart_reclaims_pin_refs_of_a_killed_owner";
+
+    /// Captures and protects a real fixture, then kills this process without
+    /// unwinding, exactly as an operator `SIGKILL` does. The kernel releases
+    /// the owner lock and nothing runs the pin's drop-time cleanup.
+    fn killed_owner_child_body(root: &Path) {
+        let graph = capture_context_in(root);
+        let repository =
+            crate::Repository::discover(root).expect("discover killed-owner repository");
+        let _owner_lock = repository
+            .acquire_runtime_owner_lock(graph.owner_id)
+            .expect("killed owner acquires its lock");
+        let scope = graph.open_read_scope().expect("killed owner read scope");
+        let payload: &[u8] = include_bytes!("../tests/fixtures/pin-roundtrip.orna");
+        let candidate = graph
+            .capture_blob_candidate(payload, payload.len() as u64, &scope)
+            .expect("capture authorized fixture stream");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+        println!(
+            "{} {}",
+            hex_encode(&graph.owner_id),
+            pin.descriptor_oid.to_hex()
+        );
+        std::io::stdout().flush().expect("flush pin evidence");
+        let status = Command::new("kill")
+            .args(["-9", &std::process::id().to_string()])
+            .status()
+            .expect("raise SIGKILL on the owner");
+        unreachable!("the killed owner never returns ({status})");
+    }
+
+    /// Names every ref under one owner's private pin namespace.
+    fn pin_ref_names(directory: &Path, owner_hex: &str) -> Vec<String> {
+        let prefix = format!("refs/orna/pins/{owner_hex}/");
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(["for-each-ref", "--format=%(refname)", &prefix])
+            .output()
+            .expect("list pin refs");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .expect("ref listing is UTF-8")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A runtime owner killed between capture and row acceptance never runs its
+    /// drop-time ref cleanup: the kernel releases the owner lock, the pin refs
+    /// stay. Restart must reclaim exactly those refs, and only that owner's.
+    #[test]
+    fn restart_reclaims_pin_refs_of_a_killed_owner() {
+        if let Some(root) = std::env::var_os(KILLED_OWNER_ROOT) {
+            killed_owner_child_body(Path::new(&root));
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("create killed-owner repository");
+        let root = directory.path();
+        let child = Command::new(std::env::current_exe().expect("resolve test binary"))
+            .args([
+                "--exact",
+                KILLED_OWNER_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(KILLED_OWNER_ROOT, root.as_os_str())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn the killed owner");
+        let output = child.wait_with_output().expect("await the killed owner");
+        assert_eq!(
+            output.status.code(),
+            None,
+            "the owner must die by signal, not exit normally"
+        );
+
+        let evidence = String::from_utf8(output.stdout).expect("owner evidence is UTF-8");
+        let (owner_hex, descriptor_hex) = evidence
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                match (fields.next(), fields.next(), fields.next()) {
+                    (Some(owner), Some(descriptor), None)
+                        if owner.len() == 32 && descriptor.len() == 40 =>
+                    {
+                        Some((owner.to_owned(), descriptor.to_owned()))
+                    }
+                    _ => None,
+                }
+            })
+            .next()
+            .expect("the killed owner prints its pin evidence before dying");
+
+        assert!(
+            !pin_ref_names(root, &owner_hex).is_empty(),
+            "a killed owner must leave its pin refs behind, or this proof is vacuous"
+        );
+
+        // A sibling pin namespace must never be reclaimed by this takeover.
+        let foreign_owner = [0x99; 16];
+        let foreign_ref = accepted_content_ref(&foreign_owner, &[0x77; 16]);
+        let zero = "0".repeat(40);
+        let foreign_created = Command::new("git")
+            .current_dir(root)
+            .args(["update-ref", &foreign_ref, &descriptor_hex, &zero])
+            .status()
+            .expect("create foreign owner pin ref");
+        assert!(foreign_created.success());
+
+        let repository =
+            crate::Repository::discover(root).expect("discover killed-owner repository");
+        let second = repository
+            .acquire_runtime_owner_lock([0x42; 16])
+            .expect("takeover after the owner was killed");
+        assert_eq!(
+            second.previous_owner().map(|owner| hex_encode(&owner)),
+            Some(owner_hex.clone()),
+            "the takeover must observe the killed owner identity"
+        );
+        assert!(
+            pin_ref_names(root, &owner_hex).is_empty(),
+            "a killed owner's pin refs must not survive the next takeover"
+        );
+        assert_eq!(
+            pin_ref_names(root, &hex_encode(&foreign_owner)),
+            vec![foreign_ref],
+            "reclamation must stay inside the killed owner's pin namespace"
+        );
     }
 }
 
