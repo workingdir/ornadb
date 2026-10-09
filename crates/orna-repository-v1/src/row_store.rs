@@ -1336,7 +1336,7 @@ fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStor
     let CborValue::Array(fields) = payload.as_ref() else {
         return Err(RowStoreError::InvalidCanonicalRowValue);
     };
-    let [length, sha256, media_type, suffix, _descriptor] = fields.as_slice() else {
+    let [length, sha256, media_type, suffix, descriptor] = fields.as_slice() else {
         return Err(RowStoreError::InvalidCanonicalRowValue);
     };
     let length = match length {
@@ -1362,11 +1362,17 @@ fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStor
     let annotation = MimeRegistry::mime1()
         .canonical_annotation(media_type, suffix)
         .map_err(|_| RowStoreError::InvalidCanonicalRowValue)?;
+    let descriptor = match descriptor {
+        CborValue::Bytes(descriptor) => descriptor,
+        _ => return Err(RowStoreError::InvalidCanonicalRowValue),
+    };
     Ok(BlobMetadata::from_stored_reference(
         length,
         sha256,
         annotation.media_type(),
         annotation.suffix(),
+        Some(orna_value_v1::NativeOid::from_bytes(descriptor)
+            .map_err(|_| RowStoreError::InvalidCanonicalRowValue)?),
     ))
 }
 
