@@ -540,6 +540,9 @@ pub fn export_complete_copy_of(
     let dependencies = resolve_dependencies_of(repository, &exported, sources)?;
 
     fs::create_dir_all(destination)?;
+    // Every member bundle lives under `snapshots/`, so the directory must exist
+    // before the first `git bundle create` writes into it.
+    fs::create_dir_all(destination.join(SNAPSHOTS_DIR))?;
     for member in &exported {
         write_bundle(
             &source_root,
