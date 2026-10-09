@@ -6194,6 +6194,19 @@ impl Repository {
             ),
             _ => return Err(RepositoryError::LocalStateUnavailable),
         };
+        // A departed owner's private pin refs are reclaimed before this
+        // process records itself as the new owner. Reclamation happens before
+        // the identity is overwritten so a failed attempt leaves the departed
+        // owner recorded and retries on the next takeover. A retained
+        // publication journal remains the recovery authority for a candidate
+        // that may still be rooted through those refs, so reclamation waits
+        // until that recovery has cleared the journal.
+        if let Some(dead_owner) = previous_owner
+            && self.read_publication_journal_locked()?.is_none()
+        {
+            native_graph::reclaim_dead_owner_pin_refs(self, dead_owner)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        }
         file.set_len(0)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         file.seek(SeekFrom::Start(0))
