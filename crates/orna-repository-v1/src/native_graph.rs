@@ -688,13 +688,12 @@ impl NativeGraphContext {
             let NodeData::OrderedLeaf { entries, .. } = &node else {
                 unreachable!("constructed ordered leaf")
             };
-            let max_key = entries
-                .last()
-                .map(|entry| {
-                    crate::row_store::TypedKey::decode_canonical(&entry.key)
-                        .map_err(|_| GraphError::NonCanonicalData)
-                })
-                .transpose()?;
+            // The fence is the canonical encoding of the page's inclusive
+            // maximum key. `entry.key` is already that encoding, so it is kept
+            // as bytes: decoding it to a typed key and re-encoding it would be
+            // the same bytes, and the branch encoder and every fence comparison
+            // consume the canonical spelling rather than a typed key (ORP-1).
+            let max_key = entries.last().map_or(Vec::new(), |entry| entry.key.clone());
             let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
             level.push(BranchCandidate {
                 max_key,
@@ -7900,7 +7899,7 @@ fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData
         NodeKind::ByteIndex => {
             let height = bounded_height(unsigned(fields.get(2))?)?;
             let total_length = checked_length(unsigned(fields.get(3))?)?;
-            let entries = decode_byte_entries(fields.get(4), height, algorithm)?;
+            let entries = decode_byte_entries(fields.get(4), algorithm)?;
             Ok(NodeData::ByteIndex {
                 height,
                 total_length,
@@ -7943,7 +7942,6 @@ fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData
 
 fn decode_byte_entries(
     value: Option<&CborValue>,
-    height: u8,
     algorithm: GitHashAlgorithm,
 ) -> Result<Vec<ByteIndexEntry>, GraphError> {
     let entries = array_fields(value.cloned().ok_or(GraphError::NonCanonicalData)?)?
