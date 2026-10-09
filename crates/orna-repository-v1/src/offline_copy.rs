@@ -67,6 +67,7 @@ pub enum OfflineCopyError {
     PayloadMismatch { key: Vec<u8> },
     NotFound { key: Vec<u8> },
     NoPayload { key: Vec<u8> },
+    PayloadAbsent { key: Vec<u8>, sha256: [u8; 32] },
 }
 
 impl fmt::Display for OfflineCopyError {
@@ -81,6 +82,14 @@ impl fmt::Display for OfflineCopyError {
             Self::NotFound { key } => write!(formatter, "no offline row {}", hex(key)),
             Self::NoPayload { key } => {
                 write!(formatter, "offline row {} has no copied payload", hex(key))
+            }
+            Self::PayloadAbsent { key, sha256 } => {
+                write!(
+                    formatter,
+                    "payload {} for offline row {} is not present in the copy",
+                    hex(sha256),
+                    hex(key)
+                )
             }
         }
     }
@@ -314,7 +323,16 @@ impl OfflineCopy {
                 key: row.key.clone(),
             });
         }
-        let payload = fs::read(self.directory.join(MEDIA_DIR).join(hex(&row.sha256)))?;
+        let payload = match fs::read(self.directory.join(MEDIA_DIR).join(hex(&row.sha256))) {
+            Ok(payload) => payload,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(OfflineCopyError::PayloadAbsent {
+                    key: row.key.clone(),
+                    sha256: row.sha256,
+                });
+            }
+            Err(error) => return Err(OfflineCopyError::Io(error)),
+        };
         let probe = OfflineRow {
             key: row.key.clone(),
             media_type: row.media_type.clone(),

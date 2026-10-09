@@ -581,6 +581,216 @@ impl NativeGraphContext {
             .collect()
     }
 
+    /// Applies ordered mutations to the pinned primary ORP-1 root and returns
+    /// the new root together with the object accounting of the pass.
+    ///
+    /// Mutations apply in the canonical order: deletes, then rekeys (a delete
+    /// of the old key plus an insert of the new one), then inserts. Each
+    /// mutation is checked against the pinned root, so a delete of an absent
+    /// key or an insert of a present one is rejected instead of silently
+    /// changing the row set.
+    ///
+    /// The pass rebuilds the canonical complete ORP-1 pages for the domain.
+    /// The boundary rule is position-independent, so every page the mutation
+    /// did not touch keeps its previous object id and is reported as an index
+    /// object that was reused: `index_objects_created` counts the new index
+    /// nodes (the measured index churn) while `payload_objects_reused` counts
+    /// the stored value and Blob-descriptor objects the rewrite kept, which no
+    /// maintenance pass rewrites. The new root stays unreachable until the
+    /// caller names it from a row-map version or publication candidate.
+    pub fn maintain_row_index(
+        &self,
+        mutations: &[RowIndexMutation],
+        scope: &RepositoryReadScope,
+    ) -> Result<IndexMaintenance, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+        let root = version.primary_root().clone();
+        let domain = rows_domain_for_version(version);
+
+        let (previous_nodes, previous_payload, mut rows) = {
+            let mut objects = ObjectBudget::new(
+                scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
+                scope.max_objects,
+                Arc::clone(&scope.objects_used),
+                scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
+                Arc::clone(&scope.metadata_used),
+            );
+            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+            let root_node = read_node(&root)?;
+            validate_ordered_root_node(&root_node, &domain, expected_count)?;
+            let mut nodes = BTreeSet::new();
+            nodes.insert(root.clone());
+            let mut payload = BTreeSet::new();
+            collect_ordered_index_objects_with(
+                &mut read_node,
+                &root_node,
+                &domain,
+                None,
+                &mut nodes,
+                &mut payload,
+            )?;
+            let limit = usize::try_from(expected_count).unwrap_or(usize::MAX);
+            let mut raw = Vec::new();
+            collect_ordered_range_with(
+                &mut read_node,
+                root_node,
+                &domain,
+                None,
+                None,
+                None,
+                None,
+                limit,
+                &mut raw,
+            )?;
+            let mut rows = Vec::with_capacity(raw.len());
+            for entry in raw {
+                let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                let value = self.decode_persisted_row_value(entry.value, scope, &mut objects)?;
+                rows.push((key, value));
+            }
+            (nodes, payload, rows)
+        };
+
+        apply_row_index_mutations(&mut rows, mutations)?;
+        if rows.len() as u64 > MAX_SIGNED_LENGTH {
+            return Err(GraphError::InvalidCount(rows.len()));
+        }
+        let row_count = rows.len() as u64;
+
+        let entries: Vec<crate::row_store::RowEntry> = rows
+            .into_iter()
+            .map(|(key, value)| crate::row_store::RowEntry::new(key, value))
+            .collect();
+        let leaf_pages = crate::row_store::partition_pages(&entries, 0)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+
+        let mut written = BTreeSet::new();
+        let mut new_payload = BTreeSet::new();
+        let mut level: Vec<BranchCandidate> = Vec::new();
+        if leaf_pages.is_empty() {
+            // The empty table is one empty leaf, not zero pages.
+            let node = NodeData::OrderedLeaf {
+                domain: domain.clone(),
+                entries: Vec::new(),
+            };
+            let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+            level.push(BranchCandidate {
+                max_key: Vec::new(),
+                oid,
+                row_count: 0,
+            });
+        }
+        for page in &leaf_pages {
+            let mut page_entries = Vec::with_capacity(page.entries().len());
+            for entry in page.entries() {
+                page_entries.push(OrderedLeafEntry {
+                    key: entry
+                        .key()
+                        .canonical_bytes()
+                        .map_err(|_| GraphError::NonCanonicalData)?,
+                    value: entry
+                        .value()
+                        .canonical_page_bytes()
+                        .map_err(|_| GraphError::NonCanonicalData)?,
+                });
+            }
+            let node = NodeData::OrderedLeaf {
+                domain: domain.clone(),
+                entries: page_entries,
+            };
+            for dependency in node.dependencies()? {
+                new_payload.insert(dependency.oid);
+            }
+            let NodeData::OrderedLeaf { entries, .. } = &node else {
+                unreachable!("constructed ordered leaf")
+            };
+            // The fence is the canonical encoding of the page's inclusive
+            // maximum key. `entry.key` is already that encoding, so it is kept
+            // as bytes: decoding it to a typed key and re-encoding it would be
+            // the same bytes, and the branch encoder and every fence comparison
+            // consume the canonical spelling rather than a typed key (ORP-1).
+            let max_key = entries.last().map_or(Vec::new(), |entry| entry.key.clone());
+            let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+            level.push(BranchCandidate {
+                max_key,
+                oid,
+                row_count: entries.len() as u64,
+            });
+        }
+
+        let mut height = 1u8;
+        while level.len() > 1 {
+            if height > MAX_GRAPH_HEIGHT {
+                return Err(GraphError::HeightExceeded(height));
+            }
+            let groups = partition_branch_candidates(&domain, height, &level)?;
+            if groups.len() >= level.len() {
+                return Err(GraphError::FanoutExceeded(level.len()));
+            }
+            let mut next = Vec::with_capacity(groups.len());
+            for group in groups {
+                let node = NodeData::OrderedBranch {
+                    domain: domain.clone(),
+                    height,
+                    entries: group
+                        .iter()
+                        .map(|candidate| OrderedBranchEntry {
+                            inclusive_max_key: candidate.max_key.clone(),
+                            child: candidate.oid.clone(),
+                            row_count: candidate.row_count,
+                        })
+                        .collect(),
+                };
+                let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+                next.push(BranchCandidate {
+                    max_key: group
+                        .last()
+                        .ok_or(GraphError::InvalidCount(0))?
+                        .max_key
+                        .clone(),
+                    oid,
+                    row_count: group.iter().map(|candidate| candidate.row_count).sum(),
+                });
+            }
+            level = next;
+            height += 1;
+        }
+        let primary_root = level
+            .first()
+            .ok_or(GraphError::InvalidCount(0))?
+            .oid
+            .clone();
+        self.sync_object_closure(&written, scope)?;
+
+        let index_objects_created: Vec<NativeOid> = written
+            .iter()
+            .filter(|oid| !previous_nodes.contains(*oid))
+            .cloned()
+            .collect();
+        let index_objects_reused: Vec<NativeOid> = written
+            .iter()
+            .filter(|oid| previous_nodes.contains(*oid))
+            .cloned()
+            .collect();
+        let payload_objects_reused: Vec<NativeOid> = previous_payload
+            .iter()
+            .filter(|oid| new_payload.contains(*oid))
+            .cloned()
+            .collect();
+        Ok(IndexMaintenance {
+            previous_root: root,
+            primary_root,
+            row_count,
+            objects_written: written.into_iter().collect(),
+            index_objects_created,
+            index_objects_reused,
+            payload_objects_reused,
+        })
+    }
+
     /// Projects the payload-free Blob metadata of one admitted row field.
     ///
     /// This is the measured metadata-only read path a query over media rows
@@ -3532,6 +3742,82 @@ impl RowRevision {
     }
 }
 
+/// One pending ordered-map mutation for [`NativeGraphContext::maintain_row_index`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowIndexMutation {
+    /// Removes one logical key. The pinned root must hold it.
+    Delete {
+        key: crate::row_store::TypedKey,
+    },
+    /// Moves one logical key and its stored value to a new logical key. The
+    /// source must be present, the destination absent and the two distinct.
+    Rekey {
+        from: crate::row_store::TypedKey,
+        to: crate::row_store::TypedKey,
+    },
+    /// Inserts one logical key. The key must be absent from the pinned root.
+    Insert {
+        key: crate::row_store::TypedKey,
+        value: crate::row_store::RowValue,
+    },
+}
+
+/// The measured outcome of one ORP-1 index maintenance pass.
+///
+/// The object sets are disjoint by construction, so a caller can attribute new
+/// tree objects to the index rewrite and prove unchanged media was reused
+/// rather than rewritten: `index_objects_created` is the index churn the pass
+/// actually caused, `index_objects_reused` names the previous root's nodes the
+/// new root still reaches at the same object id, and `payload_objects_reused`
+/// counts the stored value/Blob-descriptor objects the rewrite kept.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexMaintenance {
+    previous_root: NativeOid,
+    primary_root: NativeOid,
+    row_count: u64,
+    objects_written: Vec<NativeOid>,
+    index_objects_created: Vec<NativeOid>,
+    index_objects_reused: Vec<NativeOid>,
+    payload_objects_reused: Vec<NativeOid>,
+}
+
+impl IndexMaintenance {
+    /// The pinned primary root this pass rewrote from.
+    pub fn previous_root(&self) -> &NativeOid {
+        &self.previous_root
+    }
+
+    /// The new primary root. It stays unreachable until a caller names it.
+    pub fn primary_root(&self) -> &NativeOid {
+        &self.primary_root
+    }
+
+    /// Logical rows the new root holds.
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    /// Every object this pass wrote, for the caller's durability barrier.
+    pub fn objects_written(&self) -> &[NativeOid] {
+        &self.objects_written
+    }
+
+    /// New index nodes: index churn, counted separately from media reuse.
+    pub fn index_objects_created(&self) -> &[NativeOid] {
+        &self.index_objects_created
+    }
+
+    /// Previous index nodes the new root still names unchanged.
+    pub fn index_objects_reused(&self) -> &[NativeOid] {
+        &self.index_objects_reused
+    }
+
+    /// Stored value/Blob-descriptor objects reused unchanged.
+    pub fn payload_objects_reused(&self) -> &[NativeOid] {
+        &self.payload_objects_reused
+    }
+}
+
 /// Upper bound on commits one revision walk may list.
 const MAX_REVISION_WALK: usize = 4096;
 
@@ -5265,6 +5551,213 @@ fn find_ordered_entry_with(
     }
 }
 
+/// One child of a branch level under construction: the exact fence and count
+/// its parent entry will name, plus the object its envelope was written as.
+struct BranchCandidate {
+    max_key: Vec<u8>,
+    oid: NativeOid,
+    row_count: u64,
+}
+
+/// Applies one maintenance pass in the canonical order: deletes, then rekeys,
+/// then inserts. Every mutation is checked against the row set the pinned root
+/// actually held, so an absent delete/rekey source or a colliding insert is
+/// rejected rather than silently changing which rows exist.
+fn apply_row_index_mutations(
+    rows: &mut Vec<(crate::row_store::TypedKey, crate::row_store::RowValue)>,
+    mutations: &[RowIndexMutation],
+) -> Result<(), GraphError> {
+    for mutation in mutations {
+        let RowIndexMutation::Delete { key } = mutation else {
+            continue;
+        };
+        let index = locate_row(rows, key)?.ok_or(GraphError::RowKeyAbsent)?;
+        rows.remove(index);
+    }
+    for mutation in mutations {
+        let RowIndexMutation::Rekey { from, to } = mutation else {
+            continue;
+        };
+        let index = locate_row(rows, from)?.ok_or(GraphError::RowKeyAbsent)?;
+        if locate_row(rows, to)?.is_some() {
+            return Err(GraphError::DuplicateRowKey);
+        }
+        let (_, value) = rows.remove(index);
+        let insertion = locate_insertion(rows, to);
+        rows.insert(insertion, (to.clone(), value));
+    }
+    for mutation in mutations {
+        let RowIndexMutation::Insert { key, value } = mutation else {
+            continue;
+        };
+        let insertion = locate_insertion(rows, key);
+        if rows
+            .get(insertion)
+            .is_some_and(|(existing, _)| existing == key)
+        {
+            return Err(GraphError::DuplicateRowKey);
+        }
+        rows.insert(insertion, (key.clone(), value.clone()));
+    }
+    Ok(())
+}
+
+fn locate_row(
+    rows: &[(crate::row_store::TypedKey, crate::row_store::RowValue)],
+    key: &crate::row_store::TypedKey,
+) -> Result<Option<usize>, GraphError> {
+    Ok(rows
+        .binary_search_by(|(existing, _)| existing.cmp(key))
+        .ok())
+}
+
+fn locate_insertion(
+    rows: &[(crate::row_store::TypedKey, crate::row_store::RowValue)],
+    key: &crate::row_store::TypedKey,
+) -> usize {
+    rows.binary_search_by(|(existing, _)| existing.cmp(key))
+        .unwrap_or_else(|index| index)
+}
+
+/// Groups branch children into canonical ORP-1 branch pages: accumulate until
+/// the next entry would exceed the 64 KiB node data bound, 256 entries or 256
+/// distinct native refs; close a group at an anchor once it holds at least 16
+/// entries, or at exactly 256; and emit the final short tail.
+fn partition_branch_candidates<'a>(
+    domain: &[u8],
+    height: u8,
+    candidates: &'a [BranchCandidate],
+) -> Result<Vec<&'a [BranchCandidate]>, GraphError> {
+    let mut groups = Vec::new();
+    let mut start = 0usize;
+    let mut size = 16usize + domain.len();
+    let mut refs = 0usize;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let entry_size = branch_entry_encoded_size(candidate)?;
+        if entry_size + 16 + domain.len() > NODE_DATA_LIMIT {
+            return Err(GraphError::NodeDataTooLarge(entry_size));
+        }
+        let held = index - start;
+        let would_overflow = held != 0
+            && (held == crate::row_store::MAX_PAGE_ENTRIES
+                || refs + 1 > MAX_REFS
+                || size + entry_size > NODE_DATA_LIMIT);
+        if would_overflow {
+            groups.push(&candidates[start..index]);
+            start = index;
+            size = 16 + domain.len();
+            refs = 0;
+        }
+        size += entry_size;
+        refs += 1;
+        let held = index - start + 1;
+        let anchor = ordered_token_anchor(height, &candidate.max_key)?;
+        if held >= crate::row_store::MIN_PAGE_ENTRIES
+            && (anchor || held == crate::row_store::MAX_PAGE_ENTRIES)
+        {
+            groups.push(&candidates[start..=index]);
+            start = index + 1;
+            size = 16 + domain.len();
+            refs = 0;
+        }
+    }
+    if start < candidates.len() {
+        groups.push(&candidates[start..]);
+    }
+    Ok(groups)
+}
+
+/// Conservative encoded size of one `[inclusive_max_key, child_oid, count]`
+/// entry: the entry array head is one byte, the child is a byte string header
+/// plus the native width, and the count is a shortest definite head.
+fn branch_entry_encoded_size(candidate: &BranchCandidate) -> Result<usize, GraphError> {
+    let oid = candidate.oid.as_bytes().len();
+    Ok(1 + 1 + candidate.max_key.len() + 1 + oid + cbor_unsigned_len(candidate.row_count))
+}
+
+const fn cbor_unsigned_len(value: u64) -> usize {
+    if value < 24 {
+        1
+    } else if value <= u8::MAX as u64 {
+        2
+    } else if value <= u16::MAX as u64 {
+        3
+    } else if value <= u32::MAX as u64 {
+        5
+    } else {
+        9
+    }
+}
+
+/// The ORP-1 anchor test over an arbitrary canonical token. A leaf token is the
+/// key's own canonical bytes, so this agrees with `row_store::boundary_anchor`;
+/// a branch token is the child's inclusive maximum key.
+fn ordered_token_anchor(height: u8, token: &[u8]) -> Result<bool, GraphError> {
+    let mut hasher = Sha256::new();
+    hasher.update(crate::row_store::ORP_DOMAIN);
+    hasher.update(u32::from(height).to_be_bytes());
+    hasher.update(token);
+    let digest = hasher.finalize();
+    Ok(digest[31] & ((1 << crate::row_store::ORP_ANCHOR_BITS) - 1) == 0)
+}
+
+/// Collects every node object of one ordered index (root, branches and leaves)
+/// plus every stored-value payload object its entries reference, so a
+/// maintenance pass can separate index churn from media reuse by object id.
+fn collect_ordered_index_objects_with(
+    read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
+    node: &NodeData,
+    expected_domain: &[u8],
+    expected_height: Option<u8>,
+    nodes: &mut BTreeSet<NativeOid>,
+    payload: &mut BTreeSet<NativeOid>,
+) -> Result<(), GraphError> {
+    match node {
+        NodeData::OrderedLeaf { domain, entries } => {
+            if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
+                return Err(GraphError::InvalidDomain);
+            }
+            for entry in entries {
+                for dependency in leaf_value_dependencies(domain, &entry.value)? {
+                    payload.insert(dependency.oid);
+                }
+            }
+            Ok(())
+        }
+        NodeData::OrderedBranch {
+            domain,
+            height,
+            entries,
+        } => {
+            if domain != expected_domain
+                || *height == 0
+                || expected_height.is_some_and(|expected| expected != *height)
+                || entries.is_empty()
+            {
+                return Err(GraphError::InvalidDomain);
+            }
+            for entry in entries {
+                if nodes.insert(entry.child.clone()) {
+                    let child = read_node(&entry.child)?;
+                    collect_ordered_index_objects_with(
+                        read_node,
+                        &child,
+                        expected_domain,
+                        Some(height - 1),
+                        nodes,
+                        payload,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        other => Err(GraphError::WrongNodeKind {
+            expected: NodeKind::OrderedLeaf,
+            actual: other.kind(),
+        }),
+    }
+}
+
 fn ordered_node_bounds_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     node: NodeData,
@@ -6477,6 +6970,8 @@ pub enum GraphError {
     InvalidRange,
     InvalidBlobAnnotation,
     DuplicateRowKey,
+    /// A delete or rekey named a logical key the pinned root does not hold.
+    RowKeyAbsent,
     CandidateRequiresBranchRewrite,
     ContextMismatch,
     InvalidReadScope,
@@ -6545,6 +7040,9 @@ impl fmt::Display for GraphError {
                 f.write_str("Blob MIME type or suffix is not canonical MIME-1")
             }
             Self::DuplicateRowKey => f.write_str("ORP row insertion key already exists"),
+            Self::RowKeyAbsent => {
+                f.write_str("ORP index maintenance names a key the pinned root does not hold")
+            }
             Self::CandidateRequiresBranchRewrite => {
                 f.write_str("ORP candidate requires a branch or page rewrite")
             }
@@ -7558,7 +8056,7 @@ fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData
         NodeKind::ByteIndex => {
             let height = bounded_height(unsigned(fields.get(2))?)?;
             let total_length = checked_length(unsigned(fields.get(3))?)?;
-            let entries = decode_byte_entries(fields.get(4), height, algorithm)?;
+            let entries = decode_byte_entries(fields.get(4), algorithm)?;
             Ok(NodeData::ByteIndex {
                 height,
                 total_length,
@@ -7601,7 +8099,6 @@ fn decode_node(value: CborValue, algorithm: GitHashAlgorithm) -> Result<NodeData
 
 fn decode_byte_entries(
     value: Option<&CborValue>,
-    height: u8,
     algorithm: GitHashAlgorithm,
 ) -> Result<Vec<ByteIndexEntry>, GraphError> {
     let entries = array_fields(value.cloned().ok_or(GraphError::NonCanonicalData)?)?
