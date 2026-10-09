@@ -10,6 +10,7 @@ mod cli_history;
 mod cli_query;
 mod cli_export;
 mod cli_import;
+mod cli_publish;
 mod cli_status;
 mod cli_serve;
 mod media_range;
