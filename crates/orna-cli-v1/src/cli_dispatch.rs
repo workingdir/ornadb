@@ -96,6 +96,14 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::Serve { port } => cli_serve::run(&parsed.endpoint, port),
+        Command::Mount {
+            ref mountpoint,
+            ref selector,
+        } => cli_mount::run_mount(&parsed.endpoint, mountpoint, selector),
+        Command::MountStatus { json } => cli_mount::run_mount_status(&parsed.endpoint, json),
+        Command::Unmount { ref mountpoint } => {
+            cli_mount::run_unmount(&parsed.endpoint, mountpoint)
+        }
         Command::Diff(ref arguments) => run_git_diff(arguments),
         Command::History(arguments) => cli_history::run(&parsed.endpoint, &arguments),
         Command::Import(ref arguments) => cli_import::run(arguments),
