@@ -13,13 +13,14 @@
 use std::path::{Path, PathBuf};
 
 use orna_repository_v1::complete_copy::{
-    CompleteCopyError, DependencySource, export_complete_copy, read_complete_copy_manifest,
+    export_complete_copy, read_complete_copy_manifest, CompleteCopyError, DependencySource,
 };
 use orna_repository_v1::Repository;
 
 use super::Diagnostic;
 
-const USAGE: &str = "usage: orna export <DEST> --at <SELECTOR> [--dependency PATH=DIR]... [--check]";
+const USAGE: &str =
+    "usage: orna export <DEST> --at <SELECTOR> [--dependency PATH=DIR]... [--check]";
 
 /// One parsed export request.
 #[derive(Debug, Eq, PartialEq)]
@@ -149,9 +150,7 @@ fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
     let title: &'static str = match error {
         CompleteCopyError::TargetNotEmpty => "Destination is not empty",
         CompleteCopyError::UnresolvedSnapshot => "--at did not resolve to a commit",
-        CompleteCopyError::NotAFormat3Snapshot => {
-            "Snapshot is not a format-3 repository snapshot"
-        }
+        CompleteCopyError::NotAFormat3Snapshot => "Snapshot is not a format-3 repository snapshot",
         CompleteCopyError::MissingDependencyOrigin { .. } => {
             "A pinned dependency has no recorded origin"
         }
@@ -208,6 +207,10 @@ mod tests {
     fn check_reports_an_absent_archive_without_a_repository() {
         // A read-only check must fail on the archive, not silently succeed.
         let missing = tempfile::tempdir().expect("create temporary directory");
-        assert!(run(missing.path(), &words(&["./absent", "--at", "main", "--check"])).is_err());
+        assert!(run(
+            missing.path(),
+            &words(&["./absent", "--at", "main", "--check"])
+        )
+        .is_err());
     }
 }
