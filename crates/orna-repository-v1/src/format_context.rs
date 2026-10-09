@@ -1292,29 +1292,29 @@ mod graph_bridge_tests {
         vec![0x81, 0x01]
     }
 
-    /// Writes one OGS-1 leaf envelope from `entries` bytes verbatim, bypassing
-    /// the writer's own canonical checks so a malformed fixture can reach the
-    /// object store the way a foreign repository would leave it.
+    /// Writes one ordered rows leaf whose declared entry count is `declared`,
+    /// bypassing the writer's own count check so a foreign repository's
+    /// miscounted page can reach the object store.
+    ///
+    /// `entries` is the canonical CBOR body a leaf carries: the array of
+    /// `[key, value]` pairs.
     fn raw_rows_leaf(
         directory: &Path,
         algorithm: GitHashAlgorithm,
         domain: &[u8],
         entries: &[u8],
-        entry_count: u64,
+        declared: u64,
     ) -> NativeOid {
         let mut data = Vec::new();
         data.push(0x84);
         data.push(0x01);
         data.push(0x01);
         cbor_bytes(&mut data, domain);
-        cbor_head(&mut data, 4, entry_count);
+        cbor_head(&mut data, 4, declared);
         data.extend_from_slice(entries);
         let data_oid = write_git_object(directory, algorithm, "blob", &data);
         let mut envelope = Vec::new();
-        cbor_head(&mut envelope, 2, 6);
-        envelope.extend_from_slice(b"100644");
-        envelope.extend_from_slice(b"data\0");
-        envelope.extend_from_slice(data_oid.as_bytes());
+        append_tree_entry(&mut envelope, "100644", "data", &data_oid);
         write_git_object(directory, algorithm, "tree", &envelope)
     }
 
@@ -1411,7 +1411,7 @@ mod graph_bridge_tests {
             .protect_captured_blob(candidate, &scope)
             .expect("protect the OGB-2 closure");
         let binding = graph
-            .accept_protected_blob_pin_with_annotation(pin, "audio/mpeg", Some("mp3"))
+            .accept_protected_blob_pin_with_annotation(pin, "audio/mpeg", None)
             .expect("accept the annotated Blob binding");
         let descriptor = binding.descriptor_oid().clone();
 
@@ -1539,6 +1539,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let mut entries = Vec::new();
+        cbor_head(&mut entries, 4, 257);
         for key in 1..=257u64 {
             entries.push(0x82);
             entries.extend_from_slice(&TypedKey::UInt(key).canonical_bytes().unwrap());
