@@ -127,7 +127,11 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     let diff: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
     // The image row is the difference; the song row is unchanged on both sides.
-    assert_eq!(diff["added"], serde_json::json!(1), "one row was added");
+    assert_eq!(
+        diff["added"],
+        serde_json::json!(1),
+        "one row was added: {diff}"
+    );
     assert_eq!(diff["changed"], serde_json::json!(0), "no row changed");
     assert_eq!(diff["removed"], serde_json::json!(0), "no row was removed");
     let changes = diff["changes"].as_array().unwrap();
