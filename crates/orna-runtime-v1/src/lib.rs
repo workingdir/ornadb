@@ -18425,23 +18425,15 @@ async fn apply_table_mutation_tx(
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
         }
         None => {
-            let mut rows = connection
-                .query(
-                    "SELECT 1 FROM table_row
-                     WHERE table_id = ?1 AND row_key = ?2
-                     LIMIT 1",
-                    params![storage_table.clone(), mutation.key.clone()],
-                )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            if rows
-                .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
-                .is_none()
-            {
-                return Err(RuntimeError::InvalidTableMutation);
-            }
+            // Rows are values; mutations are operations on tables
+            // (ORNA-MUT-001). A delete therefore records that the row is
+            // absent at this generation rather than asserting that it was
+            // present: deleting an already-absent row removes nothing and is a
+            // tolerated no-op here. The durable mutation, its pending evidence
+            // and the generation advance are recorded by the caller, so an
+            // `as_of` read observes exactly the delete this activation made.
+            // The language surface still rejects `T.delete` on a missing key
+            // before it reaches this boundary.
             connection
                 .execute(
                     "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
