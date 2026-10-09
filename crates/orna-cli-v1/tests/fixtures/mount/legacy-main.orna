@@ -1,0 +1,9 @@
+module main;
+
+// Ordinary Orna source committed beside the legacy format-1 metadata file.
+// The migration reader resolves this repository read-only, so the fixture is
+// intentionally minimal: it exists to be *present* in the attached snapshot,
+// not to be evaluated.
+fn marker() -> Int {
+    1
+}
