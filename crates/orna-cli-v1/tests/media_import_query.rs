@@ -565,6 +565,14 @@ fn run_history(directory: &Path, arguments: &[&str]) -> std::process::Output {
     run_orna_from(directory, &words)
 }
 
+/// Runs `orna query` with `arguments` as a child process inside the repository
+/// and returns its raw output, whatever the exit status.
+fn run_query(directory: &Path, arguments: &[&str]) -> std::process::Output {
+    let mut words = vec!["query"];
+    words.extend_from_slice(arguments);
+    run_orna_from(directory, &words)
+}
+
 /// Runs the built CLI from `cwd` with `words` as its whole argument list, so a
 /// test can choose the global `--db` endpoint and the process directory
 /// independently.
@@ -1346,6 +1354,148 @@ fn song_revisions_limited_to(
         })
         .expect("the song row is committed");
     graph.list_row_revisions(song, "HEAD", max_commits, &scope).unwrap()
+}
+
+/// QUERY: `orna query RELATION` answers the Blob metadata of committed media
+/// rows through the real CLI over the real graph, and the read seam it reports
+/// charges zero media payload bytes for the whole listing.
+#[tokio::test]
+async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    drop(bindings);
+    drop(state);
+
+    let relation = relation_hex(relation_id);
+    let output = run_query(directory.path(), &[&relation, "--format", "json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["media_payload_bytes_read"].as_u64(),
+        Some(0),
+        "a metadata listing must charge no media payload byte"
+    );
+    assert!(
+        report["native_objects_read"].as_u64().unwrap() > 0,
+        "the listing still walked committed graph objects, so the zero above is not vacuous"
+    );
+    let listings = report["listings"].as_array().unwrap();
+    assert_eq!(listings.len(), 2, "both committed rows carry one Blob field");
+
+    // Every committed payload is described without being fetched: the listed
+    // length and digest are the real file's, taken from the row itself.
+    let mut listed_length = 0_u64;
+    for (key, file) in [("image", "pixel.png"), ("song", "tone.wav")] {
+        let listing = listings
+            .iter()
+            .find(|listing| listing["key"] == key)
+            .unwrap_or_else(|| panic!("the {key} row is listed"));
+        let bytes = std::fs::read(Path::new(MEDIA_FIXTURES).join(file)).unwrap();
+        assert_eq!(listing["length"].as_u64(), Some(bytes.len() as u64));
+        assert_eq!(
+            listing["sha256"].as_str().unwrap(),
+            hex(Sha256::digest(&bytes).as_slice())
+        );
+        assert_eq!(
+            listing["hydrated"].as_bool(),
+            Some(false),
+            "{key}: listing must not hydrate"
+        );
+        assert_eq!(
+            listing["field"].as_u64(),
+            Some(0),
+            "{key}: the Blob is the row's one field"
+        );
+        listed_length += listing["length"].as_u64().unwrap();
+    }
+    let on_disk: u64 = ["tone.wav", "pixel.png"]
+        .iter()
+        .map(|file| std::fs::metadata(Path::new(MEDIA_FIXTURES).join(file)).unwrap().len())
+        .sum();
+    assert_eq!(
+        listed_length, on_disk,
+        "the listing describes every committed payload byte without reading one"
+    );
+
+    // The point read answers one named row with the metadata the listing gave.
+    let song_json = query_json(directory.path(), &[&relation, "--key", "song"]);
+    assert_eq!(song_json["listings"].as_array().unwrap().len(), 1);
+    assert_eq!(song_json["listings"][0]["media_type"], "audio/wav");
+    assert_eq!(
+        song_json["listings"][0]["sha256"],
+        listings.iter().find(|listing| listing["key"] == "song").unwrap()["sha256"]
+    );
+    assert_eq!(song_json["media_payload_bytes_read"], 0);
+
+    // `--field` names one tuple position, so a row whose Blob sits at field 0
+    // is not reported at a field it does not have.
+    let other_field = query_json(directory.path(), &[&relation, "--field", "1"]);
+    assert!(other_field["listings"].as_array().unwrap().is_empty());
+
+    // `--limit` bounds the listed window exactly as the graph range does.
+    let limited = query_json(directory.path(), &[&relation, "--limit", "1"]);
+    assert_eq!(limited["listings"].as_array().unwrap().len(), 1);
+
+    // The human listing states the same measurement on its summary line.
+    let human = run_query(directory.path(), &[&relation]);
+    assert_eq!(human.status.code(), Some(0));
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        text.contains("media payload bytes read: 0"),
+        "the human summary must report the payload it avoided: {text}"
+    );
+
+    // A key that is not committed is refused, not answered with an empty page.
+    let absent = run_query(directory.path(), &[&relation, "--key", "not-committed"]);
+    assert_eq!(absent.status.code(), Some(1));
+    assert!(absent.stdout.is_empty());
+    drop(directory);
+}
+
+/// Runs `orna query` and parses its `--format json` report.
+fn query_json(directory: &Path, arguments: &[&str]) -> serde_json::Value {
+    let mut words = arguments.to_vec();
+    words.extend_from_slice(&["--format", "json"]);
+    let output = run_query(directory, &words);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[tokio::test]
