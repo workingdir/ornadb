@@ -1,0 +1,6 @@
+{
+    title: "Live in London",
+    artist: "Kieran",
+    content: { path: "./content.mp3", media_type: "audio/mpeg" },
+    cover: null,
+}
