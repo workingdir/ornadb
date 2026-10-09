@@ -238,6 +238,12 @@ const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
 const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MIGRATION_IDENTITY_RECORDS: usize = 65_536;
 const MAX_MIGRATION_IDENTITY_COMPONENT_BYTES: usize = 1024 * 1024;
+const MAX_MIGRATION_ANNOTATION_DEFAULTS: usize = 1_000_000_000;
+
+/// The one canonical MIME-1 media type a legacy Blob row takes when its old
+/// annotation is not representable as a format-3 annotated value. UPGRADE-004
+/// fixes this default; a migration never chooses another one.
+pub const LEGACY_ANNOTATION_DEFAULT_MEDIA_TYPE: &str = "application/octet-stream";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PublicationMaterializationPhase {
@@ -595,6 +601,141 @@ impl MigrationContinuityRecord {
     }
 }
 
+/// The reported semantic annotation coordinate of one format-1/2 to format-3
+/// migration.
+///
+/// Legacy rows carry no MIME-1 annotation. Format 3 always annotates a Blob,
+/// so the migration assigns one and must say so: the raw bytes are preserved,
+/// but the annotated value identity of `entry_count` rows is not. UPGRADE-004
+/// fixes the assigned media type and forbids consulting payload bytes, so this
+/// record is a count of newly defaulted rows together with an explicit
+/// confirmation that no payload was read. Both are required for publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MigrationAnnotationDefaults {
+    entry_count: u32,
+    payload_inspected: bool,
+}
+
+impl MigrationAnnotationDefaults {
+    /// Reports `entry_count` legacy rows that take the fixed default
+    /// annotation during an explicit migration.
+    pub fn new(entry_count: u32) -> Result<Self, RepositoryError> {
+        if usize::try_from(entry_count).map_err(|_| RepositoryError::InvalidFormatMigration)?
+            > MAX_MIGRATION_ANNOTATION_DEFAULTS
+        {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        Ok(Self {
+            entry_count,
+            payload_inspected: false,
+        })
+    }
+
+    /// The number of legacy rows whose annotated value identity changes.
+    pub const fn entry_count(self) -> u32 {
+        self.entry_count
+    }
+
+    /// Whether the migration's defaults were derived from payload bytes.
+    /// A conforming migration derives them from metadata alone and reports
+    /// `false`; a `true` value is refused rather than reported.
+    pub const fn payload_inspected(self) -> bool {
+        self.payload_inspected
+    }
+
+    /// Derives the reported transition from the legacy rows the migration
+    /// actually decoded.
+    ///
+    /// A row recorded without an annotation takes the fixed UPGRADE-004
+    /// default and is counted as a changed annotated value identity. A row
+    /// whose recorded legacy annotation is not already a representable
+    /// canonical MIME-1 value fails the migration: ORNA-UPGRADE-010 forbids
+    /// silently downcasting an unsupported annotated value to bytes. No
+    /// payload byte is read here; the inventory is decoded metadata.
+    pub fn from_legacy_inventory(
+        legacy_rows: &[LegacyAnnotationCandidate],
+    ) -> Result<Self, RepositoryError> {
+        let mut entry_count = 0u32;
+        for row in legacy_rows {
+            match row.annotation_media_type() {
+                Some(media_type) => {
+                    orna_value_v1::MediaAnnotation::new(media_type, row.suffix())
+                        .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+                }
+                None => entry_count = entry_count.saturating_add(1),
+            }
+        }
+        Self::new(entry_count)
+    }
+
+    fn encode(self, bytes: &mut Vec<u8>) -> Result<(), RepositoryError> {
+        bytes.push(1); // annotation-defaults record version
+        put_u32(bytes, usize::try_from(self.entry_count).map_err(|_| RepositoryError::InvalidFormatMigration)?)?;
+        bytes.push(u8::from(self.payload_inspected));
+        if bytes.len() > MAX_JOURNAL_BYTES {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        Ok(())
+    }
+
+    fn decode(bytes: &[u8], cursor: &mut usize) -> Result<Self, RepositoryError> {
+        if take_byte(bytes, cursor)? != 1 {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        let entry_count = take_u32(bytes, cursor)?;
+        let payload_inspected = match take_byte(bytes, cursor)? {
+            0 => false,
+            1 => true,
+            _ => return Err(RepositoryError::InvalidPublicationJournal),
+        };
+        let defaults = Self::new(entry_count).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+        if payload_inspected != defaults.payload_inspected {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        Ok(defaults)
+    }
+}
+
+/// One legacy authoritative row's recorded annotation, as decoded from its
+/// original format-1/2 value profile. This is metadata only: payload bytes are
+/// never read to build it.
+///
+/// A legacy row that already carries a representable annotation keeps it and
+/// is not part of the transition; a row recorded without one takes the fixed
+/// UPGRADE-004 default during the migration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyAnnotationCandidate {
+    key: Vec<u8>,
+    annotation_media_type: Option<String>,
+    suffix: Option<String>,
+}
+
+impl LegacyAnnotationCandidate {
+    pub fn new(
+        key: Vec<u8>,
+        annotation_media_type: Option<String>,
+        suffix: Option<String>,
+    ) -> Self {
+        Self {
+            key,
+            annotation_media_type,
+            suffix,
+        }
+    }
+
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    pub fn annotation_media_type(&self) -> Option<&str> {
+        self.annotation_media_type.as_deref()
+    }
+
+    pub fn suffix(&self) -> Option<&str> {
+        self.suffix.as_deref()
+    }
+}
+
 fn validate_migration_identity_component(
     value: &[u8],
     nullable: bool,
@@ -656,6 +797,7 @@ pub struct PublicationJournal {
     runtime_intent_id: Option<[u8; 16]>,
     compact_manifest: Option<CompactManifestWitness>,
     migration_continuity: Option<MigrationContinuityRecord>,
+    migration_annotation_defaults: Option<MigrationAnnotationDefaults>,
     entries: Vec<PublicationJournalEntry>,
     stage: PublicationJournalStage,
     wire_version: u8,
@@ -718,6 +860,7 @@ impl PublicationJournal {
             runtime_intent_id: None,
             compact_manifest: None,
             migration_continuity: None,
+            migration_annotation_defaults: None,
             entries,
             stage: PublicationJournalStage::Prepared,
             wire_version: 5,
@@ -784,6 +927,70 @@ impl PublicationJournal {
         self.migration_continuity.as_ref()
     }
 
+    /// Binds the reported annotation-default transition to an explicit legacy
+    /// migration journal. A representable legacy annotation is carried
+    /// unchanged, so only the newly defaulted rows are reported; UPGRADE-005
+    /// requires that report to accompany preservation of the raw bytes.
+    ///
+    /// This promotes the journal to wire version 7 and requires the consumer
+    /// identity map to be present as well, because a migration that changes
+    /// annotated value identity cannot be published without both coordinates.
+    pub fn with_migration_annotation_defaults(
+        mut self,
+        defaults: MigrationAnnotationDefaults,
+    ) -> Result<Self, RepositoryError> {
+        if self.migration_annotation_defaults.is_some()
+            || self.compact_manifest.is_some()
+            || self.stage != PublicationJournalStage::Prepared
+            || self.migration_continuity.is_none()
+        {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        if defaults.payload_inspected() {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        self.migration_annotation_defaults = Some(defaults);
+        self.wire_version = 7;
+        self.binding_version = 7;
+        Ok(self)
+    }
+
+    /// Re-admits a prepared journal whose annotation-default coordinate was
+    /// already durably recorded, so a resumed publisher reports the same
+    /// semantic transition without re-deriving it.
+    ///
+    /// This is the resume counterpart of
+    /// [`Self::with_migration_annotation_defaults`]: only a wire-version-7
+    /// prepared legacy migration that already carries a non-inspecting
+    /// coordinate is admitted, and the coordinate must be supplied exactly as
+    /// it was persisted. It returns the record's own value so a caller cannot
+    /// substitute a second, unrecorded transition for the durable evidence.
+    pub fn resume_migration_annotation_defaults(
+        &self,
+        defaults: MigrationAnnotationDefaults,
+    ) -> Result<MigrationAnnotationDefaults, RepositoryError> {
+        let recorded = self
+            .migration_annotation_defaults
+            .ok_or(RepositoryError::InvalidFormatMigration)?;
+        if self.wire_version != 7
+            || self.binding_version != 7
+            || self.stage != PublicationJournalStage::Prepared
+            || self.compact_manifest.is_some()
+            || self.migration_continuity.is_none()
+            || defaults.payload_inspected()
+            || recorded != defaults
+        {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        Ok(recorded)
+    }
+
+    /// The reported annotation-default coordinate of this migration. `None`
+    /// means the caller has not declared one, and publication refuses.
+    pub const fn migration_annotation_defaults(&self) -> Option<MigrationAnnotationDefaults> {
+        self.migration_annotation_defaults
+    }
+
     pub const fn stage(&self) -> PublicationJournalStage {
         self.stage
     }
@@ -828,6 +1035,13 @@ impl PublicationJournal {
         } else if self.migration_continuity.is_some() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
+        if self.wire_version >= 7 {
+            self.migration_annotation_defaults
+                .ok_or(RepositoryError::InvalidPublicationJournal)?
+                .encode(&mut bytes)?;
+        } else if self.migration_annotation_defaults.is_some() {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
         bytes.push(self.stage.code());
         put_u32(&mut bytes, self.entries.len())?;
         for entry in &self.entries {
@@ -864,7 +1078,7 @@ impl PublicationJournal {
         }
         let mut cursor = JOURNAL_MAGIC.len();
         let version = take_byte(bytes, &mut cursor)?;
-        if version != 5 && version != 6 {
+        if version != 5 && version != 6 && version != 7 {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let old_head =
@@ -893,7 +1107,15 @@ impl PublicationJournal {
         } else {
             None
         };
+        let migration_annotation_defaults = if version >= 7 {
+            Some(MigrationAnnotationDefaults::decode(bytes, &mut cursor)?)
+        } else {
+            None
+        };
         if migration_continuity.is_some() && compact_manifest.is_some() {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        if migration_annotation_defaults.is_some() && migration_continuity.is_none() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let stage = PublicationJournalStage::from_code(take_byte(bytes, &mut cursor)?)?;
@@ -932,6 +1154,7 @@ impl PublicationJournal {
             runtime_intent_id,
             compact_manifest,
             migration_continuity,
+            migration_annotation_defaults,
             entries,
             stage,
             wire_version: version,
@@ -2604,7 +2827,9 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
     ) -> Result<IndexGeneration, RepositoryError> {
-        if journal.migration_continuity().is_none() {
+        if journal.migration_continuity().is_none()
+            || journal.migration_annotation_defaults().is_none()
+        {
             return Err(RepositoryError::InvalidFormatMigration);
         }
         let old_head = expected_index
@@ -2687,6 +2912,7 @@ impl Repository {
         permit_legacy_migration: bool,
     ) -> Result<IndexGeneration, RepositoryError> {
         if journal.migration_continuity().is_some() != permit_legacy_migration
+            || journal.migration_annotation_defaults().is_some() != permit_legacy_migration
             || (permit_legacy_migration && journal.compact_manifest().is_some())
         {
             return Err(RepositoryError::InvalidFormatMigration);
