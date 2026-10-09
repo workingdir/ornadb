@@ -16,6 +16,17 @@
 //! therefore accepts the coordinate as a declared input, and
 //! [`LegacyAnnotationInventory`] is where the transitional path derives it once
 //! a legacy decoder has supplied the rows.
+//!
+//! The conversion itself stays a separate step, and the boundary is explicit
+//! rather than implied. `prepare_format3_migration` migrates content and binds
+//! the migration journal — which is what makes the transition identifiable and
+//! resumable — but the repository has no legacy-rows-to-store-root converter,
+//! so the candidate it binds carries metadata only. A publication must also
+//! resolve a valid `.orna/store` root (MIGRATION.md steps 4 to 6), and
+//! `validate_store_root` is what refuses a candidate that has none. Until that
+//! converter exists, the returned journal describes a migration whose store
+//! conversion is still outstanding; it never claims an admission that the
+//! publication boundary would reject.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,7 +38,7 @@ use crate::init::format_context::LEGACY_FORMAT_PATH;
 use crate::{
     DatabaseId, GitCommitRef, IndexGeneration, LegacyAnnotationCandidate,
     MigrationAnnotationDefaults, MigrationContinuityRecord, PublicationJournal,
-    PublicationJournalEntry, Repository, RepositoryError, RepositoryFormat, RepositoryInitError,
+    PublicationJournalEntry, Repository, RepositoryError, RepositoryFormat,
 };
 
 /// The one frozen content format an unannotated legacy row transitions to
@@ -241,28 +252,42 @@ pub fn prepare_format3_migration(
     // migrated from the source working tree, including the ones Git ignores.
     clear_checkout(&root)?;
     copy_working_tree(&source_root, &root)?;
-    initialize_copy_identity(&root)?;
     release_source_ownership(&root)?;
     let copy = Repository::discover(&root)?;
+    // The copy carries the source's own bytes at this point, including the
+    // legacy `.orna` records: a migration must never install new bytes before
+    // it is published. The format-3 records the copy needs to read as format 3
+    // travel in the candidate below, so nothing here writes metadata.
+    let database_id = DatabaseId::new_v4();
 
     // The candidate is built with a hidden index derived from the source's
     // recorded tree and never touches the copy's ordinary index or worktree.
-    // The annotation coordinate rides in the candidate's own commit message,
-    // because the copy cannot publish the transition yet: its head must stay
-    // on the legacy commit until the runtime owner completes the migration.
+    // It carries the two records that make the copy a format-3 repository: the
+    // canonical database identity, and the retirement of the legacy format
+    // record, which the profile reader reports as "no format file beside a
+    // database record" — the canonical format-3 spelling. The annotation
+    // coordinate rides in the candidate's own message, because the copy cannot
+    // publish the transition yet: its head must stay on the legacy commit until
+    // the runtime owner completes the migration.
+    let database_bytes = canonical_database_bytes(&database_id);
+    let record = migration_record(
+        source_format,
+        &source_commit,
+        &source_tree_identity,
+        annotation_defaults,
+        &continuity,
+    );
     let candidate = copy.build_private_commit(
         &source_commit,
         &[
+            crate::ManagedFileChange::new(
+                crate::ManagedPath::new(".orna/database.orna")?,
+                Some(database_bytes.clone()),
+            ),
             crate::ManagedFileChange::new(crate::ManagedPath::new(LEGACY_FORMAT_PATH)?, None),
             crate::ManagedFileChange::new(
                 crate::ManagedPath::new(MIGRATION_RECORD)?,
-                Some(migration_record(
-                    source_format,
-                    &source_commit,
-                    &source_tree_identity,
-                    annotation_defaults,
-                    &continuity,
-                )),
+                Some(record.clone()),
             ),
         ],
         &candidate_message(source_format, annotation_defaults, &continuity),
@@ -275,7 +300,16 @@ pub fn prepare_format3_migration(
             .cloned()
             .ok_or(RepositoryError::InvalidFormatMigration)?,
         fresh_runtime_intent_id()?,
+        // The journal names every path the migration changes, so a resume
+        // replays the transition rather than re-deciding it. None of these
+        // bytes exist in the copy yet, because preparation never installs
+        // metadata the publication has not admitted.
         vec![
+            PublicationJournalEntry::new(
+                crate::ManagedPath::new(".orna/database.orna")?,
+                None,
+                Some(database_bytes),
+            ),
             PublicationJournalEntry::new(
                 crate::ManagedPath::new(LEGACY_FORMAT_PATH)?,
                 Some(legacy_format_bytes(source_format)),
@@ -284,13 +318,7 @@ pub fn prepare_format3_migration(
             PublicationJournalEntry::new(
                 crate::ManagedPath::new(MIGRATION_RECORD)?,
                 None,
-                Some(migration_record(
-                    source_format,
-                    &source_commit,
-                    &source_tree_identity,
-                    annotation_defaults,
-                    &continuity,
-                )),
+                Some(record),
             ),
         ],
     )?
@@ -298,7 +326,6 @@ pub fn prepare_format3_migration(
     .with_migration_annotation_defaults(annotation_defaults)?;
 
     let (working_tree_identity, working_tree_entries) = working_tree_identity(&copy)?;
-    let database_id = copy_database_id(&root)?;
 
     Ok(MigratedCopy {
         source_root,
@@ -317,6 +344,7 @@ pub fn prepare_format3_migration(
     })
 }
 
+/// The recorded `format.orna` bytes of one legacy source.
 fn legacy_format_bytes(format: RepositoryFormat) -> Vec<u8> {
     format!("format {}\n", format.number()).into_bytes()
 }
@@ -474,33 +502,6 @@ fn copy_entry(source: &Path, destination: &Path) -> Result<(), RepositoryError> 
     }
     // A socket, fifo or device node is not repository payload.
     Ok(())
-}
-
-/// Gives the copy its own canonical metadata identity.
-///
-/// `.orna/format.orna` is retired first: it names the source's format, and the
-/// copy must not keep a record that contradicts the writer coordinate it now
-/// carries. `initialize_repository` then mints the fresh identity through the
-/// one canonical metadata writer, so the copy never spells the record itself.
-fn initialize_copy_identity(root: &Path) -> Result<(), RepositoryError> {
-    match fs::remove_file(root.join(LEGACY_FORMAT_PATH)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(RepositoryError::LocalStateUnavailable),
-    }
-    crate::initialize_repository(root).map_err(repository_init_failed)?;
-    Ok(())
-}
-
-fn copy_database_id(root: &Path) -> Result<DatabaseId, RepositoryError> {
-    crate::inspect_metadata(&Repository::discover(root)?)
-        .map_err(repository_init_failed)?
-        .map(|metadata| metadata.database_id())
-        .ok_or(RepositoryError::LocalStateUnavailable)
-}
-
-fn repository_init_failed(_: RepositoryInitError) -> RepositoryError {
-    RepositoryError::LocalStateUnavailable
 }
 
 /// Releases the source runtime's private ownership from the copy.
