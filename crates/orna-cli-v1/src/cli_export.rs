@@ -173,7 +173,6 @@ fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::{parse_options, run};
-    use std::path::Path;
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -210,6 +209,5 @@ mod tests {
         // A read-only check must fail on the archive, not silently succeed.
         let missing = tempfile::tempdir().expect("create temporary directory");
         assert!(run(missing.path(), &words(&["./absent", "--at", "main", "--check"])).is_err());
-        assert!(Path::new(".").exists());
     }
 }
