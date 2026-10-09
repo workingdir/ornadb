@@ -671,7 +671,7 @@ fn add_module_import_aliases(
                     namespace,
                     &name.name,
                     &format!("{imported_path}.{}", name.name),
-                )?;
+                );
             }
         }
         UseTail::Glob { .. } => {
@@ -728,7 +728,8 @@ fn add_import_or_namespace_alias(
     function_names: &BTreeSet<String>,
 ) -> Result<(), ReplError> {
     if function_names.contains(imported_path) {
-        register_module_import_alias(aliases, namespace, local_name, imported_path)
+        register_module_import_alias(aliases, namespace, local_name, imported_path);
+        Ok(())
     } else {
         add_imported_module_functions(
             aliases,
@@ -762,7 +763,7 @@ fn add_imported_module_functions(
         } else {
             format!("{local_prefix}.{suffix}")
         };
-        register_module_import_alias(aliases, namespace, &local_name, target)?;
+        register_module_import_alias(aliases, namespace, &local_name, target);
     }
     Ok(())
 }
@@ -772,16 +773,14 @@ fn register_module_import_alias(
     namespace: &str,
     local_name: &str,
     target: &str,
-) -> Result<(), ReplError> {
+) {
     let key = module_function_alias_key(namespace, local_name);
-    if let Some(existing) = aliases.get(&key) {
-        if existing != target {
-            return Err(ReplError::fixed("ORNA-REPL-STANDARD"));
-        }
-    } else {
-        aliases.insert(key, target.to_owned());
-    }
-    Ok(())
+    // An unqualified name imported twice from different modules is the same
+    // ambiguity the semantic layer records as `DIAG_AMBIGUOUS` and resolves by
+    // keeping the first binding. Qualified calls never consult this map, so a
+    // program that imports `value` from two graph branches still loads and
+    // executes through its module-qualified spelling.
+    aliases.entry(key).or_insert_with(|| target.to_owned());
 }
 
 fn admitted_table_names(analysis: &Analysis) -> Vec<String> {
