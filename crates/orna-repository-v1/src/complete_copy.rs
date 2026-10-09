@@ -487,7 +487,7 @@ fn resolve_dependencies(
         let commit = commit.as_str().to_owned();
         // The pinned commit must be present in the dependency's own object
         // database before this export may claim to carry it.
-        if object_at(&source.directory, &commit)?.is_none() {
+        if object_at(&source, &commit)?.is_none() {
             return Err(CompleteCopyError::DependencyUnavailable { path });
         }
         dependencies.push(CompleteCopyDependency {
