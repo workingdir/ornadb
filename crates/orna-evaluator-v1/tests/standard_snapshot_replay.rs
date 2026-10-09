@@ -5193,6 +5193,7 @@ fn captured_snapshot_identity_survives_paired_divergence_pin_restoration_folds()
         for import in imports.lines() {
             assert_eq!(session.submit(import), Ok(None));
         }
+        assert_eq!(session.submit(closure), Ok(None));
         assert_eq!(
             session.submit(replay),
             Ok(Some(ints(&expected[index]))),
@@ -5267,12 +5268,7 @@ fn captured_iteration_identity_survives_paired_pin_restoration_folds() {
             assert_eq!(session.submit(import), Ok(None));
         }
         assert_eq!(session.submit(closure), Ok(None));
-        let outcome = session.submit(replay);
-        eprintln!(
-            "DEBUG-REENUMERATION index={index} pin={} outcome={outcome:?}",
-            pins[index]
-        );
-        let replayed = outcome.unwrap_or_else(|error| {
+        let replayed = session.submit(replay).unwrap_or_else(|error| {
             panic!(
                 "collection iteration callback must compute with restored pin {}: {}",
                 pins[index],
