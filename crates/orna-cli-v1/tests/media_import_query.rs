@@ -559,10 +559,18 @@ fn relation_hex(relation_id: [u8; 16]) -> String {
 /// Runs `orna history` with `arguments` as a child process inside the repository
 /// and returns its raw output, whatever the exit status.
 fn run_history(directory: &Path, arguments: &[&str]) -> std::process::Output {
+    let mut words = vec!["history"];
+    words.extend_from_slice(arguments);
+    run_orna_from(directory, &words)
+}
+
+/// Runs the built CLI from `cwd` with `words` as its whole argument list, so a
+/// test can choose the global `--db` endpoint and the process directory
+/// independently.
+fn run_orna_from(cwd: &Path, words: &[&str]) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
-        .current_dir(directory)
-        .arg("history")
-        .args(arguments)
+        .current_dir(cwd)
+        .args(words)
         .output()
         .unwrap()
 }
@@ -947,6 +955,67 @@ async fn history_on_an_emptied_catalogue_is_refused_with_no_listing() {
     let relation = relation_hex(relation_id);
     let output = run_history(directory.path(), &[&relation, "song"]);
     assert_history_refused(&output, "history on an emptied catalogue");
+    drop(directory);
+}
+
+/// `orna --db PATH history` must read the named repository, so the same
+/// listing is available from an unrelated working directory.
+#[tokio::test]
+async fn history_reads_the_named_db_endpoint_from_an_unrelated_directory() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    drop(bindings);
+    drop(state);
+
+    let relation = relation_hex(relation_id);
+    // A directory that is not inside any repository: only `--db` can answer.
+    let elsewhere = TempDir::new().unwrap();
+    let database = directory.path().to_string_lossy().into_owned();
+    let output = run_orna_from(
+        elsewhere.path(),
+        &["--db", &database, "history", &relation, "song", "--format", "json"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "history --db failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let routed: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!routed.is_empty(), "the imported row has revisions");
+    assert_eq!(
+        routed,
+        history_json(directory.path(), relation_id, "song"),
+        "--db names the same repository as the worktree directory"
+    );
+
+    // Without `--db` the unrelated directory holds no repository, so the same
+    // command is refused instead of silently answering from somewhere else.
+    let output = run_history(elsewhere.path(), &[&relation, "song"]);
+    assert_history_refused(&output, "history outside a repository without --db");
     drop(directory);
 }
 
