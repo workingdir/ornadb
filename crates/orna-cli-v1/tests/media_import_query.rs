@@ -59,6 +59,10 @@ const PROJECTION_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-projection.orna"
 );
+const PINNED_SONG_IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-song-at.orna"
+);
 const NEGATIVE_LIMIT_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song-negative-limit.orna"
@@ -1547,6 +1551,203 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
     assert_eq!(absent.status.code(), Some(1));
     assert!(absent.stdout.is_empty());
     drop(directory);
+}
+
+/// QUERY `--at`: a listing read at a pinned commit returns that commit's own
+/// rows and not the workspace `HEAD`'s, and the pinned read charges no media
+/// payload byte.
+#[tokio::test]
+async fn query_at_pins_the_named_snapshot_and_reads_no_media_payload() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    // The song is published first, so the commit it lands in is the snapshot
+    // `--at` has to read. The image import below moves `HEAD` past it.
+    let song = import_expression(PINNED_SONG_IMPORT_FIXTURE, source.path());
+    import_media(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &song,
+        "song",
+        0x70,
+        true,
+    )
+    .await;
+    let past = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    import_media(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &image,
+        "image",
+        0x80,
+        true,
+    )
+    .await;
+    drop(bindings);
+    drop(state);
+    let present = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_ne!(past, present, "the image import advanced HEAD");
+
+    // The unpinned listing is the control: pinning must remove exactly the row
+    // the newer commit added, and nothing else.
+    let relation = relation_hex(relation_id);
+    let head_listing = query_json(directory.path(), &[&relation]);
+    assert_eq!(
+        listing_keys(&head_listing),
+        vec!["image", "song"],
+        "both committed rows at HEAD: {head_listing}"
+    );
+
+    let pinned = query_json(directory.path(), &[&relation, "--at", &past]);
+    assert_eq!(
+        listing_keys(&pinned),
+        vec!["song"],
+        "the pinned commit carries the song and not the later image: {pinned}"
+    );
+    assert_eq!(
+        pinned["media_payload_bytes_read"].as_u64(),
+        Some(0),
+        "the pinned listing must charge no media payload byte"
+    );
+    assert!(
+        pinned["native_objects_read"].as_u64().unwrap() > 0,
+        "the pinned listing still walked that commit's graph, so its zero is not vacuous"
+    );
+    // The pinned row is the same row, described from the older commit alone.
+    let song_at_head = head_listing["listings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listing| listing["key"] == "song")
+        .expect("the song row is listed at HEAD");
+    assert_eq!(pinned["listings"][0]["sha256"], song_at_head["sha256"]);
+    assert_eq!(pinned["listings"][0]["length"], song_at_head["length"]);
+
+    // `--at HEAD` resolves once to the commit the unpinned read uses, and
+    // naming the current commit is the same read again.
+    let at_head = query_json(directory.path(), &[&relation, "--at", "HEAD"]);
+    assert_eq!(at_head["listings"], head_listing["listings"]);
+    let at_present = query_json(directory.path(), &[&relation, "--at", &present]);
+    assert_eq!(listing_keys(&at_present), vec!["image", "song"]);
+
+    // Pinning composes with the rest of the query: a predicate over the pinned
+    // rows narrows them and still fetches no payload.
+    let pinned_kind = query_json(
+        directory.path(),
+        &[&relation, "--at", &past, "--kind", "audio/wav"],
+    );
+    assert_eq!(listing_keys(&pinned_kind), vec!["song"]);
+    assert_eq!(pinned_kind["media_payload_bytes_read"].as_u64(), Some(0));
+
+    // An unresolvable selector is refused instead of silently reading HEAD.
+    let missing = run_query(directory.path(), &[&relation, "--at", "no-such-ref"]);
+    assert_eq!(
+        missing.status.code(),
+        Some(1),
+        "an unknown commit is a target error"
+    );
+    assert!(
+        missing.stdout.is_empty(),
+        "a refused pin prints no listing: {}",
+        String::from_utf8_lossy(&missing.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        stderr.contains("Snapshot could not be resolved"),
+        "the refusal is typed and names the failed resolution: {stderr}"
+    );
+
+    // The human listing reports the pinned read's own measurement.
+    let human = run_query(directory.path(), &[&relation, "--at", &past]);
+    assert_eq!(human.status.code(), Some(0));
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        text.contains("media payload bytes read: 0"),
+        "the pinned summary must report the payload it avoided: {text}"
+    );
+    drop(directory);
+}
+
+/// A format-1/2 pin is a read-only compatibility input with no native
+/// `.orna/store`, so `query --at` must refuse it with an accurate reason
+/// instead of reporting the format-3 store seam's failure or answering from
+/// the workspace.
+#[test]
+fn query_at_refuses_a_legacy_snapshot_it_cannot_read() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let setup: &[&[&str]] = &[
+        &["init", "--quiet"],
+        &["config", "user.email", "kieran@drewett.dev"],
+        &["config", "user.name", "kierandrewett"],
+        &["config", "commit.gpgsign", "false"],
+    ];
+    for words in setup {
+        git(root, words);
+    }
+    std::fs::create_dir_all(root.join(".orna")).unwrap();
+    std::fs::write(root.join("main.orna"), b"module main;\n").unwrap();
+    std::fs::write(root.join(".orna/format.orna"), b"format 1\n").unwrap();
+    git(root, &["add", "--all"]);
+    git(root, &["commit", "--quiet", "-m", "legacy format fixture"]);
+    let legacy = git_output(root, &["rev-parse", "HEAD"], None);
+    let legacy = String::from_utf8(legacy).unwrap().trim().to_owned();
+
+    // The format-1 commit is reachable and pinnable, so the refusal is about
+    // the snapshot's format and not about resolving the selector.
+    let relation = "43434343434343434343434343434343";
+    let refused = run_query(root, &[relation, "--at", &legacy]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(refused.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("legacy format-1/2"),
+        "the refusal names the pinned format: {stderr}"
+    );
+    drop(directory);
+}
+
+/// The `key` of every listing, in the order the query printed them.
+fn listing_keys(report: &serde_json::Value) -> Vec<&str> {
+    report["listings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|listing| listing["key"].as_str().unwrap())
+        .collect()
 }
 
 /// Runs `orna query` and parses its `--format json` report.
