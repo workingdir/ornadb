@@ -20,10 +20,11 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  serve [--port PORT]",
     "  diff [GIT_DIFF_ARGS...]",
     "  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]",
-    "  export DEST --at SELECTOR [--dependency PATH=DIR]...",
-    "  export DEST --check                               report one existing archive",
-    "  export exit status: 0 archive written, verified, and reported; 1 snapshot, object closure, or pinned dependency unavailable",
     "  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid",
+    "  export DEST --at SELECTOR [--at SELECTOR]... [--dependency PATH=DIR]...",
+    "  export ARCHIVE --check                         report what one archive records",
+    "  export ARCHIVE --restore DEST [--worktree]     reconstruct, verify, then materialise",
+    "  export exit status: 0 archive written, verified, or restored; 1 snapshot, object closure, or pinned dependency unavailable",
     "Editor tooling:",
     "  semantic-legend [--json|--markdown|--format csv|--quiet] [--limit N]",
     "  semantic-legend                  token types and modifiers as text",
@@ -62,7 +63,7 @@ mod tests {
             &"  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]"
         ));
         assert!(HELP_LINES.contains(
-            &"  export DEST --at SELECTOR [--dependency PATH=DIR]..."
+            &"  export DEST --at SELECTOR [--at SELECTOR]... [--dependency PATH=DIR]..."
         ));
         assert!(HELP_LINES.contains(
             &"  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid"
