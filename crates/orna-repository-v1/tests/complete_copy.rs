@@ -65,6 +65,20 @@ fn git_stdout(directory: &Path, arguments: &[&str]) -> String {
         .to_owned()
 }
 
+/// Copies an archive tree, including the per-member bundle directories.
+fn copy_archive(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("create archive copy");
+    for entry in fs::read_dir(source).expect("read archive") {
+        let entry = entry.expect("archive entry");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("archive entry type").is_dir() {
+            copy_archive(&entry.path(), &target);
+        } else if entry.file_name() != std::ffi::OsStr::new("manifest.tsv") {
+            fs::copy(entry.path(), &target).expect("copy archive member");
+        }
+    }
+}
+
 fn init_repository(directory: &Path) {
     git(
         directory,
@@ -250,7 +264,10 @@ fn complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extract
     // different closure and the archive must hold both.
     fs::write(project.join("main.orna"), MAIN_SOURCE_UPDATED).expect("write updated source");
     git(&project, &["add", "--all"]);
-    git(&project, &["commit", "--quiet", "-m", "remaster the library"]);
+    git(
+        &project,
+        &["commit", "--quiet", "-m", "remaster the library"],
+    );
     let current = git_stdout(&project, &["rev-parse", "HEAD"]);
     let current_payload = git_stdout(&project, &["rev-parse", "HEAD:main.orna"]);
     assert_ne!(previous, current);
@@ -373,4 +390,133 @@ fn complete_copy_exports_one_snapshot_at_a_time_and_refuses_a_repeat() {
 
     let none = root.path().join("none");
     assert!(export_complete_copy_of(&repository, &[], &none, &[]).is_err());
+}
+
+#[test]
+fn complete_copy_verifies_every_object_id_and_refuses_a_truncated_or_substituted_closure() {
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    let repository = Repository::discover(&project).expect("discover superproject");
+
+    let previous = git_stdout(&project, &["rev-parse", "HEAD"]);
+    fs::write(project.join("main.orna"), MAIN_SOURCE_UPDATED).expect("write updated source");
+    git(&project, &["add", "--all"]);
+    git(
+        &project,
+        &["commit", "--quiet", "-m", "remaster the library"],
+    );
+    let current = git_stdout(&project, &["rev-parse", "HEAD"]);
+
+    let archive = root.path().join("archive");
+    let selectors = ["HEAD", previous.as_str()];
+    let manifest = export_complete_copy_of(&repository, &selectors, &archive, &[])
+        .expect("export both snapshots");
+    let member = manifest.member(&current).expect("current member");
+    assert!(
+        member.objects.len() > 1,
+        "the current member carries more than the pinned commit: {:?}",
+        member.objects
+    );
+
+    // Both snapshots and their dependency must survive a manifest that was
+    // edited rather than a copy that lost objects: the case a truncated or
+    // substituted archive presents.
+    fs::rename(&dependency, root.path().join("dependency-disabled")).expect("disable dependency");
+
+    let document =
+        fs::read_to_string(archive.join("manifest.tsv")).expect("read the archive manifest");
+    let (member_block, other_records): (String, usize) = {
+        let mut block = String::new();
+        let mut others = 0;
+        let mut inside = false;
+        for line in document.lines() {
+            if let Some(rest) = line.strip_prefix("archive\t") {
+                inside = rest.split('\t').next() == Some(current.as_str());
+            }
+            if line.starts_with("object\t") {
+                if inside {
+                    block.push_str(line);
+                    block.push('\n');
+                } else {
+                    others += 1;
+                }
+            }
+        }
+        (block, others)
+    };
+    assert!(
+        !member_block.is_empty() && other_records > 0,
+        "each member records its own closure: {other_records} elsewhere"
+    );
+
+    // 1. Truncated: the object records are dropped while the commit survives.
+    let truncated = root.path().join("truncated");
+    copy_archive(&archive, &truncated);
+    let truncated_document = document.replace(&member_block, "");
+    assert_ne!(truncated_document, document, "the manifest changed");
+    fs::write(truncated.join("manifest.tsv"), &truncated_document).expect("write manifest");
+    let error = restore_complete_copy(&truncated, &root.path().join("copy-truncated"))
+        .expect_err("a truncated recording is refused");
+    assert!(
+        matches!(
+            error,
+            orna_repository_v1::complete_copy::CompleteCopyError::IntegrityMismatch { .. }
+        ),
+        "the failure is a typed integrity diagnostic: {error}"
+    );
+    // The destination was created by the fetch and then refused: a partial
+    // object database may remain, but no snapshot tree may be materialised.
+    let refused = root.path().join("copy-truncated");
+    assert!(
+        !refused.join("main.orna").exists(),
+        "a refused reconstruction writes no snapshot tree: {error}"
+    );
+
+    // 2. Substituted: re-point one object record at another real object of the
+    // archive, keeping the record count and every field valid.
+    let updated_blob = git_stdout(&project, &["rev-parse", "HEAD:main.orna"]);
+    let previous_blob = git_stdout(&project, &["rev-parse", &format!("{previous}:main.orna")]);
+    assert_ne!(updated_blob, previous_blob);
+    let lines: Vec<&str> = document.lines().collect();
+    let previous_size = lines
+        .iter()
+        .find_map(|line| line.strip_prefix(&format!("object\tblob\t{previous_blob}\t")))
+        .expect("the archive records the previous payload blob");
+    let mut substituted_lines: Vec<String> = Vec::with_capacity(lines.len());
+    let mut substituted_once = false;
+    for line in &lines {
+        if !substituted_once && line.starts_with(&format!("object\tblob\t{updated_blob}\t")) {
+            substituted_lines.push(format!("object\tblob\t{previous_blob}\t{previous_size}"));
+            substituted_once = true;
+        } else {
+            substituted_lines.push((*line).to_owned());
+        }
+    }
+    assert!(
+        substituted_once,
+        "the archive records the updated payload blob"
+    );
+    let mut substituted_document = substituted_lines.join("\n");
+    substituted_document.push('\n');
+    assert_eq!(
+        substituted_document
+            .lines()
+            .filter(|line| line.starts_with("object\t"))
+            .count(),
+        member_block.lines().count() + other_records,
+        "the substituted manifest keeps every object record"
+    );
+    let substituted = root.path().join("substituted");
+    copy_archive(&archive, &substituted);
+    fs::write(substituted.join("manifest.tsv"), &substituted_document).expect("write manifest");
+    let error = restore_complete_copy(&substituted, &root.path().join("copy-substituted"))
+        .expect_err("a substituted object record is refused");
+    assert!(
+        matches!(
+            error,
+            orna_repository_v1::complete_copy::CompleteCopyError::IntegrityMismatch { .. }
+        ),
+        "the failure is a typed integrity diagnostic: {error}"
+    );
 }

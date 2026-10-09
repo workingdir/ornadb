@@ -46,7 +46,7 @@
 //! `dependency <path>`) and never substitutes a host file or another snapshot.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -643,7 +643,8 @@ pub fn read_complete_copy_manifest(
 /// `destination` must be absent or empty. No remote is configured and no
 /// source-repository path is consulted; only the archive's bundles are read.
 /// Every recorded object of every member is then re-verified against the
-/// reconstructed object databases (see the module documentation).
+/// reconstructed object databases, and the closure each member reaches is
+/// required to equal its recorded closure (see the module documentation).
 pub fn restore_complete_copy(
     archive: &Path,
     destination: &Path,
@@ -671,6 +672,12 @@ pub fn restore_complete_copy(
     for member in &manifest.members {
         verify_closure(
             destination,
+            &member.objects,
+            &format!("snapshot {}", member.commit),
+        )?;
+        verify_recorded_closure(
+            destination,
+            &member.commit,
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
@@ -705,10 +712,27 @@ pub fn materialize_complete_copy(
     copy: &Path,
     manifest: &CompleteCopyManifest,
 ) -> Result<(), CompleteCopyError> {
-    // The superproject is materialised first: a checkout deletes and recreates
-    // the directory at a gitlink path, so a dependency populated before this
+    // Superproject is materialised first: a checkout deletes and recreates the
+    // directory at a gitlink path, so a dependency populated before this
     // step would be discarded. Dependencies are materialised afterwards, each
     // into its own path, which is why the manifest records them separately.
+    //
+    // Every member is re-verified here as well: materialising is the step that
+    // hands the copy to a user, so a copy that lost or gained objects since the
+    // restore is refused before the working tree is written.
+    for member in &manifest.members {
+        verify_closure(
+            copy,
+            &member.objects,
+            &format!("snapshot {}", member.commit),
+        )?;
+        verify_recorded_closure(
+            copy,
+            &member.commit,
+            &member.objects,
+            &format!("snapshot {}", member.commit),
+        )?;
+    }
     checkout(copy, &manifest.snapshot)?;
     for dependency in &manifest.dependencies {
         // A dependency pinned differently by two members exists under one path:
@@ -1021,6 +1045,54 @@ fn verify_closure(
             },
             other => other,
         })?;
+    }
+    Ok(())
+}
+
+/// Requires the closure a copy actually reaches from `commit` to be exactly the
+/// closure the archive recorded.
+///
+/// [`verify_closure`] checks that every recorded object is present and intact,
+/// but a truncated or substituted manifest can record *fewer* objects than the
+/// snapshot reaches and still pass that check. Comparing both directions makes
+/// export and restore agree on one closure: nothing recorded is missing, and
+/// nothing reachable is unrecorded.
+fn verify_recorded_closure(
+    directory: &Path,
+    commit: &str,
+    expected: &[CompleteCopyObject],
+    scope: &str,
+) -> Result<(), CompleteCopyError> {
+    let reached = closure_objects(directory, commit)?;
+    let reached: BTreeMap<&str, (CompleteCopyObjectKind, u64)> = reached
+        .iter()
+        .map(|object| (object.oid.as_str(), (object.kind, object.size)))
+        .collect();
+    for object in expected {
+        match reached.get(object.oid.as_str()) {
+            None => {
+                return Err(CompleteCopyError::IntegrityMismatch {
+                    scope: format!("{scope}: object {} is not reachable", object.oid),
+                })
+            }
+            Some((kind, size)) if *kind != object.kind || *size != object.size => {
+                return Err(CompleteCopyError::IntegrityMismatch {
+                    scope: format!("{scope}: object {}", object.oid),
+                })
+            }
+            Some(_) => {}
+        }
+    }
+    let recorded: BTreeSet<&str> = expected.iter().map(|object| object.oid.as_str()).collect();
+    if reached.len() != recorded.len() {
+        let unrecorded = reached
+            .keys()
+            .find(|oid| !recorded.contains(**oid))
+            .copied()
+            .unwrap_or("<unknown>");
+        return Err(CompleteCopyError::IntegrityMismatch {
+            scope: format!("{scope}: object {unrecorded} is not recorded"),
+        });
     }
     Ok(())
 }
