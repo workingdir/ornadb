@@ -17,6 +17,7 @@
 //! decoder output under ORNA-MEDIA-002, not annotation, and the plan names them
 //! as requiring an explicit decode.
 
+use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
 use orna_repository_v1::{KeyRange, Repository, TypedKey};
 use orna_value_v1::BlobMetadataFilter;
@@ -39,6 +40,7 @@ struct QueryOptions<'a> {
     relation: &'a str,
     key: Option<&'a str>,
     field: Option<usize>,
+    at: Option<&'a str>,
     limit: usize,
     format: QueryFormat,
     predicate: BlobMetadataFilter,
@@ -48,6 +50,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
     let mut key = None;
     let mut field = None;
+    let mut at = None;
     let mut limit = DEFAULT_QUERY_LIMIT;
     let mut format = QueryFormat::Human;
     let mut predicate = BlobMetadataFilter::new();
@@ -67,6 +70,18 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 field = Some(value.parse::<usize>().map_err(|_| {
                     query_error("--field is not an index", format!("got {value:?}"))
                 })?);
+            }
+            "--at" => {
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--at needs a value", "usage: --at <selector>"))?;
+                if at.is_some() {
+                    return Err(query_error(
+                        "Query names one snapshot",
+                        "usage: --at <selector>",
+                    ));
+                }
+                at = Some(value);
             }
             "--kind" => {
                 let value = words.next().ok_or_else(|| {
@@ -133,7 +148,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 return Err(query_error(
                     "Unknown query flag",
                     format!(
-                        "got {flag:?}; accepted: --key, --field, --kind, --not-kind, --suffix, \
+                        "got {flag:?}; accepted: --key, --field, --at, --kind, --not-kind, --suffix, \
                          --min-length, --max-length, --limit, --format"
                     ),
                 ));
@@ -144,13 +159,14 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--field N] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
+            "usage: orna query <relation-hex> [--key KEY] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
         ));
     };
     Ok(QueryOptions {
         relation,
         key,
         field,
+        at,
         limit,
         format,
         predicate,
@@ -163,9 +179,59 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let path = local_project_path(endpoint)?;
     let repository = Repository::discover(path)
         .map_err(|error| query_error("Repository could not be opened", format!("{error:?}")))?;
-    let format = repository
-        .open_format_context()
-        .map_err(|error| query_error("Format context could not be opened", format!("{error:?}")))?;
+    // `--at` pins one named snapshot before any row is read. The selector is
+    // resolved exactly once here; the row map, the graph and every descriptor
+    // below come from the commit it named, so a branch that advances during
+    // the read never changes the answer, and the workspace `HEAD` is never
+    // consulted instead.
+    let format = match options.at {
+        Some(selector) => {
+            // `rev-parse` accepts a bare name that two namespaces both define
+            // and only warns about the choice, so a name that identifies more
+            // than one snapshot is refused rather than silently answered from
+            // whichever one it preferred.
+            if bare_ref_selector_is_ambiguous(
+                path,
+                selector,
+                "run `orna query <relation-hex>` inside an initialized repository",
+            )? {
+                return Err(Diagnostic::target_with_detail(
+                    "E2000",
+                    "Snapshot name is ambiguous",
+                    "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
+                     `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
+                    format!("{selector:?} names more than one branch, tag or remote branch"),
+                ));
+            }
+            let commit = repository.resolve_snapshot(selector).map_err(|error| {
+                query_error(
+                    "Snapshot could not be resolved",
+                    format!("{selector:?}: {error:?}"),
+                )
+            })?;
+            let format = repository
+                .open_pinned_format_context(commit.as_str())
+                .map_err(|error| {
+                    query_error(
+                        "Snapshot could not be pinned",
+                        format!("{selector:?}: {error:?}"),
+                    )
+                })?;
+            // A format-1/2 pin is a read-only compatibility input: it carries
+            // no native `.orna/store`, so it has no row map to read. Say so
+            // instead of reporting the format-3 store seam's generic failure.
+            if format.is_read_only() {
+                return Err(query_error(
+                    "Snapshot is a legacy format-1/2 input",
+                    "--at names a read-only compatibility snapshot with no native row store; name a format-3 commit",
+                ));
+            }
+            format
+        }
+        None => repository.open_format_context().map_err(|error| {
+            query_error("Format context could not be opened", format!("{error:?}"))
+        })?,
+    };
     let row_map = format
         .load_row_map(relation)
         .map_err(|error| query_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -481,6 +547,19 @@ mod tests {
         assert_eq!(parsed.field, None);
         assert_eq!(parsed.limit, DEFAULT_QUERY_LIMIT);
         assert_eq!(parsed.format, QueryFormat::Human);
+    }
+
+    #[test]
+    fn query_options_take_one_snapshot_selector_wherever_it_appears() {
+        let plain = words(&["000102030405060708090a0b0c0d0e0f"]);
+        assert_eq!(parse_options(&plain).unwrap().at, None);
+        let pinned = words(&["--at", "HEAD~1", "000102030405060708090a0b0c0d0e0f"]);
+        assert_eq!(parse_options(&pinned).unwrap().at, Some("HEAD~1"));
+        let trailing = words(&["000102030405060708090a0b0c0d0e0f", "--at", "abc"]);
+        assert_eq!(parse_options(&trailing).unwrap().at, Some("abc"));
+        // A query names at most one snapshot, and needs a value for it.
+        assert!(parse_options(&words(&["a", "--at"])).is_err());
+        assert!(parse_options(&words(&["a", "--at", "x", "--at", "y"])).is_err());
     }
 
     #[test]
