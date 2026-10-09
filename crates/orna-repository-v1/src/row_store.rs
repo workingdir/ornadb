@@ -618,6 +618,19 @@ impl RowValue {
         }
     }
 
+    /// The canonical encoded field tuple of an inline row value.
+    ///
+    /// This is the stored representation a metadata projection decodes: row
+    /// fields with their format-3 Blob references. An overflow value keeps its
+    /// tuple in the shared graph, so it returns `None` rather than pretending
+    /// the bounded metadata here is the row's fields.
+    pub fn encoded_fields(&self) -> Option<&[u8]> {
+        match self {
+            Self::Inline { encoded, .. } => Some(encoded),
+            Self::Overflow(_) => None,
+        }
+    }
+
     pub fn dependencies(&self) -> Vec<RowDependency> {
         match self {
             Self::Inline { dependencies, .. } => dependencies.clone(),
