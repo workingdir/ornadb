@@ -1,0 +1,26 @@
+pub table Note(id: Int) {
+    text: Str,
+    assert every(row => row.text != "");
+}
+
+fn insert_note(key: Int, text: Str): Int {
+    Note.insert({ id: key, text: text });
+    key
+}
+
+fn rename_note(key: Int, text: Str): Int {
+    Note.update({ id: key, text: text });
+    key
+}
+
+fn read_note_text(key: Int): Str? {
+    Note | where(row => row.id == key) | map(row => row.text) | first()
+}
+
+pub fn main(): Int {
+    insert_note(1, "published");
+    let second = insert_note(2, "unpublished tail");
+    rename_note(1, "published edited");
+    let _ = read_note_text(1);
+    second
+}

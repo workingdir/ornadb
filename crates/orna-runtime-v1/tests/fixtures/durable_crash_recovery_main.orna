@@ -1,0 +1,2 @@
+// Root source for the durable crash-recovery proof tests. The runtime tests
+// only need a real repository root module; no Orna declarations are exercised.
