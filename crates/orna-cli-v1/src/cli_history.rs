@@ -530,6 +530,22 @@ fn run_diff(
             ));
         }
     }
+    // Both endpoints are resolved inside this repository, but a commit can
+    // record a database identity other than the current one: a reinitialized
+    // repository keeps its older commits reachable, so one repository can hold
+    // snapshots of two databases. The format-3 row map is keyed by that
+    // recorded identity, so comparing across two identities would join rows
+    // that belong to different databases. Refuse instead of reporting
+    // unrelated rows as changes.
+    if before_format.database_id() != after_format.database_id() {
+        return Err(history_error(
+            "Snapshots belong to different repositories",
+            format!(
+                "{from:?} and {to:?} record different database identities; \
+                 compare two snapshots of one repository"
+            ),
+        ));
+    }
     let from_label = format!("{from:?} ({from_commit})");
     let to_label = format!("{to:?} ({to_commit})");
     let (before, before_read) = read_relation_rows(&before_format, relation)?;

@@ -194,6 +194,108 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     drop(directory);
 }
 
+/// A repository records its database identity in the tracked metadata of every
+/// snapshot. A reinitialized repository rewrites that identity while its older
+/// commits stay reachable, so one repository can hold snapshots of two
+/// databases. The format-3 row map is keyed by the recorded identity, so a
+/// diff across two identities would join unrelated rows and report them as
+/// changes. The endpoints must be refused instead.
+///
+/// The second identity is written only into the commit, never the checkout, so
+/// the refusal also proves the identity is read from each pinned snapshot:
+/// reading the worktree's metadata would report the same identity for both
+/// endpoints and compare them instead of refusing.
+#[test]
+fn diff_refuses_endpoints_that_record_different_repositories() {
+    let (directory, _repository, relation_id) = empty_format3_repository();
+    let root = directory.path();
+    let before = revision(root, "HEAD");
+
+    // Same tree, same identity, one commit later: still one repository, so a
+    // diff of it must proceed rather than refuse.
+    let same_database = revision(root, "HEAD:.orna/database.orna");
+    let later = commit_metadata(root, &before, &same_database, "same identity");
+
+    // A different database identity, exactly as reinitialization records it.
+    let other_database = "{\n    repository_format: 3,\n    database_id: \
+                          \"00000000-0000-4000-8000-000000000002\",\n}\n";
+    let other = commit_metadata(root, &before, other_database, "other identity");
+
+    let relation = relation_hex(relation_id);
+    let refused = run_history(
+        root,
+        &[&relation, "--diff", &before, &other, "--format", "json"],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "a diff across two database identities must be refused: {}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("Snapshots belong to different repositories"),
+        "the refusal names the identity mismatch: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    // The guard is about identity, not about naming two different commits.
+    let allowed = run_history(
+        root,
+        &[&relation, "--diff", &before, &later, "--format", "json"],
+    );
+    assert_eq!(
+        allowed.status.code(),
+        Some(0),
+        "two commits of one database still compare: {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    let allowed: serde_json::Value = serde_json::from_slice(&allowed.stdout).unwrap();
+    assert_eq!(allowed["added"], serde_json::json!(0));
+    assert_eq!(allowed["removed"], serde_json::json!(0));
+
+    drop(directory);
+}
+
+/// One abbreviated git query as trimmed text.
+fn revision(directory: &Path, spec: &str) -> String {
+    String::from_utf8(git_output(directory, &["rev-parse", spec], None))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+/// Commits `parent`'s tree with `.orna/database.orna` replaced by `database`,
+/// the shape a reinitialized repository commits. Only the commit changes; the
+/// checkout keeps its previous metadata.
+fn commit_metadata(directory: &Path, parent: &str, database: &str, message: &str) -> String {
+    let database_oid = git_object(directory, "blob", database.as_bytes());
+    let store_oid = revision(directory, &format!("{parent}:.orna/store"));
+    let source_oid = revision(directory, &format!("{parent}:main.orna"));
+    let orna_tree = git_tree(
+        directory,
+        &format!("100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_oid}\tstore\n"),
+    );
+    let root_tree = git_tree(
+        directory,
+        &format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"),
+    );
+    let commit = String::from_utf8(git_output(
+        directory,
+        &["commit-tree", &root_tree, "-p", parent, "-m", message],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let head_ref = String::from_utf8(git_output(directory, &["symbolic-ref", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(directory, &["update-ref", &head_ref, &commit]);
+    commit
+}
+
 /// A name carried by more than one ref at once names no single snapshot. Git
 /// resolves it by ref precedence and reports success with only a warning, so a
 /// diff pinned with an ambiguous endpoint would silently compare against
