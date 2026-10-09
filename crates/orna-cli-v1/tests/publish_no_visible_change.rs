@@ -175,9 +175,8 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         true,
     )
     .await;
-    let pending = state.pending_count();
+    let pending = state.pending_count().await.unwrap();
     drop(state);
-    let pending = pending.await.unwrap();
     assert!(pending > 0, "the unpublished insert leaves a pending range");
 
     let first = run(root_path, &["publish"]);
@@ -213,9 +212,8 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         false,
     )
     .await;
-    let pending = state.pending_count();
+    let pending = state.pending_count().await.unwrap();
     drop(state);
-    let pending = pending.await.unwrap();
     assert!(
         pending > 0,
         "the identical replace still leaves a pending range"
