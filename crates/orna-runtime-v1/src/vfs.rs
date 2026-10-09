@@ -1379,6 +1379,19 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
         Some(hint) => hint.to_owned(),
         None => media_suffixes(media_type),
     };
+    // The suffix is part of the projected component, so VFS-016's component
+    // bound covers the whole `field + "." + suffix` spelling rather than the
+    // escaped field base alone. A base that leaves no room for the suffix takes
+    // the same `~field-` digest alias an over-bound field name takes: the alias
+    // is derived from the stored field name, so the full name is still
+    // re-derivable and verified by the long-name index (VFS-016).
+    if project_field_name(field).len() + 1 + selected.len() > VFS_MAX_COMPONENT_BYTES {
+        return format!(
+            "{}.{}",
+            long_alias(field, VfsNameNamespace::Field),
+            selected
+        );
+    }
     let mut name = project_field_name(field);
     name.push('.');
     name.push_str(&selected);
@@ -1388,40 +1401,94 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
     name
 }
 
-/// The preferred MIME-1 suffix for an essence. Unknown essences keep the
-/// profile's `bin` hint instead of guessing from the media type text.
-fn media_suffixes(media_type: &str) -> String {
-    let essence = media_type
+/// The MIME-1 suffix table: `(essence, preferred, compatible)`. One table
+/// serves both projection and validation, so a hint can never be accepted that
+/// the projection would not produce.
+const MIME1_SUFFIXES: &[(&str, &str, &[&str])] = &[
+    ("application/gzip", "gz", &["gz", "tar.gz", "tgz"]),
+    ("application/json", "json", &["json"]),
+    ("application/octet-stream", "bin", &["bin"]),
+    ("application/pdf", "pdf", &["pdf"]),
+    ("application/wasm", "wasm", &["wasm"]),
+    ("application/zip", "zip", &["zip"]),
+    ("audio/flac", "flac", &["flac"]),
+    ("audio/mp4", "m4a", &["m4a", "m4b", "mp4", "mpg4"]),
+    ("audio/mpeg", "mp3", &["mp1", "mp2", "mp3"]),
+    ("audio/ogg", "ogg", &["oga", "ogg", "opus"]),
+    ("audio/wav", "wav", &["wav"]),
+    ("image/gif", "gif", &["gif"]),
+    ("image/jpeg", "jpg", &["jpe", "jpeg", "jpg"]),
+    ("image/png", "png", &["png"]),
+    ("image/svg+xml", "svg", &["svg"]),
+    ("image/webp", "webp", &["webp"]),
+    ("text/css", "css", &["css"]),
+    ("text/javascript", "js", &["js", "mjs"]),
+    ("text/plain", "txt", &["text", "txt"]),
+    ("video/mp4", "mp4", &["m4v", "mp4"]),
+    ("video/webm", "webm", &["webm"]),
+];
+
+/// The MIME-1 essence of a media type, lowercased and stripped of parameters.
+fn media_essence(media_type: &str) -> String {
+    media_type
         .split(';')
         .next()
         .unwrap_or(media_type)
         .trim()
-        .to_ascii_lowercase();
-    let preferred = match essence.as_str() {
-        "application/gzip" => "gz",
-        "application/json" => "json",
-        "application/octet-stream" => "bin",
-        "application/pdf" => "pdf",
-        "application/wasm" => "wasm",
-        "application/zip" => "zip",
-        "audio/flac" => "flac",
-        "audio/mp4" => "m4a",
-        "audio/mpeg" => "mp3",
-        "audio/ogg" => "ogg",
-        "audio/wav" => "wav",
-        "image/gif" => "gif",
-        "image/jpeg" => "jpg",
-        "image/png" => "png",
-        "image/svg+xml" => "svg",
-        "image/webp" => "webp",
-        "text/css" => "css",
-        "text/javascript" => "js",
-        "text/plain" => "txt",
-        "video/mp4" => "mp4",
-        "video/webm" => "webm",
-        _ => "bin",
+        .to_ascii_lowercase()
+}
+
+/// The MIME-1 entry for an essence. An unknown essence keeps the profile's
+/// `bin` hint instead of guessing from the media type text.
+fn mime1_entry(media_type: &str) -> (&'static str, &'static [&'static str]) {
+    let essence = media_essence(media_type);
+    MIME1_SUFFIXES
+        .iter()
+        .find(|(name, _, _)| *name == essence)
+        .map(|(_, preferred, compatible)| (*preferred, *compatible))
+        .unwrap_or(("bin", &["bin"]))
+}
+
+/// The preferred MIME-1 suffix for an essence. Unknown essences keep the
+/// profile's `bin` hint instead of guessing from the media type text.
+fn media_suffixes(media_type: &str) -> String {
+    mime1_entry(media_type).0.to_owned()
+}
+
+/// Whether `suffix` is a MIME-1 compatible hint for this media type. Only a
+/// compatible spelling may be selected for a field (MIME-1, VFS-012).
+pub fn content_suffix_is_compatible(media_type: &str, suffix: &str) -> bool {
+    let suffix = suffix.trim().to_ascii_lowercase();
+    mime1_entry(media_type).1.contains(&suffix.as_str())
+}
+
+/// The canonical stored hint for an editor-selected suffix (MIME-1, VFS-012).
+///
+/// `selected` is the suffix the sibling file now spells; `None` means the
+/// projected preferred suffix. The result is the hint to record, or `None` when
+/// the selection is the field's preferred suffix, which the profile stores as
+/// an absent hint rather than a redundant one.
+///
+/// A rename changes only this hint: it never transcodes the stored bytes,
+/// renames a column, or rekeys the row, and an incompatible suffix is refused
+/// as a malformed candidate. The caller applies the result through the normal
+/// CAS/activation boundary.
+pub fn classify_content_suffix(
+    media_type: &str,
+    selected: Option<&str>,
+) -> Result<Option<String>, VfsPathError> {
+    let preferred = mime1_entry(media_type).0;
+    let Some(selected) = selected else {
+        return Ok(None);
     };
-    preferred.to_owned()
+    let selected = selected.trim().to_ascii_lowercase();
+    if !content_suffix_is_compatible(media_type, &selected) {
+        return Err(VfsPathError::InvalidDocument);
+    }
+    if selected == preferred {
+        return Ok(None);
+    }
+    Ok(Some(selected))
 }
 
 /// Splits one mount-relative path and refuses absolute paths, empty
@@ -1518,11 +1585,14 @@ pub enum VfsStoredFieldKind {
     Document { text: String },
     /// A stored optional field present as explicit `null`.
     Null,
-    /// A stored Blob projected as a sibling content file.
+    /// A stored Blob projected as a sibling content file. `required` is the
+    /// schema's declaration: a required Blob can never be removed through the
+    /// VFS, while an optional one may be unlinked to `null` (VFS-013).
     Content {
         media_type: String,
         suffix: Option<String>,
         descriptor_size: u64,
+        required: bool,
     },
 }
 
@@ -1541,11 +1611,34 @@ impl VfsStoredField {
         }
     }
 
+    /// A required stored Blob. Schema validity keeps its exact content
+    /// descriptor, so unlinking its sibling file must fail (VFS-013).
     pub fn content(
         name: impl Into<String>,
         media_type: impl Into<String>,
         suffix: Option<String>,
         descriptor_size: u64,
+    ) -> Self {
+        Self::content_with_class(name, media_type, suffix, descriptor_size, true)
+    }
+
+    /// An optional stored Blob. Unlinking its sibling file may set the stored
+    /// field to `null` after the row validates (VFS-013).
+    pub fn content_optional(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+    ) -> Self {
+        Self::content_with_class(name, media_type, suffix, descriptor_size, false)
+    }
+
+    fn content_with_class(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+        required: bool,
     ) -> Self {
         Self {
             name: name.into(),
@@ -1553,6 +1646,7 @@ impl VfsStoredField {
                 media_type: media_type.into(),
                 suffix,
                 descriptor_size,
+                required,
             },
         }
     }
@@ -1573,6 +1667,7 @@ pub struct VfsProjectedFile {
     name: String,
     media_type: String,
     descriptor_size: u64,
+    required: bool,
 }
 
 impl VfsProjectedFile {
@@ -1586,6 +1681,12 @@ impl VfsProjectedFile {
 
     pub fn descriptor_size(&self) -> u64 {
         self.descriptor_size
+    }
+
+    /// True when the schema declares this Blob required. A required Blob's
+    /// sibling file can never be unlinked (VFS-013).
+    pub const fn is_required(&self) -> bool {
+        self.required
     }
 }
 
@@ -1628,6 +1729,7 @@ impl<S> VfsRowProjection<S> {
                     media_type,
                     suffix,
                     descriptor_size,
+                    required,
                 } => {
                     let name = project_content_name(&field.name, media_type, suffix.as_deref());
                     // Two stored values that claim one host name are refused
@@ -1647,6 +1749,7 @@ impl<S> VfsRowProjection<S> {
                         name,
                         media_type: media_type.clone(),
                         descriptor_size: *descriptor_size,
+                        required: *required,
                     });
                 }
             }
@@ -1702,6 +1805,58 @@ impl<S> VfsRowProjection<S> {
             .find(|file| file.name == name)
             .ok_or(VfsPathError::UnknownRow)?;
         Ok(VfsProjectedEntry::Content(file))
+    }
+
+    /// Resolves one directory entry to its authorized unlink target (VFS-013).
+    /// The row document is a complete stored-non-key-field document, so
+    /// removing it is refused: row deletion is an explicit database operation,
+    /// never a VFS side effect. A sibling file resolves to its stored Blob
+    /// field, carrying the schema's required/optional class. A name outside the
+    /// projection is resolved to no target, exactly like its lookup (VFS-004).
+    pub fn resolve_unlink(&self, name: &str) -> Result<VfsUnlinkTarget<'_>, VfsPathError> {
+        match self.lookup(name)? {
+            VfsProjectedEntry::Document => Ok(VfsUnlinkTarget::RowDocument),
+            VfsProjectedEntry::Content(file) => Ok(if file.is_required() {
+                VfsUnlinkTarget::RequiredContent(file)
+            } else {
+                VfsUnlinkTarget::OptionalContent(file)
+            }),
+        }
+    }
+}
+
+/// The authorized outcome of resolving one unlink inside a row directory. The
+/// projection decides this from schema-issued field classes alone; a host name
+/// never widens what an unlink may remove (VFS-013).
+#[derive(Debug, Eq, PartialEq)]
+pub enum VfsUnlinkTarget<'a> {
+    /// `data.orna` itself: always refused (VFS-013).
+    RowDocument,
+    /// A required stored Blob: refused, because schema validity depends on the
+    /// exact content descriptor (VFS-013).
+    RequiredContent(&'a VfsProjectedFile),
+    /// An optional stored Blob: the unlink may assign that field `null`
+    /// through the validated activation boundary (VFS-013).
+    OptionalContent(&'a VfsProjectedFile),
+}
+
+impl VfsUnlinkTarget<'_> {
+    /// The exact `errno` this target requires, or `None` when the unlink may
+    /// proceed to validation.
+    pub fn refusal_errno(&self) -> Option<i32> {
+        match self {
+            Self::RowDocument | Self::RequiredContent(_) => Some(VFS_EPERM),
+            Self::OptionalContent(_) => None,
+        }
+    }
+
+    /// The stable Orna cause code kept alongside the host `errno` for a
+    /// refused unlink.
+    pub fn refusal_code(&self) -> Option<&'static str> {
+        match self {
+            Self::RowDocument | Self::RequiredContent(_) => Some("sys.vfs.unsupported"),
+            Self::OptionalContent(_) => None,
+        }
     }
 }
 
@@ -1838,6 +1993,120 @@ mod tests {
     }
 
     #[test]
+    fn unlink_refuses_row_document_and_required_blob_while_allowing_optional() {
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(17_u64)),
+            &[
+                VfsStoredField::document("title", "\"Live in London\""),
+                VfsStoredField::content("content", "audio/mpeg", None, 99),
+                VfsStoredField::content_optional("cover", "image/jpeg", None, 4096),
+                VfsStoredField::null("booklet"),
+            ],
+        )
+        .expect("row projection");
+
+        let content = project_content_name("content", "audio/mpeg", None);
+        let cover = project_content_name("cover", "image/jpeg", None);
+        assert_eq!(content, "content.mp3");
+        assert_eq!(cover, "cover.jpg");
+
+        // Deleting `data.orna` is refused: row deletion is an explicit database
+        // operation, never a VFS unlink side effect (VFS-013).
+        let document = row.resolve_unlink(VFS_ROW_DOCUMENT).expect("document");
+        assert_eq!(document, VfsUnlinkTarget::RowDocument);
+        assert_eq!(document.refusal_errno(), Some(VFS_EPERM));
+        assert_eq!(document.refusal_code(), Some("sys.vfs.unsupported"));
+
+        // A required Blob cannot be removed, because schema validity depends on
+        // its exact content descriptor (VFS-013).
+        let required = row.resolve_unlink(&content).expect("required blob");
+        let VfsUnlinkTarget::RequiredContent(file) = &required else {
+            panic!("required blob must resolve to a required target");
+        };
+        assert!(file.is_required());
+        assert_eq!(required.refusal_errno(), Some(VFS_EPERM));
+        assert_eq!(required.refusal_code(), Some("sys.vfs.unsupported"));
+
+        // An optional Blob may be unlinked to `null`, so the target authorizes
+        // validation instead of refusing in the projection (VFS-013).
+        let optional = row.resolve_unlink(&cover).expect("optional blob");
+        let VfsUnlinkTarget::OptionalContent(file) = &optional else {
+            panic!("optional blob must resolve to an optional target");
+        };
+        assert!(!file.is_required());
+        assert_eq!(optional.refusal_errno(), None);
+        assert_eq!(optional.refusal_code(), None);
+
+        // Field classes come from the schema, not the host name: a name outside
+        // the projection resolves to no target at all (VFS-004).
+        assert_eq!(
+            row.resolve_unlink("missing.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
+        assert_eq!(
+            row.resolve_unlink("~key-not-a-field.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
+    }
+
+    #[test]
+    fn suffix_selection_is_mime1_compatible_and_preferred_hint_is_absent() {
+        // A compatible non-preferred spelling is stored as that explicit hint,
+        // and the file name changes only in its suffix (MIME-1, VFS-012).
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("mp1")),
+            Ok(Some("mp1".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("MP1")),
+            Ok(Some("mp1".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("image/jpeg", Some("jpeg")),
+            Ok(Some("jpeg".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("application/gzip", Some("tgz")),
+            Ok(Some("tgz".to_owned()))
+        );
+
+        // The catalogued preferred suffix is recorded as an absent hint, never
+        // as a redundant one (MIME-1 default_hint_canonicalization).
+        assert_eq!(classify_content_suffix("audio/mpeg", Some("mp3")), Ok(None));
+        assert_eq!(classify_content_suffix("audio/mpeg", None), Ok(None));
+
+        // A suffix outside the MIME-1 entry is a malformed candidate rather
+        // than a silent transcode or a rekeyed row (VFS-012).
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("m4a")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        assert_eq!(
+            classify_content_suffix("image/jpeg", Some("png")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        // An unknown essence keeps only the profile's `bin` hint.
+        assert_eq!(
+            classify_content_suffix("application/x-unknown", Some("gz")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        assert_eq!(
+            classify_content_suffix("application/x-unknown", Some("bin")),
+            Ok(None)
+        );
+
+        // The suffix rename never changes the stored content identity: the same
+        // descriptor size projects under the selected hint, and the row's bytes
+        // are untouched.
+        let renamed = project_content_name("content", "audio/mpeg", Some("mp1"));
+        assert_eq!(renamed, "content.mp1");
+        assert_eq!(
+            project_content_name("content", "audio/mpeg", None),
+            "content.mp3"
+        );
+    }
+
+    #[test]
     fn vfs_table_row_replacement_preserves_admitted_table_identity() {
         let table = RuntimeTableIdentity::new("Song", crate::TableObjectId::new([0x71; 16]))
             .expect("valid table identity");
@@ -1882,10 +2151,57 @@ mod tests {
             panic!("content lookup should return the projected file");
         };
         assert_eq!(file.descriptor_size(), 99);
-        assert_eq!(
+        assert!(matches!(
             row.lookup("~key-not-a-field.mp3"),
             Err(VfsPathError::UnknownRow)
-        );
+        ));
+    }
+
+    #[test]
+    fn content_file_name_stays_within_the_component_bound_with_its_suffix() {
+        // The projected content file is one host component, so VFS-016's bound
+        // covers the whole `field.suffix` spelling. A field base that leaves no
+        // room for its suffix takes the `~field-` digest alias instead of
+        // overflowing the bound (VFS-016).
+        let field = "f".repeat(200);
+        let name = project_content_name(&field, "audio/mpeg", None);
+        assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
+        assert!(name.starts_with("~field-"));
+        assert!(name.ends_with(".mp3"));
+        // The alias is the field namespace digest of the stored name, so the
+        // snapshot-bound long-name index re-derives and verifies the full name
+        // rather than trusting the truncated spelling (VFS-016).
+        assert_eq!(name, format!("~field-{}.mp3", hex_digest(field.as_bytes())));
+
+        // A base with room for the suffix still spells the escaped name
+        // directly; only the over-bound spelling changes.
+        let field = "f".repeat(196);
+        let name = project_content_name(&field, "audio/mpeg", None);
+        assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
+        assert!(!name.starts_with("~field-"));
+        assert!(name.ends_with(".mp3"));
+
+        // A long field base and the row document stay distinct names in one row
+        // directory (VFS-016, VFS-017).
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(23_u64)),
+            &[
+                VfsStoredField::document("title", "\"Live in London\""),
+                VfsStoredField::content("f".repeat(200), "audio/mpeg", None, 99),
+            ],
+        )
+        .expect("row projection");
+        let long = row.files()[0].name().to_owned();
+        assert!(long.len() <= VFS_MAX_COMPONENT_BYTES);
+        assert_ne!(long, VFS_ROW_DOCUMENT);
+        assert!(matches!(
+            row.lookup(&long),
+            Ok(VfsProjectedEntry::Content(_))
+        ));
+        assert!(matches!(
+            row.lookup(VFS_ROW_DOCUMENT),
+            Ok(VfsProjectedEntry::Document)
+        ));
     }
 
     fn vfs_row_image() -> Arc<VfsFileSnapshot<u64>> {

@@ -152,10 +152,28 @@ impl fmt::Debug for RepositorySnapshotPin {
     }
 }
 
+/// Domain separation for the canonical logical snapshot identity. It keeps the
+/// readable snapshot coordinate distinct from every other repository digest.
+const SNAPSHOT_ID_DOMAIN: &[u8] = b"orna.repository.graph.snapshot.v1\0";
+
 impl RepositorySnapshotPin {
     fn belongs_to(&self, repository: &Repository) -> bool {
         self.repository.worktree() == repository.worktree()
             && self.repository.runtime_paths().root() == repository.runtime_paths().root()
+    }
+
+    /// Canonical logical identity of this pinned snapshot.
+    ///
+    /// Derived from the exact resolved commit under a private domain, so a
+    /// historical mount can report and bind the one snapshot it resolved
+    /// without disclosing the native Git object ID. Two mounts of different
+    /// commits never share an identity, and a repeated open of the same commit
+    /// always reproduces it.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(SNAPSHOT_ID_DOMAIN);
+        hash.update(self.commit.as_str().as_bytes());
+        hash.finalize().into()
     }
 
     fn read_file(
@@ -350,10 +368,7 @@ impl RepositoryFormatContext {
         let database_id = self.require_database_id()?;
         self.validate_schema_root()?;
         let store = self.validate_store_root()?;
-        let mut snapshot_hash = Sha256::new();
-        snapshot_hash.update(b"orna.repository.graph.snapshot.v1\0");
-        snapshot_hash.update(self.snapshot.commit.as_str().as_bytes());
-        let snapshot_id: [u8; 32] = snapshot_hash.finalize().into();
+        let snapshot_id: [u8; 32] = self.snapshot.snapshot_id();
         crate::native_graph::load_format3_row_map(
             &self.repository,
             store.oid.algorithm(),
@@ -399,10 +414,7 @@ impl RepositoryFormatContext {
         repository_hash.update(database_id.as_bytes());
         let repository_id: [u8; 32] = repository_hash.finalize().into();
 
-        let mut snapshot_hash = Sha256::new();
-        snapshot_hash.update(b"orna.repository.graph.snapshot.v1\0");
-        snapshot_hash.update(self.snapshot.commit.as_str().as_bytes());
-        let snapshot_id: [u8; 32] = snapshot_hash.finalize().into();
+        let snapshot_id: [u8; 32] = self.snapshot.snapshot_id();
 
         let authority = rows.authority();
         let mut owner_hash = Sha256::new();
@@ -451,6 +463,84 @@ impl SchemaRootPin {
     /// The snapshot pin from which this schema proof was admitted.
     pub fn snapshot_pin(&self) -> &RepositorySnapshotPin {
         &self.snapshot
+    }
+}
+
+/// A read-only format context pinned to one previously committed snapshot.
+///
+/// Issued only by [`Repository::open_format_context_at_selector`], which
+/// resolves its selector exactly once. The context delegates to the same
+/// format admission used for `HEAD`, so a caller reads the historical schema,
+/// row map, native graph and Blob ranges through the existing graph seam while
+/// the readable snapshot coordinate is carried alongside it.
+pub struct HistoricalFormatContext {
+    snapshot_id: [u8; 32],
+    context: RepositoryFormatContext,
+}
+
+impl HistoricalFormatContext {
+    /// Canonical logical identity of the exact commit this context resolved.
+    pub const fn snapshot_id(&self) -> &[u8; 32] {
+        &self.snapshot_id
+    }
+
+    /// The admitted repository-format dispatch at the pinned commit.
+    pub const fn repository_format(&self) -> RepositoryFormat {
+        self.context.repository_format()
+    }
+
+    /// The numeric repository-format coordinate at the pinned commit.
+    pub const fn repository_format_number(&self) -> u8 {
+        self.context.repository_format_number()
+    }
+
+    /// The database identity recorded by the pinned commit, when it carries one.
+    pub const fn database_id(&self) -> Option<DatabaseId> {
+        self.context.database_id()
+    }
+
+    /// Whether the pinned commit is a legacy format-1/2 compatibility input.
+    /// Historical format-3 pins report `false` but remain equally immutable.
+    pub const fn is_legacy_format(&self) -> bool {
+        self.context.is_read_only()
+    }
+
+    /// The pinned context's schema root, when the snapshot carries one.
+    pub fn validate_schema_root(&self) -> Result<SchemaRootPin, FormatContextError> {
+        self.context.validate_schema_root()
+    }
+
+    /// The pinned context's `.orna/store` root.
+    pub fn validate_store_root(&self) -> Result<StoreRootPin, FormatContextError> {
+        self.context.validate_store_root()
+    }
+
+    /// Loads one relation's row map from the pinned snapshot's own store root.
+    pub fn load_row_map(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<RowMapSnapshot, FormatContextError> {
+        self.context.load_row_map(relation_id)
+    }
+
+    /// Issues graph authority bound to this pinned snapshot. Rows, schema and
+    /// Blob references read through the returned context resolve against the
+    /// pinned commit only, never the workspace `HEAD`.
+    pub fn open_native_graph(
+        &self,
+        rows: &RowMapSnapshot,
+    ) -> Result<NativeGraphContext, FormatContextError> {
+        self.context.open_native_graph(rows)
+    }
+}
+
+impl fmt::Debug for HistoricalFormatContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HistoricalFormatContext")
+            .field("format", &self.context.repository_format())
+            .field("snapshot_id", &self.snapshot_id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -513,6 +603,36 @@ impl Repository {
     ) -> Result<RepositoryFormatContext, FormatContextError> {
         let snapshot = self.pin_snapshot(selector)?;
         self.open_format_context_at(&snapshot)
+    }
+
+    /// Resolves one commit selector exactly once and opens its immutable
+    /// format context read-only.
+    ///
+    /// This is the CHECKOUT-3 historical pin: `selector` is resolved a single
+    /// time to one exact commit, and every later read through the returned
+    /// context — schema root, store root, row map, native graph and Blob
+    /// ranges — is served from that commit's own objects. A branch or tag name
+    /// therefore cannot move during reads, and the current `HEAD`, index and
+    /// worktree are never consulted or modified, so one repository can serve a
+    /// historical view beside its workspace view (ORNA-CHECKOUT-003).
+    ///
+    /// Write admission is deliberately unavailable: the returned context is a
+    /// historical pin, so [`RepositoryFormatContext::supports_writes`] reports
+    /// `false` and every write seam refuses it. Only
+    /// [`Repository::open_format_context`] admits the writer coordinate.
+    pub fn open_format_context_at_selector(
+        &self,
+        selector: &str,
+    ) -> Result<HistoricalFormatContext, FormatContextError> {
+        if selector.is_empty() || selector.starts_with('-') || selector.contains('\0') {
+            return Err(FormatContextError::SnapshotInvalid);
+        }
+        let snapshot = self.pin_snapshot(selector)?;
+        let context = self.open_format_context_at(&snapshot)?;
+        Ok(HistoricalFormatContext {
+            snapshot_id: snapshot.snapshot_id(),
+            context,
+        })
     }
 
     /// Issues capture authority for one format-3 relation at the current
@@ -1038,6 +1158,230 @@ mod graph_bridge_tests {
         write_git_object(directory, algorithm, "tree", &envelope)
     }
 
+    /// Publishes one relation holding a row whose fields are the format-3 Blob
+    /// value for `payload`. Returns the descriptor OID the row names, so a
+    /// later reader can prove it read that row's own Blob. With `repeat_field`
+    /// the row stores that same Blob twice, which no reader may attribute to
+    /// one field.
+    fn install_annotated_blob_row_store(
+        directory: &Path,
+        relation_id: [u8; 16],
+        key: u64,
+        payload: &[u8],
+        media_type: &str,
+        suffix: Option<&str>,
+        repeat_field: bool,
+    ) -> NativeOid {
+        // A relation must exist before capture resolves the relation map. Seed
+        // it only once, so a second call publishes a plain successor commit
+        // instead of a commit that drops the earlier row.
+        let seeding = context(directory);
+        if seeding.load_row_map(relation_id).is_err() {
+            install_overflow_row_store(directory, &seeding, relation_id, None);
+        }
+
+        let writing = context(directory);
+        let (schema_oid, schema_digest) = schema_node(directory, &writing);
+        let snapshot = writing
+            .load_row_map(relation_id)
+            .expect("load the seeded row-map identity");
+        let graph = writing
+            .open_native_graph(&snapshot)
+            .expect("admit the seeded graph context");
+        let scope = graph.open_read_scope().expect("owner scope");
+
+        let mut input = std::io::Cursor::new(payload.to_vec());
+        let candidate = graph
+            .capture_blob_candidate(&mut input, payload.len() as u64, &scope)
+            .expect("write a private OGB-2 candidate closure");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("verify and durably protect the OGB-2 closure");
+        let binding = graph
+            .accept_protected_blob_pin_with_annotation(pin, media_type, suffix)
+            .expect("accept the annotated ORP Blob binding");
+        let descriptor_oid = binding.descriptor_oid().clone();
+
+        let algorithm = writing
+            .validate_store_root()
+            .expect("pinned native store")
+            .oid
+            .algorithm();
+        let fields = if repeat_field { 2u8 } else { 1u8 };
+        let mut stored_fields = vec![0x80 | fields];
+        for _ in 0..fields {
+            stored_fields.extend_from_slice(binding.encoded_value());
+        }
+        let row_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::UInt(key).canonical_bytes().unwrap(),
+                    value: stored_fields,
+                }],
+            },
+        );
+        let database_id = writing.require_database_id().expect("database identity");
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, row_root.as_bytes());
+        relation_value.push(0xf6);
+        relation_value.push(0x01);
+        let relation_map = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root = write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(directory, algorithm, &store_root);
+        descriptor_oid
+    }
+
+    #[test]
+    fn checkout_of_a_prior_commit_reads_its_rows_and_annotated_blob() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x51; 16];
+
+        let first_payload = b"london take one".as_slice();
+        let first_descriptor =
+            install_annotated_blob_row_store(root, relation_id, 1, first_payload, "audio/mpeg", Some("mp3"));
+        let second_payload = b"london take two, remastered".as_slice();
+        let second_descriptor =
+            install_annotated_blob_row_store(root, relation_id, 1, second_payload, "audio/mpeg", Some("mp3"));
+        assert_ne!(first_descriptor, second_descriptor);
+
+        // Mount the prior commit. The selector resolves once; every row, Blob
+        // and annotation below comes from that commit's own objects.
+        let repository = Repository::discover(root).expect("discover the fixture repository");
+        let mounted = repository
+            .open_format_context_at_selector("HEAD~1")
+            .expect("mount the prior commit read-only");
+        assert_eq!(mounted.repository_format_number(), 3);
+        assert!(!mounted.is_legacy_format());
+        assert_eq!(
+            mounted.database_id(),
+            repository
+                .open_format_context()
+                .expect("admit the workspace context")
+                .database_id()
+        );
+
+        let snapshot = mounted.load_row_map(relation_id).expect("historical row map");
+        let graph = mounted.open_native_graph(&snapshot).expect("historical graph");
+        let scope = graph.open_read_scope().expect("historical read scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(1), &scope)
+            .expect("read the historical row")
+            .expect("the prior commit holds the row");
+
+        let stored = graph
+            .read_stored_blob_value(&row, &first_descriptor, &scope)
+            .expect("read the Blob the historical row stores");
+        assert_eq!(stored.annotation().media_type(), "audio/mpeg");
+        assert_eq!(stored.annotation().suffix(), Some("mp3"));
+        assert_eq!(stored.content_identity().length(), first_payload.len() as u64);
+        let range = graph
+            .read_blob_range(stored.reference(), 0..first_payload.len() as u64, &scope)
+            .expect("read the historical payload");
+        assert_eq!(range.bytes(), first_payload);
+        assert_eq!(
+            range.verification(),
+            crate::native_graph::RangeVerification::FullBlob
+        );
+
+        // The descriptor of the newer commit is not the one this row stored,
+        // so the historical pin never serves the newer content.
+        assert!(matches!(
+            graph.read_stored_blob_value(&row, &second_descriptor, &scope),
+            Err(crate::native_graph::GraphError::DescriptorNotInRow)
+        ));
+
+        // The workspace view still reads its own revision, and the two mounts
+        // carry distinct pinned snapshot identities.
+        let head = repository
+            .open_format_context()
+            .expect("admit the workspace context");
+        let head_snapshot = head.load_row_map(relation_id).expect("workspace row map");
+        let head_graph = head.open_native_graph(&head_snapshot).expect("workspace graph");
+        let head_scope = head_graph.open_read_scope().expect("workspace read scope");
+        let head_row = head_graph
+            .lookup_row(&TypedKey::UInt(1), &head_scope)
+            .expect("read the workspace row")
+            .expect("the workspace holds the row");
+        let head_stored = head_graph
+            .read_stored_blob_value(&head_row, &second_descriptor, &head_scope)
+            .expect("read the workspace Blob");
+        let head_range = head_graph
+            .read_blob_range(
+                head_stored.reference(),
+                0..second_payload.len() as u64,
+                &head_scope,
+            )
+            .expect("read the workspace payload");
+        assert_eq!(head_range.bytes(), second_payload);
+
+        let remounted = repository
+            .open_format_context_at_selector("HEAD~1")
+            .expect("remount the prior commit");
+        assert_eq!(
+            mounted.snapshot_id(),
+            remounted.snapshot_id(),
+            "one commit always resolves to one snapshot identity"
+        );
+        assert_ne!(mounted.snapshot_id(), head.snapshot_pin().snapshot_id());
+    }
+
+    #[test]
+    fn a_row_storing_one_blob_twice_is_refused_rather_than_attributed() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x52; 16];
+        let payload = b"london take three".as_slice();
+        install_annotated_blob_row_store(
+            root,
+            relation_id,
+            1,
+            payload,
+            "audio/mpeg",
+            Some("mp3"),
+            true,
+        );
+
+        let repository = Repository::discover(root).expect("discover the fixture repository");
+        let context = repository
+            .open_format_context()
+            .expect("admit the workspace context");
+        let snapshot = context.load_row_map(relation_id).expect("row map");
+        let graph = context.open_native_graph(&snapshot).expect("graph");
+        let scope = graph.open_read_scope().expect("read scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(1), &scope)
+            .expect("read the row")
+            .expect("the row exists");
+        let descriptor = row
+            .value()
+            .dependencies()
+            .first()
+            .expect("the row names its Blob")
+            .oid()
+            .clone();
+        assert!(matches!(
+            graph.read_stored_blob_value(&row, &descriptor, &scope),
+            Err(crate::native_graph::GraphError::UnsupportedRowValueForm)
+        ));
+    }
+
     fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
         let prefix = major << 5;
         match value {
@@ -1467,6 +1811,121 @@ mod graph_bridge_tests {
             graph.pin_store_subtree_in_index(&index, &blob),
             Err(crate::native_graph::GraphError::WrongNodeKind { .. })
         ));
+    }
+
+    #[test]
+    fn frozen_publication_candidate_carries_only_the_store_root() {
+        let directory = repository();
+        let root = directory.path();
+        // Human state that a publication commit must never contain: an
+        // unstaged edit of a managed path and an untracked path.
+        fs::write(root.join("main.orna"), b"human unstaged edit").expect("edit a managed path");
+        fs::write(root.join("human.txt"), b"untracked human file").expect("add a human path");
+
+        let context = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &context);
+        let rows = sealed_rows(&context, &schema_oid, schema_digest);
+        let graph = context
+            .open_native_graph(&rows)
+            .expect("admit the fixture graph");
+        let database_id = *context
+            .require_database_id()
+            .expect("admitted format-3 identity")
+            .as_bytes();
+
+        // The frozen batch's encoded store root, built through the writer a
+        // publication path uses.
+        let mut written = std::collections::BTreeSet::new();
+        let relation_map = graph
+            .write_native_node(
+                &NodeData::OrderedLeaf {
+                    domain: relations_domain(database_id),
+                    entries: Vec::new(),
+                },
+                &mut written,
+            )
+            .expect("write the relation map node");
+        let store_root = graph
+            .write_native_node(&NodeData::StoreRoot { relation_map }, &mut written)
+            .expect("write the store root node");
+
+        let repository = Repository::discover(root).expect("discover fixture repository");
+        let head = repository
+            .head()
+            .expect("read fixture HEAD")
+            .expect("fixture HEAD is born");
+        let candidate = repository
+            .build_frozen_publication_candidate(
+                &head,
+                &graph,
+                &store_root,
+                "orna: publish runtime data",
+            )
+            .expect("build the frozen publication candidate");
+
+        // N = H + P: the candidate's parent is the captured HEAD.
+        let parents = Command::new("git")
+            .current_dir(root)
+            .args(["rev-list", "--parents", "--no-walk", candidate.commit().as_str()])
+            .output()
+            .expect("read candidate parents");
+        let parents = String::from_utf8_lossy(&parents.stdout).into_owned();
+        assert_eq!(
+            parents.trim(),
+            format!("{} {}", candidate.commit().as_str(), head.as_str()),
+            "the candidate is a direct child of the captured HEAD"
+        );
+
+        // The frozen store root is staged at the fixed format-3 path as a tree.
+        let store = Command::new("git")
+            .current_dir(root)
+            .args(["ls-tree", candidate.commit().as_str(), "--", ".orna/store"])
+            .output()
+            .expect("read the candidate store entry");
+        let store = String::from_utf8_lossy(&store.stdout).into_owned();
+        assert_eq!(
+            store.trim(),
+            format!("040000 tree {}\t.orna/store", store_root.to_hex()),
+            "the candidate exposes the encoded store root at .orna/store"
+        );
+
+        // Neither the human unstaged edit nor the untracked path is an input.
+        let human = Command::new("git")
+            .current_dir(root)
+            .args(["ls-tree", candidate.commit().as_str(), "--name-only"])
+            .output()
+            .expect("list the candidate tree");
+        let listed = String::from_utf8_lossy(&human.stdout).into_owned();
+        assert!(
+            !listed.contains("human.txt"),
+            "an untracked human path is not committed"
+        );
+        let managed = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", &format!("{}:main.orna", candidate.commit().as_str())])
+            .output()
+            .expect("read the candidate managed blob");
+        let unchanged = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", &format!("{}:main.orna", head.as_str())])
+            .output()
+            .expect("read the base managed blob");
+        assert_eq!(
+            managed.stdout, unchanged.stdout,
+            "the candidate carries the captured managed base, not the human edit"
+        );
+
+        // The candidate never touches the ordinary index, HEAD, or worktree.
+        assert_eq!(
+            repository.head().expect("read HEAD").expect("born HEAD"),
+            head,
+            "building a candidate does not move the branch"
+        );
+        assert_eq!(
+            fs::read(root.join("main.orna")).expect("read the human edit"),
+            b"human unstaged edit",
+            "building a candidate does not rewrite the worktree"
+        );
     }
 
     #[test]
