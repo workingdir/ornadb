@@ -1386,7 +1386,11 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
     // is derived from the stored field name, so the full name is still
     // re-derivable and verified by the long-name index (VFS-016).
     if project_field_name(field).len() + 1 + selected.len() > VFS_MAX_COMPONENT_BYTES {
-        return format!("{}.{}", long_alias(field, VfsNameNamespace::Field), selected);
+        return format!(
+            "{}.{}",
+            long_alias(field, VfsNameNamespace::Field),
+            selected
+        );
     }
     let mut name = project_field_name(field);
     name.push('.');
@@ -2096,7 +2100,10 @@ mod tests {
         // are untouched.
         let renamed = project_content_name("content", "audio/mpeg", Some("mp1"));
         assert_eq!(renamed, "content.mp1");
-        assert_eq!(project_content_name("content", "audio/mpeg", None), "content.mp3");
+        assert_eq!(
+            project_content_name("content", "audio/mpeg", None),
+            "content.mp3"
+        );
     }
 
     #[test]
