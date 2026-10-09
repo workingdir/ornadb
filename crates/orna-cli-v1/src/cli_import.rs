@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use orna_repository_v1::offline_copy::{OfflineCopy, OfflineImportRow};
+use orna_repository_v1::offline_copy::{OfflineCopy, OfflineImportMetadata};
 use orna_value_v1::normalize_media_type;
 
 use super::Diagnostic;
@@ -152,33 +152,35 @@ fn dry_run_summary(
     progress: bool,
     format: ReportFormat,
 ) -> Result<String, Diagnostic> {
-    let plan = OfflineCopy::open(bundle)
-        .and_then(|copy| {
-            copy.import_plan_with_progress(|step| {
-                if progress {
-                    eprintln!("{step}");
-                }
-            })
+    let copy = OfflineCopy::open(bundle)
+        .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?;
+    // Every row is verified even when the report is limited, and the payloads
+    // are hashed from a fixed buffer rather than retained (CAPTURE-3 step 2).
+    let total = copy.rows().len();
+    let summary = copy
+        .import_summary_with_progress(total, |step| {
+            if progress {
+                eprintln!("{step}");
+            }
         })
         .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?;
-    let total = plan.rows.len();
     let reported = limit.map_or(total, |limit| limit.min(total));
-    let reported_rows = &plan.rows[..reported];
+    let reported_rows = &summary.rows[..reported];
     let payload_bytes: u64 = reported_rows.iter().map(|row| row.length).sum();
     let typed = media_type.map_or(String::new(), |media_type| format!(" as {media_type}"));
-    let summary = format!(
+    let summary_line = format!(
         "dry run: {reported} of {total} rows{typed}, {payload_bytes} payload bytes, {} history entries; nothing written",
-        plan.history.len()
+        summary.history.len()
     );
     Ok(match format {
-        ReportFormat::Human => summary,
-        ReportFormat::Table => format!("{}{summary}", render_table(reported_rows, media_type)),
+        ReportFormat::Human => summary_line,
+        ReportFormat::Table => format!("{}{summary_line}", render_table(reported_rows, media_type)),
     })
 }
 
 /// Renders the reported rows as an aligned table with a header line. Every
 /// line ends in a newline, so the summary line can follow directly.
-fn render_table(rows: &[OfflineImportRow], media_type: Option<&str>) -> String {
+fn render_table(rows: &[OfflineImportMetadata], media_type: Option<&str>) -> String {
     let header = [
         "key".to_owned(),
         "media_type".to_owned(),

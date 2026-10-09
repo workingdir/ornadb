@@ -111,6 +111,7 @@ a6ca224a43637d923a7f0a5ea9daa3f4e9c10d8c22451184af616b9d0c95a2a6  crates/orna-ap
 b3711d0746280137a2f5ce469efecd0ac2cb76b5349263c0b3fb2c270ad5f3ad  crates/orna-cli-v1/tests/fixtures/captured-standard-main.orna
 666c5fd37750c47fe301fd06dfef74851103f6da7eb9d2b27d88bcaf02afaea8  crates/orna-cli-v1/tests/fixtures/captured-standard-math.orna
 330cd38e8d99a312342a488abd169902d890d00edcbcdcaa7bf6ce583eee7de8  crates/orna-cli-v1/tests/fixtures/captured-standard-parent.orna
+8f0bf948dc130ba4f904a865be0f92f771f204a844a69b574cdcddf134252f68  crates/orna-cli-v1/tests/fixtures/catalogue-count-no-args-ogx1.orna
 b8c00d075002cadfa7d055979c26d5f34e4b3d7f5a1300f5d2a226cf24655f67  crates/orna-cli-v1/tests/fixtures/catalogue-delete-ogd1.orna
 2d5c8af40b0b3f6c0390bf7619681e1dd030bd12189d232027aa237d59725c49  crates/orna-cli-v1/tests/fixtures/catalogue-empty-ogz1.orna
 9a9c2573f73668729d3ea1efe7183aa0d06a71a315baacb3e855e90c513d67a1  crates/orna-cli-v1/tests/fixtures/catalogue-eq-ogq1.orna
@@ -3533,7 +3534,9 @@ e135e88ea724373eded488eca7b9aef9e871b22379d5aa456b1af647db94c424  crates/orna-re
 5075d2e2d2ea0ceedb49a53ad8daf559c89cb9c3f86b11853bcc1586907cf3d1  crates/orna-repository-v1/tests/fixtures/foundation-adapter-main.orna
 5075d2e2d2ea0ceedb49a53ad8daf559c89cb9c3f86b11853bcc1586907cf3d1  crates/orna-repository-v1/tests/fixtures/git-repository-main.orna
 abe8d8d34d5b65d1556e2e286cc6d6649b29b7fd9f5fb78d028f6853e364371c  crates/orna-repository-v1/tests/fixtures/git-repository-nested-tool.orna
+f4343261af4a130f83991fab9b5cce452b00734918b536fbeef0ead2850511c1  crates/orna-repository-v1/tests/fixtures/offline-complete-copy/dependency.orna
 9662403d4258a1075344fce92e27c27b4975046f1056b89f176eec84133497e0  crates/orna-repository-v1/tests/fixtures/pin-roundtrip.orna
+c60afad93513466ccb681cdc6839ebed60847bf5e26d888743c2b0b338b348e9  crates/orna-repository-v1/tests/fixtures/row-edit-v2.orna
 2e88c870800727fb7dbf4dbe95619ab9cfa1b675b896b9985f15ec78e9fca510  crates/orna-repository-v1/tests/fixtures/snapshot-round-trip.orna
 1210bee01ae93bc95bf92f9377713fa21c8a4731d7fd18d02c38a3efdfd00df4  crates/orna-repository-v1/tests/fixtures/traceability-row-base.orna
 92854279a1ee438259fa7b57b1be5327a2210727eefa30f11bd574b9a66db9f0  crates/orna-repository-v1/tests/fixtures/traceability-row-conflict-name.orna
@@ -3824,6 +3827,7 @@ e9b6f3480d62becf141ddd1c8284c14c9297d45d8f544bd0f892a2050d5e722d  crates/orna-ru
 7bebf0519888550bd64f1136287cd9698ad94b530d81382e9aa856b4b3afe78b  crates/orna-runtime-v1/tests/fixtures/query-session-union-unknown-operand-batches-through-cascade-storm.orna
 02397ffe2a7fd445734dc51d72a5de7ef27d6c9ec08eae3621b0ef00a2db3b8a  crates/orna-runtime-v1/tests/fixtures/query-session-union-zero-drop-unknown-filter-storm.orna
 72c4e8856340293db9bab39c43e5f9768de3b330aa3baa5a3744c16f3bd20f77  crates/orna-runtime-v1/tests/fixtures/query-session-unknown-batch-filters-through-shared-union.orna
+3778c50266c682abc2dd7966c27ca3372d9b573be3afb3184b867830e5736450  crates/orna-runtime-v1/tests/fixtures/vfs-row-music-london.orna
 6999e5be56c22c59551d5647a16eaa8fadacdeb4b708f87eb29938a627196b4f  crates/orna-semantic-v1/src/fixtures/repl-count-declaration.orna
 1942386dcc56470ab974ff9041ffe2e85ac52488bd9f43f2e47551ccdcdc1013  crates/orna-semantic-v1/src/fixtures/repl-count-increment.orna
 dd4034215dcc7fb19c8cc9436b754da1b72279f823a7e6dc352b231d876093dd  crates/orna-semantic-v1/src/fixtures/repl-count-reference.orna

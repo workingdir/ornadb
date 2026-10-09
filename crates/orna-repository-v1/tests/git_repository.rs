@@ -5380,6 +5380,78 @@ fn publication_journal_round_trips_atomically_and_advances_monotonically() {
 }
 
 #[test]
+fn republish_after_edit_bumps_the_revision_and_serves_the_edited_bytes() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let first = b"first publication\n".to_vec();
+    let edited: &[u8] = include_bytes!("fixtures/row-edit-v2.orna");
+
+    let head_before = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head_before,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(first.clone()),
+            )],
+            "orna: publish row",
+        )
+        .unwrap();
+    let mut journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head_before.clone(),
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [4; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(first.clone()),
+        )],
+    )
+    .unwrap();
+    repo.publish_candidate(&index_before, &candidate, &mut journal)
+        .unwrap();
+    repo.clear_publication_journal().unwrap();
+    let revision_one = repo.head().unwrap().unwrap();
+    assert_ne!(revision_one, head_before);
+
+    let index_one = repo.index_generation().unwrap();
+    let edit = repo
+        .build_private_commit(
+            &revision_one,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(edited.to_vec()),
+            )],
+            "orna: republish edited row",
+        )
+        .unwrap();
+    let mut edit_journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        revision_one.clone(),
+        edit.commit().clone(),
+        index_one.tree().unwrap().clone(),
+        [5; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            Some(first),
+            Some(edited.to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.publish_candidate(&index_one, &edit, &mut edit_journal)
+        .unwrap();
+
+    let revision_two = repo.head().unwrap().unwrap();
+    assert_ne!(revision_two, revision_one, "republish must bump the revision");
+    assert_eq!(
+        git(root.path(), &["show", &format!("HEAD:{}", managed.as_path().display())]),
+        String::from_utf8(edited.to_vec()).unwrap().trim_end(),
+    );
+}
+
+#[test]
 fn publish_candidate_completes_ref_index_and_worktree_boundaries() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();

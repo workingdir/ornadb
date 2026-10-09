@@ -1,0 +1,1 @@
+pub fn status(): Text = "count without arguments";

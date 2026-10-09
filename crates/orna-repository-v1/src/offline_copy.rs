@@ -15,7 +15,7 @@
 use std::{
     error::Error,
     fmt, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -24,6 +24,10 @@ use sha2::{Digest, Sha256};
 const INDEX_FILE: &str = "index.tsv";
 const MEDIA_DIR: &str = "media";
 const HEADER: &str = "orna-offline-copy 1";
+
+/// Fixed buffer used to hash one payload. Verification retention is bounded by
+/// this constant, not by the payload length.
+const PAYLOAD_BUFFER_BYTES: usize = 64 * 1024;
 
 /// One committed row to copy, with its payload when the caller selects it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -524,6 +528,86 @@ impl OfflineCopy {
     }
 }
 
+/// One verified row without its payload: what the bundle promised, after its
+/// bytes were hashed and discarded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineImportMetadata {
+    pub key: Vec<u8>,
+    pub media_type: String,
+    pub suffix: Option<String>,
+    pub length: u64,
+    pub sha256: [u8; 32],
+}
+
+/// A complete bundle verification that keeps no payload bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineImportSummary {
+    pub rows: Vec<OfflineImportMetadata>,
+    pub history: Vec<OfflineHistoryEntry>,
+}
+
+impl OfflineCopy {
+    /// Verifies every selected payload against its recorded length and
+    /// SHA-256 from a fixed-size buffer and returns only metadata. This is the
+    /// bounded-retention counterpart to `import_plan`, for callers that plan
+    /// an import without holding the payloads (CAPTURE-3 step 2).
+    pub fn import_summary(&self, limit: usize) -> Result<OfflineImportSummary, OfflineCopyError> {
+        self.import_summary_with_progress(limit, |_| {})
+    }
+
+    /// Same verification as `import_summary`, reporting each row once its
+    /// bytes have been hashed and released. Progress is reported in bundle
+    /// order.
+    pub fn import_summary_with_progress(
+        &self,
+        limit: usize,
+        mut progress: impl FnMut(OfflineImportProgress),
+    ) -> Result<OfflineImportSummary, OfflineCopyError> {
+        if self
+            .history
+            .windows(2)
+            .any(|pair| pair[0].sequence >= pair[1].sequence)
+        {
+            return Err(OfflineCopyError::InvalidBundle(
+                "history is not strictly ordered",
+            ));
+        }
+        let selected = &self.rows[..self.rows.len().min(limit)];
+        let mut rows = Vec::with_capacity(selected.len());
+        for (index, metadata) in selected.iter().enumerate() {
+            if !metadata.has_payload {
+                return Err(OfflineCopyError::NoPayload {
+                    key: metadata.key.clone(),
+                });
+            }
+            let path = self.directory.join(MEDIA_DIR).join(hex(&metadata.sha256));
+            verify_payload_stream(
+                &metadata.key,
+                metadata.length,
+                metadata.sha256,
+                fs::File::open(path)?,
+            )?;
+            progress(OfflineImportProgress {
+                verified: index + 1,
+                total: selected.len(),
+                key: metadata.key.clone(),
+                bytes: metadata.length,
+            });
+            rows.push(OfflineImportMetadata {
+                key: metadata.key.clone(),
+                media_type: metadata.media_type.clone(),
+                suffix: metadata.suffix.clone(),
+                length: metadata.length,
+                sha256: metadata.sha256,
+            });
+        }
+        Ok(OfflineImportSummary {
+            rows,
+            history: self.history.clone(),
+        })
+    }
+}
+
 fn validate_row(row: &OfflineRow) -> Result<(), OfflineCopyError> {
     let token_ok = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_graphic());
     if !token_ok(&row.media_type) {
@@ -543,6 +627,32 @@ fn verify_payload(row: &OfflineRow, payload: &[u8]) -> Result<(), OfflineCopyErr
         return Err(OfflineCopyError::PayloadMismatch {
             key: row.key.clone(),
         });
+    }
+    Ok(())
+}
+
+/// Hashes an already-published payload from a fixed-size buffer, so a row's
+/// verification retention does not grow with its payload length.
+fn verify_payload_stream(
+    key: &[u8],
+    length: u64,
+    sha256: [u8; 32],
+    source: impl Read,
+) -> Result<(), OfflineCopyError> {
+    let mut source = source;
+    let mut buffer = vec![0_u8; PAYLOAD_BUFFER_BYTES];
+    let mut hasher = Sha256::new();
+    let mut read_total: u64 = 0;
+    loop {
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        read_total += read as u64;
+        hasher.update(&buffer[..read]);
+    }
+    if read_total != length || <[u8; 32]>::from(hasher.finalize()) != sha256 {
+        return Err(OfflineCopyError::PayloadMismatch { key: key.to_vec() });
     }
     Ok(())
 }
