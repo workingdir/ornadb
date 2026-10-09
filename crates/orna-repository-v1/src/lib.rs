@@ -32,6 +32,7 @@ mod compact;
 pub mod complete_copy;
 mod init;
 mod mount;
+pub mod migration_copy;
 mod native_graph;
 pub mod offline_copy;
 pub mod publication_describe;

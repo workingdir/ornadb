@@ -8,8 +8,6 @@ use std::{
     process::Command,
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use ed25519_dalek::{Signer, SigningKey};
 use fs2::FileExt;
 use orna_foundation_v1::{CanonicalValue, GitHash, OvbRaw, SchemaDescriptor};
@@ -35,6 +33,8 @@ use parquet::{
     schema::parser::parse_message_type,
 };
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -2642,12 +2642,7 @@ fn admitted_force_discard_is_fenced_against_later_target_drift() {
         .unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(
-            &plan,
-            true,
-            Some(&token),
-            plan.git().discardable_paths(),
-        )
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
         .unwrap();
 
     let target = git(root.path(), &["rev-parse", "experiment"]);
@@ -5444,9 +5439,15 @@ fn republish_after_edit_bumps_the_revision_and_serves_the_edited_bytes() {
         .unwrap();
 
     let revision_two = repo.head().unwrap().unwrap();
-    assert_ne!(revision_two, revision_one, "republish must bump the revision");
+    assert_ne!(
+        revision_two, revision_one,
+        "republish must bump the revision"
+    );
     assert_eq!(
-        git(root.path(), &["show", &format!("HEAD:{}", managed.as_path().display())]),
+        git(
+            root.path(),
+            &["show", &format!("HEAD:{}", managed.as_path().display())]
+        ),
         String::from_utf8(edited.to_vec()).unwrap().trim_end(),
     );
 }
@@ -5645,14 +5646,8 @@ fn cross_protocol_recovery_journals_are_mutually_exclusive() {
         repo.recover_compact_publication_boundary(),
         Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
     ));
-    let receipt = CompactRuntimeReceipt::new(
-        [87; 16],
-        [88; 32],
-        head.clone(),
-        [89; 32],
-        [0; 64],
-    )
-    .unwrap();
+    let receipt =
+        CompactRuntimeReceipt::new([87; 16], [88; 32], head.clone(), [89; 32], [0; 64]).unwrap();
     assert!(matches!(
         repo.finish_compact_with_receipt(&receipt),
         Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
@@ -7854,12 +7849,12 @@ fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
         pinned_blob,
         "migration must keep the protected pin pointing at the same Blob"
     );
+    assert_eq!(git(root.path(), &["cat-file", "-t", &pinned_blob]), "blob");
     assert_eq!(
-        git(root.path(), &["cat-file", "-t", &pinned_blob]),
-        "blob"
-    );
-    assert_eq!(
-        git(root.path(), &["show", &format!("{}:main.orna", old_head.as_str())]),
+        git(
+            root.path(),
+            &["show", &format!("{}:main.orna", old_head.as_str())]
+        ),
         git(root.path(), &["show", &format!("{pinned_blob}")])
     );
 }
@@ -8109,7 +8104,10 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
 
         // Byte identity of the old commit is untouched: the migration is
         // refused before any ref, index, or worktree change.
-        let mut without_annotation_defaults = base.clone().with_migration_continuity(continuity.clone()).unwrap();
+        let mut without_annotation_defaults = base
+            .clone()
+            .with_migration_continuity(continuity.clone())
+            .unwrap();
         assert!(matches!(
             repo.publish_legacy_format_migration(
                 &expected_index,
@@ -8165,7 +8163,10 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
         let persisted = repo.read_publication_journal().unwrap().unwrap();
         assert_eq!(persisted.migration_continuity(), Some(&continuity));
         assert_eq!(persisted.migration_annotation_defaults(), Some(defaults));
-        assert_eq!(persisted.stage(), PublicationJournalStage::WorktreeReconciled);
+        assert_eq!(
+            persisted.stage(),
+            PublicationJournalStage::WorktreeReconciled
+        );
         assert_eq!(
             repo.open_format_context()
                 .unwrap()
@@ -8348,4 +8349,228 @@ fn resumed_legacy_migration_reports_the_recorded_successor_identity_without_rese
             .repository_format_number(),
         3
     );
+}
+
+#[test]
+fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates() {
+    for (format, format_number) in [
+        (include_str!("fixtures/format-context/format-1.orna"), 1u8),
+        (include_str!("fixtures/format-context/format-2.orna"), 2u8),
+    ] {
+        let source = repository_with_legacy_format(format);
+        let repo = Repository::discover(source.path()).unwrap();
+        let source_head = repo.head().unwrap().unwrap();
+        let source_index = repo.index_generation().unwrap();
+        // Dirty, untracked and ignored source work that a migration must carry
+        // and a clean checkout must not overwrite.
+        fs::write(source.path().join("ordinary.txt"), "dirty\n").unwrap();
+        fs::write(source.path().join("untracked.txt"), "untracked\n").unwrap();
+        fs::write(source.path().join(".gitignore"), "ignored/\n").unwrap();
+        fs::create_dir_all(source.path().join("ignored")).unwrap();
+        fs::write(
+            source.path().join("ignored/payload.bin"),
+            b"ignored payload",
+        )
+        .unwrap();
+        let directory = TempDir::new().unwrap();
+        let continuity = MigrationContinuityRecord::new(vec![
+            StreamCheckpointIdentityPredecessor::new(
+                [61; 32],
+                b"legacy-stream-source".to_vec(),
+                Some(b"legacy-partition".to_vec()),
+                [62; 32],
+                b"format3-stream-source".to_vec(),
+                Some(b"format3-partition".to_vec()),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let defaults = MigrationAnnotationDefaults::new(7).unwrap();
+        let destination = directory.path().join("migrated");
+
+        let copy = orna_repository_v1::migration_copy::prepare_format3_migration(
+            &repo,
+            &destination,
+            continuity.clone(),
+            defaults,
+        )
+        .unwrap();
+
+        // The source is untouched: same head, same recorded format, same
+        // working tree, including the dirty and ignored paths.
+        assert_eq!(repo.head().unwrap(), Some(source_head.clone()));
+        assert_eq!(repo.index_generation().unwrap(), source_index);
+        assert_eq!(
+            repo.open_format_context()
+                .unwrap()
+                .repository_format_number(),
+            format_number
+        );
+        assert_eq!(
+            fs::read_to_string(source.path().join("ordinary.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert_eq!(
+            fs::read(source.path().join("ignored/payload.bin")).unwrap(),
+            b"ignored payload"
+        );
+
+        // The copy carries the source's commits under their original identity
+        // and its own content, including the paths Git ignores.
+        let migrated = Repository::discover(&copy.destination()).unwrap();
+        assert_eq!(copy.source_commit(), &source_head);
+        assert_eq!(migrated.head().unwrap(), Some(source_head.clone()));
+        assert_eq!(
+            fs::read_to_string(copy.destination().join("ordinary.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert_eq!(
+            fs::read_to_string(copy.destination().join("untracked.txt")).unwrap(),
+            "untracked\n"
+        );
+        assert_eq!(
+            fs::read(copy.destination().join("ignored/payload.bin")).unwrap(),
+            b"ignored payload"
+        );
+        assert_eq!(
+            fs::read_to_string(copy.destination().join("main.orna")).unwrap(),
+            include_str!("fixtures/git-repository-main.orna")
+        );
+        // The copy retired nothing yet: preparation preserves the source's own
+        // `.orna` bytes, and the format-3 records live in the candidate, which
+        // is exactly what keeps the migration unpacked-but-unpublished.
+        assert_eq!(
+            fs::read_to_string(copy.destination().join(".orna/format.orna")).unwrap(),
+            format
+        );
+        // Neither the source nor the copy admits canonical metadata: a legacy
+        // workspace carries the format record and no database record, which the
+        // reader reports as incomplete metadata rather than a usable identity.
+        // The copy deliberately stays in that state — its new identity lives in
+        // the candidate, where `copy.database_id()` names it.
+        assert!(matches!(
+            orna_repository_v1::inspect_metadata(&repo),
+            Err(orna_repository_v1::RepositoryInitError::MetadataIncomplete)
+        ));
+        assert!(matches!(
+            orna_repository_v1::inspect_metadata(&migrated),
+            Err(orna_repository_v1::RepositoryInitError::MetadataIncomplete)
+        ));
+        assert_eq!(copy.source_format_number(), format_number);
+
+        // The coordinates the migration must report are the ones it was
+        // prepared with, not values re-derived from anything.
+        assert_eq!(copy.annotation_defaults(), defaults);
+        assert!(!copy.annotation_defaults().payload_inspected());
+        assert_eq!(copy.continuity().predecessors(), continuity.predecessors());
+        let legacy_consumer = [61; 32];
+        assert_eq!(
+            copy.continuity().successor_for(
+                legacy_consumer,
+                b"legacy-stream-source",
+                Some(b"legacy-partition")
+            ),
+            Some((
+                [62; 32],
+                b"format3-stream-source".as_slice(),
+                Some(b"format3-partition".as_slice())
+            ))
+        );
+        assert_eq!(copy.dependency_entries(), 0);
+        let tree_identity = copy.source_tree_identity();
+        assert!(tree_identity.iter().any(|byte| *byte != 0));
+        assert!(copy.source_index_generation().tree().is_some());
+        let working_tree_identity = copy.working_tree_identity();
+        assert!(working_tree_identity.iter().any(|byte| *byte != 0));
+        // The two identities answer different questions: the source identity is
+        // derived from the legacy commit, the copy's from the settled tree the
+        // migration published, so a copy that silently reused one for the other
+        // is detectable here.
+        assert_ne!(tree_identity, working_tree_identity);
+
+        // The prepared journal binds the copy's legacy head to the format-3
+        // candidate and carries both migration coordinates, so the migration is
+        // resumable before the head moves.
+        let journal = copy.candidate_journal();
+        assert_eq!(journal.old_head(), &source_head);
+        assert!(journal.new_head().as_str() != source_head.as_str());
+        assert_eq!(journal.stage(), PublicationJournalStage::Prepared);
+        assert_eq!(journal.migration_annotation_defaults(), Some(defaults));
+        assert_eq!(
+            journal.migration_continuity().unwrap().predecessors(),
+            continuity.predecessors()
+        );
+        assert!(journal.runtime_intent_id().is_some());
+        // The journal names every path the migration changes, so a resume
+        // replays the transition rather than re-deciding it.
+        assert_eq!(journal.entries().len(), 3);
+        assert_eq!(
+            journal
+                .entries()
+                .iter()
+                .map(PublicationJournalEntry::path)
+                .map(|path| path.as_path().to_str().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                ".orna/database.orna".to_owned(),
+                ".orna/format.orna".to_owned(),
+                ".orna/migration.json".to_owned()
+            ]
+        );
+        // The candidate installs the canonical database record and retires the
+        // legacy format record, which the profile reader spells as "no format
+        // file beside a database record" rather than a literal `format 3` line.
+        // It does not yet carry a converted `.orna/store` root, so publication
+        // still refuses it: that store conversion is a separate step.
+        let candidate_commit = journal.new_head();
+        assert_ne!(candidate_commit.as_str(), source_head.as_str());
+        assert_eq!(
+            git(
+                copy.destination(),
+                &[
+                    "show",
+                    &format!("{}:.orna/database.orna", candidate_commit.as_str())
+                ]
+            ),
+            format!(
+                "{{\n    repository_format: 3,\n    database_id: \"{}\",\n}}",
+                copy.database_id()
+            )
+        );
+        assert!(
+            git(
+                copy.destination(),
+                &[
+                    "ls-tree",
+                    "--name-only",
+                    candidate_commit.as_str(),
+                    ".orna/"
+                ]
+            )
+            .lines()
+            .all(|line| line != ".orna/format.orna")
+        );
+        // The copy's head has not moved: the legacy commit stays checked out,
+        // so an old reader still dispatches to the legacy decoder there even
+        // though the working tree already carries format-3 metadata.
+        assert_eq!(migrated.head().unwrap(), Some(source_head.clone()));
+        assert_eq!(
+            migrated
+                .open_format_context()
+                .unwrap()
+                .repository_format_number(),
+            format_number
+        );
+
+        // A destination that already exists is refused rather than merged into.
+        assert!(matches!(
+            orna_repository_v1::migration_copy::prepare_format3_migration(
+                &repo,
+                &destination,
+                MigrationContinuityRecord::new(Vec::new()).unwrap(),
+                MigrationAnnotationDefaults::new(0).unwrap(),
+            ),
+            Err(RepositoryError::PublicationRecoveryConflict)
+        ));
+    }
 }
