@@ -95,12 +95,20 @@ fn export_check_and_restore_carry_one_snapshot_offline() {
     );
 
     // Reconstruct into a fresh directory: no remote is configured and the copy
-    // names the pinned commit as its HEAD.
+    // names the pinned commit as its HEAD. `--worktree` also materialises the
+    // pinned snapshot, which is what makes the copy usable and lets the source
+    // below be read from its own worktree.
     let restored = project.join("restored");
     let restored_path = restored.to_str().unwrap();
     let reconstructed = run(
         project,
-        &["export", archive_path, "--restore", restored_path],
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored_path,
+            "--worktree",
+        ],
     );
     assert_eq!(
         reconstructed.status.code(),

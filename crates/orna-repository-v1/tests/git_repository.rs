@@ -16,11 +16,11 @@ use orna_foundation_v1::{CanonicalValue, GitHash, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CommittedTreeEntryKind, CompactManifest,
     CompactRuntimeReceipt, CompactSegment, CompactSegmentRole, GitDeclaredObjectSetState,
-    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, ManagedFileChange,
-    ManagedPath, MigrationContinuityRecord, NativeObjectId, OrnaInternalRef, PublicationJournal,
-    PublicationJournalEntry, PublicationJournalStage, RemoteContinuity, Repository,
-    RepositoryError, RequiredInternalRef, RuntimeGeneration, StreamCheckpointIdentityPredecessor,
-    WorktreeState,
+    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
+    ManagedFileChange, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
+    NativeObjectId, OrnaInternalRef, PublicationJournal, PublicationJournalEntry,
+    PublicationJournalStage, RemoteContinuity, Repository, RepositoryError, RequiredInternalRef,
+    RuntimeGeneration, StreamCheckpointIdentityPredecessor, WorktreeState,
 };
 use parquet::{
     basic::{Compression, Encoding, PageType},
@@ -7709,6 +7709,10 @@ fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
         )
         .unwrap()
         .with_migration_continuity(continuity.clone())
+        .unwrap()
+        // The fixture has no legacy Blob rows, so no row's annotated value
+        // identity changes; the coordinate is still required and reported.
+        .with_migration_annotation_defaults(MigrationAnnotationDefaults::new(0).unwrap())
         .unwrap();
 
         repo.publish_legacy_format_migration(&expected_index, &candidate, &mut journal)
@@ -7832,6 +7836,8 @@ fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
     )
     .unwrap()
     .with_migration_continuity(continuity)
+    .unwrap()
+    .with_migration_annotation_defaults(MigrationAnnotationDefaults::new(0).unwrap())
     .unwrap();
 
     repo.publish_legacy_format_migration(&expected_index, &candidate, &mut journal)
@@ -7929,6 +7935,8 @@ fn recovery_refuses_to_finish_an_unstarted_legacy_migration_and_keeps_its_pin() 
     )
     .unwrap()
     .with_migration_continuity(continuity)
+    .unwrap()
+    .with_migration_annotation_defaults(MigrationAnnotationDefaults::new(0).unwrap())
     .unwrap();
 
     // Simulate a crash after the journal is durable and before publication.
@@ -8001,4 +8009,174 @@ fn legacy_format_migration_rejects_implicit_relabel_without_publication() {
     ));
     assert_eq!(repo.head().unwrap(), Some(old_head));
     assert!(repo.read_publication_journal().unwrap().is_none());
+}
+
+#[test]
+fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinate() {
+    for format in [
+        include_str!("fixtures/format-context/format-1.orna"),
+        include_str!("fixtures/format-context/format-2.orna"),
+    ] {
+        let root = repository_with_legacy_format(format);
+        let repo = Repository::discover(root.path()).unwrap();
+        let old_head = repo.head().unwrap().unwrap();
+
+        // The decoded legacy row metadata: one row already carries a
+        // representable annotation, one is recorded without any. Payload bytes
+        // are never read, so this inventory is exactly what the migration knows.
+        let rows = vec![
+            LegacyAnnotationCandidate::new(
+                b"row-labelled".to_vec(),
+                Some("audio/mpeg".to_owned()),
+                Some("mp2".to_owned()),
+            ),
+            LegacyAnnotationCandidate::new(b"row-unlabelled".to_vec(), None, None),
+        ];
+        let defaults = MigrationAnnotationDefaults::from_legacy_inventory(&rows).unwrap();
+        assert_eq!(defaults.entry_count(), 1);
+        assert!(!defaults.payload_inspected());
+
+        // A legacy annotation that format 3 cannot represent fails the
+        // migration rather than being downcast to bytes.
+        let unrepresentable = vec![LegacyAnnotationCandidate::new(
+            b"row-unrepresentable".to_vec(),
+            Some("audio/*".to_owned()),
+            Some("mp3".to_owned()),
+        )];
+        assert!(matches!(
+            MigrationAnnotationDefaults::from_legacy_inventory(&unrepresentable),
+            Err(RepositoryError::InvalidFormatMigration)
+        ));
+
+        let expected_index = repo.index_generation().unwrap();
+        let database = include_str!("fixtures/format-context/database-final.orna");
+        let store_root = b"verified candidate store root";
+        let candidate = repo
+            .build_private_commit(
+                &old_head,
+                &[
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/database.orna").unwrap(),
+                        Some(database.as_bytes().to_vec()),
+                    ),
+                    ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/store/root").unwrap(),
+                        Some(store_root.to_vec()),
+                    ),
+                ],
+                "explicit format 3 migration",
+            )
+            .unwrap();
+        let intent = [72; 16];
+        let journal_entries = vec![
+            PublicationJournalEntry::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                None,
+                Some(database.as_bytes().to_vec()),
+            ),
+            PublicationJournalEntry::new(
+                ManagedPath::new(".orna/format.orna").unwrap(),
+                Some(format.as_bytes().to_vec()),
+                None,
+            ),
+            PublicationJournalEntry::new(
+                ManagedPath::new(".orna/store/root").unwrap(),
+                None,
+                Some(store_root.to_vec()),
+            ),
+        ];
+        let continuity = MigrationContinuityRecord::new(vec![
+            StreamCheckpointIdentityPredecessor::new(
+                [51; 32],
+                b"legacy-source".to_vec(),
+                None,
+                [52; 32],
+                b"format3-source".to_vec(),
+                None,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let base = PublicationJournal::new_with_runtime_intent(
+            old_head.clone(),
+            candidate.commit().clone(),
+            expected_index.tree().unwrap().clone(),
+            intent,
+            journal_entries,
+        )
+        .unwrap();
+
+        // Byte identity of the old commit is untouched: the migration is
+        // refused before any ref, index, or worktree change.
+        let mut without_annotation_defaults = base.clone().with_migration_continuity(continuity.clone()).unwrap();
+        assert!(matches!(
+            repo.publish_legacy_format_migration(
+                &expected_index,
+                &candidate,
+                &mut without_annotation_defaults,
+            ),
+            Err(RepositoryError::InvalidFormatMigration)
+        ));
+        assert_eq!(repo.head().unwrap(), Some(old_head.clone()));
+        assert!(repo.read_publication_journal().unwrap().is_none());
+        assert_eq!(
+            repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+                .unwrap(),
+            format.as_bytes()
+        );
+
+        // The reported coordinate survives the journal round trip that a
+        // process restart performs before the publication is resumed.
+        let mut journal = base
+            .with_migration_continuity(continuity.clone())
+            .unwrap()
+            .with_migration_annotation_defaults(defaults)
+            .unwrap();
+        assert_eq!(journal.migration_annotation_defaults(), Some(defaults));
+
+        // Resume: a publisher that reopens the prepared journal must report the
+        // same durable coordinate, and cannot substitute another one.
+        assert_eq!(
+            journal
+                .clone()
+                .resume_migration_annotation_defaults(defaults)
+                .unwrap(),
+            defaults
+        );
+        assert!(matches!(
+            journal
+                .clone()
+                .resume_migration_annotation_defaults(MigrationAnnotationDefaults::new(2).unwrap()),
+            Err(RepositoryError::InvalidFormatMigration)
+        ));
+        // A journal without the recorded coordinate is a pre-v7 migration and
+        // has nothing to resume.
+        assert!(matches!(
+            without_annotation_defaults
+                .clone()
+                .resume_migration_annotation_defaults(defaults),
+            Err(RepositoryError::InvalidFormatMigration)
+        ));
+
+        repo.publish_legacy_format_migration(&expected_index, &candidate, &mut journal)
+            .unwrap();
+
+        let persisted = repo.read_publication_journal().unwrap().unwrap();
+        assert_eq!(persisted.migration_continuity(), Some(&continuity));
+        assert_eq!(persisted.migration_annotation_defaults(), Some(defaults));
+        assert_eq!(persisted.stage(), PublicationJournalStage::WorktreeReconciled);
+        assert_eq!(
+            repo.open_format_context()
+                .unwrap()
+                .repository_format_number(),
+            3
+        );
+        assert_eq!(
+            repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+                .unwrap(),
+            format.as_bytes()
+        );
+        assert_eq!(fs::read(root.path().join(".orna/store/root")).unwrap(), store_root);
+    }
 }
