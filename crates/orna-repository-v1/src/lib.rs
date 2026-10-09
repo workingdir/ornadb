@@ -6207,6 +6207,12 @@ impl Repository {
         }
     }
 
+    /// The local branch currently attached to `HEAD`, for callers that must
+    /// name it as a transport ref. `None` for a detached `HEAD`.
+    pub fn checked_out_branch(&self) -> Result<Option<String>, RepositoryError> {
+        self.current_branch()
+    }
+
     fn acquire_coordination_lock(&self) -> Result<CoordinationLock, RepositoryError> {
         let locks = self.runtime.locks();
         fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
