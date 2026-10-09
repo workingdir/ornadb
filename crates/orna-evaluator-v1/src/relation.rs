@@ -7,8 +7,10 @@ use num_integer::Integer;
 use num_traits::ToPrimitive;
 
 use super::{
-    timezone::{resolve_time_zone, Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError},
     RelationReadScope, Value,
+    timezone::{
+        Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError, resolve_time_zone,
+    },
 };
 
 static NEXT_RELATION_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
@@ -32,7 +34,6 @@ pub(super) struct BucketBySpec {
     pub(super) period: BucketPeriod,
     pub(super) zone: Option<String>,
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RelationBucketError {
@@ -83,7 +84,7 @@ impl RelationBucketState {
                 Some(resolve_time_zone(name).map_err(RelationBucketError::TimeZone)?)
             }
             (BucketPeriod::CalendarDays { .. }, None) => {
-                return Err(RelationBucketError::MissingZone)
+                return Err(RelationBucketError::MissingZone);
             }
             (BucketPeriod::Elapsed { .. }, _) => None,
         };
@@ -130,7 +131,6 @@ impl RelationBucketState {
         self.current.take()
     }
 
-
     fn boundaries(&self, instant: Instant) -> Result<(Instant, Instant), RelationBucketError> {
         match &self.spec.period {
             BucketPeriod::Elapsed {
@@ -138,10 +138,7 @@ impl RelationBucketState {
                 nanosecond,
             } => elapsed_boundaries(instant, seconds, *nanosecond),
             BucketPeriod::CalendarDays { days } => {
-                let zone = self
-                    .zone
-                    .as_ref()
-                    .ok_or(RelationBucketError::MissingZone)?;
+                let zone = self.zone.as_ref().ok_or(RelationBucketError::MissingZone)?;
                 calendar_boundaries(instant, zone, *days)
             }
         }
@@ -177,9 +174,8 @@ fn elapsed_boundaries(
     if width <= BigInt::from(0u8) {
         return Err(RelationBucketError::InvalidPeriod);
     }
-    let instant_nanos =
-        BigInt::from(instant.unix_seconds) * BigInt::from(1_000_000_000u32)
-            + BigInt::from(instant.nanosecond);
+    let instant_nanos = BigInt::from(instant.unix_seconds) * BigInt::from(1_000_000_000u32)
+        + BigInt::from(instant.nanosecond);
     let start_nanos = instant_nanos.div_floor(&width) * &width;
     let end_nanos = &start_nanos + width;
     Ok((
@@ -495,12 +491,8 @@ impl RelationStage {
     fn filter_values_equal(left: &Self, right: &Self) -> Option<bool> {
         match (left, right) {
             (Self::Filter(left), Self::Filter(right)) => Some(left == right),
-            (Self::Filter(left), Self::SharedFilter(right)) => {
-                Some(left.iter().eq(right.values()))
-            }
-            (Self::SharedFilter(left), Self::Filter(right)) => {
-                Some(left.values().eq(right.iter()))
-            }
+            (Self::Filter(left), Self::SharedFilter(right)) => Some(left.iter().eq(right.values())),
+            (Self::SharedFilter(left), Self::Filter(right)) => Some(left.values().eq(right.iter())),
             (Self::SharedFilter(left), Self::SharedFilter(right)) => {
                 Some(Arc::ptr_eq(left, right) || left.values().eq(right.values()))
             }
@@ -695,9 +687,7 @@ impl RelationPlan {
                                 self.source_identity,
                             )
                         };
-                        self.stages.push(RelationStage::SharedFilter(
-                            continuation,
-                        ));
+                        self.stages.push(RelationStage::SharedFilter(continuation));
                     }
                     Some(previous) => {
                         self.stages.push(previous);
@@ -773,9 +763,12 @@ impl RelationPlan {
         }
         match self.stages.pop() {
             Some(RelationStage::Filter(previous)) => {
-                self.stages.push(RelationStage::SharedFilter(
-                    FilterBatch::prefixed_by(previous, &predicates, self.source_identity),
-                ));
+                self.stages
+                    .push(RelationStage::SharedFilter(FilterBatch::prefixed_by(
+                        previous,
+                        &predicates,
+                        self.source_identity,
+                    )));
             }
             Some(RelationStage::SharedFilter(previous)) => {
                 self.stages.push(RelationStage::SharedFilter(
@@ -788,16 +781,12 @@ impl RelationPlan {
             }
             Some(previous) => {
                 self.stages.push(previous);
-                self.stages
-                    .push(RelationStage::SharedFilter(predicates));
+                self.stages.push(RelationStage::SharedFilter(predicates));
             }
-            None => self
-                .stages
-                .push(RelationStage::SharedFilter(predicates)),
+            None => self.stages.push(RelationStage::SharedFilter(predicates)),
         }
         self
     }
-
 }
 
 #[cfg(test)]
@@ -810,11 +799,7 @@ mod tests {
     fn shared_filter_join_cache_discards_expired_continuations() {
         let prefix = FilterBatch::from_values(vec![Value::Bool(true)]);
         let abandoned_suffix = FilterBatch::from_values(vec![Value::Bool(false)]);
-        let abandoned_join = FilterBatch::followed_by_in_scope(
-            &prefix,
-            &abandoned_suffix,
-            None,
-        );
+        let abandoned_join = FilterBatch::followed_by_in_scope(&prefix, &abandoned_suffix, None);
         assert_eq!(prefix.continuations.lock().unwrap().len(), 1);
         drop(abandoned_join);
 
@@ -856,8 +841,8 @@ mod tests {
         let source = RelationPlan::new("Unknown".into())
             .with_stage(RelationStage::SharedFilter(Arc::clone(&prefix)));
         let cloned_source = source.clone();
-        let sibling_source = RelationPlan::new("Unknown".into())
-            .with_stage(RelationStage::SharedFilter(prefix));
+        let sibling_source =
+            RelationPlan::new("Unknown".into()).with_stage(RelationStage::SharedFilter(prefix));
         let append = |plan: RelationPlan| {
             plan.with_stage(RelationStage::Filter(vec![Value::String(
                 "same continuation".into(),
@@ -965,9 +950,11 @@ mod tests {
             batch_for(right_right),
         ];
 
-        assert!(batches[1..]
-            .iter()
-            .all(|batch| Arc::ptr_eq(&batches[0], batch)));
+        assert!(
+            batches[1..]
+                .iter()
+                .all(|batch| Arc::ptr_eq(&batches[0], batch))
+        );
         assert!(
             retained_prefix.flattened.get().is_none(),
             "cloned prefixes should hit the identity cache before value flattening"
@@ -1008,9 +995,11 @@ mod tests {
             batch_for(right_right),
         ];
 
-        assert!(batches[1..]
-            .iter()
-            .all(|batch| Arc::ptr_eq(&batches[0], batch)));
+        assert!(
+            batches[1..]
+                .iter()
+                .all(|batch| Arc::ptr_eq(&batches[0], batch))
+        );
         assert!(
             retained_prefix.flattened.get().is_none(),
             "identity-cached continuations should preserve the unflattened prefix"
@@ -1059,11 +1048,9 @@ mod tests {
         let continuations = prefix.continuations.lock().unwrap();
         assert_eq!(continuations.len(), 4);
         assert!(continuations.values().all(|continuation| {
-            continuation
-                .upgrade()
-                .is_some_and(|batch| {
-                    Arc::ptr_eq(&batch, &batches[0]) || Arc::ptr_eq(&batch, &batches[1])
-                })
+            continuation.upgrade().is_some_and(|batch| {
+                Arc::ptr_eq(&batch, &batches[0]) || Arc::ptr_eq(&batch, &batches[1])
+            })
         }));
     }
 
@@ -1110,7 +1097,10 @@ mod tests {
         }
         assert_eq!(
             batches[0].values().cloned().collect::<Vec<_>>(),
-            vec![Value::Bool(true), Value::String("equal nested continuation".into())]
+            vec![
+                Value::Bool(true),
+                Value::String("equal nested continuation".into())
+            ]
         );
     }
 }

@@ -18,7 +18,10 @@ const STEP_LIMIT: u64 = 10_000_000;
 /// A syntax or resource error. Syntax errors carry the scalar position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegexError {
-    Syntax { position: usize, message: &'static str },
+    Syntax {
+        position: usize,
+        message: &'static str,
+    },
     LimitExhausted,
 }
 
@@ -52,14 +55,25 @@ enum Node {
     Literal(char),
     Any,
     Predicate(Predicate),
-    Class { negated: bool, items: Vec<ClassItem> },
+    Class {
+        negated: bool,
+        items: Vec<ClassItem>,
+    },
     Start,
     End,
     WordBoundary,
-    Group { index: Option<usize>, inner: Box<Node> },
+    Group {
+        index: Option<usize>,
+        inner: Box<Node>,
+    },
     Concat(Vec<Node>),
     Alternation(Vec<Node>),
-    Repeat { inner: Box<Node>, min: u32, max: Option<u32>, greedy: bool },
+    Repeat {
+        inner: Box<Node>,
+        min: u32,
+        max: Option<u32>,
+        greedy: bool,
+    },
 }
 
 /// A compiled `orna.regex/1` pattern.
@@ -70,7 +84,10 @@ pub struct Regex {
 }
 
 fn is_metacharacter(value: char) -> bool {
-    matches!(value, '\\' | '.' | '^' | '$' | '[' | ']' | '(' | ')' | '|' | '*' | '+' | '?' | '{' | '}')
+    matches!(
+        value,
+        '\\' | '.' | '^' | '$' | '[' | ']' | '(' | ')' | '|' | '*' | '+' | '?' | '{' | '}'
+    )
 }
 
 fn predicate_matches(predicate: Predicate, value: char) -> bool {
@@ -101,7 +118,10 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn error<T>(&self, message: &'static str) -> Result<T, RegexError> {
-        Err(RegexError::Syntax { position: self.position, message })
+        Err(RegexError::Syntax {
+            position: self.position,
+            message,
+        })
     }
 
     fn peek(&self) -> Option<char> {
@@ -182,7 +202,10 @@ impl<'a> Parser<'a> {
         if self.bump() != Some(')') {
             return self.error("unclosed group");
         }
-        Ok(Node::Group { index, inner: Box::new(inner) })
+        Ok(Node::Group {
+            index,
+            inner: Box::new(inner),
+        })
     }
 
     fn parse_escape(&mut self) -> Result<Node, RegexError> {
@@ -233,7 +256,10 @@ impl<'a> Parser<'a> {
             };
             if let ClassItem::Literal(low) = item
                 && self.peek() == Some('-')
-                && self.chars.get(self.position + 1).is_some_and(|next| *next != ']')
+                && self
+                    .chars
+                    .get(self.position + 1)
+                    .is_some_and(|next| *next != ']')
             {
                 self.bump();
                 let high = match self.bump() {
@@ -309,7 +335,12 @@ impl<'a> Parser<'a> {
             } else {
                 true
             };
-            atom = Node::Repeat { inner: Box::new(atom), min, max, greedy };
+            atom = Node::Repeat {
+                inner: Box::new(atom),
+                min,
+                max,
+                greedy,
+            };
         }
     }
 
@@ -355,12 +386,19 @@ impl<'a> Parser<'a> {
 /// look-around, backreferences and unknown escapes are syntax errors.
 pub fn compile(pattern: &str) -> Result<Regex, RegexError> {
     let chars: Vec<char> = pattern.chars().collect();
-    let mut parser = Parser { chars: &chars, position: 0, group_count: 0 };
+    let mut parser = Parser {
+        chars: &chars,
+        position: 0,
+        group_count: 0,
+    };
     let root = parser.parse_alternation()?;
     if parser.position != chars.len() {
         return parser.error("unmatched closing parenthesis");
     }
-    Ok(Regex { root, group_count: parser.group_count })
+    Ok(Regex {
+        root,
+        group_count: parser.group_count,
+    })
 }
 
 type Captures = Vec<Option<(usize, usize)>>;
@@ -470,9 +508,12 @@ impl Matcher<'_> {
                 }
                 Ok(false)
             }
-            Node::Repeat { inner, min, max, greedy } => {
-                self.run_repeat(inner, *min, *max, *greedy, 0, position, captures, next)
-            }
+            Node::Repeat {
+                inner,
+                min,
+                max,
+                greedy,
+            } => self.run_repeat(inner, *min, *max, *greedy, 0, position, captures, next),
         }
     }
 
@@ -485,9 +526,11 @@ impl Matcher<'_> {
     ) -> Result<bool, RegexError> {
         match items.split_first() {
             None => next(self, position, captures),
-            Some((first, rest)) => self.run(first, position, captures, &mut |matcher, end, captures| {
-                matcher.run_sequence(rest, end, captures, next)
-            }),
+            Some((first, rest)) => {
+                self.run(first, position, captures, &mut |matcher, end, captures| {
+                    matcher.run_sequence(rest, end, captures, next)
+                })
+            }
         }
     }
 
@@ -504,22 +547,23 @@ impl Matcher<'_> {
         next: &mut dyn FnMut(&mut Self, usize, &mut Captures) -> Result<bool, RegexError>,
     ) -> Result<bool, RegexError> {
         let may_repeat = max.is_none_or(|upper| count < upper);
-        let try_iteration = |matcher: &mut Self,
-                                 captures: &mut Captures,
-                                 next: &mut dyn FnMut(&mut Self, usize, &mut Captures) -> Result<bool, RegexError>|
-         -> Result<bool, RegexError> {
-            if !may_repeat {
-                return Ok(false);
-            }
-            matcher.run(inner, position, captures, &mut |matcher, end, captures| {
-                // An iteration that consumes nothing cannot make progress once
-                // the minimum is met, so it is not explored again.
-                if end == position && count >= min {
+        let try_iteration =
+            |matcher: &mut Self,
+             captures: &mut Captures,
+             next: &mut dyn FnMut(&mut Self, usize, &mut Captures) -> Result<bool, RegexError>|
+             -> Result<bool, RegexError> {
+                if !may_repeat {
                     return Ok(false);
                 }
-                matcher.run_repeat(inner, min, max, greedy, count + 1, end, captures, next)
-            })
-        };
+                matcher.run(inner, position, captures, &mut |matcher, end, captures| {
+                    // An iteration that consumes nothing cannot make progress once
+                    // the minimum is met, so it is not explored again.
+                    if end == position && count >= min {
+                        return Ok(false);
+                    }
+                    matcher.run_repeat(inner, min, max, greedy, count + 1, end, captures, next)
+                })
+            };
         if count < min {
             return try_iteration(self, captures, next);
         }
@@ -554,7 +598,11 @@ impl Regex {
         Ok(None)
     }
 
-    fn match_at(&self, matcher: &mut Matcher<'_>, start: usize) -> Result<Option<Match>, RegexError> {
+    fn match_at(
+        &self,
+        matcher: &mut Matcher<'_>,
+        start: usize,
+    ) -> Result<Option<Match>, RegexError> {
         let mut best: Option<(usize, Captures)> = None;
         let mut captures: Captures = vec![None; self.group_count + 1];
         matcher.run(&self.root, start, &mut captures, &mut |_, end, captures| {
@@ -567,7 +615,11 @@ impl Regex {
         Ok(best.map(|(end, captures)| {
             let mut captures = captures;
             captures[0] = Some((start, end));
-            Match { start, end, captures }
+            Match {
+                start,
+                end,
+                captures,
+            }
         }))
     }
 
@@ -617,7 +669,13 @@ mod tests {
             .expect("pattern compiles")
             .find_from(&chars, 0)
             .expect("within budget")?;
-        Some(&text[text.char_indices().nth(found.start)?.0..text.char_indices().nth(found.end).map_or(text.len(), |(index, _)| index)])
+        Some(
+            &text[text.char_indices().nth(found.start)?.0
+                ..text
+                    .char_indices()
+                    .nth(found.end)
+                    .map_or(text.len(), |(index, _)| index)],
+        )
     }
 
     fn syntax_position(pattern: &str) -> usize {
@@ -671,8 +729,14 @@ mod tests {
     #[test]
     fn lazy_quantifiers_only_reorder_captures_at_equal_length() {
         let pattern = compile("(a+?)(a*)").expect("compiles");
-        let found = pattern.find_from(&scalars("aaa"), 0).expect("within budget").expect("matches");
-        assert_eq!(found.captures, vec![Some((0, 3)), Some((0, 1)), Some((1, 3))]);
+        let found = pattern
+            .find_from(&scalars("aaa"), 0)
+            .expect("within budget")
+            .expect("matches");
+        assert_eq!(
+            found.captures,
+            vec![Some((0, 3)), Some((0, 1)), Some((1, 3))]
+        );
     }
 
     #[test]
@@ -687,7 +751,10 @@ mod tests {
     #[test]
     fn captures_report_participation_in_opening_group_order() {
         let pattern = compile("(a)|(b)").expect("compiles");
-        let found = pattern.find_from(&scalars("b"), 0).expect("within budget").expect("matches");
+        let found = pattern
+            .find_from(&scalars("b"), 0)
+            .expect("within budget")
+            .expect("matches");
         assert_eq!(found.captures, vec![Some((0, 1)), None, Some((0, 1))]);
         assert_eq!(pattern.group_count(), 2);
     }
@@ -695,8 +762,14 @@ mod tests {
     #[test]
     fn nested_groups_keep_the_last_iteration_capture() {
         let pattern = compile("((a)b)+").expect("compiles");
-        let found = pattern.find_from(&scalars("abab"), 0).expect("within budget").expect("matches");
-        assert_eq!(found.captures, vec![Some((0, 4)), Some((2, 4)), Some((2, 3))]);
+        let found = pattern
+            .find_from(&scalars("abab"), 0)
+            .expect("within budget")
+            .expect("matches");
+        assert_eq!(
+            found.captures,
+            vec![Some((0, 4)), Some((2, 4)), Some((2, 3))]
+        );
     }
 
     #[test]
@@ -758,20 +831,32 @@ mod tests {
     // Read the string literal returned by `pub fn {name}(): Str = "..."`.
     fn fixture_string(name: &str) -> &'static str {
         let marker = format!("pub fn {name}(): Str = \"");
-        let start = ANCHOR_FIXTURE.find(&marker).expect("fixture declares the function") + marker.len();
-        let length = ANCHOR_FIXTURE[start..].find('"').expect("fixture literal is closed");
+        let start = ANCHOR_FIXTURE
+            .find(&marker)
+            .expect("fixture declares the function")
+            + marker.len();
+        let length = ANCHOR_FIXTURE[start..]
+            .find('"')
+            .expect("fixture literal is closed");
         &ANCHOR_FIXTURE[start..start + length]
     }
 
     #[test]
     fn anchored_fixture_matches_only_the_whole_text() {
-        let pattern = compile(fixture_string("anchored_pattern")).expect("fixture pattern compiles");
+        let pattern =
+            compile(fixture_string("anchored_pattern")).expect("fixture pattern compiles");
         let anchored = scalars(fixture_string("anchored_text"));
         let embedded = scalars(fixture_string("embedded_text"));
         assert_eq!(
-            pattern.find_from(&anchored, 0).expect("within budget").map(|found| (found.start, found.end)),
+            pattern
+                .find_from(&anchored, 0)
+                .expect("within budget")
+                .map(|found| (found.start, found.end)),
             Some((0, 2))
         );
-        assert_eq!(pattern.find_from(&embedded, 0).expect("within budget"), None);
+        assert_eq!(
+            pattern.find_from(&embedded, 0).expect("within budget"),
+            None
+        );
     }
 }
