@@ -5531,7 +5531,8 @@ fn find_ordered_entry_with(
                 // still reach it, and every child the probe descends into is
                 // validated before it is used. ORP-1 fixes the child ranges as
                 // nonoverlapping, so a fence that lies about its child is a
-                // malformed node that only a read of that child can detect.
+                // malformed node, and probing the children the key reaches is
+                // what detects it.
                 if key <= &fence {
                     // A fence is only a pruning hint after its child proves
                     // it: validate the child this search descends into, and
@@ -5987,44 +5988,44 @@ fn collect_ordered_range_with(
                 // range does descend into is fully validated below. A bounded
                 // range therefore reads the pages that overlap its interval
                 // rather than the whole index.
-                if lower_inclusive.is_some_and(|lower| fence < *lower) {
-                    previous_fence = Some(fence);
-                    continue;
+                let within_lower = lower_inclusive.is_none_or(|lower| fence >= *lower);
+                let mut past_upper = false;
+                if within_lower {
+                    let child = read_node(&entry.child)?;
+                    let child_bounds = ordered_node_bounds_with(
+                        read_node,
+                        child.clone(),
+                        expected_domain,
+                        Some(height - 1),
+                    )?;
+                    if child_bounds.0 != entry.row_count
+                        || child_bounds.2 != fence
+                        || previous_fence
+                            .as_ref()
+                            .is_some_and(|previous| child_bounds.1 <= *previous)
+                    {
+                        return Err(GraphError::InvalidCount(
+                            usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
+                        ));
+                    }
+                    if upper_exclusive.is_some_and(|upper| child_bounds.1 >= *upper) {
+                        past_upper = true;
+                    } else {
+                        collect_ordered_range_with(
+                            read_node,
+                            child,
+                            expected_domain,
+                            Some(height - 1),
+                            previous_fence.as_ref(),
+                            lower_inclusive,
+                            upper_exclusive,
+                            limit,
+                            output,
+                        )?;
+                    }
                 }
-                let child = read_node(&entry.child)?;
-                let child_bounds = ordered_node_bounds_with(
-                    read_node,
-                    child.clone(),
-                    expected_domain,
-                    Some(height - 1),
-                )?;
-                if child_bounds.0 != entry.row_count
-                    || child_bounds.2 != fence
-                    || previous_fence
-                        .as_ref()
-                        .is_some_and(|previous| child_bounds.1 <= *previous)
-                {
-                    return Err(GraphError::InvalidCount(
-                        usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
-                    ));
-                }
-                if upper_exclusive.is_some_and(|upper| child_bounds.1 >= *upper) {
-                    previous_fence = Some(fence);
-                    break;
-                }
-                collect_ordered_range_with(
-                    read_node,
-                    child,
-                    expected_domain,
-                    Some(height - 1),
-                    previous_fence.as_ref(),
-                    lower_inclusive,
-                    upper_exclusive,
-                    limit,
-                    output,
-                )?;
                 previous_fence = Some(fence);
-                if output.len() >= limit {
+                if past_upper || output.len() >= limit {
                     break;
                 }
             }
