@@ -259,11 +259,11 @@ async fn history_pages_cover_every_revision_once_across_imported_rows() {
                     || row.key() == &TypedKey::Text(key.to_owned())
             })
             .unwrap_or_else(|| panic!("the {key} row is committed"));
-        let revisions = graph.list_row_revisions(row, 64, &scope).unwrap();
+        let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
         // One revision per page: every page is exactly the next commit.
         let pages = revision_pages(
-            |max| graph.list_row_revisions(row, max, &scope).unwrap(),
+            |max| graph.list_row_revisions(row, "HEAD", max, &scope).unwrap(),
             1,
             revisions.len(),
         );
@@ -325,7 +325,7 @@ async fn author_filter_keeps_every_revision_of_each_imported_row() {
                     || row.key() == &TypedKey::Text(key.to_owned())
             })
             .unwrap_or_else(|| panic!("the {key} row is committed"));
-        let revisions = graph.list_row_revisions(row, 64, &scope).unwrap();
+        let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
         // Every revision in the walk is stamped with the fixture identity, so the
         // filter keeps all of them and an unknown author keeps none.
@@ -389,7 +389,7 @@ async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
                     || row.key() == &TypedKey::Text(key.to_owned())
             })
             .unwrap_or_else(|| panic!("the {key} row is committed"));
-        let revisions = graph.list_row_revisions(row, 64, &scope).unwrap();
+        let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
         // Cutting at the second revision keeps only the head, which is newer.
         let since = revisions[1].commit().to_hex();
@@ -463,11 +463,11 @@ async fn limit_walk_matches_the_truncated_full_walk_for_each_imported_row() {
                     || row.key() == &TypedKey::Text(key.to_owned())
             })
             .unwrap_or_else(|| panic!("the {key} row is committed"));
-        let full = graph.list_row_revisions(row, 64, &scope).unwrap();
+        let full = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         // `orna history --limit N` walks only N commits, so each bounded walk
         // must equal the first N revisions of the full walk.
         for n in 1..=full.len() {
-            let bounded = graph.list_row_revisions(row, n, &scope).unwrap();
+            let bounded = graph.list_row_revisions(row, "HEAD", n, &scope).unwrap();
             assert_eq!(bounded, limited(&full, n), "{key}: limit {n}");
         }
     }
@@ -494,7 +494,7 @@ fn assert_song_revision_history(
         })
         .expect("the song row is committed");
 
-    let revisions = graph.list_row_revisions(song, 64, &scope).unwrap();
+    let revisions = graph.list_row_revisions(song, "HEAD", 64, &scope).unwrap();
     let head = git_output(directory.path(), &["rev-parse", "HEAD"], None);
     let head = String::from_utf8(head).unwrap().trim().to_owned();
     // Store install plus one commit per imported row, newest first.
@@ -507,7 +507,7 @@ fn assert_song_revision_history(
     );
     // Paging one commit at a time must reproduce the full walk exactly.
     let pages = revision_pages(
-        |max| graph.list_row_revisions(song, max, &scope).unwrap(),
+        |max| graph.list_row_revisions(song, "HEAD", max, &scope).unwrap(),
         1,
         revisions.len(),
     );
@@ -1019,6 +1019,101 @@ async fn history_reads_the_named_db_endpoint_from_an_unrelated_directory() {
     drop(directory);
 }
 
+/// WALKTHROUGH §6: `orna history --at SELECTOR` reads the snapshot the
+/// selector named. The selector resolves once, so the answer stays in the past
+/// even though HEAD has moved on since.
+#[tokio::test]
+async fn history_at_pins_the_named_snapshot_instead_of_head() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    // The song lands first, so its commit is the past the pin must return.
+    let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    let past = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    // A later image import moves HEAD on; the pin must not follow it.
+    let image = import_expression(IMAGE_JSON_IMPORT_FIXTURE, source.path());
+    import_media(&state, writer, &mut bindings, &image, "image", 0x80, true).await;
+    drop(bindings);
+    drop(state);
+    let present = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_ne!(past, present, "the image import advanced HEAD");
+
+    let relation = relation_hex(relation_id);
+    let pinned = run_history(
+        directory.path(),
+        &[&relation, "song", "--at", &past, "--format", "json"],
+    );
+    assert_eq!(
+        pinned.status.code(),
+        Some(0),
+        "history --at failed: {}",
+        String::from_utf8_lossy(&pinned.stderr)
+    );
+    let pinned: Vec<serde_json::Value> = serde_json::from_slice(&pinned.stdout).unwrap();
+    assert!(!pinned.is_empty(), "the pinned snapshot carries the song");
+    assert_eq!(
+        pinned[0]["commit"], past.as_str(),
+        "--at starts the walk at the named snapshot"
+    );
+    assert!(
+        pinned.iter().all(|entry| entry["commit"] != present.as_str()),
+        "the pinned walk never reaches the newer HEAD commit"
+    );
+
+    // Pinning only shortens the walk: the pinned listing is the tail of the
+    // unpinned one, so no revision is reordered or invented.
+    let full = history_json(directory.path(), relation_id, "song");
+    assert!(
+        full.len() > pinned.len(),
+        "the newer import adds a revision the pin excludes"
+    );
+    assert_eq!(full[full.len() - pinned.len()..], pinned[..]);
+
+    // `--at HEAD` resolves once to the same commit the unpinned read uses.
+    let at_head = run_history(
+        directory.path(),
+        &[&relation, "song", "--at", "HEAD", "--format", "json"],
+    );
+    assert_eq!(at_head.status.code(), Some(0), "--at HEAD must resolve");
+    let at_head: Vec<serde_json::Value> = serde_json::from_slice(&at_head.stdout).unwrap();
+    assert_eq!(at_head, full);
+
+    // An unresolvable selector is refused instead of silently reading HEAD.
+    let missing = run_history(directory.path(), &[&relation, "song", "--at", "no-such-ref"]);
+    assert_history_refused(&missing, "history --at with an unknown selector");
+    drop(directory);
+}
+
 /// Deletes one committed media row through an admitted request, the same path
 /// the import uses for inserts.
 async fn delete_media(
@@ -1243,7 +1338,7 @@ fn song_revisions_limited_to(
                 || row.key() == &TypedKey::Text("song".to_owned())
         })
         .expect("the song row is committed");
-    graph.list_row_revisions(song, max_commits, &scope).unwrap()
+    graph.list_row_revisions(song, "HEAD", max_commits, &scope).unwrap()
 }
 
 #[tokio::test]

@@ -23,6 +23,7 @@ enum HistoryFormat {
 struct HistoryOptions<'a> {
     relation: &'a str,
     key: &'a str,
+    at: Option<&'a str>,
     limit: usize,
     since: Option<&'a str>,
     format: HistoryFormat,
@@ -34,6 +35,7 @@ struct HistoryOptions<'a> {
 
 fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
+    let mut at = None;
     let mut limit = DEFAULT_HISTORY_LIMIT;
     let mut since = None;
     let mut format = HistoryFormat::Human;
@@ -62,6 +64,18 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
                 })?;
                 since = Some(value);
             }
+            "--at" => {
+                let value = words
+                    .next()
+                    .ok_or_else(|| history_error("--at needs a value", "usage: --at <selector>"))?;
+                if at.is_some() {
+                    return Err(history_error(
+                        "History names one snapshot",
+                        "usage: --at <selector>",
+                    ));
+                }
+                at = Some(value);
+            }
             "--reverse" => reverse = true,
             "--quiet" => quiet = true,
             "--count" => count = true,
@@ -89,7 +103,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
             flag if flag.starts_with("--") => {
                 return Err(history_error(
                     "Unknown history flag",
-                    format!("got {flag:?}; accepted: --limit, --since, --format, --reverse, --author, --count, --quiet"),
+                    format!("got {flag:?}; accepted: --at, --limit, --since, --format, --reverse, --author, --count, --quiet"),
                 ));
             }
             _ => positional.push(word),
@@ -98,12 +112,13 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     let [relation, key] = positional[..] else {
         return Err(history_error(
             "History expects a relation and a row key",
-            "usage: orna history <relation-hex> <key> [--limit N] [--since <commit-hex>]",
+            "usage: orna history <relation-hex> <key> [--at SELECTOR] [--limit N] [--since <commit-hex>]",
         ));
     };
     Ok(HistoryOptions {
         relation,
         key,
+        at,
         limit,
         since,
         format,
@@ -121,9 +136,36 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let path = local_project_path(endpoint)?;
     let repository = Repository::discover(path)
         .map_err(|error| history_error("Repository could not be opened", format!("{error:?}")))?;
-    let format = repository.open_format_context().map_err(|error| {
-        history_error("Format context could not be opened", format!("{error:?}"))
-    })?;
+    // `--at` pins one named snapshot. The selector is resolved exactly once
+    // here; the row map, the read and the revision walk all come from the
+    // commit it named, so a branch that advances during the read never changes
+    // the answer. Without `--at` the walk starts at the current HEAD.
+    let (format, start) = match options.at {
+        Some(selector) => {
+            let commit = repository.resolve_snapshot(selector).map_err(|error| {
+                history_error(
+                    "Snapshot could not be resolved",
+                    format!("{selector:?}: {error:?}"),
+                )
+            })?;
+            let start = commit.as_str().to_owned();
+            let format = repository
+                .open_pinned_format_context(&start)
+                .map_err(|error| {
+                    history_error(
+                        "Snapshot could not be pinned",
+                        format!("{selector:?}: {error:?}"),
+                    )
+                })?;
+            (format, start)
+        }
+        None => {
+            let format = repository.open_format_context().map_err(|error| {
+                history_error("Format context could not be opened", format!("{error:?}"))
+            })?;
+            (format, "HEAD".to_owned())
+        }
+    };
     let row_map = format
         .load_row_map(relation)
         .map_err(|error| history_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -145,7 +187,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         options.limit
     };
     let mut revisions = graph
-        .list_row_revisions(&row, walk, &scope)
+        .list_row_revisions(&row, &start, walk, &scope)
         .map_err(|error| {
             history_error("Revision history could not be listed", format!("{error:?}"))
         })?;
@@ -293,6 +335,7 @@ mod tests {
         let default_arguments = words(&["0102", "song"]);
         let parsed = parse_options(&default_arguments).unwrap();
         assert_eq!((parsed.limit, parsed.since), (DEFAULT_HISTORY_LIMIT, None));
+        assert_eq!(parsed.at, None);
         let flagged_arguments = words(&["--limit", "3", "0102", "--since", "abc", "song"]);
         let parsed = parse_options(&flagged_arguments).unwrap();
         assert_eq!((parsed.relation, parsed.key), ("0102", "song"));
@@ -300,6 +343,9 @@ mod tests {
         assert_eq!(parsed.format, HistoryFormat::Human);
         let json = words(&["--format", "json", "0102", "song"]);
         assert_eq!(parse_options(&json).unwrap().format, HistoryFormat::Json);
+        // `--at` takes one selector, wherever it appears.
+        let pinned = parse_options(&words(&["--at", "HEAD~1", "0102", "song"])).unwrap();
+        assert_eq!(pinned.at, Some("HEAD~1"));
     }
 
     #[test]
@@ -308,6 +354,11 @@ mod tests {
         assert!(parse_options(&words(&["r", "k", "--limit", "4097"])).is_err());
         assert!(parse_options(&words(&["r", "k", "--limit", "x"])).is_err());
         assert!(parse_options(&words(&["r", "k", "--since"])).is_err());
+        assert!(parse_options(&words(&["r", "k", "--at"])).is_err());
+        assert!(
+            parse_options(&words(&["r", "k", "--at", "a", "--at", "b"])).is_err(),
+            "history names one snapshot"
+        );
         assert!(parse_options(&words(&["r", "k", "--bogus"])).is_err());
         assert!(parse_options(&words(&["r"])).is_err());
         assert!(parse_options(&words(&["r", "k", "--format", "xml"])).is_err());
