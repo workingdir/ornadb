@@ -146,7 +146,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     getrandom::fill(&mut intent_id)
         .map_err(|_| publish_error("publication intent could not be created", USAGE))?;
 
-    let (commit, counts) = runtime.block_on(async {
+    let commit = runtime.block_on(async {
         let freeze = state
             .freeze(intent_id, &checkpoint)
             .await
