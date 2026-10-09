@@ -96,7 +96,7 @@ fn fixture_expression(fixture: &str, root: &str) -> String {
 fn git_log_subjects(repository: &Repository) -> Vec<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
-        .arg(repository.root())
+        .arg(repository.worktree())
         .args(["log", "--format=%s"])
         .output()
         .expect("git log runs");
