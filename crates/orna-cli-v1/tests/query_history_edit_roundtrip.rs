@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState, WriterLease};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
@@ -100,13 +100,13 @@ fn only_listing(report: &Json) -> &Json {
 async fn publish_capture(
     repository: &Repository,
     state: &RuntimeState,
+    writer: WriterLease,
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
     key: &str,
     ordinal: u8,
     insert_only: bool,
 ) -> String {
-    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
     commit_capture(
         repository,
         state,
@@ -143,6 +143,7 @@ async fn a_pinned_query_reports_the_descriptor_that_commit_named() {
     )
     .await
     .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
     let capability = repository.capture_capability(relation).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(source.path()).unwrap();
@@ -153,6 +154,7 @@ async fn a_pinned_query_reports_the_descriptor_that_commit_named() {
     let first_commit = publish_capture(
         &repository,
         &state,
+        writer,
         &mut bindings,
         &capture_expression(source.path(), "pixel.png"),
         "image",
@@ -196,6 +198,7 @@ async fn a_pinned_query_reports_the_descriptor_that_commit_named() {
     let second_commit = publish_capture(
         &repository,
         &state,
+        writer,
         &mut bindings,
         &capture_expression(source.path(), "pixel2.png"),
         "image",
