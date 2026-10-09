@@ -366,19 +366,24 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
         LEGACY_BLOB.as_bytes()
     );
 
-    // Both mounts are open in this one process: the format-3 view admits its
-    // writer capability while every write and row-graph seam reached through
-    // the legacy mount is refused with the typed read-only diagnostic naming
-    // its own coordinate, not the unknown-format admission failure.
+    // Both mounts are open in this one process: the format-3 workspace reader
+    // admits the writer coordinate while every write and row-graph seam reached
+    // through the legacy mount is refused with the typed read-only diagnostic
+    // naming its own coordinate, not the unknown-format admission failure.
+    // `current` and `legacy_view` are `--at` pins, so neither has a write seam
+    // at all; the writer capability belongs to the workspace reader.
     let legacy_view = repository
         .open_format_context_at_selector(&legacy_commit)
         .expect("the legacy mount stays attached");
-    current
+    let writer = repository
+        .open_format_context()
+        .expect("the format-3 workspace admits writes");
+    writer
         .final_format_capability()
         .expect("the format-3 mount admits writes");
-    assert_eq!(
-        legacy_view.final_format_capability().unwrap_err(),
-        RepositoryFormatContextError::LegacyReadOnly(1)
+    assert!(
+        writer.read_committed_file(".orna/format.orna", 64).is_err(),
+        "the format-3 workspace carries no legacy metadata file"
     );
     assert_eq!(
         legacy_view.validate_schema_root().unwrap_err().code(),
@@ -412,8 +417,8 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
         .expect("reopen the advanced workspace");
     assert_eq!(advanced.repository_format_number(), 3);
     assert_ne!(
-        advanced.snapshot_id(),
-        current.snapshot_id(),
+        advanced.snapshot_pin().snapshot_id(),
+        current.snapshot_pin().snapshot_id(),
         "the format-3 workspace advanced"
     );
     assert_eq!(
@@ -433,4 +438,92 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
             .expect("the advanced workspace reads its own bytes"),
         b"format three advanced".as_slice()
     );
+}
+
+/// Gate F, "reopen new/old mounts simultaneously": one repository that has
+/// moved through a migration holds *both* coordinates at once. Its old
+/// format-1 commit and its current format-3 commit are reopened together, in
+/// this one process, through the same `Repository` handle. Each mount reads
+/// its own commit and neither can be swapped for the other.
+#[test]
+fn reopens_old_and_new_mounts_of_one_migrated_repository_together() {
+    // The repository is initialized while it still carries the legacy
+    // coordinate, so the first commit really decodes as format 1.
+    let directory = repository(None, Some(LEGACY_FORMAT_ONE), false);
+    let repository = Repository::discover(directory.path()).expect("discover repository");
+    let old_selector = git_line(directory.path(), &["rev-parse", "HEAD"]);
+    let old_mount = repository
+        .open_format_context_at_selector(&old_selector)
+        .expect("the format-1 commit is anyone's to reopen");
+    assert_eq!(old_mount.repository_format_number(), 1);
+    assert!(old_mount.is_legacy_format());
+
+    // The migration replaces the worktree metadata with the final coordinate,
+    // commits it, and is never checked out back to format 1.
+    fs::remove_file(directory.path().join(".orna/format.orna")).expect("drop the legacy metadata");
+    fs::create_dir_all(directory.path().join(".orna/store")).expect("create store root");
+    fs::write(
+        directory.path().join(".orna/store/root"),
+        b"format three bytes",
+    )
+    .expect("write the store root");
+    fs::write(
+        directory.path().join(".orna/database.orna"),
+        CANONICAL_DATABASE,
+    )
+    .expect("write the final database record");
+    git(directory.path(), &["add", "--all"]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "migrate to format 3"],
+    );
+
+    // Both mounts are open at the same time, from one Repository: the old pin
+    // keeps the legacy coordinate and the new pin keeps the final one. The
+    // workspace `HEAD` is the format-3 commit, so the old mount cannot be an
+    // accidental read of the workspace.
+    let new_mount = repository
+        .open_format_context()
+        .expect("the format-3 workspace is admitted");
+    let old_mount_again = repository
+        .open_format_context_at_selector(&old_selector)
+        .expect("the format-1 commit reopens beside the new one");
+    assert_eq!(new_mount.repository_format_number(), 3);
+    assert!(!new_mount.is_read_only());
+    assert_eq!(old_mount_again.repository_format_number(), 1);
+    assert!(old_mount_again.is_legacy_format());
+    assert_ne!(
+        old_mount_again.snapshot_id(),
+        new_mount.snapshot_pin().snapshot_id()
+    );
+
+    // Each reads its own committed bytes, and neither is the other's answer.
+    assert_eq!(
+        old_mount_again
+            .read_committed_file(".orna/format.orna", 64)
+            .expect("the old mount reads its own legacy metadata"),
+        b"format 1\n".as_slice()
+    );
+    assert!(
+        new_mount
+            .read_committed_file(".orna/format.orna", 64)
+            .is_err(),
+        "the format-3 commit carries no legacy metadata file"
+    );
+    assert_eq!(
+        new_mount
+            .read_committed_file(".orna/store/root", 64)
+            .expect("the new mount reads its own store root"),
+        b"format three bytes".as_slice()
+    );
+
+    // The old mount has no row store to walk and says so; the new mount has
+    // the writer coordinate the old one must never be given.
+    assert_eq!(
+        old_mount_again.load_row_map([0; 16]).unwrap_err().code(),
+        "ORNA-REPO-CONTEXT-015"
+    );
+    new_mount
+        .final_format_capability()
+        .expect("the new mount admits writes");
 }
