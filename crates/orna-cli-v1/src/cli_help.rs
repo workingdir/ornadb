@@ -20,6 +20,9 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  serve [--port PORT]",
     "  diff [GIT_DIFF_ARGS...]",
     "  import BUNDLE --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]",
+    "  export DEST --at SELECTOR [--dependency PATH=DIR]...",
+    "  export DEST --check                               report one existing archive",
+    "  export exit status: 0 archive written, verified, and reported; 1 snapshot, object closure, or pinned dependency unavailable",
     "  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid",
     "Editor tooling:",
     "  semantic-legend [--json|--markdown|--format csv|--quiet] [--limit N]",
@@ -57,6 +60,9 @@ mod tests {
         assert!(HELP_LINES.contains(&"  diff [GIT_DIFF_ARGS...]"));
         assert!(HELP_LINES.contains(
             &"  import BUNDLE --dry-run [--limit N] [--quiet] [--type MEDIA_TYPE] [--format human|table]"
+        ));
+        assert!(HELP_LINES.contains(
+            &"  export DEST --at SELECTOR [--dependency PATH=DIR]..."
         ));
         assert!(HELP_LINES.contains(
             &"  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid"
