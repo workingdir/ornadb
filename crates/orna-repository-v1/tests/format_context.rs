@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
-use orna_repository_v1::Repository;
+use orna_repository_v1::{FormatContextError as RepositoryFormatContextError, Repository};
 use tempfile::TempDir;
 
 const DATABASE_ID: &str = "9f237b7e-6844-4498-bcd5-d24641c07449";
@@ -350,11 +350,11 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
     );
 
     // The legacy pin admits no native graph, so it can never share the
-    // current store's row authority.
-    assert_eq!(
-        legacy.load_row_map([0; 16]).unwrap_err().code(),
-        "ORNA-REPO-CONTEXT-003"
-    );
+    // current store's row authority. The refusal is the typed read-only one
+    // and names the pinned coordinate, not an unknown-format admission error.
+    let refused = legacy.load_row_map([0; 16]).unwrap_err();
+    assert_eq!(refused.code(), "ORNA-REPO-CONTEXT-015");
+    assert_eq!(refused, RepositoryFormatContextError::LegacyReadOnly(1));
 
     // A read past the bound is refused rather than silently truncated, while
     // the same path reads exactly at the bound.
@@ -364,5 +364,73 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
             .read_committed_file(".orna/store/root", LEGACY_BLOB.len())
             .expect("read exactly at the bound"),
         LEGACY_BLOB.as_bytes()
+    );
+
+    // Both mounts are open in this one process: the format-3 view admits its
+    // writer capability while every write and row-graph seam reached through
+    // the legacy mount is refused with the typed read-only diagnostic naming
+    // its own coordinate, not the unknown-format admission failure.
+    let legacy_view = repository
+        .open_format_context_at_selector(&legacy_commit)
+        .expect("the legacy mount stays attached");
+    current
+        .final_format_capability()
+        .expect("the format-3 mount admits writes");
+    assert_eq!(
+        legacy_view.final_format_capability().unwrap_err(),
+        RepositoryFormatContextError::LegacyReadOnly(1)
+    );
+    assert_eq!(
+        legacy_view.validate_schema_root().unwrap_err().code(),
+        "ORNA-REPO-CONTEXT-015"
+    );
+    assert_eq!(
+        legacy_view.validate_store_root().unwrap_err().code(),
+        "ORNA-REPO-CONTEXT-015"
+    );
+    assert_eq!(
+        legacy_view.load_row_map([0; 16]).unwrap_err().code(),
+        "ORNA-REPO-CONTEXT-015"
+    );
+
+    // Advancing the format-3 mount leaves the legacy mount's pin and bytes
+    // exactly as admitted: the two views share no store, no pin and no
+    // identity, so a format-3 commit cannot reach the legacy snapshot.
+    let legacy_pin = *legacy_view.snapshot_id();
+    fs::write(
+        directory.path().join(".orna/store/root"),
+        b"format three advanced",
+    )
+    .unwrap();
+    git(directory.path(), &["add", "--all"]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "advance format 3"],
+    );
+    let advanced = repository
+        .open_format_context()
+        .expect("reopen the advanced workspace");
+    assert_eq!(advanced.repository_format_number(), 3);
+    assert_ne!(
+        advanced.snapshot_id(),
+        current.snapshot_id(),
+        "the format-3 workspace advanced"
+    );
+    assert_eq!(
+        *legacy_view.snapshot_id(),
+        legacy_pin,
+        "the legacy pin did not move with the format-3 commit"
+    );
+    assert_eq!(
+        legacy_view
+            .read_committed_file(".orna/store/root", 64)
+            .expect("the legacy bytes are unchanged"),
+        LEGACY_BLOB.as_bytes()
+    );
+    assert_eq!(
+        advanced
+            .read_committed_file(".orna/store/root", 64)
+            .expect("the advanced workspace reads its own bytes"),
+        b"format three advanced".as_slice()
     );
 }

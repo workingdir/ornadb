@@ -74,6 +74,11 @@ pub enum FormatContextError {
     MetadataUnavailable,
     MetadataInvalid,
     UnknownFormat,
+    /// A write or row-graph seam was attempted through a format-1/2
+    /// compatibility reader. The snapshot is admitted and readable; only the
+    /// write seams are refused, and the pinned numeric coordinate says which
+    /// reader was asked.
+    LegacyReadOnly(u8),
     MixedFormats,
     SnapshotUnavailable,
     SnapshotInvalid,
@@ -94,6 +99,7 @@ impl FormatContextError {
             Self::MetadataUnavailable => "ORNA-REPO-CONTEXT-001",
             Self::MetadataInvalid => "ORNA-REPO-CONTEXT-002",
             Self::UnknownFormat => "ORNA-REPO-CONTEXT-003",
+            Self::LegacyReadOnly(_) => "ORNA-REPO-CONTEXT-015",
             Self::MixedFormats => "ORNA-REPO-CONTEXT-004",
             Self::SnapshotUnavailable => "ORNA-REPO-CONTEXT-005",
             Self::SnapshotInvalid => "ORNA-REPO-CONTEXT-006",
@@ -115,6 +121,12 @@ impl fmt::Display for FormatContextError {
             Self::MetadataUnavailable => "repository metadata is unavailable",
             Self::MetadataInvalid => "repository metadata is invalid",
             Self::UnknownFormat => "repository format is unknown",
+            Self::LegacyReadOnly(format) => {
+                return write!(
+                    formatter,
+                    "repository format {format} is a read-only compatibility snapshot; it has no row store to write"
+                );
+            }
             Self::MixedFormats => "repository metadata mixes format authorities",
             Self::SnapshotUnavailable => "repository snapshot is unavailable",
             Self::SnapshotInvalid => "repository snapshot is invalid",
@@ -476,11 +488,14 @@ impl RepositoryFormatContext {
             })
     }
 
+    /// Every write and row-graph seam funnels through here, so an admitted
+    /// format-1/2 reader is refused once, with its own pinned numeric
+    /// coordinate, instead of reporting the unknown-format admission failure.
     fn require_format3(&self) -> Result<(), FormatContextError> {
         if self.format.supports_writes() {
             Ok(())
         } else {
-            Err(FormatContextError::UnknownFormat)
+            Err(FormatContextError::LegacyReadOnly(self.format.number()))
         }
     }
 }
