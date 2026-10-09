@@ -1946,6 +1946,24 @@ impl VfsProjectedFile {
         self.captured.as_ref()
     }
 
+    /// The captured descriptor one save may rebuild this content field from.
+    ///
+    /// `digest` is the SHA-256 of the bytes the save holds for this file. The
+    /// descriptor belongs to the payload the store captured, so it is returned
+    /// only while the saved bytes are exactly that payload: same length and
+    /// same digest. A save that replaced the payload drops it, and the row's
+    /// value is minted from the new bytes rather than keeping a descriptor that
+    /// no longer names them (VFS-008, VFS-020).
+    pub fn admitted_capture(
+        &self,
+        length: u64,
+        digest: &[u8; 32],
+    ) -> Option<&CapturedContentDescriptor> {
+        self.captured
+            .as_ref()
+            .filter(|descriptor| descriptor.length() == length && descriptor.sha256() == digest)
+    }
+
     /// True when the schema declares this Blob required. A required Blob's
     /// sibling file can never be unlinked (VFS-013).
     pub const fn is_required(&self) -> bool {
@@ -2833,6 +2851,21 @@ mod tests {
             panic!("content lookup should return the projected file");
         };
         assert!(file.captured_descriptor().is_none());
+
+        // The descriptor is admitted only for the payload the store captured:
+        // a save that keeps those exact bytes rebuilds the field from it, while
+        // a save that replaced the payload reports no admission, so the new
+        // bytes mint their own descriptor instead of inheriting one that no
+        // longer names them (VFS-008, VFS-020).
+        let VfsProjectedEntry::Content(content) = row
+            .lookup("content.mp1")
+            .expect("the compatible suffix names the content file")
+        else {
+            panic!("content lookup should return the projected file");
+        };
+        assert_eq!(content.admitted_capture(4096, &[0x5a; 32]), Some(&captured));
+        assert!(content.admitted_capture(4096, &[0x5b; 32]).is_none());
+        assert!(content.admitted_capture(4095, &[0x5a; 32]).is_none());
     }
 
     #[test]

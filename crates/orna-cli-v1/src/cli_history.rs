@@ -178,6 +178,15 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             (format, "HEAD".to_owned())
         }
     };
+    // A format-1/2 pin is a read-only compatibility input: it carries no
+    // native `.orna/store`, so it has no row map to walk. Say so instead of
+    // reporting the format-3 store seam's generic failure.
+    if format.is_read_only() {
+        return Err(history_error(
+            "Snapshot is a legacy format-1/2 input",
+            "--at names a read-only compatibility snapshot with no native row store; name a format-3 commit",
+        ));
+    }
     let row_map = format
         .load_row_map(relation)
         .map_err(|error| history_error("Row map could not be loaded", format!("{error:?}")))?;
