@@ -7156,7 +7156,7 @@ impl fmt::Display for GraphError {
 /// readers (`blob`, `tree`, ...) all take the object id last, so the final
 /// argument is it; the batch forms read object ids from stdin and name none
 /// here, so they report no object rather than a guessed one.
-fn cat_file_object_id(args: &[&str]) -> Option<&str> {
+fn cat_file_object_id<'a>(args: &[&'a str]) -> Option<&'a str> {
     if args.first() != Some(&"cat-file") {
         return None;
     }
