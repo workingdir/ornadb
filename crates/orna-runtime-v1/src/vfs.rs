@@ -2781,20 +2781,23 @@ mod tests {
         // the destination keeps the accepted row (ORNA-VFS-009).
         let stale = target.open_draft(1 << 20).await;
         stale.truncate(0).await.unwrap();
-        stale.write_at(0, invalid).await.unwrap();
-        let before_stale_commits = row_store.transaction_count();
+        stale.write_at(0, row_text).await.unwrap();
         let row_store_for_stale = Arc::clone(&row_store);
         let seeded = target
-            .commit_draft_with(&draft, move |candidate| {
+            .commit_draft_with(&stale, move |candidate| {
                 Arc::clone(&row_store_for_stale).activate(candidate, 21)
             })
             .await
             .unwrap();
         assert!(matches!(seeded, TemporaryRenameOutcome::Applied { .. }));
         assert!(stale.retained_invalid_draft().await.is_none());
+
+        // `draft` still holds the rejected candidate and its recorded baseline,
+        // so its next commit is stale before any activation is consulted.
+        let before_stale_commits = row_store.transaction_count();
         let row_store_for_stale_commit = Arc::clone(&row_store);
         let stale_outcome = target
-            .commit_draft_with(&stale, move |candidate| {
+            .commit_draft_with(&draft, move |candidate| {
                 Arc::clone(&row_store_for_stale_commit).activate(candidate, 22)
             })
             .await
@@ -2802,18 +2805,41 @@ mod tests {
         let TemporaryRenameOutcome::Stale { diagnostic } = stale_outcome else {
             panic!("a draft over a replaced image must be stale");
         };
-        assert_eq!(diagnostic, rejected());
-        assert_eq!(row_store.transaction_count(), before_stale_commits + 1);
+        let stale_diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::ExecutionRejected,
+            class: DiagnosticClass::Transient,
+        };
+        assert_eq!(diagnostic, stale_diagnostic);
+        assert_eq!(row_store.transaction_count(), before_stale_commits);
         assert_eq!(row_store.accepted(), row_text);
         assert_eq!(
             target.open_read().await.read_at(0, row_text.len()),
             row_text
         );
-        let parked = stale.retained_invalid_draft().await.unwrap();
+        let parked = draft.retained_invalid_draft().await.unwrap();
         assert_eq!(parked.replacement_bytes(), invalid);
-        assert_eq!(parked.diagnostic(), rejected());
+        assert_eq!(parked.diagnostic(), stale_diagnostic);
         assert_ne!(parked.id(), [0u8; 16]);
-        assert_ne!(parked.id(), retained.id());
+        // A stale rejection of the same unchanged revision keeps the identity
+        // the draft already had; only its diagnostic is superseded.
+        assert_eq!(parked.id(), retained.id());
+
+        // A changed candidate is a new revision, so its rejection is a new
+        // retained draft with its own identity (ORNA-VFS-009).
+        draft.write_at(0, b"x").await.unwrap();
+        let row_store_for_stale_again = Arc::clone(&row_store);
+        let stale_again = target
+            .commit_draft_with(&draft, move |candidate| {
+                Arc::clone(&row_store_for_stale_again).activate(candidate, 23)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(stale_again, TemporaryRenameOutcome::Stale { .. }));
+        let reparked = draft.retained_invalid_draft().await.unwrap();
+        assert_eq!(reparked.revision(), parked.revision() + 1);
+        assert_ne!(reparked.id(), parked.id());
+        assert_eq!(row_store.transaction_count(), before_stale_commits);
+        assert_eq!(row_store.accepted(), row_text);
     }
 
     #[tokio::test]
