@@ -8597,6 +8597,42 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
         let migrated = Repository::discover(&copy.destination()).unwrap();
         assert_eq!(copy.source_commit(), &source_head);
         assert_eq!(migrated.head().unwrap(), Some(source_head.clone()));
+        // The journalled migration commit is the one that establishes the
+        // migrated representation, and it names its own coordinate as a Git
+        // trailer so a history walk can report the transition instead of
+        // leaving the reader to infer it from the message prose.
+        let candidate_message = git(
+            copy.destination(),
+            &[
+                "log",
+                "-1",
+                "--format=%B",
+                copy.candidate_journal().new_head().as_str(),
+            ],
+        );
+        assert_eq!(
+            candidate_message,
+            format!(
+                "explicit format {format_number} to 3 migration: 7 rows take the MIME-1 default \
+                 annotation, 1 stream checkpoint identities carried\n\n\
+                 Orna-Migration: format-{format_number}-to-3"
+            ),
+            "the candidate states the migration coordinate as a trailer"
+        );
+        // Git only recognizes a trailer after a blank line; a marker written
+        // into the summary would not be one.
+        assert_eq!(
+            git(
+                copy.destination(),
+                &[
+                    "log",
+                    "-1",
+                    "--format=%(trailers:key=Orna-Migration,valueonly)",
+                    copy.candidate_journal().new_head().as_str(),
+                ]
+            ),
+            format!("format-{format_number}-to-3")
+        );
         assert_eq!(
             fs::read_to_string(copy.destination().join("ordinary.txt")).unwrap(),
             "dirty\n"
