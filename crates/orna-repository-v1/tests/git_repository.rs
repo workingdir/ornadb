@@ -8177,6 +8177,175 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
                 .unwrap(),
             format.as_bytes()
         );
-        assert_eq!(fs::read(root.path().join(".orna/store/root")).unwrap(), store_root);
+        assert_eq!(
+            fs::read(root.path().join(".orna/store/root")).unwrap(),
+            store_root
+        );
     }
+}
+
+#[test]
+fn resumed_legacy_migration_reports_the_recorded_successor_identity_without_resetting_it() {
+    let format = include_str!("fixtures/format-context/format-1.orna");
+    let root = repository_with_legacy_format(format);
+    let repo = Repository::discover(root.path()).unwrap();
+    let old_head = repo.head().unwrap().unwrap();
+
+    // The legacy stream's committed consumer, source and partition coordinates.
+    let legacy_consumer = [61; 32];
+    let legacy_source = b"events".to_vec();
+    let legacy_partition = Some(b"shard-0".to_vec());
+    let format3_consumer = [62; 32];
+    let format3_source = b"stream-events".to_vec();
+    let format3_partition = Some(b"partition-0".to_vec());
+
+    let expected_index = repo.index_generation().unwrap();
+    let database = include_str!("fixtures/format-context/database-final.orna");
+    let store_root = b"verified candidate store root";
+    let candidate = repo
+        .build_private_commit(
+            &old_head,
+            &[
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/database.orna").unwrap(),
+                    Some(database.as_bytes().to_vec()),
+                ),
+                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/store/root").unwrap(),
+                    Some(store_root.to_vec()),
+                ),
+            ],
+            "explicit format 3 migration",
+        )
+        .unwrap();
+    let journal_entries = vec![
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/database.orna").unwrap(),
+            None,
+            Some(database.as_bytes().to_vec()),
+        ),
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/format.orna").unwrap(),
+            Some(format.as_bytes().to_vec()),
+            None,
+        ),
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/store/root").unwrap(),
+            None,
+            Some(store_root.to_vec()),
+        ),
+    ];
+    let continuity = MigrationContinuityRecord::new(vec![
+        StreamCheckpointIdentityPredecessor::new(
+            legacy_consumer,
+            legacy_source.clone(),
+            legacy_partition.clone(),
+            format3_consumer,
+            format3_source.clone(),
+            format3_partition.clone(),
+        )
+        .unwrap(),
+        // A second stream whose successor deliberately has no partition.
+        StreamCheckpointIdentityPredecessor::new(
+            [63; 32],
+            b"metrics".to_vec(),
+            Some(b"shard-1".to_vec()),
+            [64; 32],
+            b"stream-metrics".to_vec(),
+            None,
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    let defaults = MigrationAnnotationDefaults::new(0).unwrap();
+    let journal = PublicationJournal::new_with_runtime_intent(
+        old_head.clone(),
+        candidate.commit().clone(),
+        expected_index.tree().unwrap().clone(),
+        [73; 16],
+        journal_entries,
+    )
+    .unwrap()
+    .with_migration_continuity(continuity.clone())
+    .unwrap()
+    .with_migration_annotation_defaults(defaults)
+    .unwrap();
+
+    // A process restart persists the prepared journal, then reopens it. The
+    // successor coordinate must be the migration's recorded one, not a
+    // re-derived identity: re-deriving is the reset this record prevents.
+    repo.write_publication_journal(&journal).unwrap();
+    let reopened = repo.read_publication_journal().unwrap().unwrap();
+    let resumed = reopened.migration_continuity().unwrap();
+    assert_eq!(
+        resumed.successor_for(legacy_consumer, &legacy_source, legacy_partition.as_deref()),
+        Some((
+            format3_consumer,
+            format3_source.as_slice(),
+            format3_partition.as_deref()
+        ))
+    );
+
+    // `None` partition stays distinct from an encoded empty partition.
+    assert_eq!(
+        resumed.successor_for([63; 32], b"metrics", Some(b"shard-1")),
+        Some(([64; 32], b"stream-metrics".as_slice(), None))
+    );
+    assert_eq!(
+        resumed.successor_for([63; 32], b"metrics", Some(b"")),
+        None,
+        "an empty partition is not the absent partition"
+    );
+
+    // A legacy identity the migration never carried has no successor, and a
+    // legacy key cannot be answered with another key's successor.
+    assert_eq!(
+        resumed.successor_for([99; 32], &legacy_source, legacy_partition.as_deref()),
+        None
+    );
+    assert_eq!(
+        resumed.successor_for(
+            legacy_consumer,
+            b"other-source",
+            legacy_partition.as_deref()
+        ),
+        None
+    );
+
+    // The journal resumes and publishes with the recorded coordinate intact:
+    // the resumed publisher still reports exactly what it recorded before.
+    let mut resumed_journal = reopened.clone();
+    assert_eq!(
+        resumed_journal
+            .resume_migration_annotation_defaults(defaults)
+            .unwrap(),
+        defaults
+    );
+    let source_identity = resumed
+        .successor_for(legacy_consumer, &legacy_source, legacy_partition.as_deref())
+        .expect("the resumed stream keeps its successor identity");
+    assert_eq!(source_identity.0, format3_consumer);
+    repo.publish_legacy_format_migration(&expected_index, &candidate, &mut resumed_journal)
+        .unwrap();
+    let persisted = repo.read_publication_journal().unwrap().unwrap();
+    assert_eq!(
+        persisted.migration_continuity().unwrap().successor_for(
+            legacy_consumer,
+            &legacy_source,
+            legacy_partition.as_deref()
+        ),
+        Some((
+            format3_consumer,
+            format3_source.as_slice(),
+            format3_partition.as_deref()
+        )),
+        "publication must not change the recorded successor identity"
+    );
+    assert_eq!(
+        repo.open_format_context()
+            .unwrap()
+            .repository_format_number(),
+        3
+    );
 }
