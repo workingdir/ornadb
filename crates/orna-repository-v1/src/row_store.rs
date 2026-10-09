@@ -1080,6 +1080,128 @@ pub(crate) fn partition_token_ranges(
 }
 
 /// Encoded node header and domain cost charged to every height-0 page when the
+/// caller does not supply an exact one. It covers the `[1, 1, domain, entries]`
+/// tuple head, the domain itself and the widest definite entry-count head, so
+/// the charged cost never understates a real page.
+pub(crate) fn leaf_node_overhead(domain: &[u8]) -> usize {
+    domain
+        .len()
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(3)
+}
+
+/// Encoded node header, domain and count cost charged to every branch page.
+/// It covers the `[1, 2, domain, height, entries]` tuple head.
+pub(crate) fn branch_node_overhead(domain: &[u8]) -> usize {
+    domain
+        .len()
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(3)
+}
+
+/// Encoded cost of one branch entry `[inclusive_max_key, child_oid, row_count]`
+/// for a native object width of `oid_width` bytes. Counts are bounded by the
+/// signed-length limit, so the integer head is charged at its widest definite
+/// form and the estimate never understates the encoded entry.
+pub(crate) fn branch_entry_size(fence: usize, oid_width: usize) -> usize {
+    fence
+        .saturating_add(oid_width)
+        .saturating_add(3)
+        .saturating_add(9)
+}
+
+/// The canonical ORP-1 shape of one ordered map: the page ranges at every
+/// level, level 0 the leaves and the final level the root. Every level's
+/// ranges are in logical key order and cover its whole input exactly once.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RowMapLevels {
+    levels: Vec<Vec<std::ops::Range<usize>>>,
+}
+
+impl RowMapLevels {
+    /// The root height. An empty or single-leaf map is height 0.
+    pub fn height(&self) -> u8 {
+        self.levels.len().saturating_sub(1) as u8
+    }
+
+    pub fn levels(&self) -> &[Vec<std::ops::Range<usize>>] {
+        &self.levels
+    }
+
+    /// The page ranges at one height, or nothing above the root.
+    pub fn level(&self, height: u8) -> &[std::ops::Range<usize>] {
+        self.levels
+            .get(height as usize)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
+/// Plans every ORP-1 level of one ordered map with the pinned boundary rule:
+/// partition the leaves, then partition each successive level by its children's
+/// last logical keys until a single root remains. Child ranges are
+/// nonoverlapping and exhaustive; a root with one child collapses to that child
+/// at the next lower height. The final physical root is therefore a pure
+/// function of the ordered entries, the domain and the native object width.
+pub(crate) fn partition_levels(
+    entries: &[RowEntry],
+    domain: &[u8],
+    oid_width: usize,
+) -> Result<RowMapLevels, RowStoreError> {
+    if oid_width != 20 && oid_width != 32 {
+        return Err(RowStoreError::VersionIdentityMismatch);
+    }
+    let mut tokens = Vec::with_capacity(entries.len());
+    for entry in entries {
+        tokens.push(BoundaryToken::new(
+            entry.key.canonical_bytes()?,
+            entry_encoded_size(entry)?,
+            entry.value.dependencies().len(),
+        ));
+    }
+    let leaves = partition_token_ranges(&tokens, 0, leaf_node_overhead(domain))?;
+    let mut levels = vec![leaves];
+    let branch_overhead = branch_node_overhead(domain);
+    while levels
+        .last()
+        .is_some_and(|level| level.len() > 1)
+    {
+        let height = u8::try_from(levels.len()).map_err(|_| RowStoreError::PageHeightExceeded(64))?;
+        if height > MAX_PAGE_HEIGHT {
+            return Err(RowStoreError::PageHeightExceeded(height));
+        }
+        let children = levels.last().ok_or(RowStoreError::InvalidKeyRange)?;
+        let mut child_tokens = Vec::with_capacity(children.len());
+        for range in children {
+            let last = range
+                .clone()
+                .next_back()
+                .and_then(|index| tokens.get(index))
+                .ok_or(RowStoreError::InvalidKeyRange)?;
+            child_tokens.push(BoundaryToken::new(
+                last.key.clone(),
+                branch_entry_size(last.key.len(), oid_width),
+                1,
+            ));
+        }
+        levels.push(partition_token_ranges(
+            &child_tokens,
+            height,
+            branch_overhead,
+        )?);
+    }
+    Ok(RowMapLevels { levels })
+}
+
+/// The pinned format-3 height bound shared with the native graph.
+pub const MAX_PAGE_HEIGHT: u8 = 64;
+
+/// Encoded node header and domain cost charged to every height-0 page when the
 /// caller does not supply an exact one.
 const PAGE_NODE_OVERHEAD: usize = 16;
 
