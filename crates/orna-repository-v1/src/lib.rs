@@ -58,10 +58,11 @@ pub use init::{
 };
 pub use native_graph::RowRevision;
 pub use native_graph::{
-    AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError, NativeGraphContext,
-    NativeObjectKind, NativeOid, OrpBlobBinding, OrpGraphCandidate, ProtectedBlobMetadata,
-    ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification,
-    RepositoryCaptureCapability, RepositoryReadScope, VerifiedBlobRange,
+    AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError, IndexMaintenance,
+    NativeGraphContext, NativeObjectKind, NativeOid, OrpBlobBinding, OrpGraphCandidate,
+    ProtectedBlobMetadata, ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt,
+    RangeVerification, RepositoryCaptureCapability, RepositoryReadScope, RowIndexMutation,
+    VerifiedBlobRange,
 };
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
