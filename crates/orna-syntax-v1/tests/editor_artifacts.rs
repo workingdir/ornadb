@@ -304,6 +304,30 @@ fn every_legend_token_type_has_a_hover_sample_in_markdown() {
     assert!(markdown.contains("| Index | Token type | Hover sample |"));
 }
 
+/// Fields of one RFC 4180 CSV record: comma separated, with quoted fields
+/// unquoted and doubled quotes collapsed back to a single quote. Asserting on
+/// the parsed fields keeps this a check of what a CSV consumer reads rather
+/// than of the exact spacing or quoting the writer chose.
+fn csv_fields(record: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut characters = record.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' if quoted && characters.peek() == Some(&'"') => {
+                field.push('"');
+                characters.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => fields.push(std::mem::take(&mut field)),
+            _ => field.push(character),
+        }
+    }
+    fields.push(field);
+    fields
+}
+
 #[test]
 fn semantic_legend_csv_has_one_row_per_token_type_and_modifier() {
     let csv = editor::semantic_legend_csv();
@@ -313,7 +337,19 @@ fn semantic_legend_csv_has_one_row_per_token_type_and_modifier() {
     assert_eq!(rows.len(), 1 + type_count + editor::TOKEN_MODIFIERS.len());
     for (index, token_type) in editor::legend_token_types().enumerate() {
         let sample = editor::token_type_sample(token_type).expect("sample");
-        assert!(rows.contains(&format!("token_type,{index},{token_type},{sample}").as_str()));
+        // The writer quotes a sample that contains a quote, so the parsed
+        // field must come back as the sample itself, not its quoted spelling.
+        assert_eq!(
+            csv_fields(rows[index + 1]),
+            [
+                "token_type".to_owned(),
+                index.to_string(),
+                token_type.to_owned(),
+                sample.to_owned()
+            ],
+            "row {} must name {token_type} at index {index} with its sample",
+            index + 1
+        );
     }
     for (index, modifier) in editor::TOKEN_MODIFIERS.iter().enumerate() {
         assert!(rows.contains(&format!("token_modifier,{index},{modifier},").as_str()));
