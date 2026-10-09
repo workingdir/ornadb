@@ -29,6 +29,7 @@ pub use uuid::Uuid;
 
 mod blob_store;
 mod compact;
+pub mod complete_copy;
 mod init;
 mod native_graph;
 pub mod offline_copy;
