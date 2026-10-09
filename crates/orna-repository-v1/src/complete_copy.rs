@@ -15,15 +15,24 @@
 //! - `manifest.tsv`: one header line, one `snapshot` line naming the primary
 //!   member, one `archive` line per carried snapshot plus that member's `object`
 //!   lines (kind, object ID, size), and one `dependency` line per recorded
-//!   gitlink (path, pinned commit, origin, bundle file, owning member).
+//!   gitlink (path, pinned commit, origin, bundle file, owning member, object
+//!   count) followed by that dependency's own `object` lines.
 //! - `snapshots/<commit>.bundle`: one self-contained Git bundle per carried
 //!   snapshot, holding that commit's complete reachable object closure.
 //! - `dependencies/<commit>.bundle`: one self-contained bundle per pinned
 //!   dependency commit.
 //!
-//! A header-1 archive — one snapshot, `superproject.bundle`, no `archive` lines,
-//! no owning member on a dependency line — is still read and reconstructed
-//! exactly, so an archive written before this format keeps working.
+//! A dependency's closure is recorded and verified exactly like a member's, so
+//! a bundle that lost or gained an object fails the reconstruction instead of
+//! being reported as a complete copy. Two older headers are still read and
+//! reconstructed exactly: header 2 carried members with their closures but left
+//! each dependency to be reconstructed from whatever its bundle reached, and
+//! header 1 carried one snapshot under `superproject.bundle` with no `archive`
+//! lines and no owning member on its dependency line. Neither is written again.
+//!
+//! A dependency's object IDs name objects of *that dependency's* repository, so
+//! they are kept out of the archive's member object union and are never counted
+//! against [`MAX_EXPORT_OBJECTS`] for the archive as a whole.
 //!
 //! ## Reconstruction independence
 //!
@@ -67,7 +76,14 @@ const DEPENDENCIES_DIR: &str = "dependencies";
 const SNAPSHOTS_DIR: &str = "snapshots";
 /// Prefix of the ref names a reconstructed copy uses for non-primary members.
 const MEMBER_REF_PREFIX: &str = "orna-complete-copy-member-";
-const HEADER: &str = "orna-complete-copy 2";
+/// Header of the archive written by this module: members with their closures
+/// and, for each pinned dependency, its own recorded closure.
+const HEADER: &str = "orna-complete-copy 3";
+/// Header of an archive written before dependency closures were recorded: it
+/// names its members and their closures but leaves each dependency to be
+/// reconstructed from whatever its bundle reaches. It stays readable and is
+/// never written again.
+const PREVIOUS_HEADER: &str = "orna-complete-copy 2";
 /// Header of an archive written before members existed: one snapshot, one
 /// closure, one bundle. It stays readable and is never written again.
 const LEGACY_HEADER: &str = "orna-complete-copy 1";
@@ -152,6 +168,15 @@ pub struct CompleteCopyDependency {
     pub bundle: String,
     /// Commit of the archive member whose gitlink pins this dependency.
     pub member: String,
+    /// Every object of this dependency's closure, ordered by object ID.
+    ///
+    /// A current archive records the closure the pinned commit reaches, so a
+    /// reconstruction can require the dependency to reach exactly it. Empty
+    /// only for a header-1/2 archive, which recorded no dependency closure and
+    /// is still read: such an archive verifies the objects it does reach
+    /// instead, because the recorded closure it would be checked against was
+    /// never written.
+    pub objects: Vec<CompleteCopyObject>,
 }
 
 /// The verified contents of one complete-copy manifest.
@@ -194,18 +219,30 @@ impl CompleteCopyManifest {
     fn decode(manifest: &str) -> Result<Self, CompleteCopyError> {
         let mut lines = manifest.lines();
         let header = lines.next();
-        if header != Some(HEADER) && header != Some(LEGACY_HEADER) {
+        if header != Some(HEADER)
+            && header != Some(PREVIOUS_HEADER)
+            && header != Some(LEGACY_HEADER)
+        {
             return Err(CompleteCopyError::InvalidArchive("unknown header"));
         }
         let legacy = header == Some(LEGACY_HEADER);
+        let records_dependency_closures = header == Some(HEADER);
         let mut snapshot = None;
         let mut members: Vec<CompleteCopyMember> = Vec::new();
         let mut objects = Vec::new();
         let mut dependencies = Vec::new();
+        // The object count each dependency line declared, aligned with
+        // `dependencies`, so the recorded closure is checked once the whole
+        // document has been read. It is not a public field: the count is a
+        // property of the encoding, not of a recorded dependency.
+        let mut declared_dependency_objects: Vec<usize> = Vec::new();
         // Objects and archive members are recorded grouped by member, so the
         // decoder appends objects to the member named by the last `archive`
-        // line and keeps one union list for the whole archive.
+        // line and keeps one union list for the whole archive. A dependency's
+        // own closure is grouped the same way: its `object` lines follow its
+        // `dependency` line and belong to the dependency, not to a member.
         let mut current = 0_usize;
+        let mut current_dependency: Option<usize> = None;
         for line in lines {
             let fields: Vec<&str> = line.split('\t').collect();
             match fields.as_slice() {
@@ -234,9 +271,27 @@ impl CompleteCopyManifest {
                         objects: Vec::new(),
                     });
                     current = members.len() - 1;
+                    current_dependency = None;
                 }
                 ["object", kind, oid, size] => {
                     let object = decode_object(kind, oid, size)?;
+                    // A dependency's object lines are its own closure and are
+                    // not part of the archive's member union: a dependency is a
+                    // different repository, so its object IDs name that
+                    // repository's objects and not this archive's members.
+                    if let Some(index) = current_dependency {
+                        // The count the line declared bounds the group, so a
+                        // manifest that names a small closure cannot make the
+                        // decoder allocate an unbounded one before the post-read
+                        // check refuses it.
+                        if dependencies[index].objects.len() >= declared_dependency_objects[index] {
+                            return Err(CompleteCopyError::InvalidArchive(
+                                "dependency closure count",
+                            ));
+                        }
+                        dependencies[index].objects.push(object);
+                        continue;
+                    }
                     if objects.len() == MAX_EXPORT_OBJECTS {
                         return Err(CompleteCopyError::ClosureTooLarge);
                     }
@@ -252,6 +307,14 @@ impl CompleteCopyManifest {
                         || !valid_dependency_bundle(bundle)
                     {
                         return Err(CompleteCopyError::InvalidArchive("dependency line"));
+                    }
+                    // A header-3 archive records each dependency's closure
+                    // after its line, so a `dependency` line in one names no
+                    // closure and is a truncated manifest, not an older form.
+                    if records_dependency_closures {
+                        return Err(CompleteCopyError::InvalidArchive(
+                            "dependency closure is not recorded",
+                        ));
                     }
                     // A header-1 archive had one member, so its dependencies
                     // belong to that member.
@@ -269,8 +332,8 @@ impl CompleteCopyManifest {
                     };
                     push_dependency(&mut dependencies, path, commit, origin, bundle, member)?;
                 }
-                // A current archive names the member that pins each dependency,
-                // because two members may pin the same path differently.
+                // A header-2 archive names the member that pins each dependency
+                // but records no closure for it; such an archive is still read.
                 ["dependency", path, commit, origin, bundle, member] => {
                     if !valid_object_id(commit)
                         || path.is_empty()
@@ -288,6 +351,14 @@ impl CompleteCopyManifest {
                             "dependency names no member",
                         ));
                     }
+                    // A header-3 archive records each dependency's closure
+                    // after its line, so the shorter line here is a truncated
+                    // manifest rather than an older form.
+                    if records_dependency_closures {
+                        return Err(CompleteCopyError::InvalidArchive(
+                            "dependency closure is not recorded",
+                        ));
+                    }
                     push_dependency(
                         &mut dependencies,
                         path,
@@ -297,14 +368,80 @@ impl CompleteCopyManifest {
                         (*member).to_owned(),
                     )?;
                 }
+                // A current archive names the member that pins each dependency,
+                // because two members may pin the same path differently, and
+                // the number of objects its closure records.
+                ["dependency", path, commit, origin, bundle, member, count] => {
+                    if !valid_object_id(commit)
+                        || path.is_empty()
+                        || origin.is_empty()
+                        || !valid_dependency_bundle(bundle)
+                        || !valid_object_id(member)
+                    {
+                        return Err(CompleteCopyError::InvalidArchive("dependency line"));
+                    }
+                    if !members
+                        .iter()
+                        .any(|candidate| candidate.commit.eq_ignore_ascii_case(member))
+                    {
+                        return Err(CompleteCopyError::InvalidArchive(
+                            "dependency names no member",
+                        ));
+                    }
+                    // Only a current archive records a dependency closure, so
+                    // the counted form belongs to it and to no other header:
+                    // one header means one shape of dependency line.
+                    if !records_dependency_closures {
+                        return Err(CompleteCopyError::InvalidArchive(
+                            "dependency closure in an archive that records none",
+                        ));
+                    }
+                    let count = count
+                        .parse::<usize>()
+                        .map_err(|_| CompleteCopyError::InvalidArchive("dependency count"))?;
+                    // A dependency's closure always contains the pinned commit
+                    // it is defined by, so an archive that records none of it
+                    // was truncated rather than describing an empty closure.
+                    if count == 0 {
+                        return Err(CompleteCopyError::InvalidArchive(
+                            "dependency closure is not recorded",
+                        ));
+                    }
+                    if count > MAX_EXPORT_OBJECTS {
+                        return Err(CompleteCopyError::ClosureTooLarge);
+                    }
+                    push_dependency(
+                        &mut dependencies,
+                        path,
+                        commit,
+                        origin,
+                        bundle,
+                        (*member).to_owned(),
+                    )?;
+                    current_dependency = Some(dependencies.len() - 1);
+                    declared_dependency_objects.push(count);
+                }
                 _ => return Err(CompleteCopyError::InvalidArchive("unrecognised line")),
+            }
+        }
+        // Each dependency's recorded closure must match the count its line
+        // declared: a manifest that names a closure and then records a
+        // different number of objects was truncated or padded, and either way
+        // it does not describe the archive it claims to be.
+        for (dependency, declared) in dependencies.iter().zip(&declared_dependency_objects) {
+            if dependency.objects.len() != *declared {
+                return Err(CompleteCopyError::InvalidArchive(
+                    "dependency closure count",
+                ));
             }
         }
         let snapshot = snapshot.ok_or(CompleteCopyError::InvalidArchive("missing snapshot"))?;
         // The archive's own object list is the union of its members, so an
         // object reachable from two members is recorded once. Grouping by
         // member appends it once per member, so fold the union back to a set
-        // here: a read manifest then equals the manifest that was written.
+        // here: a read manifest then equals the manifest that was written. A
+        // dependency's closure is a different repository's object set and is
+        // never part of this union.
         let objects: Vec<CompleteCopyObject> = objects
             .into_iter()
             .collect::<BTreeSet<CompleteCopyObject>>()
@@ -354,6 +491,7 @@ fn push_dependency(
         origin: origin.to_owned(),
         bundle: bundle.to_owned(),
         member,
+        objects: Vec::new(),
     });
     Ok(())
 }
@@ -583,13 +721,22 @@ pub fn export_complete_copy_of(
     }
     for dependency in &dependencies {
         document.push_str(&format!(
-            "dependency\t{}\t{}\t{}\t{}\t{}\n",
+            "dependency\t{}\t{}\t{}\t{}\t{}\t{}\n",
             dependency.path,
             dependency.commit,
             dependency.origin,
             dependency.bundle,
-            dependency.member
+            dependency.member,
+            dependency.objects.len()
         ));
+        for object in &dependency.objects {
+            document.push_str(&format!(
+                "object\t{}\t{}\t{}\n",
+                object.kind.as_str(),
+                object.oid,
+                object.size
+            ));
+        }
     }
     // The manifest is written last, so an interrupted export leaves an archive
     // without a manifest: visibly incomplete rather than silently partial.
@@ -693,12 +840,22 @@ pub fn restore_complete_copy(
             &directory,
             &dependency.commit,
         )?;
-        let objects = closure_objects(&directory, &dependency.commit)?;
-        verify_closure(
-            &directory,
-            &objects,
-            &format!("dependency {}", dependency.path),
-        )?;
+        let scope = format!("dependency {}", dependency.path);
+        if dependency.objects.is_empty() {
+            // A header-1/2 archive recorded no dependency closure, so the only
+            // closure available to check is the one the copy itself reaches:
+            // every object it holds must be intact, which is all such an
+            // archive can promise.
+            let objects = closure_objects(&directory, &dependency.commit)?;
+            verify_closure(&directory, &objects, &scope)?;
+        } else {
+            // A current archive recorded the closure the dependency had when
+            // it was exported, so require the dependency to reach exactly that
+            // one: a bundle that lost or gained an object is refused here
+            // rather than reported as a complete copy.
+            verify_closure(&directory, &dependency.objects, &scope)?;
+            verify_recorded_closure(&directory, &dependency.commit, &dependency.objects, &scope)?;
+        }
     }
     Ok(manifest)
 }
@@ -741,6 +898,14 @@ pub fn materialize_complete_copy(
         // the primary member's pin is the one the worktree shows.
         if !dependency.member.eq_ignore_ascii_case(&manifest.snapshot) {
             continue;
+        }
+        if !dependency.objects.is_empty() {
+            verify_recorded_closure(
+                &copy.join(&dependency.path),
+                &dependency.commit,
+                &dependency.objects,
+                &format!("dependency {}", dependency.path),
+            )?;
         }
         checkout(&copy.join(&dependency.path), &dependency.commit)?;
     }
@@ -816,12 +981,21 @@ fn resolve_dependencies_of(
             if dependencies.len() == MAX_EXPORT_DEPENDENCIES {
                 return Err(CompleteCopyError::ClosureTooLarge);
             }
+            // Every object of the dependency's closure is recorded, not just
+            // its commit, so a reconstruction can require the dependency to
+            // reach exactly what was exported rather than whatever its bundle
+            // happens to carry.
+            let objects = closure_objects(&source, &commit)?;
+            if objects.is_empty() || objects.len() > MAX_EXPORT_OBJECTS {
+                return Err(CompleteCopyError::ClosureTooLarge);
+            }
             dependencies.push(CompleteCopyDependency {
                 path,
                 bundle: format!("{DEPENDENCIES_DIR}/{commit}.bundle"),
                 commit,
                 origin,
                 member: exported.name.clone(),
+                objects,
             });
         }
         if dependencies.len() > MAX_EXPORT_DEPENDENCIES {
@@ -1461,7 +1635,7 @@ mod tests {
 
     #[test]
     fn manifest_round_trips_every_member_and_its_own_objects() {
-        let document = "orna-complete-copy 2\n\
+        let document = "orna-complete-copy 3\n\
              snapshot\t0123456789012345678901234567890123456789\n\
              archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\n\
              object\tcommit\t0123456789012345678901234567890123456789\t120\n\
@@ -1469,7 +1643,8 @@ mod tests {
              archive\tabcdef0123456789abcdef0123456789abcdef01\tsnapshots/abcdef0123456789abcdef0123456789abcdef01.bundle\n\
              object\tcommit\tabcdef0123456789abcdef0123456789abcdef01\t121\n\
              object\tblob\t89abcdef0123456789abcdef0123456789abcdef\t7\n\
-             dependency\tstdlib/std\tabcdef0123456789abcdef0123456789abcdef01\thttps://example.invalid/std.git\tdependencies/abcdef0123456789abcdef0123456789abcdef01.bundle\tabcdef0123456789abcdef0123456789abcdef01\n";
+             dependency\tstdlib/std\tabcdef0123456789abcdef0123456789abcdef01\thttps://example.invalid/std.git\tdependencies/abcdef0123456789abcdef0123456789abcdef01.bundle\tabcdef0123456789abcdef0123456789abcdef01\t1\n\
+             object\tcommit\tabcdef0123456789abcdef0123456789abcdef01\t121\n";
         let decoded = CompleteCopyManifest::decode(document).unwrap();
         assert_eq!(decoded.snapshot, "0123456789012345678901234567890123456789");
         assert_eq!(decoded.members.len(), 2);
@@ -1502,6 +1677,13 @@ mod tests {
         assert_eq!(decoded.dependencies[0].path, "stdlib/std");
         assert_eq!(
             decoded.dependencies[0].member,
+            "abcdef0123456789abcdef0123456789abcdef01"
+        );
+        // The dependency's own closure is recorded alongside its line, and it
+        // belongs to the dependency's repository rather than the member union.
+        assert_eq!(decoded.dependencies[0].objects.len(), 1);
+        assert_eq!(
+            decoded.dependencies[0].objects[0].oid,
             "abcdef0123456789abcdef0123456789abcdef01"
         );
         assert_eq!(decoded.counts(), (3, 1));
@@ -1563,6 +1745,50 @@ mod tests {
         .is_err());
         assert!(!valid_object_id("0123456789"));
         assert!(valid_object_id("0123456789012345678901234567890123456789"));
+    }
+
+    #[test]
+    fn header_3_requires_each_dependency_to_record_its_closure() {
+        const MEMBERS: &str = "orna-complete-copy 3\n\
+             snapshot\t0123456789012345678901234567890123456789\n\
+             archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\n\
+             object\tcommit\t0123456789012345678901234567890123456789\t120\n\
+             dependency\tstdlib/std\tabcdef0123456789abcdef0123456789abcdef01\thttps://example.invalid/std.git\tdependencies/abcdef0123456789abcdef0123456789abcdef01.bundle\t0123456789012345678901234567890123456789";
+        const RECORD: &str = "object\tcommit\tabcdef0123456789abcdef0123456789abcdef01\t121\n";
+
+        // The header-2 spelling carries no closure, so in a header-3 archive it
+        // is a truncated manifest rather than an older form.
+        assert!(CompleteCopyManifest::decode(&format!("{MEMBERS}\n")).is_err());
+        // A dependency always reaches its own pinned commit, so a declared
+        // closure of zero records nothing and is refused.
+        assert!(CompleteCopyManifest::decode(&format!("{MEMBERS}\t0\n")).is_err());
+        // A declared count that the recorded objects do not match describes an
+        // archive other than the one it claims to be.
+        assert!(CompleteCopyManifest::decode(&format!("{MEMBERS}\t2\n{RECORD}")).is_err());
+        assert!(CompleteCopyManifest::decode(&format!("{MEMBERS}\t1\n{RECORD}{RECORD}")).is_err());
+        // The coherent spelling decodes, and only then is the closure carried.
+        let decoded =
+            CompleteCopyManifest::decode(&format!("{MEMBERS}\t1\n{RECORD}")).expect("decode");
+        assert_eq!(decoded.dependencies[0].objects.len(), 1);
+        // A dependency's closure is its own repository's objects and never
+        // joins the archive's member union.
+        assert_eq!(decoded.objects.len(), 1);
+        assert_eq!(decoded.counts(), (1, 1));
+    }
+
+    #[test]
+    fn header_2_archives_still_decode_without_recorded_dependency_closures() {
+        // A header-2 archive named its members and their closures but left each
+        // dependency to be reconstructed from whatever its bundle reached.
+        let document = "orna-complete-copy 2\n\
+             snapshot\t0123456789012345678901234567890123456789\n\
+             archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\n\
+             object\tcommit\t0123456789012345678901234567890123456789\t120\n\
+             dependency\tstdlib/std\tabcdef0123456789abcdef0123456789abcdef01\thttps://example.invalid/std.git\tdependencies/abcdef0123456789abcdef0123456789abcdef01.bundle\t0123456789012345678901234567890123456789\n";
+        let decoded = CompleteCopyManifest::decode(document).expect("decode");
+        assert_eq!(decoded.dependencies.len(), 1);
+        assert!(decoded.dependencies[0].objects.is_empty());
+        assert_eq!(decoded.counts(), (1, 1));
     }
 
     #[test]

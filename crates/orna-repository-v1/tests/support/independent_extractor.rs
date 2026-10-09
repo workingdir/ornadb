@@ -16,8 +16,9 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use sha1::{Digest, Sha1};
@@ -43,7 +44,15 @@ pub struct RecordedMember {
 pub struct RecordedArchive {
     pub snapshot: String,
     pub members: Vec<RecordedMember>,
-    pub dependencies: Vec<(String, String)>,
+    pub dependencies: Vec<RecordedDependency>,
+}
+
+/// One dependency line and, in a current archive, the closure it records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordedDependency {
+    pub path: String,
+    pub commit: String,
+    pub objects: Vec<RecordedObject>,
 }
 
 /// Reads `manifest.tsv` directly.
@@ -53,28 +62,34 @@ pub fn read_manifest(archive: &Path) -> RecordedArchive {
     let header = lines.next().expect("manifest is not empty");
     let legacy = header == "orna-complete-copy 1";
     assert!(
-        legacy || header == "orna-complete-copy 2",
+        legacy || header == "orna-complete-copy 2" || header == "orna-complete-copy 3",
         "unexpected manifest header {header:?}"
     );
     let mut snapshot = None;
     let mut members: Vec<RecordedMember> = Vec::new();
-    let mut dependencies = Vec::new();
+    let mut dependencies: Vec<RecordedDependency> = Vec::new();
+    let mut current_dependency: Option<usize> = None;
     for line in lines {
         let fields: Vec<&str> = line.split('\t').collect();
         match fields.as_slice() {
             ["snapshot", commit] => snapshot = Some((*commit).to_owned()),
-            ["archive", commit, bundle] => members.push(RecordedMember {
-                commit: (*commit).to_owned(),
-                bundle: (*bundle).to_owned(),
-                objects: Vec::new(),
-            }),
+            ["archive", commit, bundle] => {
+                members.push(RecordedMember {
+                    commit: (*commit).to_owned(),
+                    bundle: (*bundle).to_owned(),
+                    objects: Vec::new(),
+                });
+                current_dependency = None;
+            }
             ["object", kind, oid, size] => {
                 let object = RecordedObject {
                     kind: (*kind).to_owned(),
                     oid: (*oid).to_owned(),
                     size: size.parse().expect("object size is a number"),
                 };
-                if let Some(member) = members.last_mut() {
+                if let Some(index) = current_dependency {
+                    dependencies[index].objects.push(object);
+                } else if let Some(member) = members.last_mut() {
                     member.objects.push(object);
                 } else {
                     // A header-1 archive lists one closure without a member
@@ -88,7 +103,19 @@ pub fn read_manifest(archive: &Path) -> RecordedArchive {
                 }
             }
             ["dependency", path, commit, ..] => {
-                dependencies.push(((*path).to_owned(), (*commit).to_owned()));
+                dependencies.push(RecordedDependency {
+                    path: (*path).to_owned(),
+                    commit: (*commit).to_owned(),
+                    objects: Vec::new(),
+                });
+                // A current archive records the dependency's closure under its
+                // line; an older one records nothing and leaves the closure to
+                // be discovered from the bundle.
+                current_dependency = if header == "orna-complete-copy 3" {
+                    Some(dependencies.len() - 1)
+                } else {
+                    None
+                };
             }
             other => panic!("unrecognised manifest line: {other:?}"),
         }
@@ -98,6 +125,76 @@ pub fn read_manifest(archive: &Path) -> RecordedArchive {
         members,
         dependencies,
     }
+}
+
+/// Every object `commit` reaches in `directory`, read with Git alone.
+///
+/// The manifest's recorded closures can then be compared against what Git
+/// itself reaches, which is how this module checks that a copy carries the
+/// payload blobs and not only the descriptor trees.
+pub fn closure_objects(directory: &Path, commit: &str) -> Vec<RecordedObject> {
+    let listing = String::from_utf8(git(
+        directory,
+        &["rev-list", "--objects", "--no-object-names", commit],
+    ))
+    .expect("git output is UTF-8");
+    let mut oids: Vec<String> = listing
+        .split_ascii_whitespace()
+        .map(str::to_owned)
+        .collect();
+    oids.sort();
+    oids.dedup();
+    let mut query = oids.join("\n");
+    query.push('\n');
+    let checked = String::from_utf8(git_stdin(
+        directory,
+        &["cat-file", "--batch-check"],
+        query.as_bytes(),
+    ))
+    .expect("git output is UTF-8");
+    let mut objects: Vec<RecordedObject> = checked
+        .lines()
+        .map(|line| {
+            let mut fields = line.split_ascii_whitespace();
+            RecordedObject {
+                oid: fields.next().expect("object id").to_owned(),
+                kind: fields.next().expect("object kind").to_owned(),
+                size: fields
+                    .next()
+                    .expect("object size")
+                    .parse()
+                    .expect("object size is a number"),
+            }
+        })
+        .collect();
+    objects.sort_by(|left, right| left.oid.cmp(&right.oid));
+    objects
+}
+
+/// Re-hashes every recorded blob of `objects` against its raw bytes.
+///
+/// Unlike [`verify_blobs`] this takes the object records directly, so a pinned
+/// dependency's recorded closure is re-hashed the same way a member's is.
+/// Returns the number of verified blobs.
+pub fn verify_recorded_blobs(repository: &Path, objects: &[RecordedObject]) -> usize {
+    let mut verified = 0;
+    for object in objects.iter().filter(|object| object.kind == "blob") {
+        let bytes = git(repository, &["cat-file", "blob", &object.oid]);
+        assert_eq!(
+            bytes.len() as u64,
+            object.size,
+            "blob {} length matches the manifest",
+            object.oid
+        );
+        assert_eq!(
+            object_id("blob", &bytes),
+            object.oid,
+            "blob {} raw bytes hash back to the recorded object ID",
+            object.oid
+        );
+        verified += 1;
+    }
+    verified
 }
 
 /// Recomputes the object ID of `bytes` as Git does: `sha1("<kind> <len>\0" || bytes)`.
@@ -129,12 +226,37 @@ fn git(directory: &Path, arguments: &[&str]) -> Vec<u8> {
     output.stdout
 }
 
-/// Moves one archive member into `destination` using the bundle alone.
+/// Runs Git with a request on its standard input, for `--batch-check`.
+fn git_stdin(directory: &Path, arguments: &[&str], input: &[u8]) -> Vec<u8> {
+    let mut child = Command::new("git")
+        .current_dir(directory)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git runs");
+    let mut stdin = child.stdin.take().expect("git stdin");
+    stdin.write_all(input).expect("write to git");
+    drop(stdin);
+    let output = child.wait_with_output().expect("git finishes");
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+/// Moves one archived commit into `destination` using its bundle alone.
 ///
-/// No other archive file is read and no remote is configured, so a member that
+/// No other archive file is read and no remote is configured, so a commit that
 /// only survives because the source repository still exists is not extractable
-/// here and the test fails.
-pub fn extract_member(archive: &Path, member: &RecordedMember, destination: &Path) {
+/// here and the test fails. Used for a member and for a pinned dependency
+/// alike: both are one bundle plus the commit it must carry.
+pub fn extract_commit(archive: &Path, bundle: &str, commit: &str, destination: &Path) {
     fs::create_dir_all(destination).expect("create extraction directory");
     git(destination, &["init", "--quiet", "--template=", "."]);
     git(
@@ -144,7 +266,7 @@ pub fn extract_member(archive: &Path, member: &RecordedMember, destination: &Pat
             "fetch.recurseSubmodules=false",
             "fetch",
             "--no-tags",
-            archive.join(&member.bundle).to_str().expect("UTF-8 path"),
+            archive.join(bundle).to_str().expect("UTF-8 path"),
             &format!("+refs/heads/orna-complete-copy:refs/heads/extracted"),
         ],
     );
@@ -152,9 +274,14 @@ pub fn extract_member(archive: &Path, member: &RecordedMember, destination: &Pat
         .expect("git output is UTF-8");
     assert_eq!(
         resolved.trim(),
-        member.commit,
-        "the bundle carries the recorded member commit"
+        commit,
+        "the bundle carries the recorded commit"
     );
+}
+
+/// Moves one archive member into `destination` using the bundle alone.
+pub fn extract_member(archive: &Path, member: &RecordedMember, destination: &Path) {
+    extract_commit(archive, &member.bundle, &member.commit, destination);
 }
 
 /// Reads every recorded blob of `member` back from `repository` and checks its

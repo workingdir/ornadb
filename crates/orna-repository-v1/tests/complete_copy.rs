@@ -247,6 +247,109 @@ fn complete_copy_fails_closed_when_a_dependency_is_unavailable() {
     assert!(!archive.join("manifest.tsv").exists());
 }
 
+#[test]
+fn complete_copy_refuses_a_dependency_that_does_not_reach_its_recorded_closure() {
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    let repository = Repository::discover(&project).expect("discover superproject");
+    let dependency_commit = git_stdout(&dependency, &["rev-parse", "HEAD"]);
+    let dependency_payload = git_stdout(&dependency, &["rev-parse", "HEAD:main.orna"]);
+
+    let archive = root.path().join("archive");
+    let manifest =
+        export_complete_copy(&repository, "HEAD", &archive, &[]).expect("export the complete copy");
+    let recorded = manifest.dependencies[0].clone();
+    assert_eq!(recorded.path, "deps/std");
+    assert!(
+        recorded
+            .objects
+            .iter()
+            .any(|object| object.kind == CompleteCopyObjectKind::Blob
+                && object.oid == dependency_payload),
+        "the dependency closure records the pinned payload blob: {:?}",
+        recorded.objects
+    );
+
+    // Disable the source repository: only the archive remains.
+    fs::rename(&dependency, root.path().join("dependency-disabled")).expect("disable dependency");
+
+    // The archive alone reconstructs, and the dependency keeps its payload.
+    let intact = root.path().join("copy-intact");
+    restore_complete_copy(&archive, &intact).expect("the recorded copy reconstructs");
+    assert_eq!(
+        git_stdout(&intact.join("deps/std"), &["rev-parse", "HEAD:main.orna"]),
+        dependency_payload,
+        "the dependency's payload blob is readable from the copy alone"
+    );
+
+    // Drop the payload blob from the dependency's recorded closure and lower
+    // the count with it, so the manifest stays internally coherent: the only
+    // thing wrong with it is that the recorded closure no longer describes the
+    // bytes the dependency reaches.
+    let document = fs::read_to_string(archive.join("manifest.tsv")).expect("read the manifest");
+    let dropped = format!("object\tblob\t{dependency_payload}\t");
+    let mut truncated_lines: Vec<String> = Vec::new();
+    let mut dropped_once = false;
+    let mut lowered_once = false;
+    for line in document.lines() {
+        if line.starts_with("dependency\t") {
+            let count = line
+                .rsplit('\t')
+                .next()
+                .expect("the count column")
+                .parse::<usize>()
+                .expect("the count is a number");
+            let lowered = line
+                .rsplit_once('\t')
+                .expect("the count is the last column")
+                .0
+                .to_owned();
+            truncated_lines.push(format!("{lowered}\t{}", count - 1));
+            lowered_once = true;
+            continue;
+        }
+        if !dropped_once && line.starts_with(&dropped) {
+            dropped_once = true;
+            continue;
+        }
+        truncated_lines.push(line.to_owned());
+    }
+    assert!(dropped_once, "the dependency records its payload blob");
+    assert!(lowered_once, "the dependency line carries a count");
+    let mut truncated_document = truncated_lines.join("\n");
+    truncated_document.push('\n');
+    assert_ne!(truncated_document, document, "the manifest changed");
+    assert!(
+        truncated_document.contains("dependency\tdeps/std\t"),
+        "the dependency line survives"
+    );
+
+    let truncated = root.path().join("truncated");
+    copy_archive(&archive, &truncated);
+    fs::write(truncated.join("manifest.tsv"), &truncated_document).expect("write the manifest");
+    let error = restore_complete_copy(&truncated, &root.path().join("copy-truncated"))
+        .expect_err("a dependency that reaches more than the recording is refused");
+    assert!(
+        matches!(
+            error,
+            orna_repository_v1::complete_copy::CompleteCopyError::IntegrityMismatch { .. }
+        ),
+        "the failure is a typed integrity diagnostic: {error}"
+    );
+    assert!(
+        format!("{error}").contains("deps/std"),
+        "the failure names the dependency: {error}"
+    );
+    assert!(
+        !root
+            .path()
+            .join("copy-truncated/deps/std/main.orna")
+            .exists(),
+        "a refused dependency is not materialised: {error}"
+    );
+}
+
 /// A third committed snapshot: the same schema source with one new row file, so
 /// the second snapshot has its own distinct closure and its own blob.
 const MAIN_SOURCE_UPDATED: &str = "module main;\n// remastered\n";
@@ -308,9 +411,38 @@ fn complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extract
     assert_eq!(recorded.members.len(), 2);
     assert_eq!(recorded.members[0].commit, current);
     assert_eq!(recorded.members[1].commit, previous);
-    // The dependency is carried once and pinned by the member that names it.
+    // The dependency is carried once and pinned by the member that names it,
+    // and its closure is recorded rather than left to whichever objects its
+    // bundle happens to reach.
     assert_eq!(recorded.dependencies.len(), 1);
-    assert_eq!(recorded.dependencies[0].0, "deps/std");
+    assert_eq!(recorded.dependencies[0].path, "deps/std");
+    assert!(
+        !recorded.dependencies[0].objects.is_empty(),
+        "the archive records the dependency closure"
+    );
+    for dependency in &recorded.dependencies {
+        let scratch = extractor::scratch(&format!("dep-{}", &dependency.commit[..8]));
+        extractor::extract_commit(&archive, &dependency.bundle, &dependency.commit, &scratch);
+        // The recorded closure is exactly what the dependency's bundle reaches,
+        // and it is read back from that bundle alone: payload blobs included,
+        // so a descriptor-only copy fails here.
+        let reached = extractor::closure_objects(&scratch, &dependency.commit);
+        let mut recorded_objects = dependency.objects.clone();
+        recorded_objects.sort_by(|left, right| left.oid.cmp(&right.oid));
+        assert_eq!(
+            reached, recorded_objects,
+            "dependency {} reaches exactly its recorded closure",
+            dependency.path
+        );
+        // Re-hashing the payload bytes proves the objects are carried, not just
+        // named: a closure of descriptor trees alone verifies here and fails.
+        assert!(
+            extractor::verify_recorded_blobs(&scratch, &dependency.objects) > 0,
+            "dependency {} carries its payload blobs",
+            dependency.path
+        );
+        fs::remove_dir_all(&scratch).expect("clean scratch");
+    }
 
     // Disable the original remote entirely: only the archive remains.
     fs::rename(&dependency, root.path().join("dependency-disabled")).expect("disable dependency");
