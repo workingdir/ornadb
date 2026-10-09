@@ -47,7 +47,7 @@ mod ui;
 mod unicode_16_case_properties;
 
 #[cfg(feature = "project-repl")]
-pub use admitted_repl::{AdmittedReplSession, RepositoryScope, ReplError};
+pub use admitted_repl::{AdmittedReplSession, ReplError, RepositoryScope};
 pub use cancellation::CancellationToken;
 use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
@@ -6192,25 +6192,28 @@ impl Context<'_, '_> {
         let resolved_function = self.resolve_function_name(callee, scope);
         let source_function_name = function_name(callee);
         // A portable Blob call is admitted only when the generated typed
-        // registry declares the operation. The resolved name is used when a
-        // declaration was reachable; an unshadowed source-level `sys.blob.*`
-        // call is accepted so the generated declarations stay callable.
-        let declared = resolved_function
-            .as_deref()
-            .is_some_and(crate::sys_bindings::is_blob_annotation_operation)
-            .then(|| resolved_function.clone())
-            .flatten()
-            .or_else(|| {
-                let name = source_function_name?;
-                (!scope.0.contains_key("sys")
-                    && crate::sys_bindings::is_blob_annotation_operation(&name))
-                .then_some(name)
-            })
-            .filter(|name| {
-                orna_sys_v1::system_dispatch_table()
-                    .operation(name)
-                    .is_some()
-            });
+        // registry declares the operation. The resolved name wins when a
+        // declaration was reachable; an unresolved, unshadowed source-level
+        // `sys.blob.*` call is accepted so the generated declarations stay
+        // callable, and a resolved non-Blob function never falls through.
+        let declared = match resolved_function.as_deref() {
+            Some(name) if crate::sys_bindings::is_blob_annotation_operation(name) => {
+                Some(name.to_owned())
+            }
+            Some(_) => None,
+            None => source_function_name
+                .as_deref()
+                .filter(|name| {
+                    !scope.0.contains_key("sys")
+                        && crate::sys_bindings::is_blob_annotation_operation(name)
+                })
+                .map(str::to_owned),
+        }
+        .filter(|name| {
+            orna_sys_v1::system_dispatch_table()
+                .operation(name)
+                .is_some()
+        });
         if let Some(operation) = declared {
             return self.call_blob_annotation(&operation, arguments, input, scope, depth);
         }
