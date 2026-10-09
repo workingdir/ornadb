@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use orna_value_v1::{BlobMetadata, MimeRegistry};
 
 use crate::native_graph::{
-    CborValue, GraphError, MAX_REFS, NODE_DATA_LIMIT, NativeObjectId, NativeObjectKind,
-    decode_canonical_cbor, row_fields_dependencies,
+    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeObjectId,
+    NativeObjectKind, MAX_REFS, NODE_DATA_LIMIT,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
@@ -1005,61 +1005,230 @@ impl RowMapBuilder {
     }
 }
 
+/// One entry's cost in the pinned ORP-1 page-boundary algorithm: its canonical
+/// logical boundary token (the key itself, never a storage OID) plus the
+/// encoded node bytes and distinct native refs the entry contributes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BoundaryToken {
+    key: Vec<u8>,
+    size: usize,
+    refs: usize,
+}
+
+impl BoundaryToken {
+    pub(crate) fn new(key: Vec<u8>, size: usize, refs: usize) -> Self {
+        Self { key, size, refs }
+    }
+}
+
+/// Groups ordered entries into page ranges with the exact ORP-1 rule: cut
+/// before an entry that would push the page past 64 KiB, 256 entries or 256
+/// distinct native refs, and cut after an entry whose height-specific boundary
+/// anchor is set once the page holds at least 16 entries, or at exactly 256
+/// entries. The final nonempty tail is always emitted. `node_overhead` is the
+/// encoded node header, domain and entry-count cost charged to every page, so
+/// a caller that passes the real overhead gets pages that fit the node bound.
+///
+/// The same call serves successive branch levels: a branch level's entries are
+/// its children, whose token is that child's last logical key.
+pub(crate) fn partition_token_ranges(
+    tokens: &[BoundaryToken],
+    height: u8,
+    node_overhead: usize,
+) -> Result<Vec<std::ops::Range<usize>>, RowStoreError> {
+    if node_overhead >= NODE_DATA_LIMIT {
+        return Err(RowStoreError::EntryTooLarge(node_overhead));
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut size = node_overhead;
+    let mut refs = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.refs > MAX_REFS {
+            return Err(RowStoreError::PageFanoutExceeded(token.refs));
+        }
+        if token.size + node_overhead > NODE_DATA_LIMIT {
+            return Err(RowStoreError::EntryTooLarge(token.size));
+        }
+        let count = index - start;
+        if count > 0
+            && (count == MAX_PAGE_ENTRIES
+                || refs + token.refs > MAX_REFS
+                || size + token.size > NODE_DATA_LIMIT)
+        {
+            ranges.push(start..index);
+            start = index;
+            size = node_overhead;
+            refs = 0;
+        }
+        size += token.size;
+        refs += token.refs;
+        let count = index - start + 1;
+        if count >= MIN_PAGE_ENTRIES
+            && (count == MAX_PAGE_ENTRIES || boundary_anchor_bytes(height, &token.key)?)
+        {
+            ranges.push(start..index + 1);
+            start = index + 1;
+            size = node_overhead;
+            refs = 0;
+        }
+    }
+    if start < tokens.len() {
+        ranges.push(start..tokens.len());
+    }
+    Ok(ranges)
+}
+
+/// Encoded node header and domain cost charged to every height-0 page when the
+/// caller does not supply an exact one. It covers the `[1, 1, domain, entries]`
+/// tuple head, the domain itself and the widest definite entry-count head, so
+/// the charged cost never understates a real page.
+pub(crate) fn leaf_node_overhead(domain: &[u8]) -> usize {
+    domain
+        .len()
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(3)
+}
+
+/// Encoded node header, domain and count cost charged to every branch page.
+/// It covers the `[1, 2, domain, height, entries]` tuple head.
+pub(crate) fn branch_node_overhead(domain: &[u8]) -> usize {
+    domain
+        .len()
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(1)
+        .saturating_add(3)
+}
+
+/// Encoded cost of one branch entry `[inclusive_max_key, child_oid, row_count]`
+/// for a native object width of `oid_width` bytes. Counts are bounded by the
+/// signed-length limit, so the integer head is charged at its widest definite
+/// form and the estimate never understates the encoded entry.
+pub(crate) fn branch_entry_size(fence: usize, oid_width: usize) -> usize {
+    fence
+        .saturating_add(oid_width)
+        .saturating_add(3)
+        .saturating_add(9)
+}
+
+/// The canonical ORP-1 shape of one ordered map: the page ranges at every
+/// level, level 0 the leaves and the final level the root. Every level's
+/// ranges are in logical key order and cover its whole input exactly once.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RowMapLevels {
+    levels: Vec<Vec<std::ops::Range<usize>>>,
+}
+
+impl RowMapLevels {
+    /// The root height. An empty or single-leaf map is height 0.
+    pub fn height(&self) -> u8 {
+        self.levels.len().saturating_sub(1) as u8
+    }
+
+    pub fn levels(&self) -> &[Vec<std::ops::Range<usize>>] {
+        &self.levels
+    }
+
+    /// The page ranges at one height, or nothing above the root.
+    pub fn level(&self, height: u8) -> &[std::ops::Range<usize>] {
+        self.levels
+            .get(height as usize)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
+/// Plans every ORP-1 level of one ordered map with the pinned boundary rule:
+/// partition the leaves, then partition each successive level by its children's
+/// last logical keys until a single root remains. Child ranges are
+/// nonoverlapping and exhaustive; a root with one child collapses to that child
+/// at the next lower height. The final physical root is therefore a pure
+/// function of the ordered entries, the domain and the native object width.
+pub(crate) fn partition_levels(
+    entries: &[RowEntry],
+    domain: &[u8],
+    oid_width: usize,
+) -> Result<RowMapLevels, RowStoreError> {
+    if oid_width != 20 && oid_width != 32 {
+        return Err(RowStoreError::VersionIdentityMismatch);
+    }
+    let mut tokens = Vec::with_capacity(entries.len());
+    for entry in entries {
+        tokens.push(BoundaryToken::new(
+            entry.key.canonical_bytes()?,
+            entry_encoded_size(entry)?,
+            entry.value.dependencies().len(),
+        ));
+    }
+    let leaves = partition_token_ranges(&tokens, 0, leaf_node_overhead(domain))?;
+    let mut levels = vec![leaves];
+    let branch_overhead = branch_node_overhead(domain);
+    while levels.last().is_some_and(|level| level.len() > 1) {
+        let height =
+            u8::try_from(levels.len()).map_err(|_| RowStoreError::PageHeightExceeded(64))?;
+        if height > MAX_PAGE_HEIGHT {
+            return Err(RowStoreError::PageHeightExceeded(height));
+        }
+        let children = levels.last().ok_or(RowStoreError::InvalidKeyRange)?;
+        let mut child_tokens = Vec::with_capacity(children.len());
+        for range in children {
+            let last = range
+                .clone()
+                .next_back()
+                .and_then(|index| tokens.get(index))
+                .ok_or(RowStoreError::InvalidKeyRange)?;
+            child_tokens.push(BoundaryToken::new(
+                last.key.clone(),
+                branch_entry_size(last.key.len(), oid_width),
+                1,
+            ));
+        }
+        levels.push(partition_token_ranges(
+            &child_tokens,
+            height,
+            branch_overhead,
+        )?);
+    }
+    Ok(RowMapLevels { levels })
+}
+
+/// The pinned format-3 height bound shared with the native graph.
+pub const MAX_PAGE_HEIGHT: u8 = 64;
+
+/// Encoded node header and domain cost charged to every height-0 page when the
+/// caller does not supply an exact one.
+const PAGE_NODE_OVERHEAD: usize = 16;
+
 pub(crate) fn partition_pages(
     entries: &[RowEntry],
     height: u8,
 ) -> Result<Vec<RowPage>, RowStoreError> {
-    let mut pages = Vec::new();
-    let mut current = Vec::new();
-    let mut current_size = 16usize;
-    let mut current_refs = 0usize;
+    let mut tokens = Vec::with_capacity(entries.len());
     for entry in entries {
         let size = entry_encoded_size(entry)?;
-        let refs = entry.value.dependencies().len();
-        if refs > MAX_REFS {
-            return Err(RowStoreError::PageFanoutExceeded(refs));
-        }
-        if size + 16 > NODE_DATA_LIMIT {
-            return Err(RowStoreError::EntryTooLarge(size));
-        }
-        let would_overflow = !current.is_empty()
-            && (current.len() == MAX_PAGE_ENTRIES
-                || current_refs + refs > MAX_REFS
-                || current_size + size > NODE_DATA_LIMIT);
-        if would_overflow {
-            pages.push(RowPage {
-                height,
-                entries: std::mem::take(&mut current),
-                encoded_size: current_size,
-                direct_refs: current_refs,
-            });
-            current_size = 16;
-            current_refs = 0;
-        }
-        current_size += size;
-        current_refs += refs;
-        current.push(entry.clone());
-        let anchor = boundary_anchor(height, entry.key())?;
-        if current.len() >= MIN_PAGE_ENTRIES
-            && (anchor || current.len() == MAX_PAGE_ENTRIES)
-            && !current.is_empty()
-        {
-            pages.push(RowPage {
-                height,
-                entries: std::mem::take(&mut current),
-                encoded_size: current_size,
-                direct_refs: current_refs,
-            });
-            current_size = 16;
-            current_refs = 0;
-        }
+        tokens.push(BoundaryToken::new(
+            entry.key.canonical_bytes()?,
+            size,
+            entry.value.dependencies().len(),
+        ));
     }
-    if !current.is_empty() {
+    let mut pages = Vec::new();
+    for range in partition_token_ranges(&tokens, height, PAGE_NODE_OVERHEAD)? {
+        let mut encoded_size = PAGE_NODE_OVERHEAD;
+        let mut direct_refs = 0usize;
+        for token in &tokens[range.clone()] {
+            encoded_size += token.size;
+            direct_refs += token.refs;
+        }
         pages.push(RowPage {
             height,
-            entries: current,
-            encoded_size: current_size,
-            direct_refs: current_refs,
+            entries: entries[range].to_vec(),
+            encoded_size,
+            direct_refs,
         });
     }
     Ok(pages)
@@ -1076,7 +1245,12 @@ fn entry_encoded_size(entry: &RowEntry) -> Result<usize, RowStoreError> {
 }
 
 fn boundary_anchor(height: u8, key: &TypedKey) -> Result<bool, RowStoreError> {
-    let canonical = key.canonical_bytes()?;
+    boundary_anchor_bytes(height, &key.canonical_bytes()?)
+}
+
+/// The anchor test over an already-encoded logical boundary token, so a builder
+/// that has the canonical bytes never pays for a second encoding pass.
+pub(crate) fn boundary_anchor_bytes(height: u8, canonical: &[u8]) -> Result<bool, RowStoreError> {
     let mut hasher = Sha256::new();
     hasher.update(ORP_DOMAIN);
     hasher.update(u32::from(height).to_be_bytes());
@@ -1229,6 +1403,7 @@ pub enum RowStoreError {
     ValueTooLarge(u64),
     EntryTooLarge(usize),
     PageFanoutExceeded(usize),
+    PageHeightExceeded(u8),
     BoundaryMismatch,
     VersionIdentityMismatch,
     RowCountExceeded,
@@ -1261,6 +1436,9 @@ impl fmt::Display for RowStoreError {
             Self::ValueTooLarge(length) => write!(f, "overflow value length {length} is too large"),
             Self::EntryTooLarge(size) => write!(f, "row entry is {size} bytes, over node bound"),
             Self::PageFanoutExceeded(count) => write!(f, "row page fanout is {count}, over 256"),
+            Self::PageHeightExceeded(height) => {
+                write!(f, "row page height {height} is over the format-3 bound")
+            }
             Self::BoundaryMismatch => {
                 f.write_str("row lookup boundary does not match map identity")
             }
