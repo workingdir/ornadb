@@ -7,6 +7,7 @@ mod cli_args;
 mod cli_dispatch;
 mod cli_help;
 mod cli_history;
+mod cli_query;
 mod cli_export;
 mod cli_import;
 mod cli_mount;
