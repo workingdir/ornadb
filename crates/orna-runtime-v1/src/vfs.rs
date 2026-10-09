@@ -14,6 +14,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use super::{
     CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeError, RuntimeState, RuntimeTableIdentity,
@@ -464,6 +465,7 @@ pub enum FsyncOutcome<S> {
 /// The latest rejected replacement remains separately readable even after a
 /// later write starts a new candidate from its bytes.
 pub struct RetainedInvalidDraft<S> {
+    id: [u8; 16],
     baseline: SnapshotPin<S>,
     revision: u64,
     replacement: Arc<[u8]>,
@@ -473,6 +475,7 @@ pub struct RetainedInvalidDraft<S> {
 impl<S> Clone for RetainedInvalidDraft<S> {
     fn clone(&self) -> Self {
         Self {
+            id: self.id,
             baseline: self.baseline.clone(),
             revision: self.revision,
             replacement: Arc::clone(&self.replacement),
@@ -482,6 +485,13 @@ impl<S> Clone for RetainedInvalidDraft<S> {
 }
 
 impl<S> RetainedInvalidDraft<S> {
+    /// The unique local-state identity of this retained draft, issued when the
+    /// rejection was recorded. A later rejection of the same revision keeps the
+    /// identity it was first given (ORNA-VFS-009).
+    pub const fn id(&self) -> [u8; 16] {
+        self.id
+    }
+
     pub fn baseline(&self) -> &SnapshotPin<S> {
         &self.baseline
     }
@@ -504,7 +514,42 @@ struct DraftState<S> {
     candidate: Option<Vec<u8>>,
     revision: u64,
     last_rejection: Option<(u64, SafeDiagnostic)>,
-    retained_invalid: Option<RetainedInvalidDraft<S>>,
+    retained_invalid: Option<RetainedRejection<S>>,
+}
+
+/// The retained rejected draft together with the identity of the rejection
+/// that recorded it. One rejection has one identity, so a repeated validation
+/// of the same revision is distinguishable from a fresh one (ORNA-VFS-009).
+struct RetainedRejection<S> {
+    id: [u8; 16],
+    draft: RetainedInvalidDraft<S>,
+}
+
+impl<S> DraftState<S> {
+    /// Records one rejection of `revision`, issuing a fresh identity unless the
+    /// same revision was already retained by an earlier rejection.
+    fn retain_rejection(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
+        let replacement: Arc<[u8]> = Arc::from(
+            self.candidate
+                .as_deref()
+                .unwrap_or(self.baseline.bytes.as_ref()),
+        );
+        self.last_rejection = Some((revision, diagnostic));
+        let id = match self.retained_invalid.as_ref() {
+            Some(retained) if retained.draft.revision == revision => retained.id,
+            _ => *Uuid::new_v4().as_bytes(),
+        };
+        self.retained_invalid = Some(RetainedRejection {
+            id,
+            draft: RetainedInvalidDraft {
+                id,
+                baseline: self.baseline.pin.clone(),
+                revision,
+                replacement,
+                diagnostic,
+            },
+        });
+    }
 }
 
 /// A private EDIT-1 replacement draft. Writes use a copy-on-write buffer;
@@ -700,19 +745,7 @@ impl<S> ManagedFile<S> {
             };
             let mut draft = scratch_state.draft.state.lock().await;
             let revision = draft.revision;
-            let replacement: Arc<[u8]> = Arc::from(
-                draft
-                    .candidate
-                    .as_deref()
-                    .unwrap_or(draft.baseline.bytes.as_ref()),
-            );
-            draft.last_rejection = Some((revision, diagnostic));
-            draft.retained_invalid = Some(RetainedInvalidDraft {
-                baseline: scratch.baseline.pin.clone(),
-                revision,
-                replacement,
-                diagnostic,
-            });
+            draft.retain_rejection(revision, diagnostic);
             return Ok(TemporaryRenameOutcome::Stale { diagnostic });
         }
         // Serialize commits in this repository epoch and retain the lock over
@@ -756,6 +789,95 @@ impl<S> ManagedFile<S> {
         EditDraft::open(baseline, max_file_bytes)
     }
 
+    /// Opens the `orna edit` read-to-save route: a retained strong read
+    /// baseline plus a private draft bound to it, captured together.
+    ///
+    /// Unlike [`open_draft`], which baselines on whatever the destination holds
+    /// at open time and accepts any save whose draft still matches it, the
+    /// retained read image stays the baseline for the whole edit: the draft may
+    /// only be saved while the destination still shows exactly the version the
+    /// editor read. Capturing the image and the draft's baseline under one lock
+    /// is what makes the retention exact — no change admitted between the two
+    /// could be missed or double-counted.
+    ///
+    /// [`open_draft`]: ManagedFile::open_draft
+    pub async fn open_read_baseline(
+        self: &Arc<Self>,
+        max_file_bytes: usize,
+    ) -> EditReadBaseline<S> {
+        let image = Arc::clone(&self.state.lock().await.image);
+        EditReadBaseline {
+            image: Arc::clone(&image),
+            draft: EditDraft::open(image, max_file_bytes),
+            epoch: self.cache_epoch.clone(),
+        }
+    }
+
+    /// Saves a strong read-baseline edit through the validated activation
+    /// boundary, refusing whenever the read version is no longer the accepted
+    /// row version.
+    ///
+    /// The retained read image is the sole baseline: this checks that the
+    /// destination still holds it *before* handing the candidate to activation.
+    /// When a concurrent change has moved the destination on, the save returns
+    /// [`TemporaryRenameOutcome::Stale`], the draft keeps its bytes and its
+    /// retained-invalid copy for the caller to keep as a draft, and the
+    /// activation boundary is never reached. This is exactly what a blind
+    /// temp-create save cannot prove: a late temp-create has no witness for the
+    /// version the editor originally read (VFS-011).
+    pub async fn save_strong_with<F, Fut, E>(
+        self: &Arc<Self>,
+        baseline: &EditReadBaseline<S>,
+        activate: F,
+    ) -> Result<TemporaryRenameOutcome<S>, TemporaryRenameError<E>>
+    where
+        S: Send + Sync + 'static,
+        F: FnOnce(ActivationCandidate<S>) -> Fut,
+        Fut: Future<Output = Result<ActivationDecision<S>, E>>,
+    {
+        if !Arc::ptr_eq(&self.cache_epoch.generation, &baseline.epoch.generation) {
+            return Err(TemporaryRenameError::WrongRepositoryScope);
+        }
+        let mut destination = self.state.lock().await;
+        let reads_baseline =
+            !destination.unlinked && Arc::ptr_eq(&destination.image, &baseline.image) && {
+                let draft_state = baseline.draft.state.lock().await;
+                Arc::ptr_eq(&draft_state.baseline, &baseline.image)
+            };
+        if !reads_baseline {
+            let diagnostic = stale_baseline_diagnostic();
+            retain_rejected_draft(&baseline.draft, &baseline.image, diagnostic).await;
+            return Ok(TemporaryRenameOutcome::Stale { diagnostic });
+        }
+        let mut cache_generation = self.cache_epoch.generation.lock().await;
+        let next_generation = cache_generation
+            .checked_add(1)
+            .ok_or(TemporaryRenameError::GenerationExhausted)?;
+        match baseline.draft.fsync_with(activate).await {
+            Err(error) => Err(TemporaryRenameError::Activation(error)),
+            Ok(FsyncOutcome::Rejected(diagnostic)) => {
+                Ok(TemporaryRenameOutcome::Rejected { diagnostic })
+            }
+            Ok(FsyncOutcome::Accepted(handle)) => {
+                let image = Arc::new(VfsFileSnapshot::with_projection(
+                    &handle.image,
+                    CacheProjection {
+                        epoch: self.cache_epoch.clone(),
+                        generation: next_generation,
+                    },
+                ));
+                baseline.draft.rebase_accepted(Arc::clone(&image)).await;
+                destination.image = Arc::clone(&image);
+                *cache_generation = next_generation;
+                Ok(TemporaryRenameOutcome::Applied {
+                    generation: next_generation,
+                    handle: SnapshotReadHandle::open(image),
+                })
+            }
+            Ok(FsyncOutcome::Unchanged(_)) => Err(TemporaryRenameError::NoCandidate),
+        }
+    }
+
     /// Commits a direct draft over this destination through the same validated
     /// activation boundary as a temp rename. A draft whose baseline is no longer
     /// this destination's image returns `Stale` without calling activation.
@@ -772,17 +894,27 @@ impl<S> ManagedFile<S> {
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
         let mut destination = self.state.lock().await;
-        let based_on_current = !destination.unlinked && {
+        let (based_on_current, revision) = {
             let draft_state = draft.state.lock().await;
-            Arc::ptr_eq(&destination.image, &draft_state.baseline)
+            (
+                !destination.unlinked && Arc::ptr_eq(&destination.image, &draft_state.baseline),
+                draft_state.revision,
+            )
         };
         if !based_on_current {
-            return Ok(TemporaryRenameOutcome::Stale {
-                diagnostic: SafeDiagnostic {
-                    code: DiagnosticCode::ExecutionRejected,
-                    class: DiagnosticClass::Transient,
-                },
-            });
+            let diagnostic = SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Transient,
+            };
+            // A stale candidate is still a rejected candidate. Without this the
+            // draft's bytes and diagnostic would be dropped with the handle,
+            // while the temp-rename route keeps them readable (ORNA-VFS-009).
+            draft
+                .state
+                .lock()
+                .await
+                .retain_rejection(revision, diagnostic);
+            return Ok(TemporaryRenameOutcome::Stale { diagnostic });
         }
         let mut cache_generation = self.cache_epoch.generation.lock().await;
         let next_generation = cache_generation
@@ -936,6 +1068,68 @@ impl<S> TemporarySave<S> {
     }
 }
 
+/// A retained `orna edit` read-to-save baseline.
+///
+/// The image is the exact destination version the editor read at capture time,
+/// kept readable for the whole edit, and the draft holds this edit's private
+/// bytes over it. [`ManagedFile::save_strong_with`] is its only accepting route:
+/// a save proves the retained image is still the accepted version before the
+/// candidate reaches activation. A superseded read still reads its own version,
+/// because this type owns the retained image — a later accepted replacement
+/// only ends what new opens observe, never what this handle already holds.
+pub struct EditReadBaseline<S> {
+    image: Arc<VfsFileSnapshot<S>>,
+    draft: EditDraft<S>,
+    epoch: SharedCacheEpoch,
+}
+
+impl<S> EditReadBaseline<S> {
+    /// Opens the retained read version. This reads the exact image captured at
+    /// edit start, never the destination's live image.
+    pub fn baseline(&self) -> SnapshotReadHandle<S> {
+        SnapshotReadHandle::open(Arc::clone(&self.image))
+    }
+
+    /// This edit's private draft over the retained read version.
+    pub fn draft(&self) -> &EditDraft<S> {
+        &self.draft
+    }
+}
+
+/// The safe diagnostic a superseded read-to-save baseline reports. It carries
+/// no repository detail: the retained draft and its bytes are what the caller
+/// keeps, and the code is the profile's `sys.vfs.stale_edit` refusal.
+fn stale_baseline_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::ExecutionRejected,
+        class: DiagnosticClass::Transient,
+    }
+}
+
+/// Keeps a refused draft's bytes and its stable diagnostic, so a rejected
+/// strong save is recoverable and is never silently dropped.
+async fn retain_rejected_draft<S>(
+    draft: &EditDraft<S>,
+    baseline: &Arc<VfsFileSnapshot<S>>,
+    diagnostic: SafeDiagnostic,
+) {
+    let mut draft_state = draft.state.lock().await;
+    let revision = draft_state.revision;
+    let replacement: Arc<[u8]> = Arc::from(
+        draft_state
+            .candidate
+            .as_deref()
+            .unwrap_or(draft_state.baseline.bytes.as_ref()),
+    );
+    draft_state.last_rejection = Some((revision, diagnostic));
+    draft_state.retained_invalid = Some(RetainedInvalidDraft {
+        baseline: baseline.pin.clone(),
+        revision,
+        replacement,
+        diagnostic,
+    });
+}
+
 pub enum TemporaryRenameOutcome<S> {
     Applied {
         generation: u64,
@@ -1055,7 +1249,12 @@ impl<S> EditDraft<S> {
     }
 
     pub async fn retained_invalid_draft(&self) -> Option<RetainedInvalidDraft<S>> {
-        self.state.lock().await.retained_invalid.clone()
+        self.state
+            .lock()
+            .await
+            .retained_invalid
+            .as_ref()
+            .map(|retained| retained.draft.clone())
     }
 
     /// Calls the validated activation adapter exactly once for a changed
@@ -1096,15 +1295,7 @@ impl<S> EditDraft<S> {
                 Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(image)))
             }
             ActivationDecision::Rejected(diagnostic) => {
-                let replacement: Arc<[u8]> =
-                    Arc::from(state.candidate.as_deref().expect("candidate held by lock"));
-                state.last_rejection = Some((revision, diagnostic));
-                state.retained_invalid = Some(RetainedInvalidDraft {
-                    baseline: state.baseline.pin.clone(),
-                    revision,
-                    replacement,
-                    diagnostic,
-                });
+                state.retain_rejection(revision, diagnostic);
                 Ok(FsyncOutcome::Rejected(diagnostic))
             }
         }
@@ -2687,6 +2878,7 @@ mod tests {
         let retained = save.retained_invalid_draft().await.unwrap();
         assert_eq!(retained.replacement_bytes(), invalid);
         assert_eq!(retained.diagnostic(), rejected());
+        assert_ne!(retained.id(), [0u8; 16]);
 
         let row_store_for_repeat = Arc::clone(&row_store);
         let repeated = target
@@ -2703,6 +2895,12 @@ mod tests {
         ));
         assert_eq!(row_store.transaction_count(), 1);
         assert_eq!(repository.generation().await, 0);
+        // Repeated syncs of one unchanged revision are one rejection, so the
+        // retained draft keeps the identity it was first given (ORNA-VFS-009).
+        assert_eq!(
+            save.retained_invalid_draft().await.unwrap().id(),
+            retained.id()
+        );
 
         let draft = target.open_draft(1 << 20).await;
         draft.truncate(0).await.unwrap();
@@ -2728,6 +2926,71 @@ mod tests {
         assert_eq!(retained.replacement_bytes(), invalid);
         assert_eq!(retained.diagnostic(), rejected());
         assert_eq!(repository.generation().await, 0);
+
+        // A stale candidate is a rejected candidate: its bytes and diagnostic
+        // stay readable through the same path as a validation rejection, and
+        // the destination keeps the accepted row (ORNA-VFS-009).
+        let stale = target.open_draft(1 << 20).await;
+        stale.truncate(0).await.unwrap();
+        stale.write_at(0, row_text).await.unwrap();
+        let row_store_for_stale = Arc::clone(&row_store);
+        let seeded = target
+            .commit_draft_with(&stale, move |candidate| {
+                Arc::clone(&row_store_for_stale).activate(candidate, 21)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(seeded, TemporaryRenameOutcome::Applied { .. }));
+        assert!(stale.retained_invalid_draft().await.is_none());
+
+        // `draft` still holds the rejected candidate and its recorded baseline,
+        // so its next commit is stale before any activation is consulted.
+        let before_stale_commits = row_store.transaction_count();
+        let row_store_for_stale_commit = Arc::clone(&row_store);
+        let stale_outcome = target
+            .commit_draft_with(&draft, move |candidate| {
+                Arc::clone(&row_store_for_stale_commit).activate(candidate, 22)
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Stale { diagnostic } = stale_outcome else {
+            panic!("a draft over a replaced image must be stale");
+        };
+        let stale_diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::ExecutionRejected,
+            class: DiagnosticClass::Transient,
+        };
+        assert_eq!(diagnostic, stale_diagnostic);
+        assert_eq!(row_store.transaction_count(), before_stale_commits);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(
+            target.open_read().await.read_at(0, row_text.len()),
+            row_text
+        );
+        let parked = draft.retained_invalid_draft().await.unwrap();
+        assert_eq!(parked.replacement_bytes(), invalid);
+        assert_eq!(parked.diagnostic(), stale_diagnostic);
+        assert_ne!(parked.id(), [0u8; 16]);
+        // A stale rejection of the same unchanged revision keeps the identity
+        // the draft already had; only its diagnostic is superseded.
+        assert_eq!(parked.id(), retained.id());
+
+        // A changed candidate is a new revision, so its rejection is a new
+        // retained draft with its own identity (ORNA-VFS-009).
+        draft.write_at(0, b"x").await.unwrap();
+        let row_store_for_stale_again = Arc::clone(&row_store);
+        let stale_again = target
+            .commit_draft_with(&draft, move |candidate| {
+                Arc::clone(&row_store_for_stale_again).activate(candidate, 23)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(stale_again, TemporaryRenameOutcome::Stale { .. }));
+        let reparked = draft.retained_invalid_draft().await.unwrap();
+        assert_eq!(reparked.revision(), parked.revision() + 1);
+        assert_ne!(reparked.id(), parked.id());
+        assert_eq!(row_store.transaction_count(), before_stale_commits);
+        assert_eq!(row_store.accepted(), row_text);
     }
 
     #[tokio::test]
@@ -3054,5 +3317,110 @@ mod tests {
             TemporaryRenameOutcome::Applied { generation: 2, .. }
         ));
         assert_eq!(target.open_read().await.read_at(0, 1), [0x5A]);
+    }
+
+    /// A strong read baseline refuses the save once a concurrent REPL change
+    /// has moved the row on, keeps the rejected draft, and never reaches
+    /// activation; a save whose read is still current applies. An open read
+    /// keeps the version it captured in both cases.
+    #[tokio::test]
+    async fn strong_read_baseline_refuses_a_save_after_a_concurrent_repl_change() {
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(fixture_image()).await.unwrap();
+        let read_bytes = include_str!("../tests/fixtures/publication-repository-main.orna");
+        let repl_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let draft_bytes = include_str!("../tests/fixtures/case_closure_edge_tail_sixty.orna");
+
+        // The editor reads the row and retains that exact version, with its own
+        // draft over the version it read.
+        let baseline = target.open_read_baseline(1 << 20).await;
+        let read_handle = baseline.baseline();
+        assert_eq!(
+            read_handle.read_at(0, read_bytes.len()),
+            read_bytes.as_bytes()
+        );
+        baseline.draft().truncate(0).await.unwrap();
+        baseline
+            .draft()
+            .write_at(0, draft_bytes.as_bytes())
+            .await
+            .unwrap();
+
+        // A concurrent REPL change is accepted first, so the row no longer
+        // holds the version the editor read.
+        let repl = target.open_draft(1 << 20).await;
+        repl.truncate(0).await.unwrap();
+        repl.write_at(0, repl_bytes.as_bytes()).await.unwrap();
+        let repl_commit = target
+            .commit_draft_with(&repl, |_| async {
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(8),
+                )))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            repl_commit,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+
+        // The editor's save is refused on its read baseline: activation is
+        // never reached and the draft is retained rather than discarded.
+        let activation_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&activation_calls);
+        let stale = target
+            .save_strong_with(&baseline, move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ()>(ActivationDecision::Rejected(rejected())) }
+            })
+            .await
+            .unwrap();
+        assert!(matches!(stale, TemporaryRenameOutcome::Stale { .. }));
+        assert_eq!(activation_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            baseline
+                .draft()
+                .retained_invalid_draft()
+                .await
+                .expect("a refused read-baseline save keeps its draft")
+                .replacement_bytes(),
+            draft_bytes.as_bytes()
+        );
+        // The REPL change is still what the row holds, and the read handle
+        // still reads the version it captured.
+        assert_eq!(
+            target.open_read().await.read_at(0, repl_bytes.len()),
+            repl_bytes.as_bytes()
+        );
+        assert_eq!(
+            read_handle.read_at(0, read_bytes.len()),
+            read_bytes.as_bytes()
+        );
+
+        // A read whose version is still the accepted one saves normally, so
+        // the refusal above is the baseline check and not a broken route.
+        let current = target.open_read_baseline(1 << 20).await;
+        current.draft().truncate(0).await.unwrap();
+        current
+            .draft()
+            .write_at(0, draft_bytes.as_bytes())
+            .await
+            .unwrap();
+        let applied = target
+            .save_strong_with(&current, |_| async {
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(11),
+                )))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(
+            target.open_read().await.read_at(0, draft_bytes.len()),
+            draft_bytes.as_bytes()
+        );
     }
 }
