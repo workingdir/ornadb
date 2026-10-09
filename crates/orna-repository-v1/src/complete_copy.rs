@@ -1231,6 +1231,14 @@ fn fetch_member_into(
             scope: format!("bundle {} carries {resolved}", bundle.display()),
         });
     }
+    // A fresh `git init` leaves HEAD on an unborn branch, so the copy would not
+    // name its pinned commit until something checked it out. Point HEAD at the
+    // reconstructed branch here: the copy is then an ordinary repository whose
+    // HEAD is the pinned commit, which is what a recovery read needs.
+    git_output(
+        destination,
+        &["symbolic-ref", "HEAD", &format!("refs/heads/{RESTORED_BRANCH}")],
+    )?;
     Ok(())
 }
 
