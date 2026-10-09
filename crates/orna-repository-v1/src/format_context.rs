@@ -450,6 +450,32 @@ impl RepositoryFormatContext {
         .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
+    /// Reads one committed path's bytes from this context's own pinned
+    /// snapshot.
+    ///
+    /// This is the one read seam every admitted repository format shares. A
+    /// legacy format-1/2 input has no native `.orna/store`, so
+    /// [`Self::load_row_map`] and [`Self::open_native_graph`] refuse it; its
+    /// committed files are still readable through their original path layout,
+    /// which is what keeps a legacy view open without converting it. A
+    /// format-3 context reads the same path from the format-3 commit, so one
+    /// process can hold both views at once without either consulting the
+    /// other, the worktree `HEAD`, or the skipped format's objects.
+    ///
+    /// `max_bytes` bounds the read before the bytes are accumulated.
+    pub fn read_committed_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, FormatContextError> {
+        self.snapshot
+            .read_file(&self.repository, path, max_bytes)
+            .map_err(|error| match error {
+                RepositoryError::GitUnavailable => FormatContextError::GraphContextUnavailable,
+                _ => FormatContextError::GraphContextInvalid,
+            })
+    }
+
     fn require_format3(&self) -> Result<(), FormatContextError> {
         if self.format.supports_writes() {
             Ok(())
@@ -531,6 +557,20 @@ impl HistoricalFormatContext {
         rows: &RowMapSnapshot,
     ) -> Result<NativeGraphContext, FormatContextError> {
         self.context.open_native_graph(rows)
+    }
+
+    /// Reads one committed path's bytes from the pinned commit only.
+    ///
+    /// Available for every admitted format, so a legacy format-1/2 pin is
+    /// readable through its own path layout even though its row map and native
+    /// graph are refused. The bytes come from the resolved commit, never the
+    /// workspace `HEAD`, so this read cannot advance while the pin is held.
+    pub fn read_committed_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, FormatContextError> {
+        self.context.read_committed_file(path, max_bytes)
     }
 }
 
@@ -1594,7 +1634,7 @@ mod graph_bridge_tests {
             1,
             first_payload,
             "audio/mpeg",
-            Some("mp3"),
+            Some("mp2"),
             false,
         );
         let second_payload = b"london take two, remastered".as_slice();
@@ -1604,7 +1644,7 @@ mod graph_bridge_tests {
             1,
             second_payload,
             "audio/mpeg",
-            Some("mp3"),
+            Some("mp2"),
             false,
         );
         assert_ne!(first_descriptor, second_descriptor);
@@ -1637,7 +1677,7 @@ mod graph_bridge_tests {
             .read_stored_blob_value(&row, &first_descriptor, &scope)
             .expect("read the Blob the historical row stores");
         assert_eq!(stored.annotation().media_type(), "audio/mpeg");
-        assert_eq!(stored.annotation().suffix(), Some("mp3"));
+        assert_eq!(stored.annotation().suffix(), Some("mp2"));
         assert_eq!(stored.content_identity().length(), first_payload.len() as u64);
         let range = graph
             .read_blob_range(stored.reference(), 0..first_payload.len() as u64, &scope)
@@ -1687,7 +1727,11 @@ mod graph_bridge_tests {
             remounted.snapshot_id(),
             "one commit always resolves to one snapshot identity"
         );
-        assert_ne!(*mounted.snapshot_id(), head.snapshot_pin().snapshot_id());
+        assert_ne!(
+            *mounted.snapshot_id(),
+            head.snapshot_pin().snapshot_id(),
+            "a historical pin never shares the workspace snapshot identity"
+        );
     }
 
     #[test]
@@ -1702,7 +1746,7 @@ mod graph_bridge_tests {
             1,
             payload,
             "audio/mpeg",
-            Some("mp3"),
+            Some("mp2"),
             true,
         );
 
@@ -2850,6 +2894,170 @@ mod graph_bridge_tests {
             later_graph.resolve_row_node(&row, &descriptor_oid, &later_scope),
             Err(crate::native_graph::GraphError::ContextMismatch)
         ));
+    }
+
+    #[test]
+    fn metadata_only_projection_reads_the_row_and_no_media_payload() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x7a; 16];
+        let initial = context(root);
+        install_overflow_row_store(root, &initial, relation_id, None);
+
+        let writing_context = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &writing_context);
+        let snapshot = writing_context
+            .load_row_map(relation_id)
+            .expect("load the committed row-map identity");
+        let graph = writing_context
+            .open_native_graph(&snapshot)
+            .expect("admit the repository-owned graph context");
+        let write_scope = graph.open_read_scope().expect("owner write scope");
+
+        // Two GEAR chunks, so the payload length is not a single-chunk special
+        // case and the write-seam counter has to sum a real stream.
+        let payload: Vec<u8> = (0..(crate::blob_store::GEAR_MAXIMUM + 4096))
+            .map(|index| (index.wrapping_mul(11) & 0xff) as u8)
+            .collect();
+        let mut input = std::io::Cursor::new(payload.clone());
+        let candidate = graph
+            .capture_blob_candidate(&mut input, payload.len() as u64, &write_scope)
+            .expect("write a private OGB-2 candidate closure");
+        let pin = graph
+            .protect_captured_blob(candidate, &write_scope)
+            .expect("verify and durably protect the OGB-2 closure");
+        let binding = graph
+            .accept_protected_blob_pin_with_annotation(pin, "audio/wav", Some("wav"))
+            .expect("accept the durable pin as an annotated ORP Blob binding");
+        let identity = binding.content_identity();
+        let descriptor_oid = binding.descriptor_oid().clone();
+
+        // The write seam charged exactly the payload chunks: the byte index,
+        // descriptor and tree objects around them are never payload.
+        assert_eq!(
+            write_scope.payload_bytes_written(),
+            payload.len() as u64,
+            "capture charges the payload bytes and nothing else"
+        );
+
+        let algorithm = writing_context
+            .validate_store_root()
+            .expect("pinned native store")
+            .oid
+            .algorithm();
+        let mut stored_fields = vec![0x81];
+        stored_fields.extend_from_slice(binding.encoded_value());
+        let row_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::UInt(7).canonical_bytes().unwrap(),
+                    value: stored_fields,
+                }],
+            },
+        );
+        let database_id = writing_context.require_database_id().unwrap();
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, row_root.as_bytes());
+        relation_value.push(0xf6);
+        relation_value.push(0x01);
+        let relation_map = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root = write_native_node(root, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(root, algorithm, &store_root);
+
+        let admitted_context = context(root);
+        let admitted_snapshot = admitted_context
+            .load_row_map(relation_id)
+            .expect("admit the committed ORP row map");
+        let admitted_graph = admitted_context
+            .open_native_graph(&admitted_snapshot)
+            .expect("bind row reads to the committed graph");
+
+        // Metadata-only projection: the row's own field tuple answers with the
+        // committed length, digest and annotation.
+        let scope = admitted_graph.open_read_scope().unwrap();
+        let (key, metadata) = admitted_graph
+            .project_blob_metadata(&TypedKey::UInt(7), 0, &scope)
+            .expect("project the committed row's Blob metadata")
+            .expect("the committed row has a Blob field");
+        assert_eq!(key, TypedKey::UInt(7));
+        assert_eq!(metadata.length(), identity.length());
+        assert_eq!(metadata.sha256(), identity.sha256());
+        assert_eq!(metadata.media_type(), "audio/wav");
+        assert_eq!(metadata.suffix(), Some("wav"));
+        assert!(!metadata.is_hydrated(), "projection never holds the bytes");
+        assert_eq!(
+            scope.payload_bytes_read(),
+            0,
+            "a metadata-only projection reads no media payload byte"
+        );
+        assert!(
+            scope.objects_read() > 0,
+            "the projection still walked the committed row pages"
+        );
+
+        // The same row and graph, read for its bytes, must charge the payload.
+        // This is what makes the zero above meaningful rather than vacuous.
+        let read_scope = admitted_graph.open_read_scope().unwrap();
+        let row = admitted_graph
+            .lookup_row(&TypedKey::UInt(7), &read_scope)
+            .unwrap()
+            .expect("committed Blob row");
+        let reference = admitted_graph
+            .admit_blob_reference(&row, &descriptor_oid, &read_scope)
+            .expect("admit the descriptor through its stored row");
+        let expected_objects = read_scope.objects_read();
+        let verified = admitted_graph
+            .read_blob_range(&reference, 0..identity.length(), &read_scope)
+            .expect("verify the complete OGB-2 closure");
+        assert_eq!(verified.bytes(), payload);
+        assert_eq!(
+            read_scope.payload_bytes_read(),
+            payload.len() as u64,
+            "reading the bytes charges every payload byte"
+        );
+        assert!(read_scope.objects_read() > expected_objects);
+
+        // A bounded range projection answers in canonical key order and, like
+        // the point projection, charges no payload byte.
+        let range_scope = admitted_graph.open_read_scope().unwrap();
+        let range = crate::row_store::KeyRange::new(Some(TypedKey::UInt(0)), None, 8).unwrap();
+        let listed = admitted_graph
+            .project_blob_metadata_range(&range, 0, &range_scope)
+            .expect("project the committed row interval");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0, TypedKey::UInt(7));
+        assert_eq!(listed[0].1, metadata);
+        assert_eq!(
+            range_scope.payload_bytes_read(),
+            0,
+            "a range listing reads no media payload byte"
+        );
+
+        // The projection is per field, and a tuple without that field yields
+        // nothing rather than a fabricated summary.
+        assert_eq!(
+            admitted_graph
+                .project_blob_metadata(&TypedKey::UInt(7), 1, &scope)
+                .ok()
+                .flatten(),
+            None
+        );
     }
 
     #[test]
