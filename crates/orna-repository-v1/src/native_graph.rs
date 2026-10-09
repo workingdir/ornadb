@@ -1425,13 +1425,23 @@ impl NativeGraphContext {
         }
         let limit = format!("--max-count={max_commits}");
         // `%an <%ae>` follows a tab, so names containing spaces stay intact.
-        let output = self.git_output(&["log", "--format=%H %T%x09%an <%ae>", &limit, start])?;
+        // The trailer block follows a second tab: a migration commit states its
+        // coordinate there so an ordinary commit renders as an empty field.
+        let output = self.git_output(&[
+            "log",
+            "--format=%H %T%x09%an <%ae>%x09%(trailers:key=Orna-Migration,valueonly)",
+            &limit,
+            start,
+        ])?;
         let text = std::str::from_utf8(&output).map_err(|_| GraphError::GitObjectMalformed)?;
         let mut snapshots = Vec::new();
         for line in text.lines() {
-            let Some((header, author)) = line.split_once('\t') else {
+            let Some((header, rest)) = line.split_once('\t') else {
                 return Err(GraphError::GitObjectMalformed);
             };
+            // A trailing newline inside the trailer block would coincide with
+            // the record separator, so a marker value never carries one.
+            let (author, migration) = split_revision_record(rest);
             let mut fields = header.split(' ');
             let (Some(commit), Some(tree), None) = (fields.next(), fields.next(), fields.next())
             else {
@@ -1450,6 +1460,7 @@ impl NativeGraphContext {
                 commit,
                 tree,
                 author: author.to_owned(),
+                migration,
             });
         }
         Ok(snapshots)
@@ -1497,6 +1508,7 @@ impl NativeGraphContext {
                 commit: snapshot.commit().clone(),
                 tree: snapshot.tree().clone(),
                 author: snapshot.author().to_owned(),
+                migration: snapshot.migration().map(str::to_owned),
                 present,
             });
         }
@@ -3714,6 +3726,7 @@ pub struct RevisionSnapshot {
     commit: NativeOid,
     tree: NativeOid,
     author: String,
+    migration: Option<String>,
 }
 
 impl RevisionSnapshot {
@@ -3729,6 +3742,27 @@ impl RevisionSnapshot {
     pub fn author(&self) -> &str {
         &self.author
     }
+
+    /// The migration coordinate this commit records, when it is a journalled
+    /// format-1/2 to format-3 migration commit rather than an ordinary one.
+    pub fn migration(&self) -> Option<&str> {
+        self.migration.as_deref()
+    }
+}
+
+/// Splits one `git log` record's author-and-trailer field into the author and
+/// the migration coordinate.
+///
+/// The author follows the first tab of the record and the trailer value follows
+/// a second tab, so a commit that carries no marker renders an empty value that
+/// is not the same as an absent one. An empty marker is therefore reported as
+/// no migration rather than as an empty coordinate.
+fn split_revision_record(record: &str) -> (&str, Option<String>) {
+    match record.split_once('\t') {
+        Some((author, marker)) if !marker.is_empty() => (author, Some(marker.to_owned())),
+        Some((author, _)) => (author, None),
+        None => (record, None),
+    }
 }
 
 /// One reachable commit of a row's history, as listed by
@@ -3739,6 +3773,7 @@ pub struct RowRevision {
     commit: NativeOid,
     tree: NativeOid,
     author: String,
+    migration: Option<String>,
     present: bool,
 }
 
@@ -3754,6 +3789,16 @@ impl RowRevision {
     /// Commit author as `Name <email>`.
     pub fn author(&self) -> &str {
         &self.author
+    }
+
+    /// The migration coordinate this commit records, when it is the journalled
+    /// format-1/2 to format-3 migration commit rather than an ordinary one.
+    ///
+    /// The coordinate is what lets a `history` walk distinguish the commit that
+    /// established the migrated representation from the ordinary commits around
+    /// it, whose older revisions predate the format-3 row store.
+    pub fn migration(&self) -> Option<&str> {
+        self.migration.as_deref()
     }
 
     pub const fn present(&self) -> bool {
@@ -6037,6 +6082,35 @@ mod persisted_orp_tests {
                 std::task::Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    /// The revision record parser: a commit that carries no migration marker is
+    /// not the same as one that carries an empty value, and the author field is
+    /// never confused with the trailer field.
+    #[test]
+    fn revision_records_separate_the_author_from_the_migration_marker() {
+        assert_eq!(
+            split_revision_record("Ada <ada@example.test>\tformat-1-to-3"),
+            ("Ada <ada@example.test>", Some("format-1-to-3".to_owned()))
+        );
+        // An ordinary commit renders an empty trailer value, which is no marker.
+        assert_eq!(
+            split_revision_record("Ada <ada@example.test>\t"),
+            ("Ada <ada@example.test>", None)
+        );
+        // A record with no trailer field at all is still an author.
+        assert_eq!(
+            split_revision_record("Ada <ada@example.test>"),
+            ("Ada <ada@example.test>", None)
+        );
+        // An author name containing spaces survives intact.
+        assert_eq!(
+            split_revision_record("Ada Lovelace <ada@example.test>\tformat-2-to-3"),
+            (
+                "Ada Lovelace <ada@example.test>",
+                Some("format-2-to-3".to_owned())
+            )
+        );
     }
 
     fn fixture_git_object(directory: &Path, kind: &str, content: &[u8]) -> NativeOid {
