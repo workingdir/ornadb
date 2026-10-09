@@ -1464,6 +1464,7 @@ dependencies = [
  "orna-value-v1",
  "parquet",
  "rustix 0.38.44",
+ "sha1",
  "sha2 0.11.0",
  "tempfile",
  "uuid",
