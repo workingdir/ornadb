@@ -61,6 +61,7 @@ pub(super) enum Command {
     Serve { port: u16 },
     Diff(Vec<String>),
     History(Vec<String>),
+    Query(Vec<String>),
     Import(Vec<String>),
     Export(Vec<String>),
     Check,
@@ -316,6 +317,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             branch: words.next().unwrap_or("main").to_owned(),
         },
         Some("history") => Command::History(words.by_ref().map(str::to_owned).collect()),
+        Some("query") => Command::Query(words.by_ref().map(str::to_owned).collect()),
         Some("import") => Command::Import(words.by_ref().map(str::to_owned).collect()),
         Some("export") => Command::Export(words.by_ref().map(str::to_owned).collect()),
         Some("serve") => {
