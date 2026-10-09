@@ -77,6 +77,20 @@ fn row_path(mutation: &TableMutation) -> Result<LoosePath, orna_storage_v1::Erro
     LoosePath::for_key(mutation.table(), &[key.to_owned()])
 }
 
+/// Names an already-committed snapshot as the publication result for a frozen
+/// range with no visible change. The commit is the current `HEAD`, so the
+/// completion receipt never claims an object the range did not produce.
+fn publication_commit_id(
+    head: &orna_repository_v1::GitCommitRef,
+) -> Result<orna_runtime_v1::PublicationCommitId, Diagnostic> {
+    orna_runtime_v1::PublicationCommitId::new(head.as_str().as_bytes().to_vec()).map_err(|error| {
+        publish_error(
+            "publication commit could not be named",
+            format!("{error:?}"),
+        )
+    })
+}
+
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let message = parse_options(arguments)?;
     let path = local_project_path(endpoint)?;
@@ -165,7 +179,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         let index = repository.index_generation().map_err(|error| {
             publish_error("ordinary index could not be read", format!("{error:?}"))
         })?;
-        let mut coordinator = RuntimePublicationCoordinator::prepare_from_runtime(
+        let prepared = RuntimePublicationCoordinator::prepare_from_runtime_allow_noop(
             &repository,
             &state,
             &head,
@@ -178,6 +192,23 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         .map_err(|error| {
             describe_storage_failure("publication candidate could not be prepared", &error)
         })?;
+        let Some(mut coordinator) = prepared else {
+            // Every row in the frozen range already matches the committed
+            // snapshot, so there is no visible change to publish. Consume the
+            // frozen intent instead of failing on an empty commit: the save
+            // that produced the range stays successful and the pending tail
+            // does not grow without bound (ORNA-PUB-006).
+            state
+                .complete_publication(&freeze, &publication_commit_id(&head)?)
+                .await
+                .map_err(|error| {
+                    publish_error(
+                        "unpublishable runtime range could not be consumed",
+                        format!("{error:?}"),
+                    )
+                })?;
+            return Ok::<_, Diagnostic>(None);
+        };
         coordinator.publish(&repository).map_err(|error| {
             describe_storage_failure("publication commit could not be advanced", &error)
         })?;
@@ -193,12 +224,18 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 publish_error("published snapshot could not be read", format!("{error:?}"))
             })?
             .ok_or_else(|| publish_error("publication left no committed snapshot", USAGE))?;
-        Ok::<_, Diagnostic>((commit.as_str().to_owned(), counts))
+        Ok(Some((commit.as_str().to_owned(), counts)))
     })?;
 
-    println!("published {commit}");
-    for (table, rows) in counts {
-        println!("  {table}  {rows} rows");
+    match commit {
+        Some((commit, counts)) => {
+            println!("published {commit}");
+            for (table, rows) in counts {
+                println!("  {table}  {rows} rows");
+            }
+        }
+        /* A no-op range consumes the frozen range without creating a commit. */
+        None => println!("nothing to publish: the runtime changes are already committed"),
     }
     Ok(())
 }
