@@ -743,10 +743,7 @@ impl<S> ManagedFile<S> {
             });
         }
         if destination.unlinked || !Arc::ptr_eq(&destination.image, &scratch.baseline) {
-            let diagnostic = SafeDiagnostic {
-                code: DiagnosticCode::ExecutionRejected,
-                class: DiagnosticClass::Transient,
-            };
+            let diagnostic = stale_baseline_diagnostic();
             let mut draft = scratch_state.draft.state.lock().await;
             let revision = draft.revision;
             draft.retain_rejection(revision, diagnostic);
@@ -906,10 +903,7 @@ impl<S> ManagedFile<S> {
             )
         };
         if !based_on_current {
-            let diagnostic = SafeDiagnostic {
-                code: DiagnosticCode::ExecutionRejected,
-                class: DiagnosticClass::Transient,
-            };
+            let diagnostic = stale_baseline_diagnostic();
             // A stale candidate is still a rejected candidate. Without this the
             // draft's bytes and diagnostic would be dropped with the handle,
             // while the temp-rename route keeps them readable (ORNA-VFS-009).
@@ -1105,8 +1099,18 @@ impl<S> EditReadBaseline<S> {
 /// keeps, and the code is the profile's `sys.vfs.stale_edit` refusal.
 fn stale_baseline_diagnostic() -> SafeDiagnostic {
     SafeDiagnostic {
-        code: DiagnosticCode::ExecutionRejected,
+        code: DiagnosticCode::StaleBaseline,
         class: DiagnosticClass::Transient,
+    }
+}
+
+/// The stable Orna cause code for a VFS save refusal, or `None` when the code
+/// has no VFS profile spelling of its own. `sys.vfs.stale_edit` is the cause a
+/// superseded baseline reports, alongside `EAGAIN` (ORNA-VFS-011).
+pub const fn vfs_stale_failure_code(code: DiagnosticCode) -> Option<&'static str> {
+    match code {
+        DiagnosticCode::StaleBaseline => Some("sys.vfs.stale_edit"),
+        _ => None,
     }
 }
 
@@ -2509,10 +2513,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         let mut destination = self.state.lock().await;
         let mut draft_state = draft.state.lock().await;
         if destination.unlinked || !Arc::ptr_eq(&destination.image, &draft_state.baseline) {
-            let diagnostic = SafeDiagnostic {
-                code: DiagnosticCode::ExecutionRejected,
-                class: DiagnosticClass::Transient,
-            };
+            let diagnostic = stale_baseline_diagnostic();
             let generation = *self.cache_epoch.generation.lock().await;
             let revision = draft_state.revision;
             draft_state.retain_rejection(revision, diagnostic);
