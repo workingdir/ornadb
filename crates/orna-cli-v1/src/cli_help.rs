@@ -47,9 +47,10 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  history RELATION KEY [--at SELECTOR] [--limit N] [--since COMMIT] [--format human|json] [--reverse] [--author TEXT] [--count]",
     "  history exit codes: 0 listed or counted; 1 any history error (bad flag or value, unknown repository, row, --at selector, or --since commit)",
     "Query commands:",
-    "  query RELATION [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]",
+    "  query RELATION [--key KEY|0xBYTES] [--field N] [--at SELECTOR] [--limit N] [--format human|json]",
     "  query                            Blob metadata of committed rows, payload-free",
-    "  query exit codes: 0 metadata listed; 1 any query error (bad flag or value, unknown repository or relation)",
+    "  query --at SELECTOR              the same listing read from that commit, not HEAD",
+    "  query exit codes: 0 metadata listed; 1 any query error (bad flag or value, unknown repository, relation, or --at selector)",
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];
 
@@ -121,7 +122,7 @@ mod tests {
             .position(|line| *line == "Query commands:")
             .expect("query group");
         let group = &HELP_LINES[index + 1..];
-        for flag in ["--key", "--field", "--limit", "--format"] {
+        for flag in ["--key", "--field", "--at", "--limit", "--format"] {
             assert!(
                 group
                     .iter()
