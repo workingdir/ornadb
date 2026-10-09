@@ -26,7 +26,7 @@ pub const FINAL_REPOSITORY_FORMAT: u8 = 3;
 pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
 
 const DATABASE_PATH: &str = ".orna/database.orna";
-const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
+pub(crate) const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
 const MAIN_SOURCE_PATH: &str = "main.orna";
 /// The fixed position of the format-3 native store root inside a snapshot.
 pub(crate) const STORE_PATH: &str = ".orna/store";
