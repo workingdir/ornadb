@@ -152,10 +152,28 @@ impl fmt::Debug for RepositorySnapshotPin {
     }
 }
 
+/// Domain separation for the canonical logical snapshot identity. It keeps the
+/// readable snapshot coordinate distinct from every other repository digest.
+const SNAPSHOT_ID_DOMAIN: &[u8] = b"orna.repository.graph.snapshot.v1\0";
+
 impl RepositorySnapshotPin {
     fn belongs_to(&self, repository: &Repository) -> bool {
         self.repository.worktree() == repository.worktree()
             && self.repository.runtime_paths().root() == repository.runtime_paths().root()
+    }
+
+    /// Canonical logical identity of this pinned snapshot.
+    ///
+    /// Derived from the exact resolved commit under a private domain, so a
+    /// historical mount can report and bind the one snapshot it resolved
+    /// without disclosing the native Git object ID. Two mounts of different
+    /// commits never share an identity, and a repeated open of the same commit
+    /// always reproduces it.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(SNAPSHOT_ID_DOMAIN);
+        hash.update(self.commit.as_str().as_bytes());
+        hash.finalize().into()
     }
 
     fn read_file(
@@ -350,10 +368,7 @@ impl RepositoryFormatContext {
         let database_id = self.require_database_id()?;
         self.validate_schema_root()?;
         let store = self.validate_store_root()?;
-        let mut snapshot_hash = Sha256::new();
-        snapshot_hash.update(b"orna.repository.graph.snapshot.v1\0");
-        snapshot_hash.update(self.snapshot.commit.as_str().as_bytes());
-        let snapshot_id: [u8; 32] = snapshot_hash.finalize().into();
+        let snapshot_id: [u8; 32] = self.snapshot.snapshot_id();
         crate::native_graph::load_format3_row_map(
             &self.repository,
             store.oid.algorithm(),
@@ -399,10 +414,7 @@ impl RepositoryFormatContext {
         repository_hash.update(database_id.as_bytes());
         let repository_id: [u8; 32] = repository_hash.finalize().into();
 
-        let mut snapshot_hash = Sha256::new();
-        snapshot_hash.update(b"orna.repository.graph.snapshot.v1\0");
-        snapshot_hash.update(self.snapshot.commit.as_str().as_bytes());
-        let snapshot_id: [u8; 32] = snapshot_hash.finalize().into();
+        let snapshot_id: [u8; 32] = self.snapshot.snapshot_id();
 
         let authority = rows.authority();
         let mut owner_hash = Sha256::new();
@@ -451,6 +463,84 @@ impl SchemaRootPin {
     /// The snapshot pin from which this schema proof was admitted.
     pub fn snapshot_pin(&self) -> &RepositorySnapshotPin {
         &self.snapshot
+    }
+}
+
+/// A read-only format context pinned to one previously committed snapshot.
+///
+/// Issued only by [`Repository::open_format_context_at_selector`], which
+/// resolves its selector exactly once. The context delegates to the same
+/// format admission used for `HEAD`, so a caller reads the historical schema,
+/// row map, native graph and Blob ranges through the existing graph seam while
+/// the readable snapshot coordinate is carried alongside it.
+pub struct HistoricalFormatContext {
+    snapshot_id: [u8; 32],
+    context: RepositoryFormatContext,
+}
+
+impl HistoricalFormatContext {
+    /// Canonical logical identity of the exact commit this context resolved.
+    pub const fn snapshot_id(&self) -> &[u8; 32] {
+        &self.snapshot_id
+    }
+
+    /// The admitted repository-format dispatch at the pinned commit.
+    pub const fn repository_format(&self) -> RepositoryFormat {
+        self.context.repository_format()
+    }
+
+    /// The numeric repository-format coordinate at the pinned commit.
+    pub const fn repository_format_number(&self) -> u8 {
+        self.context.repository_format_number()
+    }
+
+    /// The database identity recorded by the pinned commit, when it carries one.
+    pub const fn database_id(&self) -> Option<DatabaseId> {
+        self.context.database_id()
+    }
+
+    /// Whether the pinned commit is a legacy format-1/2 compatibility input.
+    /// Historical format-3 pins report `false` but remain equally immutable.
+    pub const fn is_legacy_format(&self) -> bool {
+        self.context.is_read_only()
+    }
+
+    /// The pinned context's schema root, when the snapshot carries one.
+    pub fn validate_schema_root(&self) -> Result<SchemaRootPin, FormatContextError> {
+        self.context.validate_schema_root()
+    }
+
+    /// The pinned context's `.orna/store` root.
+    pub fn validate_store_root(&self) -> Result<StoreRootPin, FormatContextError> {
+        self.context.validate_store_root()
+    }
+
+    /// Loads one relation's row map from the pinned snapshot's own store root.
+    pub fn load_row_map(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<RowMapSnapshot, FormatContextError> {
+        self.context.load_row_map(relation_id)
+    }
+
+    /// Issues graph authority bound to this pinned snapshot. Rows, schema and
+    /// Blob references read through the returned context resolve against the
+    /// pinned commit only, never the workspace `HEAD`.
+    pub fn open_native_graph(
+        &self,
+        rows: &RowMapSnapshot,
+    ) -> Result<NativeGraphContext, FormatContextError> {
+        self.context.open_native_graph(rows)
+    }
+}
+
+impl fmt::Debug for HistoricalFormatContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HistoricalFormatContext")
+            .field("format", &self.context.repository_format())
+            .field("snapshot_id", &self.snapshot_id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -513,6 +603,36 @@ impl Repository {
     ) -> Result<RepositoryFormatContext, FormatContextError> {
         let snapshot = self.pin_snapshot(selector)?;
         self.open_format_context_at(&snapshot)
+    }
+
+    /// Resolves one commit selector exactly once and opens its immutable
+    /// format context read-only.
+    ///
+    /// This is the CHECKOUT-3 historical pin: `selector` is resolved a single
+    /// time to one exact commit, and every later read through the returned
+    /// context — schema root, store root, row map, native graph and Blob
+    /// ranges — is served from that commit's own objects. A branch or tag name
+    /// therefore cannot move during reads, and the current `HEAD`, index and
+    /// worktree are never consulted or modified, so one repository can serve a
+    /// historical view beside its workspace view (ORNA-CHECKOUT-003).
+    ///
+    /// Write admission is deliberately unavailable: the returned context is a
+    /// historical pin, so [`RepositoryFormatContext::supports_writes`] reports
+    /// `false` and every write seam refuses it. Only
+    /// [`Repository::open_format_context`] admits the writer coordinate.
+    pub fn open_format_context_at_selector(
+        &self,
+        selector: &str,
+    ) -> Result<HistoricalFormatContext, FormatContextError> {
+        if selector.is_empty() || selector.starts_with('-') || selector.contains('\0') {
+            return Err(FormatContextError::SnapshotInvalid);
+        }
+        let snapshot = self.pin_snapshot(selector)?;
+        let context = self.open_format_context_at(&snapshot)?;
+        Ok(HistoricalFormatContext {
+            snapshot_id: snapshot.snapshot_id(),
+            context,
+        })
     }
 
     /// Issues capture authority for one format-3 relation at the current
