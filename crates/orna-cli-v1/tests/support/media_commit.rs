@@ -48,11 +48,11 @@ pub async fn commit_capture(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let (id, key, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
+    let (id, key_bytes, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
     let mutation = if insert_only {
-        TableMutation::insert(id, "media", key, row)
+        TableMutation::insert(id, "media", key_bytes, row)
     } else {
-        TableMutation::new(id, "media", key, Some(row))
+        TableMutation::new(id, "media", key_bytes, Some(row))
     }
     .unwrap()
     .with_orp_blob_binding(binding)
