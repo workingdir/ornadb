@@ -1153,6 +1153,24 @@ pub fn lower_runtime_table_mutations(
     path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
     expected_bytes_for: impl Fn(&LoosePath) -> Result<Option<Vec<u8>>, Error>,
 ) -> Result<FrozenBatch, Error> {
+    lower_runtime_table_mutations_allow_empty(freeze, mutations, path_for, expected_bytes_for)?
+        .ok_or(Error::IncompleteStaging)
+}
+
+/// Converts the runtime's validated typed table prefix into the loose-row
+/// representation, reporting a prefix with no visible change as `None`.
+///
+/// Lowering still refuses an empty prefix, because an empty freeze is not a
+/// publication. A prefix whose every row folds to the bytes already committed
+/// is a different case: there is nothing to stage, so a caller completes the
+/// frozen intent without building an empty commit instead of failing the save
+/// that produced no change.
+pub fn lower_runtime_table_mutations_allow_empty(
+    freeze: &PublicationFreeze,
+    mutations: &[TableMutation],
+    path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
+    expected_bytes_for: impl Fn(&LoosePath) -> Result<Option<Vec<u8>>, Error>,
+) -> Result<Option<FrozenBatch>, Error> {
     if mutations.is_empty() {
         return Err(Error::IncompleteStaging);
     }
@@ -1193,14 +1211,16 @@ pub fn lower_runtime_table_mutations(
             );
         }
     }
-    FrozenBatch::new(
-        batch_id,
-        lowered
-            .into_values()
-            .filter(|mutation| mutation.next.as_ref().map(LooseRow::hash) != mutation.expected)
-            .collect(),
-        freeze.checkpoint.mutation_sequence,
-    )
+    let visible = lowered
+        .into_values()
+        .filter(|mutation| mutation.next.as_ref().map(LooseRow::hash) != mutation.expected)
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        // Every row in the prefix already matches its committed bytes, so the
+        // frozen intent has no visible change to publish.
+        return Ok(None);
+    }
+    FrozenBatch::new(batch_id, visible, freeze.checkpoint.mutation_sequence).map(Some)
 }
 
 /// A prepared, runtime-bound publication. Preparation creates only private
@@ -1461,15 +1481,48 @@ impl RuntimePublicationCoordinator {
         path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
         message: &str,
     ) -> Result<Self, Error> {
+        Self::prepare_from_runtime_allow_noop(
+            repository,
+            runtime,
+            expected_head,
+            expected_index,
+            freeze,
+            path_for,
+            message,
+        )
+        .await?
+        .ok_or(Error::IncompleteStaging)
+    }
+
+    /// Reads the exact typed prefix named by `freeze` and reports the result as
+    /// `None` when the frozen prefix is a no-op.
+    ///
+    /// A prefix whose rows fold to the bytes already committed has no visible
+    /// change, so there is no publication to prepare. The caller completes the
+    /// frozen intent without a commit; a save that changed nothing stays
+    /// successful instead of failing on the empty batch.
+    pub async fn prepare_from_runtime_allow_noop(
+        repository: &Repository,
+        runtime: &RuntimeState,
+        expected_head: &GitCommitRef,
+        expected_index: IndexGeneration,
+        freeze: &PublicationFreeze,
+        path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
+        message: &str,
+    ) -> Result<Option<Self>, Error> {
         let mutations = runtime
             .pending_table_mutations_through(freeze)
             .await
             .map_err(|_| Error::RuntimeUnavailable)?;
-        let batch = lower_runtime_table_mutations(freeze, &mutations, path_for, |path| {
-            repository
-                .managed_file_bytes(path.as_managed_path())
-                .map_err(|_| Error::RepositoryUnavailable)
-        })?;
+        let Some(batch) =
+            lower_runtime_table_mutations_allow_empty(freeze, &mutations, path_for, |path| {
+                repository
+                    .managed_file_bytes(path.as_managed_path())
+                    .map_err(|_| Error::RepositoryUnavailable)
+            })?
+        else {
+            return Ok(None);
+        };
         Self::prepare(
             repository,
             expected_head,
@@ -1478,6 +1531,7 @@ impl RuntimePublicationCoordinator {
             batch,
             message,
         )
+        .map(Some)
     }
 
     /// Prepares a candidate from a validated runtime freeze and already
@@ -3303,6 +3357,50 @@ mod tests {
             Some(b"unchanged".to_vec()),
         )
         .unwrap();
+        assert_eq!(
+            lower_runtime_table_mutations(
+                &freeze,
+                std::slice::from_ref(&mutation),
+                |_mutation| LoosePath::for_key("Contact", &["Alice".into()]),
+                |_path| Ok(Some(b"unchanged".to_vec())),
+            ),
+            Err(Error::IncompleteStaging)
+        );
+    }
+
+    #[test]
+    fn runtime_table_prefix_reports_a_net_noop_update_as_no_visible_change() {
+        let freeze = PublicationFreeze {
+            intent_id: [28; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [29; 32],
+                mutation_sequence: 1,
+            },
+            candidate_digest: [29; 32],
+            mutations: Vec::new(),
+        };
+        let mutation = TableMutation::new(
+            [30; 16],
+            "Contact",
+            b"Alice".to_vec(),
+            Some(b"unchanged".to_vec()),
+        )
+        .unwrap();
+        // A prefix that folds to the committed bytes has no publication to
+        // stage, so the no-op-aware lowering reports it instead of failing the
+        // save that produced it.
+        assert_eq!(
+            lower_runtime_table_mutations_allow_empty(
+                &freeze,
+                std::slice::from_ref(&mutation),
+                |_mutation| LoosePath::for_key("Contact", &["Alice".into()]),
+                |_path| Ok(Some(b"unchanged".to_vec())),
+            ),
+            Ok(None)
+        );
+        // The strict entry point still refuses, so an empty publication can
+        // never be built silently.
         assert_eq!(
             lower_runtime_table_mutations(
                 &freeze,
