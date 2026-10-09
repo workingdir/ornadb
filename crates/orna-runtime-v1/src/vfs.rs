@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use super::{
-    CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeState, SafeDiagnostic,
-    TableActivationError, ValidatedTableActivationCommit,
+    CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeError, RuntimeState, RuntimeTableIdentity,
+    SafeDiagnostic, TableActivationError, TableMutation, ValidatedTableActivationCommit,
 };
 
 /// One repository-wide invalidation clock shared by projections in a VFS
@@ -1379,7 +1379,7 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
         Some(hint) => hint.to_owned(),
         None => media_suffixes(media_type),
     };
-    let mut name = project_component(field);
+    let mut name = project_field_name(field);
     name.push('.');
     name.push_str(&selected);
     if name == VFS_ROW_DOCUMENT {
@@ -1729,20 +1729,15 @@ impl<S> VfsRowProjection<S> {
     /// projection is refused, so a lookup can never retarget another row's
     /// field (VFS-004, VFS-017).
     pub fn lookup(&self, name: &str) -> Result<VfsProjectedEntry<'_>, VfsPathError> {
-        match unproject_component(name)? {
-            VfsComponent::Canonical(text) if text == VFS_ROW_DOCUMENT => {
-                Ok(VfsProjectedEntry::Document)
-            }
-            VfsComponent::Canonical(text) => {
-                let file = self
-                    .files
-                    .iter()
-                    .find(|file| file.name == text)
-                    .ok_or(VfsPathError::UnknownRow)?;
-                Ok(VfsProjectedEntry::Content(file))
-            }
-            VfsComponent::LongAlias { .. } => Err(VfsPathError::WrongNamespace),
+        if name == VFS_ROW_DOCUMENT {
+            return Ok(VfsProjectedEntry::Document);
         }
+        let file = self
+            .files
+            .iter()
+            .find(|file| file.name == name)
+            .ok_or(VfsPathError::UnknownRow)?;
+        Ok(VfsProjectedEntry::Content(file))
     }
 
     /// Resolves one directory entry to its authorized unlink target (VFS-013).
@@ -1831,6 +1826,66 @@ fn render_field_name(name: &str) -> Result<String, VfsPathError> {
         return Err(VfsPathError::InvalidDocument);
     }
     Ok(name.to_owned())
+}
+
+/// One complete VFS row replacement routed into the runtime's validated table
+/// activation boundary. The table identity is repository-issued admission
+/// metadata; host paths never supply or override it.
+pub struct VfsTableRowReplacement {
+    mutation_id: [u8; 16],
+    table: RuntimeTableIdentity,
+    key: Vec<u8>,
+    value: Option<Vec<u8>>,
+}
+
+impl VfsTableRowReplacement {
+    pub fn new(
+        mutation_id: [u8; 16],
+        table: RuntimeTableIdentity,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    ) -> Result<Self, RuntimeError> {
+        let mutation = TableMutation::new(mutation_id, table.table(), key.clone(), value.clone())?
+            .with_table_object_id(table.object_id());
+        Ok(Self {
+            mutation_id: mutation.id(),
+            table,
+            key: mutation.key().to_vec(),
+            value,
+        })
+    }
+
+    pub fn from_candidate<S>(
+        mutation_id: [u8; 16],
+        table: RuntimeTableIdentity,
+        key: Vec<u8>,
+        candidate: &ActivationCandidate<S>,
+    ) -> Result<Self, RuntimeError> {
+        let value = (!candidate.is_removal()).then(|| candidate.replacement_bytes().to_vec());
+        Self::new(mutation_id, table, key, value)
+    }
+
+    pub fn table(&self) -> &RuntimeTableIdentity {
+        &self.table
+    }
+
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    pub fn value(&self) -> Option<&[u8]> {
+        self.value.as_deref()
+    }
+
+    pub fn mutation(&self) -> Result<TableMutation, RuntimeError> {
+        TableMutation::new(
+            self.mutation_id,
+            self.table.table(),
+            self.key.clone(),
+            self.value.clone(),
+        )
+        .map(|mutation| mutation.with_table_object_id(self.table.object_id()))
+    }
 }
 
 /// The VFS call boundary into the runtime's single validated table transaction.
@@ -1975,6 +2030,57 @@ mod tests {
         let renamed = project_content_name("content", "audio/mpeg", Some("mp1"));
         assert_eq!(renamed, "content.mp1");
         assert_eq!(project_content_name("content", "audio/mpeg", None), "content.mp3");
+    }
+
+    #[test]
+    fn vfs_table_row_replacement_preserves_admitted_table_identity() {
+        let table = RuntimeTableIdentity::new("Song", crate::TableObjectId::new([0x71; 16]))
+            .expect("valid table identity");
+        let replacement = VfsTableRowReplacement::new(
+            [0x55; 16],
+            table.clone(),
+            vec![0x18, 0x2a],
+            Some(vec![0xa1]),
+        )
+        .expect("valid replacement");
+
+        assert_eq!(replacement.table(), &table);
+        assert_eq!(replacement.key(), &[0x18, 0x2a]);
+        assert_eq!(replacement.value(), Some(&[0xa1][..]));
+        let mutation = replacement.mutation().expect("valid mutation");
+        assert_eq!(mutation.table(), "Song");
+        assert_eq!(mutation.table_object_id(), Some(table.object_id()));
+        assert_eq!(mutation.key(), &[0x18, 0x2a]);
+        assert_eq!(mutation.value(), Some(&[0xa1][..]));
+    }
+
+    #[test]
+    fn content_file_projection_uses_field_namespace_and_exact_entry_identity() {
+        let long_field = "content_".repeat(40);
+        let projected = project_content_name(&long_field, "audio/mpeg", None);
+        assert!(projected.starts_with("~field-"));
+        assert!(projected.ends_with(".mp3"));
+
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            &[VfsStoredField::content(
+                long_field.clone(),
+                "audio/mpeg",
+                None,
+                99,
+            )],
+        )
+        .expect("content field projection");
+        assert_eq!(row.files()[0].name(), projected);
+        let VfsProjectedEntry::Content(file) = row.lookup(&projected).expect("projected file")
+        else {
+            panic!("content lookup should return the projected file");
+        };
+        assert_eq!(file.descriptor_size(), 99);
+        assert_eq!(
+            row.lookup("~key-not-a-field.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
     }
 
     fn vfs_row_image() -> Arc<VfsFileSnapshot<u64>> {
