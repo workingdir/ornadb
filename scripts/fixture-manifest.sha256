@@ -3534,6 +3534,7 @@ e135e88ea724373eded488eca7b9aef9e871b22379d5aa456b1af647db94c424  crates/orna-re
 5075d2e2d2ea0ceedb49a53ad8daf559c89cb9c3f86b11853bcc1586907cf3d1  crates/orna-repository-v1/tests/fixtures/foundation-adapter-main.orna
 5075d2e2d2ea0ceedb49a53ad8daf559c89cb9c3f86b11853bcc1586907cf3d1  crates/orna-repository-v1/tests/fixtures/git-repository-main.orna
 abe8d8d34d5b65d1556e2e286cc6d6649b29b7fd9f5fb78d028f6853e364371c  crates/orna-repository-v1/tests/fixtures/git-repository-nested-tool.orna
+f4343261af4a130f83991fab9b5cce452b00734918b536fbeef0ead2850511c1  crates/orna-repository-v1/tests/fixtures/offline-complete-copy/dependency.orna
 9662403d4258a1075344fce92e27c27b4975046f1056b89f176eec84133497e0  crates/orna-repository-v1/tests/fixtures/pin-roundtrip.orna
 c60afad93513466ccb681cdc6839ebed60847bf5e26d888743c2b0b338b348e9  crates/orna-repository-v1/tests/fixtures/row-edit-v2.orna
 2e88c870800727fb7dbf4dbe95619ab9cfa1b675b896b9985f15ec78e9fca510  crates/orna-repository-v1/tests/fixtures/snapshot-round-trip.orna
@@ -3826,6 +3827,7 @@ e9b6f3480d62becf141ddd1c8284c14c9297d45d8f544bd0f892a2050d5e722d  crates/orna-ru
 7bebf0519888550bd64f1136287cd9698ad94b530d81382e9aa856b4b3afe78b  crates/orna-runtime-v1/tests/fixtures/query-session-union-unknown-operand-batches-through-cascade-storm.orna
 02397ffe2a7fd445734dc51d72a5de7ef27d6c9ec08eae3621b0ef00a2db3b8a  crates/orna-runtime-v1/tests/fixtures/query-session-union-zero-drop-unknown-filter-storm.orna
 72c4e8856340293db9bab39c43e5f9768de3b330aa3baa5a3744c16f3bd20f77  crates/orna-runtime-v1/tests/fixtures/query-session-unknown-batch-filters-through-shared-union.orna
+3778c50266c682abc2dd7966c27ca3372d9b573be3afb3184b867830e5736450  crates/orna-runtime-v1/tests/fixtures/vfs-row-music-london.orna
 6999e5be56c22c59551d5647a16eaa8fadacdeb4b708f87eb29938a627196b4f  crates/orna-semantic-v1/src/fixtures/repl-count-declaration.orna
 1942386dcc56470ab974ff9041ffe2e85ac52488bd9f43f2e47551ccdcdc1013  crates/orna-semantic-v1/src/fixtures/repl-count-increment.orna
 dd4034215dcc7fb19c8cc9436b754da1b72279f823a7e6dc352b231d876093dd  crates/orna-semantic-v1/src/fixtures/repl-count-reference.orna
