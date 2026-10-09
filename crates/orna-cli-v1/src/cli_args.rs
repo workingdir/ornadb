@@ -59,6 +59,16 @@ pub(super) enum Command {
         limit: Option<usize>,
     },
     Serve { port: u16 },
+    /// `mount DIR --at SELECTOR`: one read-only view of an exactly-resolved
+    /// snapshot (VFS-1).
+    Mount {
+        mountpoint: PathBuf,
+        selector: String,
+    },
+    /// `mount status [--json]`: the attached read-only views.
+    MountStatus { json: bool },
+    /// `unmount DIR`: release the view's record, nothing else.
+    Unmount { mountpoint: PathBuf },
     Diff(Vec<String>),
     History(Vec<String>),
     Import(Vec<String>),
@@ -316,6 +326,106 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             branch: words.next().unwrap_or("main").to_owned(),
         },
         Some("history") => Command::History(words.by_ref().map(str::to_owned).collect()),
+        Some("mount") => {
+            let first = words.next().ok_or_else(|| {
+                Diagnostic::usage(
+                    "E1001",
+                    "`mount` needs a mountpoint",
+                    "use `mount DIR --at SELECTOR`, `mount status [--json]`",
+                )
+            })?;
+            if first == "status" {
+                let json = match words.next() {
+                    None => false,
+                    Some("--json") => true,
+                    Some(_) => {
+                        return Err(Diagnostic::usage(
+                            "E1002",
+                            "unsupported `mount status` option",
+                            "use `mount status` or `mount status --json`",
+                        ));
+                    }
+                };
+                if words.next().is_some() {
+                    return Err(Diagnostic::usage(
+                        "E1002",
+                        "unsupported `mount status` option",
+                        "use `mount status` or `mount status --json`",
+                    ));
+                }
+                Command::MountStatus { json }
+            } else {
+                let mountpoint = PathBuf::from(first);
+                let mut selector = None;
+                while let Some(option) = words.next() {
+                    match option {
+                        "--at" => {
+                            let value = words.next().ok_or_else(|| {
+                                Diagnostic::usage(
+                                    "E1001",
+                                    "`mount --at` needs a value",
+                                    "supply a commit or ref that resolves to one snapshot",
+                                )
+                            })?;
+                            if selector.is_some() {
+                                return Err(Diagnostic::usage(
+                                    "E1001",
+                                    "`mount` names one snapshot",
+                                    "use `mount DIR --at SELECTOR`",
+                                ));
+                            }
+                            selector = Some(value.to_owned());
+                        }
+                        // `--cwd` is the writable workspace view; this slice
+                        // implements the always-read-only `--at` view only.
+                        "--cwd" | "--read-only" => {
+                            return Err(Diagnostic::usage(
+                                "E1002",
+                                "`mount --cwd` is not implemented",
+                                "use `mount DIR --at SELECTOR`, which is always read-only",
+                            ));
+                        }
+                        _ => {
+                            return Err(Diagnostic::usage(
+                                "E1002",
+                                "unsupported `mount` option",
+                                "use `mount DIR --at SELECTOR`",
+                            ));
+                        }
+                    }
+                }
+                let selector = selector.ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`mount` needs a snapshot selector",
+                        "use `mount DIR --at SELECTOR`; exactly one selector is required",
+                    )
+                })?;
+                Command::Mount {
+                    mountpoint,
+                    selector,
+                }
+            }
+        }
+        Some("unmount") => {
+            let mountpoint = words.next().ok_or_else(|| {
+                Diagnostic::usage(
+                    "E1001",
+                    "`unmount` needs a mountpoint",
+                    "use `unmount DIR`",
+                )
+            })?;
+            if words.next().is_some() {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "unsupported `unmount` option",
+                    "use `unmount DIR`",
+                ));
+            }
+            Command::Unmount {
+                mountpoint: PathBuf::from(mountpoint),
+            }
+        }
         Some("import") => Command::Import(words.by_ref().map(str::to_owned).collect()),
         Some("export") => Command::Export(words.by_ref().map(str::to_owned).collect()),
         Some("serve") => {
