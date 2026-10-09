@@ -9,6 +9,8 @@ use std::{cmp::Ordering, collections::BTreeMap, fmt, sync::Arc};
 
 use sha2::{Digest, Sha256};
 
+use orna_value_v1::{BlobMetadata, MimeRegistry};
+
 use crate::native_graph::{
     CborValue, GraphError, MAX_REFS, NODE_DATA_LIMIT, NativeObjectId, NativeObjectKind,
     decode_canonical_cbor, row_fields_dependencies,
@@ -22,6 +24,9 @@ pub const MAX_PAGE_ENTRIES: usize = 256;
 pub const ORP_ANCHOR_BITS: u8 = 6;
 pub const ORP_DOMAIN: &[u8] = b"orna.orp.boundary.v1\0";
 pub const MAX_ROW_RANGE_LIMIT: usize = 256;
+
+/// The format-3 stored-value tag for an annotated Blob reference (ROV-3).
+pub const ROV3_BLOB_TAG: u64 = 60_111;
 
 /// Immutable format-3 schema identity for one relation generation.  The
 /// local generation number is an owner fence; semantic identity remains the
@@ -230,6 +235,27 @@ impl AdmittedRow {
 
     pub fn value(&self) -> &RowValue {
         &self.value
+    }
+
+    /// Projects this row's canonical stored field tuple to payload-free
+    /// metadata of one Blob field.
+    ///
+    /// The fields are decoded from the row's own bytes; the descriptor the
+    /// Blob carries is surfaced as-is, so the caller gets length, SHA-256 and
+    /// annotation without the graph or any content read being touched. A row
+    /// whose Blob fields moved to the shared overflow graph has no local field
+    /// tuple and reports [`RowStoreError::BlobMetadataRequiresGraphContext`]
+    /// rather than a fabricated summary.
+    pub fn blob_metadata(&self, field: usize) -> Result<Option<BlobMetadata>, RowStoreError> {
+        let fields = decode_canonical_fields_of(
+            self.value
+                .encoded_fields()
+                .ok_or(RowStoreError::BlobMetadataRequiresGraphContext)?,
+        )?;
+        let Some(field) = fields.get(field) else {
+            return Ok(None);
+        };
+        decode_blob_field_metadata(field).map(Some)
     }
 }
 
@@ -1080,6 +1106,66 @@ fn encode_key(key: &TypedKey, output: &mut Vec<u8>) -> Result<(), RowStoreError>
     Ok(())
 }
 
+/// Decodes the canonical CBOR field tuple of a stored row value.
+///
+/// This is the read side of `RowValue::encoded_fields`: a row that is stored
+/// inline carries its fields here, and an overflow row has none. It is the
+/// decode a metadata-only projection performs, so it never crosses into the
+/// graph or reads a payload byte.
+pub(crate) fn decode_canonical_fields_of(encoded: &[u8]) -> Result<Vec<CborValue>, RowStoreError> {
+    match decode_canonical_cbor(encoded) {
+        Ok(CborValue::Array(fields)) => Ok(fields),
+        _ => Err(RowStoreError::InvalidCanonicalRowValue),
+    }
+}
+
+/// Projects one stored row field to payload-free Blob metadata.
+///
+/// A Blob field is the format-3 ROV-3 tag 60111: `[length, sha256,
+/// media_type, suffix, descriptor]`. The descriptor is deliberately not
+/// resolved here, so a listing reads the row's own bytes and nothing else.
+/// A field that is not a Blob in canonical shape is not a Blob.
+fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStoreError> {
+    let CborValue::Tag(ROV3_BLOB_TAG, payload) = field else {
+        return Err(RowStoreError::InvalidCanonicalRowValue);
+    };
+    let CborValue::Array(fields) = payload.as_ref() else {
+        return Err(RowStoreError::InvalidCanonicalRowValue);
+    };
+    let [length, sha256, media_type, suffix, _descriptor] = fields.as_slice() else {
+        return Err(RowStoreError::InvalidCanonicalRowValue);
+    };
+    let length = match length {
+        CborValue::Unsigned(length) => *length,
+        _ => return Err(RowStoreError::InvalidCanonicalRowValue),
+    };
+    let sha256: [u8; 32] = match sha256 {
+        CborValue::Bytes(sha256) => sha256
+            .as_slice()
+            .try_into()
+            .map_err(|_| RowStoreError::InvalidCanonicalRowValue)?,
+        _ => return Err(RowStoreError::InvalidCanonicalRowValue),
+    };
+    let media_type = match media_type {
+        CborValue::Text(media_type) => media_type,
+        _ => return Err(RowStoreError::InvalidCanonicalRowValue),
+    };
+    let suffix = match suffix {
+        CborValue::Null => None,
+        CborValue::Text(suffix) => Some(suffix.as_str()),
+        _ => return Err(RowStoreError::InvalidCanonicalRowValue),
+    };
+    let annotation = MimeRegistry::mime1()
+        .canonical_annotation(media_type, suffix)
+        .map_err(|_| RowStoreError::InvalidCanonicalRowValue)?;
+    Ok(BlobMetadata::from_stored_reference(
+        length,
+        sha256,
+        annotation.media_type(),
+        annotation.suffix(),
+    ))
+}
+
 fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
     let base = major << 5;
     match value {
@@ -1121,6 +1207,7 @@ pub enum RowStoreError {
     RowsNotStrictlyOrdered,
     RowCountMismatch,
     PersistedLookupRequiresGraphContext,
+    BlobMetadataRequiresGraphContext,
     InvalidCanonicalKey,
     InvalidCanonicalRowValue,
     UnresolvedValueOverflow,
@@ -1163,6 +1250,10 @@ impl fmt::Display for RowStoreError {
             Self::PersistedLookupRequiresGraphContext => {
                 f.write_str("persisted row lookup requires its repository graph context")
             }
+            Self::BlobMetadataRequiresGraphContext => f.write_str(
+                "row Blob metadata lives in the shared overflow graph, so it requires its \
+                 repository graph context",
+            ),
             Self::InvalidCanonicalKey => {
                 f.write_str("persisted row key is not a supported canonical typed key")
             }
