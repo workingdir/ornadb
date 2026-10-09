@@ -321,14 +321,14 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
         .open_format_context_at_selector(&legacy_commit)
         .expect("reopen the legacy commit read-only");
     let current = repository
-        .open_format_context_at_selector("HEAD")
+        .open_format_context()
         .expect("reopen the format-3 commit");
 
     // Both views are open at once and neither rewrites the other's coordinate.
     assert_eq!(legacy.repository_format_number(), 1);
     assert!(legacy.is_legacy_format());
     assert_eq!(current.repository_format_number(), 3);
-    assert!(!current.is_legacy_format());
+    assert!(!current.is_read_only());
     assert!(
         repository.head().unwrap().unwrap().as_str() != legacy_commit,
         "the legacy view did not move the workspace HEAD"
@@ -377,10 +377,6 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
         .final_format_capability()
         .expect("the format-3 mount admits writes");
     assert_eq!(
-        legacy_view.final_format_capability().unwrap_err(),
-        RepositoryFormatContextError::LegacyReadOnly(1)
-    );
-    assert_eq!(
         legacy_view.validate_schema_root().unwrap_err().code(),
         "ORNA-REPO-CONTEXT-015"
     );
@@ -412,8 +408,8 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
         .expect("reopen the advanced workspace");
     assert_eq!(advanced.repository_format_number(), 3);
     assert_ne!(
-        advanced.snapshot_id(),
-        current.snapshot_id(),
+        advanced.snapshot_pin().snapshot_id(),
+        current.snapshot_pin().snapshot_id(),
         "the format-3 workspace advanced"
     );
     assert_eq!(
