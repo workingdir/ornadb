@@ -18,6 +18,10 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",
     "  serve [--port PORT]",
+    "  mount DIR --at SELECTOR       read-only view of one resolved snapshot",
+    "  mount status [--json]         report attached read-only views",
+    "  unmount DIR                   release a view's record",
+    "  mount exit codes: 0 attached, released or reported; 1 snapshot, mountpoint or record unavailable",
     "  diff [GIT_DIFF_ARGS...]",
     "  log [GIT_LOG_ARGS...]",
     "  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]",
@@ -42,6 +46,10 @@ pub(super) const HELP_LINES: &[&str] = &[
     "History commands:",
     "  history RELATION KEY [--at SELECTOR] [--limit N] [--since COMMIT] [--format human|json] [--reverse] [--author TEXT] [--count]",
     "  history exit codes: 0 listed or counted; 1 any history error (bad flag or value, unknown repository, row, --at selector, or --since commit)",
+    "Query commands:",
+    "  query RELATION [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]",
+    "  query                            Blob metadata of committed rows, payload-free",
+    "  query exit codes: 0 metadata listed; 1 any query error (bad flag or value, unknown repository or relation)",
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];
 
@@ -103,6 +111,29 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("  history exit codes: 0 ")
                     && line.contains("; 1 any history error"))
+        );
+    }
+
+    #[test]
+    fn help_documents_query_flags_and_exit_codes() {
+        let index = HELP_LINES
+            .iter()
+            .position(|line| *line == "Query commands:")
+            .expect("query group");
+        let group = &HELP_LINES[index + 1..];
+        for flag in ["--key", "--field", "--limit", "--format"] {
+            assert!(
+                group
+                    .iter()
+                    .any(|line| line.starts_with("  query ") && line.contains(flag)),
+                "help lacks query flag {flag}"
+            );
+        }
+        assert!(
+            group
+                .iter()
+                .any(|line| line.starts_with("  query exit codes: 0 ")
+                    && line.contains("; 1 any query error"))
         );
     }
 

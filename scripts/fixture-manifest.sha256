@@ -161,6 +161,7 @@ d2eff8224767cc3bf267832033969153720cf1c42f90de2ab577848520fdda64  crates/orna-cl
 137630611e28a270c44bfa2947877bb3f739af22a4e3f6e6b28a2f2df342a528  crates/orna-cli-v1/tests/fixtures/media/pixel.png
 038d9e7fbf912679d14e68b0087e1ca71047e016c50c4b272ae4bce38d5dedcb  crates/orna-cli-v1/tests/fixtures/media/reimport-image-capture.orna
 c3a9237224f5d1f5d26acb76c80c9618dcd53b2f4ff295f0c4c0c2a7f553d891  crates/orna-cli-v1/tests/fixtures/media/tone.wav
+48b66dcabe2299760274ccdac406845c211f98fcee42fe4af7327e8b02a462dc  crates/orna-cli-v1/tests/fixtures/mount/legacy-main.orna
 a5bd70ee1eea9dfc78fbfa325391ee6d97f50e0929a59ee50ede86105829d69d  crates/orna-cli-v1/tests/fixtures/playground-asset-app.orna
 76aa5947900e831014431f8ff29b4e28286608cfdf81aa8ef26a772960b56a59  crates/orna-cli-v1/tests/fixtures/playground-asset-editor-config.orna
 965eab0d2975e7d2604b1a159775bf918fd5a9a57e4d18142dada860ea7dd5f4  crates/orna-cli-v1/tests/fixtures/playground-asset-embed.orna

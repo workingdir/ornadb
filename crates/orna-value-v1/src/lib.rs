@@ -934,6 +934,28 @@ pub struct BlobMetadata {
 }
 
 impl BlobMetadata {
+    /// Builds the payload-free metadata a stored ROV-3 Blob reference
+    /// carries.
+    ///
+    /// This is the constructor for readers that decode a committed row's own
+    /// field tuple: the stored reference already holds the content identity
+    /// and annotation, so no context and no content read are needed. The
+    /// bytes are not local, so `hydrated` is false.
+    pub fn from_stored_reference(
+        length: u64,
+        sha256: [u8; 32],
+        media_type: &str,
+        suffix: Option<&str>,
+    ) -> Self {
+        Self {
+            media_type: media_type.to_owned(),
+            suffix: suffix.map(str::to_owned),
+            length,
+            sha256,
+            hydrated: false,
+        }
+    }
+
     pub fn media_type(&self) -> &str {
         &self.media_type
     }
