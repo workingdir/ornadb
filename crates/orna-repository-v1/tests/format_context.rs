@@ -288,9 +288,21 @@ fn does_not_downgrade_an_invalid_database_entry_to_legacy() {
 
 #[test]
 fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
+    // Both legacy coordinates must reopen through their own recorded decoder.
+    // ORNA-UPGRADE-001 dispatches a historical open by the recorded repository
+    // format rather than the host default, and ORNA-UPGRADE-002 keeps each
+    // legacy commit readable as itself, so format 1 and format 2 are each
+    // reopened beside the format-3 commit that replaced them.
+    reopens_one_legacy_format_beside_format_three(LEGACY_FORMAT_ONE, 1);
+    reopens_one_legacy_format_beside_format_three(LEGACY_FORMAT_TWO, 2);
+}
+
+/// Reopens one legacy format's prior commit beside the format-3 commit that
+/// migrated away from it, and proves neither mount answers for the other.
+fn reopens_one_legacy_format_beside_format_three(legacy_format: &str, format_number: u8) {
     const LEGACY_BLOB: &str = "legacy bytes";
     const FORMAT_THREE_BLOB: &str = "format three bytes";
-    let directory = repository(None, Some(LEGACY_FORMAT_ONE), false);
+    let directory = repository(None, Some(legacy_format), false);
     // The legacy commit's own content, before the format-3 commit exists.
     fs::create_dir_all(directory.path().join(".orna/store")).unwrap();
     fs::write(directory.path().join(".orna/store/root"), LEGACY_BLOB).unwrap();
@@ -325,7 +337,11 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
         .expect("reopen the format-3 commit");
 
     // Both views are open at once and neither rewrites the other's coordinate.
-    assert_eq!(legacy.repository_format_number(), 1);
+    assert_eq!(
+        legacy.repository_format_number(),
+        format_number,
+        "the historical pin decodes the format its own commit recorded"
+    );
     assert!(legacy.is_legacy_format());
     assert_eq!(current.repository_format_number(), 3);
     assert!(!current.is_read_only());
@@ -354,7 +370,11 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
     // and names the pinned coordinate, not an unknown-format admission error.
     let refused = legacy.load_row_map([0; 16]).unwrap_err();
     assert_eq!(refused.code(), "ORNA-REPO-CONTEXT-015");
-    assert_eq!(refused, RepositoryFormatContextError::LegacyReadOnly(1));
+    assert_eq!(
+        refused,
+        RepositoryFormatContextError::LegacyReadOnly(format_number),
+        "the refusal names the format the pin actually recorded"
+    );
 
     // A read past the bound is refused rather than silently truncated, while
     // the same path reads exactly at the bound.
