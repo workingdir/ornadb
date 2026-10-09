@@ -32,7 +32,7 @@ use orna_runtime_v1::{
     ActivationWork, Component, ConsumerIdentity, FaultInjector, FaultPoint, RequestIdentity,
     RequestState, RunObservationRegistration, RunningTableRequestContinuation, RuntimeError,
     RuntimeIdentity, RuntimeState, RuntimeTableIdentity, TableMutation, TableObjectId,
-    TerminalOutcome, run_admitted_table_request_activation,
+    TerminalOutcome, WriterLease, run_admitted_table_request_activation,
 };
 use tempfile::{Builder, TempDir};
 
