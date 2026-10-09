@@ -1814,6 +1814,121 @@ mod graph_bridge_tests {
     }
 
     #[test]
+    fn frozen_publication_candidate_carries_only_the_store_root() {
+        let directory = repository();
+        let root = directory.path();
+        // Human state that a publication commit must never contain: an
+        // unstaged edit of a managed path and an untracked path.
+        fs::write(root.join("main.orna"), b"human unstaged edit").expect("edit a managed path");
+        fs::write(root.join("human.txt"), b"untracked human file").expect("add a human path");
+
+        let context = context(root);
+        let (schema_oid, schema_digest) = schema_node(root, &context);
+        let rows = sealed_rows(&context, &schema_oid, schema_digest);
+        let graph = context
+            .open_native_graph(&rows)
+            .expect("admit the fixture graph");
+        let database_id = *context
+            .require_database_id()
+            .expect("admitted format-3 identity")
+            .as_bytes();
+
+        // The frozen batch's encoded store root, built through the writer a
+        // publication path uses.
+        let mut written = std::collections::BTreeSet::new();
+        let relation_map = graph
+            .write_native_node(
+                &NodeData::OrderedLeaf {
+                    domain: relations_domain(database_id),
+                    entries: Vec::new(),
+                },
+                &mut written,
+            )
+            .expect("write the relation map node");
+        let store_root = graph
+            .write_native_node(&NodeData::StoreRoot { relation_map }, &mut written)
+            .expect("write the store root node");
+
+        let repository = Repository::discover(root).expect("discover fixture repository");
+        let head = repository
+            .head()
+            .expect("read fixture HEAD")
+            .expect("fixture HEAD is born");
+        let candidate = repository
+            .build_frozen_publication_candidate(
+                &head,
+                &graph,
+                &store_root,
+                "orna: publish runtime data",
+            )
+            .expect("build the frozen publication candidate");
+
+        // N = H + P: the candidate's parent is the captured HEAD.
+        let parents = Command::new("git")
+            .current_dir(root)
+            .args(["rev-list", "--parents", "--no-walk", candidate.commit().as_str()])
+            .output()
+            .expect("read candidate parents");
+        let parents = String::from_utf8_lossy(&parents.stdout).into_owned();
+        assert_eq!(
+            parents.trim(),
+            format!("{} {}", candidate.commit().as_str(), head.as_str()),
+            "the candidate is a direct child of the captured HEAD"
+        );
+
+        // The frozen store root is staged at the fixed format-3 path as a tree.
+        let store = Command::new("git")
+            .current_dir(root)
+            .args(["ls-tree", candidate.commit().as_str(), "--", ".orna/store"])
+            .output()
+            .expect("read the candidate store entry");
+        let store = String::from_utf8_lossy(&store.stdout).into_owned();
+        assert_eq!(
+            store.trim(),
+            format!("040000 tree {}\t.orna/store", store_root.to_hex()),
+            "the candidate exposes the encoded store root at .orna/store"
+        );
+
+        // Neither the human unstaged edit nor the untracked path is an input.
+        let human = Command::new("git")
+            .current_dir(root)
+            .args(["ls-tree", candidate.commit().as_str(), "--name-only"])
+            .output()
+            .expect("list the candidate tree");
+        let listed = String::from_utf8_lossy(&human.stdout).into_owned();
+        assert!(
+            !listed.contains("human.txt"),
+            "an untracked human path is not committed"
+        );
+        let managed = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", &format!("{}:main.orna", candidate.commit().as_str())])
+            .output()
+            .expect("read the candidate managed blob");
+        let unchanged = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", &format!("{}:main.orna", head.as_str())])
+            .output()
+            .expect("read the base managed blob");
+        assert_eq!(
+            managed.stdout, unchanged.stdout,
+            "the candidate carries the captured managed base, not the human edit"
+        );
+
+        // The candidate never touches the ordinary index, HEAD, or worktree.
+        assert_eq!(
+            repository.head().expect("read HEAD").expect("born HEAD"),
+            head,
+            "building a candidate does not move the branch"
+        );
+        assert_eq!(
+            fs::read(root.join("main.orna")).expect("read the human edit"),
+            b"human unstaged edit",
+            "building a candidate does not rewrite the worktree"
+        );
+    }
+
+    #[test]
     fn unresolvable_object_id_exits_3_from_the_resolver() {
         let directory = repository();
         let root = directory.path();
