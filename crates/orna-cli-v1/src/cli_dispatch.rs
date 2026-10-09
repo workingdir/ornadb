@@ -102,6 +102,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::Export(ref arguments) => {
             cli_export::run(std::path::Path::new(local_project_path(&parsed.endpoint)?), arguments)
         }
+        Command::Publish(ref arguments) => cli_publish::run(&parsed.endpoint, arguments),
         Command::Status {
             format: StatusFormat::Human,
         } => run_status_human(&parsed.endpoint, parsed.color.stdout_enabled()),

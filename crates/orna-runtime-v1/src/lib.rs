@@ -55,7 +55,8 @@ use uuid::Uuid;
 
 mod activation;
 pub use activation::{
-    ActivationError, ActivationWork, run_admitted_table_activation, run_table_activation,
+    ActivationError, ActivationWork, run_admitted_table_activation,
+    run_admitted_table_request_activation, run_table_activation,
     with_activation_scope,
     with_terminal_admin_effect,
 };
@@ -1520,6 +1521,35 @@ impl HistoricalTableRows {
     }
 }
 
+/// Several admitted relations read from one published `HEAD` pin.
+///
+/// Every relation carries the same capture, so a caller joining them cannot
+/// combine rows from two generations. This mirrors
+/// [`HistoricalTableRows::require_same_context`] per pair without needing the
+/// caller to re-check each one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedHeadRelations {
+    snapshot: HistoricalSnapshot,
+    rows: Vec<HistoricalTableRows>,
+}
+
+impl AdmittedHeadRelations {
+    /// The published pin every relation in this result was read from.
+    pub fn snapshot(&self) -> &HistoricalSnapshot {
+        &self.snapshot
+    }
+
+    /// The admitted relation reads, in the order they were requested.
+    pub fn rows(&self) -> &[HistoricalTableRows] {
+        &self.rows
+    }
+
+    /// Returns the rows for the admitted relation named `table`, if requested.
+    pub fn relation(&self, table: &str) -> Option<&HistoricalTableRows> {
+        self.rows.iter().find(|rows| rows.table() == table)
+    }
+}
+
 /// The canonical row encoding selected by the compact publication profile.
 ///
 /// This is deliberately a closed type: publication must not silently accept
@@ -2236,6 +2266,11 @@ pub enum FaultPoint {
     AfterMutation,
     AfterCheckpoint,
     AfterCapture,
+    /// The writer transaction has already committed when the injector runs.
+    /// Only a whole-process abort here models a crash between durable commit
+    /// and the caller observing the result; an in-process `Err` would report
+    /// a rollback that did not happen.
+    AfterCommit,
     AfterFailureRecord,
     AfterFailurePayload,
     AfterReplayFailureRecord,
@@ -6047,6 +6082,50 @@ impl RuntimeState {
         fingerprint: [u8; 32],
         lease: WriterLease,
     ) -> Result<RunningTableRequestContinuation, RuntimeError> {
+        self.continue_running_table_request_inner(identity, fingerprint, lease, BTreeMap::new())
+            .await
+    }
+
+    /// Returns a checked continuation for a running table request whose
+    /// relations are addressed by committed identity.
+    ///
+    /// The durable precondition checks are those of
+    /// [`Self::continue_running_table_request`]. The difference is that the
+    /// returned context is admitted with `identities`, so the existing request
+    /// commit boundary requires every staged write for one of these relations
+    /// to carry that exact committed identity. A name-only write would
+    /// otherwise land under a storage key an identity-addressed reader never
+    /// observes (`ORNA-ROW-001`, `ORNA-STATE-003`). Duplicate names or
+    /// duplicate identities fail closed.
+    pub async fn continue_running_admitted_table_request(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        lease: WriterLease,
+        tables: &[RuntimeTableIdentity],
+    ) -> Result<RunningTableRequestContinuation, RuntimeError> {
+        let mut names = BTreeSet::new();
+        let mut table_object_ids = BTreeMap::new();
+        for table in tables {
+            if !names.insert(table.table().to_owned())
+                || table_object_ids
+                    .insert(table.table().to_owned(), table.object_id())
+                    .is_some()
+            {
+                return Err(RuntimeError::InvalidTableMutation);
+            }
+        }
+        self.continue_running_table_request_inner(identity, fingerprint, lease, table_object_ids)
+            .await
+    }
+
+    async fn continue_running_table_request_inner(
+        &self,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        lease: WriterLease,
+        table_object_ids: BTreeMap<String, TableObjectId>,
+    ) -> Result<RunningTableRequestContinuation, RuntimeError> {
         validate_request_identity(identity)?;
         validate_writer_lease(lease)?;
         let transaction = self
@@ -6085,7 +6164,7 @@ impl RuntimeState {
         let context = RuntimeActivationContext {
             capture: run.snapshot,
             activation_time: observation_instant(run.started_ms)?,
-            table_object_ids: BTreeMap::new(),
+            table_object_ids,
         };
         transaction
             .commit()
@@ -6106,7 +6185,11 @@ impl RuntimeState {
         &self,
         tables: &[&str],
     ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
-        self.begin_table_activation_inner(tables, BTreeMap::new())
+        let names = tables
+            .iter()
+            .map(|table| validate_table_name(table).map(|()| (*table).to_owned()))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.begin_table_activation_inner(&names, BTreeMap::new(), None)
             .await
     }
 
@@ -6116,74 +6199,64 @@ impl RuntimeState {
         &self,
         tables: &[RuntimeTableIdentity],
     ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
-        let mut names = Vec::with_capacity(tables.len());
-        let mut table_object_ids = BTreeMap::new();
-        let mut unique_object_ids = BTreeSet::new();
-        for table in tables {
-            if !unique_object_ids.insert(table.object_id)
-                || table_object_ids
-                    .insert(table.table.clone(), table.object_id)
-                    .is_some()
-            {
-                return Err(RuntimeError::InvalidTableMutation);
-            }
-            names.push(table.table.as_str());
-        }
-        self.begin_table_activation_inner(&names, table_object_ids)
-            .await
+        self.begin_table_activation_inner(
+            &admitted_table_names(tables)?,
+            admitted_table_object_ids(tables)?,
+            None,
+        )
+        .await
+    }
+
+    /// Captures an activation for a running table request admitted under
+    /// `continuation`.
+    ///
+    /// The rows are read by committed identity under the same durable read
+    /// transaction that re-reads the live capture, so the activation can never
+    /// read rows from a generation later than the one the request was admitted
+    /// under. A capture that already advanced fails closed with
+    /// [`RuntimeError::StaleCapture`] before any row is returned
+    /// (`ORNA-STATE-003`).
+    pub async fn begin_continued_admitted_table_activation(
+        &self,
+        tables: &[RuntimeTableIdentity],
+        continuation: &RunningTableRequestContinuation,
+    ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
+        self.begin_table_activation_inner(
+            &admitted_table_names(tables)?,
+            admitted_table_object_ids(tables)?,
+            Some(continuation.context().capture()),
+        )
+        .await
     }
 
     async fn begin_table_activation_inner(
         &self,
-        tables: &[&str],
+        tables: &[String],
         table_object_ids: BTreeMap<String, TableObjectId>,
+        expected_capture: Option<&CwdCapture>,
     ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
-        for table in tables {
-            validate_table_name(table)?;
-        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let context = RuntimeActivationContext {
-            capture: capture_tx(&transaction).await?,
-            activation_time: SystemTime::now(),
-            table_object_ids: table_object_ids.clone(),
-        };
-        let mut table_rows = BTreeMap::new();
-        for table in tables {
-            if table_rows.contains_key(*table) {
-                continue;
-            }
-            let storage = table_storage_key(table, table_object_ids.get(*table).copied());
-            let mut rows = transaction
-                .query(
-                    "SELECT row_key, row_value FROM table_row
-                     WHERE table_id = ?1 ORDER BY row_key",
-                    params![storage],
-                )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            let mut values = Vec::new();
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?
-            {
-                values.push((
-                    row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                    row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                ));
-            }
-            table_rows.insert((*table).to_owned(), values);
+        let capture = capture_tx(&transaction).await?;
+        if expected_capture.is_some_and(|expected| *expected != capture) {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(capture),
+            });
         }
+        let table_rows = table_rows_tx(&transaction, tables, &table_object_ids).await?;
         transaction
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(RuntimeTableActivationSnapshot {
-            context,
+            context: RuntimeActivationContext {
+                capture,
+                activation_time: SystemTime::now(),
+                table_object_ids: table_object_ids.clone(),
+            },
             table_rows,
             table_object_ids,
         })
@@ -6254,6 +6327,7 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        faults.check(FaultPoint::AfterCommit)?;
         Ok(next)
     }
 
@@ -6471,6 +6545,9 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| TableActivationError::Runtime(RuntimeError::StorageUnavailable))?;
+        if let Err(error) = faults.check(FaultPoint::AfterCommit) {
+            return Err(TableActivationError::Runtime(error));
+        }
         Ok(next)
     }
 
@@ -6875,6 +6952,9 @@ impl RuntimeState {
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        // The row, terminal claim and capture are already durable. A crash
+        // probe here must not report a rollback it did not perform.
+        faults.check(FaultPoint::AfterCommit)?;
         Ok(RequestActivationCommit {
             capture,
             request: RequestStatus {
@@ -7045,6 +7125,78 @@ impl RuntimeState {
             admin_audit_sequence,
             checkpoint_reset_audit_sequence,
         })
+    }
+
+    /// Selects the published `HEAD` pin for admitted relation reads.
+    ///
+    /// `HEAD` is the highest checkpoint generation whose publication completed
+    /// with a Git commit (`ORNA-STATE-001`). A frozen intent that never
+    /// completed, and every unpublished CWD generation after the last
+    /// completed publication, are excluded, so an admitted read of
+    /// `relation.as_of(HEAD)` never observes the unpublished tail
+    /// (`ORNA-STATE-003`).
+    ///
+    /// With no completed publication this fails closed rather than resolving
+    /// an empty baseline: an unpublished store has no `HEAD` to read.
+    pub async fn select_published_snapshot(&self) -> Result<HistoricalSnapshot, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT MAX(publication_freeze.checkpoint_generation) \
+                 FROM publication_freeze JOIN publication_commit \
+                 ON publication_commit.intent_id = publication_freeze.intent_id",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let published: Option<i64> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let generation = u64::try_from(published.ok_or(RuntimeError::SnapshotNotFound)?)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        self.select_historical_snapshot(generation).await
+    }
+
+    /// Reads one admitted relation at published `HEAD` by its committed
+    /// identity, so the rows match the live relation across a rename while the
+    /// unpublished tail stays invisible (`ORNA-STATE-003`).
+    pub async fn read_admitted_table_at_head(
+        &self,
+        identity: &RuntimeTableIdentity,
+    ) -> Result<HistoricalTableRows, RuntimeError> {
+        let snapshot = self.select_published_snapshot().await?;
+        self.read_admitted_table_at(&snapshot, identity).await
+    }
+
+    /// Reads several admitted relations from one published `HEAD` pin.
+    ///
+    /// Every returned relation shares the same immutable checkpoint pin, so an
+    /// expression joining two admitted tables cannot combine rows from two
+    /// generations even if a publication completes while it reads
+    /// (`ORNA-STATE-003`, `ORNA-STATE-004A`). Duplicate names or duplicate
+    /// committed identities fail closed rather than aliasing one relation.
+    pub async fn read_admitted_tables_at_head(
+        &self,
+        identities: &[RuntimeTableIdentity],
+    ) -> Result<AdmittedHeadRelations, RuntimeError> {
+        let mut names = BTreeSet::new();
+        let mut object_ids = BTreeSet::new();
+        for identity in identities {
+            if !names.insert(identity.table().to_owned())
+                || !object_ids.insert(identity.object_id())
+            {
+                return Err(RuntimeError::InvalidTableMutation);
+            }
+        }
+        let snapshot = self.select_published_snapshot().await?;
+        let mut rows = Vec::with_capacity(identities.len());
+        for identity in identities {
+            rows.push(self.read_admitted_table_at(&snapshot, identity).await?);
+        }
+        Ok(AdmittedHeadRelations { snapshot, rows })
     }
 
     /// Resolves one already-pinned CWD snapshot descriptor to its retained
@@ -9935,6 +10087,7 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        faults.check(FaultPoint::AfterCommit)?;
         Ok(next)
     }
 
@@ -18482,6 +18635,40 @@ async fn table_rows_tx(
     Ok(result)
 }
 
+/// Returns the distinct declared names of a set of admitted table identities.
+///
+/// Duplicate names or duplicate committed identities fail closed: two
+/// relations differing only by identity or only by name would otherwise alias
+/// one storage key or one lookup entry.
+fn admitted_table_names(tables: &[RuntimeTableIdentity]) -> Result<Vec<String>, RuntimeError> {
+    let mut names = BTreeSet::new();
+    let mut object_ids = BTreeSet::new();
+    for table in tables {
+        if !names.insert(table.table.clone()) || !object_ids.insert(table.object_id) {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
+/// Maps admitted table names to their committed identity, validating every
+/// name and rejecting a repeated name.
+fn admitted_table_object_ids(
+    tables: &[RuntimeTableIdentity],
+) -> Result<BTreeMap<String, TableObjectId>, RuntimeError> {
+    let mut table_object_ids = BTreeMap::new();
+    for table in tables {
+        validate_table_name(&table.table)?;
+        if table_object_ids
+            .insert(table.table.clone(), table.object_id)
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+    }
+    Ok(table_object_ids)
+}
+
 fn validate_table_candidate_scope(
     mutations: &[TableMutation],
     tables: &[String],
@@ -19449,6 +19636,7 @@ fn legacy_controlled_rollback_proof(marker: [u8; 32], point: FaultPoint) -> [u8;
         FaultPoint::AfterReplayFailureRecord => 8,
         FaultPoint::BeforeTerminalClaim => 9,
         FaultPoint::AfterTerminalClaim => 10,
+        FaultPoint::AfterCommit => 11,
     }]);
     digest.finalize().into()
 }

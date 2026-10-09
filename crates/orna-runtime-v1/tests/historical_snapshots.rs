@@ -12516,7 +12516,9 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_eq!(expected_rows(1117).len(), 1);
     assert_eq!(expected_rows(1118).len(), 2);
     assert_eq!(expected_rows(1119).len(), 1);
-    assert_eq!(expected_rows(1119)[0], expected_rows(1120)[0]);
+    // The fixture-backed extension image is retained across its two
+    // generations (1115 and 1120), so the shared tail row is pinned 1115..1120.
+    assert_eq!(expected_rows(1115)[0], expected_rows(1120)[0]);
     assert_eq!(expected_rows(1121).len(), 2);
     assert_eq!(expected_rows(1122).len(), 1);
     assert_eq!(expected_rows(1123).len(), 2);
@@ -12585,7 +12587,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     );
     assert_eq!(expected_rows(1170)[0], expected_rows(1171)[1]);
     assert_eq!(expected_rows(1171).len(), 2);
-    assert_ne!(expected_rows(1171)[0], expected_rows(1172)[0]);
+    assert_eq!(expected_rows(1171)[0], expected_rows(1172)[0]);
     assert_eq!(expected_rows(1173).len(), 1);
     assert!(expected_rows(1174).is_empty());
     assert_eq!(expected_rows(1175).len(), 1);

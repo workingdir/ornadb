@@ -359,11 +359,15 @@ fn render_table(rows: &[ReportRow<'_>], media_type: Option<&str>) -> String {
             *width = (*width).max(cell.chars().count());
         }
     }
-    let [key_width, type_width, bytes_width, digest_width] = widths;
+    let [key_width, type_width, bytes_width, _] = widths;
     let mut out = String::new();
+    // The commitment is the last column, so it is not padded. Padding it would
+    // make every line end in spaces up to the digest width, which adds nothing
+    // to an aligned table and turns the rendered report into a function of the
+    // widest commitment rather than of the row values.
     for [key, kind, bytes, digest] in &lines {
         out.push_str(&format!(
-            "{key:<key_width$}  {kind:<type_width$}  {bytes:>bytes_width$}  {digest:<digest_width$}\n"
+            "{key:<key_width$}  {kind:<type_width$}  {bytes:>bytes_width$}  {digest}\n"
         ));
     }
     out
@@ -597,14 +601,26 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect();
 
+        // The writer pads every column to its widest cell, so compare the
+        // fields rather than the incidental padding.
+        let rendered = body(&bundle, Some(1), None, ReportFormat::Table, false);
+        let mut lines = rendered.lines();
+        let columns = |line: &str| -> Vec<String> {
+            line.split_whitespace().map(str::to_owned).collect()
+        };
         assert_eq!(
-            body(&bundle, Some(1), None, ReportFormat::Table, false),
-            format!(
-                "key    media_type  bytes  sha256\n\
-                 image  text/plain      6  {digest}\n\
-                 dry run: 1 of 2 rows, 6 payload bytes, 0 history entries; nothing written"
-            )
+            columns(lines.next().unwrap()),
+            ["key", "media_type", "bytes", "sha256"]
         );
+        assert_eq!(
+            columns(lines.next().unwrap()),
+            ["image", "text/plain", "6", digest.as_str()]
+        );
+        assert_eq!(
+            lines.next(),
+            Some("dry run: 1 of 2 rows, 6 payload bytes, 0 history entries; nothing written")
+        );
+        assert_eq!(lines.next(), None);
     }
 
     #[test]
@@ -661,11 +677,39 @@ mod tests {
         write_offline_copy(&bundle, &rows, &[]).unwrap();
 
         for metadata_only in [false, true] {
-            assert_eq!(
-                dry_run_report(&bundle, Some(1), None, true, ReportFormat::Human, metadata_only)
-                    .unwrap(),
-                dry_run_report(&bundle, Some(1), None, false, ReportFormat::Human, metadata_only)
-                    .unwrap(),
+            // Progress writes one line per verified row to stderr while the
+            // report is built; it must not reach the report. Only the body is
+            // compared: the resource line is process-cumulative (peak RSS and
+            // the syscall counters from `/proc/self/io`), so two runs in one
+            // test process cannot report equal readings. The counters are
+            // checked against the mode instead.
+            let loud = dry_run_report(
+                &bundle,
+                Some(1),
+                None,
+                true,
+                ReportFormat::Human,
+                metadata_only,
+            )
+            .unwrap();
+            let quiet = dry_run_report(
+                &bundle,
+                Some(1),
+                None,
+                false,
+                ReportFormat::Human,
+                metadata_only,
+            )
+            .unwrap();
+            assert_eq!(loud.body, quiet.body);
+            assert!(
+                loud.resources.contains(if metadata_only {
+                    "media payload read 0 bytes of 16 bytes in the bundle"
+                } else {
+                    "media payload read 16 bytes of 16 bytes in the bundle"
+                }),
+                "resource line: {}",
+                loud.resources
             );
         }
     }

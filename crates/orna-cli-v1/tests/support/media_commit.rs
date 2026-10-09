@@ -2,12 +2,16 @@
 //! the media import tests use. `insert_only` chooses an insert or a replace.
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TerminalOutcome,
     WriterLease,
 };
 
+use super::format3::publish_media_row;
+
 pub async fn commit_capture(
+    repository: &Repository,
     state: &RuntimeState,
     writer: WriterLease,
     bindings: &mut SysHostBindingRegistry,
@@ -44,11 +48,11 @@ pub async fn commit_capture(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let (id, key, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
+    let (id, key_bytes, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
     let mutation = if insert_only {
-        TableMutation::insert(id, "media", key, row)
+        TableMutation::insert(id, "media", key_bytes, row)
     } else {
-        TableMutation::new(id, "media", key, Some(row))
+        TableMutation::new(id, "media", key_bytes, Some(row))
     }
     .unwrap()
     .with_orp_blob_binding(binding)
@@ -67,4 +71,5 @@ pub async fn commit_capture(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
+    publish_media_row(repository, state, key, ordinal + 0x10).await;
 }

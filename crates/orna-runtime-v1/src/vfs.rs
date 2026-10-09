@@ -14,10 +14,11 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use super::{
-    CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeState, SafeDiagnostic,
-    TableActivationError, ValidatedTableActivationCommit,
+    CwdCapture, DiagnosticClass, DiagnosticCode, RuntimeError, RuntimeState, RuntimeTableIdentity,
+    SafeDiagnostic, TableActivationError, TableMutation, ValidatedTableActivationCommit,
 };
 
 /// One repository-wide invalidation clock shared by projections in a VFS
@@ -464,6 +465,7 @@ pub enum FsyncOutcome<S> {
 /// The latest rejected replacement remains separately readable even after a
 /// later write starts a new candidate from its bytes.
 pub struct RetainedInvalidDraft<S> {
+    id: [u8; 16],
     baseline: SnapshotPin<S>,
     revision: u64,
     replacement: Arc<[u8]>,
@@ -473,6 +475,7 @@ pub struct RetainedInvalidDraft<S> {
 impl<S> Clone for RetainedInvalidDraft<S> {
     fn clone(&self) -> Self {
         Self {
+            id: self.id,
             baseline: self.baseline.clone(),
             revision: self.revision,
             replacement: Arc::clone(&self.replacement),
@@ -482,6 +485,13 @@ impl<S> Clone for RetainedInvalidDraft<S> {
 }
 
 impl<S> RetainedInvalidDraft<S> {
+    /// The unique local-state identity of this retained draft, issued when the
+    /// rejection was recorded. A later rejection of the same revision keeps the
+    /// identity it was first given (ORNA-VFS-009).
+    pub const fn id(&self) -> [u8; 16] {
+        self.id
+    }
+
     pub fn baseline(&self) -> &SnapshotPin<S> {
         &self.baseline
     }
@@ -504,7 +514,42 @@ struct DraftState<S> {
     candidate: Option<Vec<u8>>,
     revision: u64,
     last_rejection: Option<(u64, SafeDiagnostic)>,
-    retained_invalid: Option<RetainedInvalidDraft<S>>,
+    retained_invalid: Option<RetainedRejection<S>>,
+}
+
+/// The retained rejected draft together with the identity of the rejection
+/// that recorded it. One rejection has one identity, so a repeated validation
+/// of the same revision is distinguishable from a fresh one (ORNA-VFS-009).
+struct RetainedRejection<S> {
+    id: [u8; 16],
+    draft: RetainedInvalidDraft<S>,
+}
+
+impl<S> DraftState<S> {
+    /// Records one rejection of `revision`, issuing a fresh identity unless the
+    /// same revision was already retained by an earlier rejection.
+    fn retain_rejection(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
+        let replacement: Arc<[u8]> = Arc::from(
+            self.candidate
+                .as_deref()
+                .unwrap_or(self.baseline.bytes.as_ref()),
+        );
+        self.last_rejection = Some((revision, diagnostic));
+        let id = match self.retained_invalid.as_ref() {
+            Some(retained) if retained.draft.revision == revision => retained.id,
+            _ => *Uuid::new_v4().as_bytes(),
+        };
+        self.retained_invalid = Some(RetainedRejection {
+            id,
+            draft: RetainedInvalidDraft {
+                id,
+                baseline: self.baseline.pin.clone(),
+                revision,
+                replacement,
+                diagnostic,
+            },
+        });
+    }
 }
 
 /// A private EDIT-1 replacement draft. Writes use a copy-on-write buffer;
@@ -700,19 +745,7 @@ impl<S> ManagedFile<S> {
             };
             let mut draft = scratch_state.draft.state.lock().await;
             let revision = draft.revision;
-            let replacement: Arc<[u8]> = Arc::from(
-                draft
-                    .candidate
-                    .as_deref()
-                    .unwrap_or(draft.baseline.bytes.as_ref()),
-            );
-            draft.last_rejection = Some((revision, diagnostic));
-            draft.retained_invalid = Some(RetainedInvalidDraft {
-                baseline: scratch.baseline.pin.clone(),
-                revision,
-                replacement,
-                diagnostic,
-            });
+            draft.retain_rejection(revision, diagnostic);
             return Ok(TemporaryRenameOutcome::Stale { diagnostic });
         }
         // Serialize commits in this repository epoch and retain the lock over
@@ -756,6 +789,95 @@ impl<S> ManagedFile<S> {
         EditDraft::open(baseline, max_file_bytes)
     }
 
+    /// Opens the `orna edit` read-to-save route: a retained strong read
+    /// baseline plus a private draft bound to it, captured together.
+    ///
+    /// Unlike [`open_draft`], which baselines on whatever the destination holds
+    /// at open time and accepts any save whose draft still matches it, the
+    /// retained read image stays the baseline for the whole edit: the draft may
+    /// only be saved while the destination still shows exactly the version the
+    /// editor read. Capturing the image and the draft's baseline under one lock
+    /// is what makes the retention exact — no change admitted between the two
+    /// could be missed or double-counted.
+    ///
+    /// [`open_draft`]: ManagedFile::open_draft
+    pub async fn open_read_baseline(
+        self: &Arc<Self>,
+        max_file_bytes: usize,
+    ) -> EditReadBaseline<S> {
+        let image = Arc::clone(&self.state.lock().await.image);
+        EditReadBaseline {
+            image: Arc::clone(&image),
+            draft: EditDraft::open(image, max_file_bytes),
+            epoch: self.cache_epoch.clone(),
+        }
+    }
+
+    /// Saves a strong read-baseline edit through the validated activation
+    /// boundary, refusing whenever the read version is no longer the accepted
+    /// row version.
+    ///
+    /// The retained read image is the sole baseline: this checks that the
+    /// destination still holds it *before* handing the candidate to activation.
+    /// When a concurrent change has moved the destination on, the save returns
+    /// [`TemporaryRenameOutcome::Stale`], the draft keeps its bytes and its
+    /// retained-invalid copy for the caller to keep as a draft, and the
+    /// activation boundary is never reached. This is exactly what a blind
+    /// temp-create save cannot prove: a late temp-create has no witness for the
+    /// version the editor originally read (VFS-011).
+    pub async fn save_strong_with<F, Fut, E>(
+        self: &Arc<Self>,
+        baseline: &EditReadBaseline<S>,
+        activate: F,
+    ) -> Result<TemporaryRenameOutcome<S>, TemporaryRenameError<E>>
+    where
+        S: Send + Sync + 'static,
+        F: FnOnce(ActivationCandidate<S>) -> Fut,
+        Fut: Future<Output = Result<ActivationDecision<S>, E>>,
+    {
+        if !Arc::ptr_eq(&self.cache_epoch.generation, &baseline.epoch.generation) {
+            return Err(TemporaryRenameError::WrongRepositoryScope);
+        }
+        let mut destination = self.state.lock().await;
+        let reads_baseline =
+            !destination.unlinked && Arc::ptr_eq(&destination.image, &baseline.image) && {
+                let draft_state = baseline.draft.state.lock().await;
+                Arc::ptr_eq(&draft_state.baseline, &baseline.image)
+            };
+        if !reads_baseline {
+            let diagnostic = stale_baseline_diagnostic();
+            retain_rejected_draft(&baseline.draft, diagnostic).await;
+            return Ok(TemporaryRenameOutcome::Stale { diagnostic });
+        }
+        let mut cache_generation = self.cache_epoch.generation.lock().await;
+        let next_generation = cache_generation
+            .checked_add(1)
+            .ok_or(TemporaryRenameError::GenerationExhausted)?;
+        match baseline.draft.fsync_with(activate).await {
+            Err(error) => Err(TemporaryRenameError::Activation(error)),
+            Ok(FsyncOutcome::Rejected(diagnostic)) => {
+                Ok(TemporaryRenameOutcome::Rejected { diagnostic })
+            }
+            Ok(FsyncOutcome::Accepted(handle)) => {
+                let image = Arc::new(VfsFileSnapshot::with_projection(
+                    &handle.image,
+                    CacheProjection {
+                        epoch: self.cache_epoch.clone(),
+                        generation: next_generation,
+                    },
+                ));
+                baseline.draft.rebase_accepted(Arc::clone(&image)).await;
+                destination.image = Arc::clone(&image);
+                *cache_generation = next_generation;
+                Ok(TemporaryRenameOutcome::Applied {
+                    generation: next_generation,
+                    handle: SnapshotReadHandle::open(image),
+                })
+            }
+            Ok(FsyncOutcome::Unchanged(_)) => Err(TemporaryRenameError::NoCandidate),
+        }
+    }
+
     /// Commits a direct draft over this destination through the same validated
     /// activation boundary as a temp rename. A draft whose baseline is no longer
     /// this destination's image returns `Stale` without calling activation.
@@ -772,17 +894,27 @@ impl<S> ManagedFile<S> {
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
         let mut destination = self.state.lock().await;
-        let based_on_current = !destination.unlinked && {
+        let (based_on_current, revision) = {
             let draft_state = draft.state.lock().await;
-            Arc::ptr_eq(&destination.image, &draft_state.baseline)
+            (
+                !destination.unlinked && Arc::ptr_eq(&destination.image, &draft_state.baseline),
+                draft_state.revision,
+            )
         };
         if !based_on_current {
-            return Ok(TemporaryRenameOutcome::Stale {
-                diagnostic: SafeDiagnostic {
-                    code: DiagnosticCode::ExecutionRejected,
-                    class: DiagnosticClass::Transient,
-                },
-            });
+            let diagnostic = SafeDiagnostic {
+                code: DiagnosticCode::ExecutionRejected,
+                class: DiagnosticClass::Transient,
+            };
+            // A stale candidate is still a rejected candidate. Without this the
+            // draft's bytes and diagnostic would be dropped with the handle,
+            // while the temp-rename route keeps them readable (ORNA-VFS-009).
+            draft
+                .state
+                .lock()
+                .await
+                .retain_rejection(revision, diagnostic);
+            return Ok(TemporaryRenameOutcome::Stale { diagnostic });
         }
         let mut cache_generation = self.cache_epoch.generation.lock().await;
         let next_generation = cache_generation
@@ -936,6 +1068,62 @@ impl<S> TemporarySave<S> {
     }
 }
 
+/// A retained `orna edit` read-to-save baseline.
+///
+/// The image is the exact destination version the editor read at capture time,
+/// kept readable for the whole edit, and the draft holds this edit's private
+/// bytes over it. [`ManagedFile::save_strong_with`] is its only accepting route:
+/// a save proves the retained image is still the accepted version before the
+/// candidate reaches activation. A superseded read still reads its own version,
+/// because this type owns the retained image — a later accepted replacement
+/// only ends what new opens observe, never what this handle already holds.
+pub struct EditReadBaseline<S> {
+    image: Arc<VfsFileSnapshot<S>>,
+    draft: EditDraft<S>,
+    epoch: SharedCacheEpoch,
+}
+
+impl<S> EditReadBaseline<S> {
+    /// Opens the retained read version. This reads the exact image captured at
+    /// edit start, never the destination's live image.
+    pub fn baseline(&self) -> SnapshotReadHandle<S> {
+        SnapshotReadHandle::open(Arc::clone(&self.image))
+    }
+
+    /// This edit's private draft over the retained read version.
+    pub fn draft(&self) -> &EditDraft<S> {
+        &self.draft
+    }
+}
+
+/// The safe diagnostic a superseded read-to-save baseline reports. It carries
+/// no repository detail: the retained draft and its bytes are what the caller
+/// keeps, and the code is the profile's `sys.vfs.stale_edit` refusal.
+fn stale_baseline_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::ExecutionRejected,
+        class: DiagnosticClass::Transient,
+    }
+}
+
+/// Keeps a refused draft's bytes and its stable diagnostic, so a rejected
+/// strong save is recoverable and is never silently dropped.
+///
+/// This records the rejection through the draft's own retention, so a strong
+/// save that is refused because its read baseline went stale keeps the same
+/// retained-draft identity rules as every other rejection (ORNA-VFS-009): the
+/// identity is issued once per rejected revision and reused while that
+/// revision stays unchanged.
+///
+/// [`DraftState::retain_rejection`] is the one authority for a retained
+/// rejection, so this route and the direct draft routes cannot disagree about
+/// a draft's retained identity.
+async fn retain_rejected_draft<S>(draft: &EditDraft<S>, diagnostic: SafeDiagnostic) {
+    let mut draft_state = draft.state.lock().await;
+    let revision = draft_state.revision;
+    draft_state.retain_rejection(revision, diagnostic);
+}
+
 pub enum TemporaryRenameOutcome<S> {
     Applied {
         generation: u64,
@@ -1055,7 +1243,12 @@ impl<S> EditDraft<S> {
     }
 
     pub async fn retained_invalid_draft(&self) -> Option<RetainedInvalidDraft<S>> {
-        self.state.lock().await.retained_invalid.clone()
+        self.state
+            .lock()
+            .await
+            .retained_invalid
+            .as_ref()
+            .map(|retained| retained.draft.clone())
     }
 
     /// Calls the validated activation adapter exactly once for a changed
@@ -1096,15 +1289,7 @@ impl<S> EditDraft<S> {
                 Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(image)))
             }
             ActivationDecision::Rejected(diagnostic) => {
-                let replacement: Arc<[u8]> =
-                    Arc::from(state.candidate.as_deref().expect("candidate held by lock"));
-                state.last_rejection = Some((revision, diagnostic));
-                state.retained_invalid = Some(RetainedInvalidDraft {
-                    baseline: state.baseline.pin.clone(),
-                    revision,
-                    replacement,
-                    diagnostic,
-                });
+                state.retain_rejection(revision, diagnostic);
                 Ok(FsyncOutcome::Rejected(diagnostic))
             }
         }
@@ -1379,7 +1564,20 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
         Some(hint) => hint.to_owned(),
         None => media_suffixes(media_type),
     };
-    let mut name = project_component(field);
+    // The suffix is part of the projected component, so VFS-016's component
+    // bound covers the whole `field + "." + suffix` spelling rather than the
+    // escaped field base alone. A base that leaves no room for the suffix takes
+    // the same `~field-` digest alias an over-bound field name takes: the alias
+    // is derived from the stored field name, so the full name is still
+    // re-derivable and verified by the long-name index (VFS-016).
+    if project_field_name(field).len() + 1 + selected.len() > VFS_MAX_COMPONENT_BYTES {
+        return format!(
+            "{}.{}",
+            long_alias(field, VfsNameNamespace::Field),
+            selected
+        );
+    }
+    let mut name = project_field_name(field);
     name.push('.');
     name.push_str(&selected);
     if name == VFS_ROW_DOCUMENT {
@@ -1388,40 +1586,94 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
     name
 }
 
-/// The preferred MIME-1 suffix for an essence. Unknown essences keep the
-/// profile's `bin` hint instead of guessing from the media type text.
-fn media_suffixes(media_type: &str) -> String {
-    let essence = media_type
+/// The MIME-1 suffix table: `(essence, preferred, compatible)`. One table
+/// serves both projection and validation, so a hint can never be accepted that
+/// the projection would not produce.
+const MIME1_SUFFIXES: &[(&str, &str, &[&str])] = &[
+    ("application/gzip", "gz", &["gz", "tar.gz", "tgz"]),
+    ("application/json", "json", &["json"]),
+    ("application/octet-stream", "bin", &["bin"]),
+    ("application/pdf", "pdf", &["pdf"]),
+    ("application/wasm", "wasm", &["wasm"]),
+    ("application/zip", "zip", &["zip"]),
+    ("audio/flac", "flac", &["flac"]),
+    ("audio/mp4", "m4a", &["m4a", "m4b", "mp4", "mpg4"]),
+    ("audio/mpeg", "mp3", &["mp1", "mp2", "mp3"]),
+    ("audio/ogg", "ogg", &["oga", "ogg", "opus"]),
+    ("audio/wav", "wav", &["wav"]),
+    ("image/gif", "gif", &["gif"]),
+    ("image/jpeg", "jpg", &["jpe", "jpeg", "jpg"]),
+    ("image/png", "png", &["png"]),
+    ("image/svg+xml", "svg", &["svg"]),
+    ("image/webp", "webp", &["webp"]),
+    ("text/css", "css", &["css"]),
+    ("text/javascript", "js", &["js", "mjs"]),
+    ("text/plain", "txt", &["text", "txt"]),
+    ("video/mp4", "mp4", &["m4v", "mp4"]),
+    ("video/webm", "webm", &["webm"]),
+];
+
+/// The MIME-1 essence of a media type, lowercased and stripped of parameters.
+fn media_essence(media_type: &str) -> String {
+    media_type
         .split(';')
         .next()
         .unwrap_or(media_type)
         .trim()
-        .to_ascii_lowercase();
-    let preferred = match essence.as_str() {
-        "application/gzip" => "gz",
-        "application/json" => "json",
-        "application/octet-stream" => "bin",
-        "application/pdf" => "pdf",
-        "application/wasm" => "wasm",
-        "application/zip" => "zip",
-        "audio/flac" => "flac",
-        "audio/mp4" => "m4a",
-        "audio/mpeg" => "mp3",
-        "audio/ogg" => "ogg",
-        "audio/wav" => "wav",
-        "image/gif" => "gif",
-        "image/jpeg" => "jpg",
-        "image/png" => "png",
-        "image/svg+xml" => "svg",
-        "image/webp" => "webp",
-        "text/css" => "css",
-        "text/javascript" => "js",
-        "text/plain" => "txt",
-        "video/mp4" => "mp4",
-        "video/webm" => "webm",
-        _ => "bin",
+        .to_ascii_lowercase()
+}
+
+/// The MIME-1 entry for an essence. An unknown essence keeps the profile's
+/// `bin` hint instead of guessing from the media type text.
+fn mime1_entry(media_type: &str) -> (&'static str, &'static [&'static str]) {
+    let essence = media_essence(media_type);
+    MIME1_SUFFIXES
+        .iter()
+        .find(|(name, _, _)| *name == essence)
+        .map(|(_, preferred, compatible)| (*preferred, *compatible))
+        .unwrap_or(("bin", &["bin"]))
+}
+
+/// The preferred MIME-1 suffix for an essence. Unknown essences keep the
+/// profile's `bin` hint instead of guessing from the media type text.
+fn media_suffixes(media_type: &str) -> String {
+    mime1_entry(media_type).0.to_owned()
+}
+
+/// Whether `suffix` is a MIME-1 compatible hint for this media type. Only a
+/// compatible spelling may be selected for a field (MIME-1, VFS-012).
+pub fn content_suffix_is_compatible(media_type: &str, suffix: &str) -> bool {
+    let suffix = suffix.trim().to_ascii_lowercase();
+    mime1_entry(media_type).1.contains(&suffix.as_str())
+}
+
+/// The canonical stored hint for an editor-selected suffix (MIME-1, VFS-012).
+///
+/// `selected` is the suffix the sibling file now spells; `None` means the
+/// projected preferred suffix. The result is the hint to record, or `None` when
+/// the selection is the field's preferred suffix, which the profile stores as
+/// an absent hint rather than a redundant one.
+///
+/// A rename changes only this hint: it never transcodes the stored bytes,
+/// renames a column, or rekeys the row, and an incompatible suffix is refused
+/// as a malformed candidate. The caller applies the result through the normal
+/// CAS/activation boundary.
+pub fn classify_content_suffix(
+    media_type: &str,
+    selected: Option<&str>,
+) -> Result<Option<String>, VfsPathError> {
+    let preferred = mime1_entry(media_type).0;
+    let Some(selected) = selected else {
+        return Ok(None);
     };
-    preferred.to_owned()
+    let selected = selected.trim().to_ascii_lowercase();
+    if !content_suffix_is_compatible(media_type, &selected) {
+        return Err(VfsPathError::InvalidDocument);
+    }
+    if selected == preferred {
+        return Ok(None);
+    }
+    Ok(Some(selected))
 }
 
 /// Splits one mount-relative path and refuses absolute paths, empty
@@ -1518,11 +1770,14 @@ pub enum VfsStoredFieldKind {
     Document { text: String },
     /// A stored optional field present as explicit `null`.
     Null,
-    /// A stored Blob projected as a sibling content file.
+    /// A stored Blob projected as a sibling content file. `required` is the
+    /// schema's declaration: a required Blob can never be removed through the
+    /// VFS, while an optional one may be unlinked to `null` (VFS-013).
     Content {
         media_type: String,
         suffix: Option<String>,
         descriptor_size: u64,
+        required: bool,
     },
 }
 
@@ -1541,11 +1796,34 @@ impl VfsStoredField {
         }
     }
 
+    /// A required stored Blob. Schema validity keeps its exact content
+    /// descriptor, so unlinking its sibling file must fail (VFS-013).
     pub fn content(
         name: impl Into<String>,
         media_type: impl Into<String>,
         suffix: Option<String>,
         descriptor_size: u64,
+    ) -> Self {
+        Self::content_with_class(name, media_type, suffix, descriptor_size, true)
+    }
+
+    /// An optional stored Blob. Unlinking its sibling file may set the stored
+    /// field to `null` after the row validates (VFS-013).
+    pub fn content_optional(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+    ) -> Self {
+        Self::content_with_class(name, media_type, suffix, descriptor_size, false)
+    }
+
+    fn content_with_class(
+        name: impl Into<String>,
+        media_type: impl Into<String>,
+        suffix: Option<String>,
+        descriptor_size: u64,
+        required: bool,
     ) -> Self {
         Self {
             name: name.into(),
@@ -1553,6 +1831,7 @@ impl VfsStoredField {
                 media_type: media_type.into(),
                 suffix,
                 descriptor_size,
+                required,
             },
         }
     }
@@ -1573,6 +1852,7 @@ pub struct VfsProjectedFile {
     name: String,
     media_type: String,
     descriptor_size: u64,
+    required: bool,
 }
 
 impl VfsProjectedFile {
@@ -1586,6 +1866,12 @@ impl VfsProjectedFile {
 
     pub fn descriptor_size(&self) -> u64 {
         self.descriptor_size
+    }
+
+    /// True when the schema declares this Blob required. A required Blob's
+    /// sibling file can never be unlinked (VFS-013).
+    pub const fn is_required(&self) -> bool {
+        self.required
     }
 }
 
@@ -1628,6 +1914,7 @@ impl<S> VfsRowProjection<S> {
                     media_type,
                     suffix,
                     descriptor_size,
+                    required,
                 } => {
                     let name = project_content_name(&field.name, media_type, suffix.as_deref());
                     // Two stored values that claim one host name are refused
@@ -1647,6 +1934,7 @@ impl<S> VfsRowProjection<S> {
                         name,
                         media_type: media_type.clone(),
                         descriptor_size: *descriptor_size,
+                        required: *required,
                     });
                 }
             }
@@ -1693,19 +1981,66 @@ impl<S> VfsRowProjection<S> {
     /// projection is refused, so a lookup can never retarget another row's
     /// field (VFS-004, VFS-017).
     pub fn lookup(&self, name: &str) -> Result<VfsProjectedEntry<'_>, VfsPathError> {
-        match unproject_component(name)? {
-            VfsComponent::Canonical(text) if text == VFS_ROW_DOCUMENT => {
-                Ok(VfsProjectedEntry::Document)
-            }
-            VfsComponent::Canonical(text) => {
-                let file = self
-                    .files
-                    .iter()
-                    .find(|file| file.name == text)
-                    .ok_or(VfsPathError::UnknownRow)?;
-                Ok(VfsProjectedEntry::Content(file))
-            }
-            VfsComponent::LongAlias { .. } => Err(VfsPathError::WrongNamespace),
+        if name == VFS_ROW_DOCUMENT {
+            return Ok(VfsProjectedEntry::Document);
+        }
+        let file = self
+            .files
+            .iter()
+            .find(|file| file.name == name)
+            .ok_or(VfsPathError::UnknownRow)?;
+        Ok(VfsProjectedEntry::Content(file))
+    }
+
+    /// Resolves one directory entry to its authorized unlink target (VFS-013).
+    /// The row document is a complete stored-non-key-field document, so
+    /// removing it is refused: row deletion is an explicit database operation,
+    /// never a VFS side effect. A sibling file resolves to its stored Blob
+    /// field, carrying the schema's required/optional class. A name outside the
+    /// projection is resolved to no target, exactly like its lookup (VFS-004).
+    pub fn resolve_unlink(&self, name: &str) -> Result<VfsUnlinkTarget<'_>, VfsPathError> {
+        match self.lookup(name)? {
+            VfsProjectedEntry::Document => Ok(VfsUnlinkTarget::RowDocument),
+            VfsProjectedEntry::Content(file) => Ok(if file.is_required() {
+                VfsUnlinkTarget::RequiredContent(file)
+            } else {
+                VfsUnlinkTarget::OptionalContent(file)
+            }),
+        }
+    }
+}
+
+/// The authorized outcome of resolving one unlink inside a row directory. The
+/// projection decides this from schema-issued field classes alone; a host name
+/// never widens what an unlink may remove (VFS-013).
+#[derive(Debug, Eq, PartialEq)]
+pub enum VfsUnlinkTarget<'a> {
+    /// `data.orna` itself: always refused (VFS-013).
+    RowDocument,
+    /// A required stored Blob: refused, because schema validity depends on the
+    /// exact content descriptor (VFS-013).
+    RequiredContent(&'a VfsProjectedFile),
+    /// An optional stored Blob: the unlink may assign that field `null`
+    /// through the validated activation boundary (VFS-013).
+    OptionalContent(&'a VfsProjectedFile),
+}
+
+impl VfsUnlinkTarget<'_> {
+    /// The exact `errno` this target requires, or `None` when the unlink may
+    /// proceed to validation.
+    pub fn refusal_errno(&self) -> Option<i32> {
+        match self {
+            Self::RowDocument | Self::RequiredContent(_) => Some(VFS_EPERM),
+            Self::OptionalContent(_) => None,
+        }
+    }
+
+    /// The stable Orna cause code kept alongside the host `errno` for a
+    /// refused unlink.
+    pub fn refusal_code(&self) -> Option<&'static str> {
+        match self {
+            Self::RowDocument | Self::RequiredContent(_) => Some("sys.vfs.unsupported"),
+            Self::OptionalContent(_) => None,
         }
     }
 }
@@ -1749,6 +2084,66 @@ fn render_field_name(name: &str) -> Result<String, VfsPathError> {
     Ok(name.to_owned())
 }
 
+/// One complete VFS row replacement routed into the runtime's validated table
+/// activation boundary. The table identity is repository-issued admission
+/// metadata; host paths never supply or override it.
+pub struct VfsTableRowReplacement {
+    mutation_id: [u8; 16],
+    table: RuntimeTableIdentity,
+    key: Vec<u8>,
+    value: Option<Vec<u8>>,
+}
+
+impl VfsTableRowReplacement {
+    pub fn new(
+        mutation_id: [u8; 16],
+        table: RuntimeTableIdentity,
+        key: Vec<u8>,
+        value: Option<Vec<u8>>,
+    ) -> Result<Self, RuntimeError> {
+        let mutation = TableMutation::new(mutation_id, table.table(), key.clone(), value.clone())?
+            .with_table_object_id(table.object_id());
+        Ok(Self {
+            mutation_id: mutation.id(),
+            table,
+            key: mutation.key().to_vec(),
+            value,
+        })
+    }
+
+    pub fn from_candidate<S>(
+        mutation_id: [u8; 16],
+        table: RuntimeTableIdentity,
+        key: Vec<u8>,
+        candidate: &ActivationCandidate<S>,
+    ) -> Result<Self, RuntimeError> {
+        let value = (!candidate.is_removal()).then(|| candidate.replacement_bytes().to_vec());
+        Self::new(mutation_id, table, key, value)
+    }
+
+    pub fn table(&self) -> &RuntimeTableIdentity {
+        &self.table
+    }
+
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    pub fn value(&self) -> Option<&[u8]> {
+        self.value.as_deref()
+    }
+
+    pub fn mutation(&self) -> Result<TableMutation, RuntimeError> {
+        TableMutation::new(
+            self.mutation_id,
+            self.table.table(),
+            self.key.clone(),
+            self.value.clone(),
+        )
+        .map(|mutation| mutation.with_table_object_id(self.table.object_id()))
+    }
+}
+
 /// The VFS call boundary into the runtime's single validated table transaction.
 /// Callers prepare complete typed row mutations and graph-issued pin transfers
 /// in the request; this wrapper adds no journal or publication authority.
@@ -1780,6 +2175,218 @@ mod tests {
             code: DiagnosticCode::TableAssertionFalse,
             class: DiagnosticClass::Permanent,
         }
+    }
+
+    #[test]
+    fn unlink_refuses_row_document_and_required_blob_while_allowing_optional() {
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(17_u64)),
+            &[
+                VfsStoredField::document("title", "\"Live in London\""),
+                VfsStoredField::content("content", "audio/mpeg", None, 99),
+                VfsStoredField::content_optional("cover", "image/jpeg", None, 4096),
+                VfsStoredField::null("booklet"),
+            ],
+        )
+        .expect("row projection");
+
+        let content = project_content_name("content", "audio/mpeg", None);
+        let cover = project_content_name("cover", "image/jpeg", None);
+        assert_eq!(content, "content.mp3");
+        assert_eq!(cover, "cover.jpg");
+
+        // Deleting `data.orna` is refused: row deletion is an explicit database
+        // operation, never a VFS unlink side effect (VFS-013).
+        let document = row.resolve_unlink(VFS_ROW_DOCUMENT).expect("document");
+        assert_eq!(document, VfsUnlinkTarget::RowDocument);
+        assert_eq!(document.refusal_errno(), Some(VFS_EPERM));
+        assert_eq!(document.refusal_code(), Some("sys.vfs.unsupported"));
+
+        // A required Blob cannot be removed, because schema validity depends on
+        // its exact content descriptor (VFS-013).
+        let required = row.resolve_unlink(&content).expect("required blob");
+        let VfsUnlinkTarget::RequiredContent(file) = &required else {
+            panic!("required blob must resolve to a required target");
+        };
+        assert!(file.is_required());
+        assert_eq!(required.refusal_errno(), Some(VFS_EPERM));
+        assert_eq!(required.refusal_code(), Some("sys.vfs.unsupported"));
+
+        // An optional Blob may be unlinked to `null`, so the target authorizes
+        // validation instead of refusing in the projection (VFS-013).
+        let optional = row.resolve_unlink(&cover).expect("optional blob");
+        let VfsUnlinkTarget::OptionalContent(file) = &optional else {
+            panic!("optional blob must resolve to an optional target");
+        };
+        assert!(!file.is_required());
+        assert_eq!(optional.refusal_errno(), None);
+        assert_eq!(optional.refusal_code(), None);
+
+        // Field classes come from the schema, not the host name: a name outside
+        // the projection resolves to no target at all (VFS-004).
+        assert_eq!(
+            row.resolve_unlink("missing.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
+        assert_eq!(
+            row.resolve_unlink("~key-not-a-field.mp3"),
+            Err(VfsPathError::UnknownRow)
+        );
+    }
+
+    #[test]
+    fn suffix_selection_is_mime1_compatible_and_preferred_hint_is_absent() {
+        // A compatible non-preferred spelling is stored as that explicit hint,
+        // and the file name changes only in its suffix (MIME-1, VFS-012).
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("mp1")),
+            Ok(Some("mp1".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("MP1")),
+            Ok(Some("mp1".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("image/jpeg", Some("jpeg")),
+            Ok(Some("jpeg".to_owned()))
+        );
+        assert_eq!(
+            classify_content_suffix("application/gzip", Some("tgz")),
+            Ok(Some("tgz".to_owned()))
+        );
+
+        // The catalogued preferred suffix is recorded as an absent hint, never
+        // as a redundant one (MIME-1 default_hint_canonicalization).
+        assert_eq!(classify_content_suffix("audio/mpeg", Some("mp3")), Ok(None));
+        assert_eq!(classify_content_suffix("audio/mpeg", None), Ok(None));
+
+        // A suffix outside the MIME-1 entry is a malformed candidate rather
+        // than a silent transcode or a rekeyed row (VFS-012).
+        assert_eq!(
+            classify_content_suffix("audio/mpeg", Some("m4a")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        assert_eq!(
+            classify_content_suffix("image/jpeg", Some("png")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        // An unknown essence keeps only the profile's `bin` hint.
+        assert_eq!(
+            classify_content_suffix("application/x-unknown", Some("gz")),
+            Err(VfsPathError::InvalidDocument)
+        );
+        assert_eq!(
+            classify_content_suffix("application/x-unknown", Some("bin")),
+            Ok(None)
+        );
+
+        // The suffix rename never changes the stored content identity: the same
+        // descriptor size projects under the selected hint, and the row's bytes
+        // are untouched.
+        let renamed = project_content_name("content", "audio/mpeg", Some("mp1"));
+        assert_eq!(renamed, "content.mp1");
+        assert_eq!(
+            project_content_name("content", "audio/mpeg", None),
+            "content.mp3"
+        );
+    }
+
+    #[test]
+    fn vfs_table_row_replacement_preserves_admitted_table_identity() {
+        let table = RuntimeTableIdentity::new("Song", crate::TableObjectId::new([0x71; 16]))
+            .expect("valid table identity");
+        let replacement = VfsTableRowReplacement::new(
+            [0x55; 16],
+            table.clone(),
+            vec![0x18, 0x2a],
+            Some(vec![0xa1]),
+        )
+        .expect("valid replacement");
+
+        assert_eq!(replacement.table(), &table);
+        assert_eq!(replacement.key(), &[0x18, 0x2a]);
+        assert_eq!(replacement.value(), Some(&[0xa1][..]));
+        let mutation = replacement.mutation().expect("valid mutation");
+        assert_eq!(mutation.table(), "Song");
+        assert_eq!(mutation.table_object_id(), Some(table.object_id()));
+        assert_eq!(mutation.key(), &[0x18, 0x2a]);
+        assert_eq!(mutation.value(), Some(&[0xa1][..]));
+    }
+
+    #[test]
+    fn content_file_projection_uses_field_namespace_and_exact_entry_identity() {
+        let long_field = "content_".repeat(40);
+        let projected = project_content_name(&long_field, "audio/mpeg", None);
+        assert!(projected.starts_with("~field-"));
+        assert!(projected.ends_with(".mp3"));
+
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            &[VfsStoredField::content(
+                long_field.clone(),
+                "audio/mpeg",
+                None,
+                99,
+            )],
+        )
+        .expect("content field projection");
+        assert_eq!(row.files()[0].name(), projected);
+        let VfsProjectedEntry::Content(file) = row.lookup(&projected).expect("projected file")
+        else {
+            panic!("content lookup should return the projected file");
+        };
+        assert_eq!(file.descriptor_size(), 99);
+        assert!(matches!(
+            row.lookup("~key-not-a-field.mp3"),
+            Err(VfsPathError::UnknownRow)
+        ));
+    }
+
+    #[test]
+    fn content_file_name_stays_within_the_component_bound_with_its_suffix() {
+        // The projected content file is one host component, so VFS-016's bound
+        // covers the whole `field.suffix` spelling. A field base that leaves no
+        // room for its suffix takes the `~field-` digest alias instead of
+        // overflowing the bound (VFS-016).
+        let field = "f".repeat(200);
+        let name = project_content_name(&field, "audio/mpeg", None);
+        assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
+        assert!(name.starts_with("~field-"));
+        assert!(name.ends_with(".mp3"));
+        // The alias is the field namespace digest of the stored name, so the
+        // snapshot-bound long-name index re-derives and verifies the full name
+        // rather than trusting the truncated spelling (VFS-016).
+        assert_eq!(name, format!("~field-{}.mp3", hex_digest(field.as_bytes())));
+
+        // A base with room for the suffix still spells the escaped name
+        // directly; only the over-bound spelling changes.
+        let field = "f".repeat(196);
+        let name = project_content_name(&field, "audio/mpeg", None);
+        assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
+        assert!(!name.starts_with("~field-"));
+        assert!(name.ends_with(".mp3"));
+
+        // A long field base and the row document stay distinct names in one row
+        // directory (VFS-016, VFS-017).
+        let row = VfsRowProjection::project(
+            SnapshotPin::capture(Arc::new(23_u64)),
+            &[
+                VfsStoredField::document("title", "\"Live in London\""),
+                VfsStoredField::content("f".repeat(200), "audio/mpeg", None, 99),
+            ],
+        )
+        .expect("row projection");
+        let long = row.files()[0].name().to_owned();
+        assert!(long.len() <= VFS_MAX_COMPONENT_BYTES);
+        assert_ne!(long, VFS_ROW_DOCUMENT);
+        assert!(matches!(
+            row.lookup(&long),
+            Ok(VfsProjectedEntry::Content(_))
+        ));
+        assert!(matches!(
+            row.lookup(VFS_ROW_DOCUMENT),
+            Ok(VfsProjectedEntry::Document)
+        ));
     }
 
     fn vfs_row_image() -> Arc<VfsFileSnapshot<u64>> {
@@ -2265,6 +2872,7 @@ mod tests {
         let retained = save.retained_invalid_draft().await.unwrap();
         assert_eq!(retained.replacement_bytes(), invalid);
         assert_eq!(retained.diagnostic(), rejected());
+        assert_ne!(retained.id(), [0u8; 16]);
 
         let row_store_for_repeat = Arc::clone(&row_store);
         let repeated = target
@@ -2281,6 +2889,12 @@ mod tests {
         ));
         assert_eq!(row_store.transaction_count(), 1);
         assert_eq!(repository.generation().await, 0);
+        // Repeated syncs of one unchanged revision are one rejection, so the
+        // retained draft keeps the identity it was first given (ORNA-VFS-009).
+        assert_eq!(
+            save.retained_invalid_draft().await.unwrap().id(),
+            retained.id()
+        );
 
         let draft = target.open_draft(1 << 20).await;
         draft.truncate(0).await.unwrap();
@@ -2306,6 +2920,71 @@ mod tests {
         assert_eq!(retained.replacement_bytes(), invalid);
         assert_eq!(retained.diagnostic(), rejected());
         assert_eq!(repository.generation().await, 0);
+
+        // A stale candidate is a rejected candidate: its bytes and diagnostic
+        // stay readable through the same path as a validation rejection, and
+        // the destination keeps the accepted row (ORNA-VFS-009).
+        let stale = target.open_draft(1 << 20).await;
+        stale.truncate(0).await.unwrap();
+        stale.write_at(0, row_text).await.unwrap();
+        let row_store_for_stale = Arc::clone(&row_store);
+        let seeded = target
+            .commit_draft_with(&stale, move |candidate| {
+                Arc::clone(&row_store_for_stale).activate(candidate, 21)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(seeded, TemporaryRenameOutcome::Applied { .. }));
+        assert!(stale.retained_invalid_draft().await.is_none());
+
+        // `draft` still holds the rejected candidate and its recorded baseline,
+        // so its next commit is stale before any activation is consulted.
+        let before_stale_commits = row_store.transaction_count();
+        let row_store_for_stale_commit = Arc::clone(&row_store);
+        let stale_outcome = target
+            .commit_draft_with(&draft, move |candidate| {
+                Arc::clone(&row_store_for_stale_commit).activate(candidate, 22)
+            })
+            .await
+            .unwrap();
+        let TemporaryRenameOutcome::Stale { diagnostic } = stale_outcome else {
+            panic!("a draft over a replaced image must be stale");
+        };
+        let stale_diagnostic = SafeDiagnostic {
+            code: DiagnosticCode::ExecutionRejected,
+            class: DiagnosticClass::Transient,
+        };
+        assert_eq!(diagnostic, stale_diagnostic);
+        assert_eq!(row_store.transaction_count(), before_stale_commits);
+        assert_eq!(row_store.accepted(), row_text);
+        assert_eq!(
+            target.open_read().await.read_at(0, row_text.len()),
+            row_text
+        );
+        let parked = draft.retained_invalid_draft().await.unwrap();
+        assert_eq!(parked.replacement_bytes(), invalid);
+        assert_eq!(parked.diagnostic(), stale_diagnostic);
+        assert_ne!(parked.id(), [0u8; 16]);
+        // A stale rejection of the same unchanged revision keeps the identity
+        // the draft already had; only its diagnostic is superseded.
+        assert_eq!(parked.id(), retained.id());
+
+        // A changed candidate is a new revision, so its rejection is a new
+        // retained draft with its own identity (ORNA-VFS-009).
+        draft.write_at(0, b"x").await.unwrap();
+        let row_store_for_stale_again = Arc::clone(&row_store);
+        let stale_again = target
+            .commit_draft_with(&draft, move |candidate| {
+                Arc::clone(&row_store_for_stale_again).activate(candidate, 23)
+            })
+            .await
+            .unwrap();
+        assert!(matches!(stale_again, TemporaryRenameOutcome::Stale { .. }));
+        let reparked = draft.retained_invalid_draft().await.unwrap();
+        assert_eq!(reparked.revision(), parked.revision() + 1);
+        assert_ne!(reparked.id(), parked.id());
+        assert_eq!(row_store.transaction_count(), before_stale_commits);
+        assert_eq!(row_store.accepted(), row_text);
     }
 
     #[tokio::test]
@@ -2632,5 +3311,110 @@ mod tests {
             TemporaryRenameOutcome::Applied { generation: 2, .. }
         ));
         assert_eq!(target.open_read().await.read_at(0, 1), [0x5A]);
+    }
+
+    /// A strong read baseline refuses the save once a concurrent REPL change
+    /// has moved the row on, keeps the rejected draft, and never reaches
+    /// activation; a save whose read is still current applies. An open read
+    /// keeps the version it captured in both cases.
+    #[tokio::test]
+    async fn strong_read_baseline_refuses_a_save_after_a_concurrent_repl_change() {
+        let repository = VfsRepositoryCache::new();
+        let target = repository.managed_file(fixture_image()).await.unwrap();
+        let read_bytes = include_str!("../tests/fixtures/publication-repository-main.orna");
+        let repl_bytes = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let draft_bytes = include_str!("../tests/fixtures/case_closure_edge_tail_sixty.orna");
+
+        // The editor reads the row and retains that exact version, with its own
+        // draft over the version it read.
+        let baseline = target.open_read_baseline(1 << 20).await;
+        let read_handle = baseline.baseline();
+        assert_eq!(
+            read_handle.read_at(0, read_bytes.len()),
+            read_bytes.as_bytes()
+        );
+        baseline.draft().truncate(0).await.unwrap();
+        baseline
+            .draft()
+            .write_at(0, draft_bytes.as_bytes())
+            .await
+            .unwrap();
+
+        // A concurrent REPL change is accepted first, so the row no longer
+        // holds the version the editor read.
+        let repl = target.open_draft(1 << 20).await;
+        repl.truncate(0).await.unwrap();
+        repl.write_at(0, repl_bytes.as_bytes()).await.unwrap();
+        let repl_commit = target
+            .commit_draft_with(&repl, |_| async {
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(8),
+                )))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            repl_commit,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+
+        // The editor's save is refused on its read baseline: activation is
+        // never reached and the draft is retained rather than discarded.
+        let activation_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&activation_calls);
+        let stale = target
+            .save_strong_with(&baseline, move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ()>(ActivationDecision::Rejected(rejected())) }
+            })
+            .await
+            .unwrap();
+        assert!(matches!(stale, TemporaryRenameOutcome::Stale { .. }));
+        assert_eq!(activation_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            baseline
+                .draft()
+                .retained_invalid_draft()
+                .await
+                .expect("a refused read-baseline save keeps its draft")
+                .replacement_bytes(),
+            draft_bytes.as_bytes()
+        );
+        // The REPL change is still what the row holds, and the read handle
+        // still reads the version it captured.
+        assert_eq!(
+            target.open_read().await.read_at(0, repl_bytes.len()),
+            repl_bytes.as_bytes()
+        );
+        assert_eq!(
+            read_handle.read_at(0, read_bytes.len()),
+            read_bytes.as_bytes()
+        );
+
+        // A read whose version is still the accepted one saves normally, so
+        // the refusal above is the baseline check and not a broken route.
+        let current = target.open_read_baseline(1 << 20).await;
+        current.draft().truncate(0).await.unwrap();
+        current
+            .draft()
+            .write_at(0, draft_bytes.as_bytes())
+            .await
+            .unwrap();
+        let applied = target
+            .save_strong_with(&current, |_| async {
+                Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                    Arc::new(11),
+                )))
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(
+            target.open_read().await.read_at(0, draft_bytes.len()),
+            draft_bytes.as_bytes()
+        );
     }
 }
