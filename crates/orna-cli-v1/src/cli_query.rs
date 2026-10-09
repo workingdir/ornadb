@@ -344,7 +344,8 @@ mod tests {
 
     #[test]
     fn query_options_default_to_one_human_page_of_every_field() {
-        let parsed = parse_options(&words(&["000102030405060708090a0b0c0d0e0f"])).unwrap();
+        let arguments = words(&["000102030405060708090a0b0c0d0e0f"]);
+        let parsed = parse_options(&arguments).unwrap();
         assert_eq!(parsed.field, None);
         assert_eq!(parsed.limit, DEFAULT_QUERY_LIMIT);
         assert_eq!(parsed.format, QueryFormat::Human);
@@ -352,7 +353,7 @@ mod tests {
 
     #[test]
     fn query_options_accept_a_field_and_json_format() {
-        let parsed = parse_options(&words(&[
+        let arguments = words(&[
             "000102030405060708090a0b0c0d0e0f",
             "--field",
             "2",
@@ -360,8 +361,8 @@ mod tests {
             "5",
             "--format",
             "json",
-        ]))
-        .unwrap();
+        ]);
+        let parsed = parse_options(&arguments).unwrap();
         assert_eq!(parsed.field, Some(2));
         assert_eq!(parsed.limit, 5);
         assert_eq!(parsed.format, QueryFormat::Json);
@@ -369,14 +370,14 @@ mod tests {
 
     #[test]
     fn query_options_accept_a_key_and_a_field() {
-        let parsed = parse_options(&words(&[
+        let arguments = words(&[
             "000102030405060708090a0b0c0d0e0f",
             "--key",
             "song",
             "--field",
             "0",
-        ]))
-        .unwrap();
+        ]);
+        let parsed = parse_options(&arguments).unwrap();
         assert_eq!(parsed.key, Some("song"));
         assert_eq!(parsed.field, Some(0));
     }
