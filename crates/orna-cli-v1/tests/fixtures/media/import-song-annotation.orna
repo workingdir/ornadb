@@ -1,0 +1,3 @@
+// Author the suffix coordinate the query predicate reads, so the row's stored
+// ROV-3 annotation binds a suffix hint rather than leaving it absent.
+sys.blob.annotate(sys.blob.capture_file(__MEDIA_ROOT__, "note.wav", 65536), "audio/wav", "note")
