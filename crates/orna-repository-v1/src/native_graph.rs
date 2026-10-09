@@ -2318,7 +2318,7 @@ impl NativeGraphContext {
         NativeOid::from_hex(self.algorithm, hex)
     }
 
-    fn write_capture_object(
+    pub(crate) fn write_capture_object(
         &self,
         kind: &str,
         bytes: &[u8],
@@ -2356,7 +2356,104 @@ impl NativeGraphContext {
         Ok(oid)
     }
 
-    fn write_capture_node(
+    pub(crate) fn write_capture_node(
+        &self,
+        node: &NodeData,
+        written: &mut BTreeSet<NativeOid>,
+        object_limit: u64,
+    ) -> Result<NativeOid, GraphError> {
+        let data = node.encode_canonical()?;
+        self.write_capture_envelope(&data, node, written, object_limit)
+    }
+
+    /// The stable database identity admitted for this graph context.
+    pub const fn database_id(&self) -> &[u8; 16] {
+        &self.database_id
+    }
+
+    /// The hash algorithm fixed by the admitted repository format.
+    pub const fn algorithm(&self) -> GitHashAlgorithm {
+        self.algorithm
+    }
+
+    /// The admitted `.orna/store` root this context pinned. A candidate commit
+    /// that rewrites the store must nest the replacement tree in its own
+    /// private index rather than reusing this identity.
+    pub fn store_root(&self) -> &NativeOid {
+        &self.store_root
+    }
+
+    /// Writes one complete OGS-1 node envelope (its canonical `data` blob, its
+    /// `refs` tree when the node has dependencies, and the envelope tree that
+    /// names both) into the repository's single object store.
+    ///
+    /// The returned object ID covers the whole envelope, so a later
+    /// `read_native_node` of it re-derives and verifies every dependency edge.
+    /// Objects stay unreachable until a caller-issued protected ref or commit
+    /// names them, which is the durable writer a publication candidate needs
+    /// for its encoded ORP nodes. `written` accumulates the exact closure so
+    /// the caller can run its own durability barrier before advancing a ref.
+    pub(crate) fn write_native_node(
+        &self,
+        node: &NodeData,
+        written: &mut BTreeSet<NativeOid>,
+    ) -> Result<NativeOid, GraphError> {
+        self.write_capture_node(node, written, MAX_FULL_VERIFY_OBJECTS)
+    }
+
+    /// Records the fixed `.orna/store` tree position in a caller-owned private
+    /// index, so a candidate commit built from that index exposes the encoded
+    /// store root at the exact path the format-3 reader resolves.
+    ///
+    /// The store root is an OGS-1 tree, not a regular file, so the ordinary
+    /// managed-file path cannot express it. This checks the supplied object is
+    /// a real, fully decodable `StoreRoot` node first: a raw OID cannot be
+    /// planted at the store position. The caller keeps ownership of the index
+    /// file and of any later ref advancement.
+    pub(crate) fn pin_store_subtree_in_index(
+        &self,
+        index: &std::path::Path,
+        store_root: &NativeOid,
+    ) -> Result<(), GraphError> {
+        if store_root.algorithm() != self.algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: self.algorithm.width(),
+                actual: store_root.as_bytes().len(),
+            });
+        }
+        let scope = self.open_read_scope()?;
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let node = self.read_native_node(store_root, &scope, &mut objects)?;
+        if node.kind() != NodeKind::StoreRoot {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::StoreRoot,
+                actual: node.kind(),
+            });
+        }
+        let cacheinfo = format!(
+            "040000,{},{}",
+            store_root.to_hex(),
+            crate::format_context::STORE_PATH
+        );
+        let output = self
+            .git_command()
+            .env("GIT_INDEX_FILE", index)
+            .args(["update-index", "--add", "--cacheinfo", &cacheinfo])
+            .output()
+            .map_err(|_| GraphError::GitCommandFailed)?;
+        if !output.status.success() {
+            return Err(GraphError::GitCommandFailed);
+        }
+        Ok(())
+    }
+
+    fn write_capture_envelope(
         &self,
         node: &NodeData,
         written: &mut BTreeSet<NativeOid>,

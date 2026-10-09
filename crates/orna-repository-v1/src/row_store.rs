@@ -601,6 +601,60 @@ impl RowValue {
         Self::Overflow(reference)
     }
 
+    /// The canonical CBOR spelling of this stored value exactly as it belongs
+    /// in an ORP-1 page. Inline values keep their admitted field encoding; an
+    /// overflow value is the kind-3 tag naming its shared value graph root, so
+    /// re-reading the page re-derives the same idempotent reference.
+    ///
+    /// A reference that has no resolved native root has no canonical page
+    /// spelling: the byte root is not the graph root the reader resolves, and
+    /// substituting it would name a different node. Such a value is rejected
+    /// rather than spelled ambiguously.
+    pub(crate) fn canonical_page_bytes(&self) -> Result<Vec<u8>, RowStoreError> {
+        match self {
+            Self::Inline { encoded, .. } => Ok(encoded.clone()),
+            Self::Overflow(reference) => {
+                let root = reference
+                    .native_root()
+                    .ok_or(RowStoreError::UnresolvedValueOverflow)?;
+                let mut output = Vec::with_capacity(root.as_bytes().len() + 6);
+                cbor_head(&mut output, 6, orna_value_v1::ROV3_OVERFLOW_TAG);
+                cbor_head(&mut output, 4, 1);
+                cbor_head(&mut output, 2, root.as_bytes().len() as u64);
+                output.extend_from_slice(root.as_bytes());
+                Ok(output)
+            }
+        }
+    }
+
+    /// The complete canonical ORP-1 page body for an ordered set of entries:
+    /// the CBOR array of `[key, value]` pairs a reader decodes into one leaf.
+    /// Entry order is the order supplied, which the caller owns.
+    pub(crate) fn page_bytes(entries: &[RowEntry]) -> Result<Vec<u8>, RowStoreError> {
+        if entries.len() > MAX_PAGE_ENTRIES {
+            return Err(RowStoreError::PageFanoutExceeded(entries.len()));
+        }
+        let mut output = Vec::new();
+        // The shortest definite array header, so a 256-entry page stays
+        // canonical rather than being truncated to a one-byte count.
+        cbor_head(&mut output, 4, entries.len() as u64);
+        for entry in entries {
+            let key = entry.key.canonical_bytes()?;
+            let value = entry.value.canonical_page_bytes()?;
+            let mut pair = Vec::with_capacity(key.len() + value.len() + 4);
+            // The pair is a two-element array: the canonical typed key, then
+            // the canonical stored value.
+            cbor_head(&mut pair, 4, 2);
+            pair.extend_from_slice(&key);
+            pair.extend_from_slice(&value);
+            if output.len() + pair.len() > NODE_DATA_LIMIT {
+                return Err(RowStoreError::EntryTooLarge(pair.len()));
+            }
+            output.extend_from_slice(&pair);
+        }
+        Ok(output)
+    }
+
     pub fn encoded_metadata_len(&self) -> usize {
         match self {
             Self::Inline { encoded, .. } => encoded.len(),
@@ -766,7 +820,10 @@ impl RowMapBuilder {
     }
 }
 
-fn partition_pages(entries: &[RowEntry], height: u8) -> Result<Vec<RowPage>, RowStoreError> {
+pub(crate) fn partition_pages(
+    entries: &[RowEntry],
+    height: u8,
+) -> Result<Vec<RowPage>, RowStoreError> {
     let mut pages = Vec::new();
     let mut current = Vec::new();
     let mut current_size = 16usize;
@@ -928,6 +985,7 @@ pub enum RowStoreError {
     PersistedLookupRequiresGraphContext,
     InvalidCanonicalKey,
     InvalidCanonicalRowValue,
+    UnresolvedValueOverflow,
     UnsupportedWriterProfile,
     LegacyFormatReadOnly(u8),
     Native(GraphError),
@@ -972,6 +1030,9 @@ impl fmt::Display for RowStoreError {
             }
             Self::InvalidCanonicalRowValue => {
                 f.write_str("persisted row value is not a canonical stored-field tuple")
+            }
+            Self::UnresolvedValueOverflow => {
+                f.write_str("overflow value has no resolved native graph root")
             }
             Self::UnsupportedWriterProfile => f.write_str("legacy writer profile is unsupported"),
             Self::LegacyFormatReadOnly(format) => {
