@@ -2671,6 +2671,11 @@ fn primitive(name: &str) -> Option<Type> {
         "Bool" => Type::Bool,
         "Null" => Type::Null,
         "Unit" => Type::Unit,
+        // Annotated immutable content is a closed language type. Table fields
+        // already resolve it; function signatures must resolve it too, because
+        // the specified capture/insert helpers take and return `Blob`
+        // (ORNA-BLOB-001, ORNA-BLOB-003).
+        "Blob" => Type::Named("Blob".into()),
         "BOOLEAN" | "BOOL" => Type::Bool,
         "INTEGER" | "INT" | "BIGINT" => Type::Int,
         "FLOAT" => Type::Float,
@@ -4356,6 +4361,7 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
                     | "std.ByteStream"
                     | "std.UI"
                     | "std.ui.Action"
+                    | "Blob"
                     | "Error"
             ) || system_api::embedded_system_api().describes_type(name)
                 || scope.generic_type_parameters.contains(name)
