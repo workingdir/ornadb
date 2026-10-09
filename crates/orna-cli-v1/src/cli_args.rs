@@ -72,6 +72,7 @@ pub(super) enum Command {
     Diff(Vec<String>),
     Log(Vec<String>),
     History(Vec<String>),
+    Query(Vec<String>),
     Import(Vec<String>),
     Export(Vec<String>),
     Publish(Vec<String>),
@@ -328,6 +329,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             branch: words.next().unwrap_or("main").to_owned(),
         },
         Some("history") => Command::History(words.by_ref().map(str::to_owned).collect()),
+        Some("query") => Command::Query(words.by_ref().map(str::to_owned).collect()),
         Some("mount") => {
             let first = words.next().ok_or_else(|| {
                 Diagnostic::usage(
