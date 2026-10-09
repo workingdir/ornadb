@@ -20,7 +20,7 @@ use std::{
     },
 };
 
-use orna_value_v1::MediaAnnotation;
+use orna_value_v1::{BlobMetadata, MediaAnnotation};
 use sha2::{Digest, Sha256};
 
 pub const REPOSITORY_FORMAT: u8 = 3;
@@ -318,6 +318,25 @@ impl RepositoryCaptureCapability {
     ) -> Result<Self, GraphError> {
         scope.authorize(&graph)?;
         Ok(Self { graph, scope })
+    }
+
+    /// Cumulative media payload bytes this capability has read from the graph.
+    ///
+    /// This is the accounting a metadata-only query is measured against: it
+    /// stays at zero while the same capability still walks row pages, byte
+    /// index nodes and descriptors, which are charged as objects instead.
+    pub fn payload_bytes_read(&self) -> u64 {
+        self.scope.payload_bytes_read()
+    }
+
+    /// Cumulative media payload bytes this capability has written to the graph.
+    pub fn payload_bytes_written(&self) -> u64 {
+        self.scope.payload_bytes_written()
+    }
+
+    /// Cumulative native Git objects this capability has charged its owner.
+    pub fn objects_read(&self) -> u64 {
+        self.scope.objects_read()
     }
 
     /// Streams a source into the graph's existing OGB-2 writer. The resulting
@@ -770,6 +789,104 @@ impl NativeGraphContext {
             index_objects_reused,
             payload_objects_reused,
         })
+    }
+
+    /// Projects the payload-free Blob metadata of one admitted row field.
+    ///
+    /// This is the measured metadata-only read path a query over media rows
+    /// takes. The row itself is the only object the lookup reads, and its own
+    /// field tuple carries the length, SHA-256 and MIME-1 annotation of the
+    /// Blob reference, so the projection returns without entering a descriptor
+    /// or content read. `scope.payload_bytes_read()` therefore stays at zero
+    /// for the whole projection, while `scope.objects_read()` still counts the
+    /// row pages the lookup genuinely walked.
+    ///
+    /// `field` is the index of the Blob field in the stored tuple; a tuple
+    /// without that field yields `None`. A row whose fields overflowed to the
+    /// shared graph has no local tuple and is rejected, because reporting the
+    /// bounded overflow metadata as the row's fields would be a lie.
+    pub fn project_blob_metadata(
+        &self,
+        key: &crate::row_store::TypedKey,
+        field: usize,
+        scope: &RepositoryReadScope,
+    ) -> Result<Option<(crate::row_store::TypedKey, BlobMetadata)>, GraphError> {
+        let Some(row) = self.lookup_row(key, scope)? else {
+            return Ok(None);
+        };
+        let metadata = row
+            .blob_metadata(field)
+            .map_err(|_| GraphError::NonCanonicalData)?
+            .ok_or(GraphError::NonCanonicalData)?;
+        Ok(Some((row.key().clone(), metadata)))
+    }
+
+    /// Projects the payload-free Blob metadata of a bounded row interval.
+    ///
+    /// Rows are returned in canonical key order, exactly as
+    /// [`Self::range_rows`] orders them, but only the interval's own field
+    /// tuples are decoded: no descriptor, byte index or payload chunk is read.
+    /// A field that is absent from a row's tuple is skipped rather than
+    /// fabricated, and an overflowed row is rejected by the same rule as
+    /// [`Self::project_blob_metadata`].
+    pub fn project_blob_metadata_range(
+        &self,
+        range: &crate::row_store::KeyRange,
+        field: usize,
+        scope: &RepositoryReadScope,
+    ) -> Result<Vec<(crate::row_store::TypedKey, BlobMetadata)>, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+        let root = version.primary_root().clone();
+        let domain = rows_domain_for_version(version);
+        let entries = {
+            let mut objects = ObjectBudget::new(
+                scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+                scope.max_objects,
+                Arc::clone(&scope.objects_used),
+                scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+                Arc::clone(&scope.metadata_used),
+            );
+            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+            let root_node = read_node(&root)?;
+            validate_ordered_root_node(&root_node, &domain, expected_count)?;
+            let mut entries = Vec::with_capacity(range.limit());
+            collect_ordered_range_with(
+                &mut read_node,
+                root_node,
+                &domain,
+                None,
+                None,
+                range.lower_inclusive(),
+                range.upper_exclusive(),
+                range.limit(),
+                &mut entries,
+            )?;
+            entries
+        };
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let mut projected = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                .map_err(|_| GraphError::NonCanonicalData)?;
+            let value = self.decode_persisted_row_value(entry.value, scope, &mut objects)?;
+            let row = crate::row_store::AdmittedRow::issue(version, key, value);
+            let Some(metadata) = row
+                .blob_metadata(field)
+                .map_err(|_| GraphError::NonCanonicalData)?
+            else {
+                continue;
+            };
+            projected.push((row.key().clone(), metadata));
+        }
+        Ok(projected)
     }
 
     fn decode_persisted_row_value(
@@ -1415,6 +1532,7 @@ impl NativeGraphContext {
             owner_id,
             cancelled,
             bytes_used: Arc::new(AtomicU64::new(0)),
+            payload_bytes_written: Arc::new(AtomicU64::new(0)),
             objects_used: Arc::new(AtomicU64::new(0)),
             metadata_used: Arc::new(AtomicU64::new(0)),
             byte_quota,
@@ -2924,6 +3042,7 @@ pub struct RepositoryReadScope {
     owner_id: [u8; 16],
     cancelled: Arc<AtomicBool>,
     bytes_used: Arc<AtomicU64>,
+    payload_bytes_written: Arc<AtomicU64>,
     objects_used: Arc<AtomicU64>,
     metadata_used: Arc<AtomicU64>,
     byte_quota: u64,
@@ -2984,6 +3103,41 @@ impl RepositoryReadScope {
     #[cfg(test)]
     pub(crate) fn payload_bytes_read_for_test(&self) -> u64 {
         self.bytes_used.load(AtomicOrdering::Acquire)
+    }
+
+    /// Cumulative OVB-2 media payload bytes this scope has charged to its
+    /// owner.
+    ///
+    /// Every payload byte that crosses the graph boundary is reserved here
+    /// before it is returned, so this counter is the reader-seam measurement
+    /// of "did this operation fetch media bytes". Structured metadata, index
+    /// nodes and descriptors are charged as objects, never as payload, so a
+    /// metadata-only query reports zero while still having read the graph.
+    pub fn payload_bytes_read(&self) -> u64 {
+        self.bytes_used.load(AtomicOrdering::Acquire)
+    }
+
+    /// Cumulative native Git objects this scope has charged to its owner,
+    /// including row pages, index nodes, descriptors and any payload chunks.
+    pub fn objects_read(&self) -> u64 {
+        self.objects_used.load(AtomicOrdering::Acquire)
+    }
+
+    /// Cumulative OVB-2 media payload bytes this scope has written to the
+    /// graph.
+    ///
+    /// Only the payload chunks of an OGB-2 closure are charged, never the byte
+    /// index nodes, the descriptor or the tree objects around them. A
+    /// metadata-only update therefore writes zero here however many structural
+    /// objects it commits, and this is the write-seam counterpart of
+    /// [`Self::payload_bytes_read`].
+    pub fn payload_bytes_written(&self) -> u64 {
+        self.payload_bytes_written.load(AtomicOrdering::Acquire)
+    }
+
+    fn charge_payload_written(&self, bytes: u64) {
+        self.payload_bytes_written
+            .fetch_add(bytes, AtomicOrdering::AcqRel);
     }
 }
 
@@ -3192,6 +3346,9 @@ impl<'a> CaptureIndexBuilder<'a> {
             self.written,
             self.object_limit,
         )?;
+        // The write-seam measurement: only an actual payload chunk is charged,
+        // so a metadata-only commit through this scope reports zero.
+        self.scope.charge_payload_written(length);
         self.push_chunk(length, target, chunk_sha256)
     }
 

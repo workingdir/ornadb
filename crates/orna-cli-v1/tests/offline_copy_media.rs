@@ -62,6 +62,15 @@ fn offline_copy_answers_metadata_queries_without_media_files() {
     };
     assert_eq!(key, b"song");
     assert_eq!(sha256, rows[1].sha256);
+
+    // A fetch-on-demand caller asks which objects this copy lacks without
+    // reading any payload, and gets the pairs it must retrieve.
+    assert_eq!(
+        copy.missing_payloads(),
+        rows.iter()
+            .map(|row| (row.key.clone(), row.sha256))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
