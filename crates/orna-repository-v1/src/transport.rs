@@ -1355,6 +1355,41 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
+    /// Builds a bare remote holding one commit that `local` has never seen and
+    /// points `local` at it, so fetching `main` is a real transfer rather than a
+    /// no-op against objects the fixture already had.
+    fn remote_with_one_unseen_commit(root: &Path, local: &Path) -> String {
+        let author = root.join("author");
+        let remote = root.join("remote.git");
+        fs::create_dir(&author).unwrap();
+        fs::create_dir(local).unwrap();
+        git(root, &["init", "--bare", remote.to_str().unwrap()]);
+        git(&author, &["init", "-b", "main"]);
+        git(&author, &["config", "user.name", "kierandrewett"]);
+        git(&author, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&author, &["config", "commit.gpgsign", "false"]);
+        fs::write(author.join("state.txt"), "fetched payload\n").unwrap();
+        git(&author, &["add", "state.txt"]);
+        git(&author, &["commit", "-m", "initial"]);
+        let head = git(&author, &["rev-parse", "HEAD"]);
+        git(
+            &author,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&author, &["push", "origin", "refs/heads/main"]);
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/main"]),
+            head,
+            "the sealed remote must advertise the commit under test"
+        );
+        git(local, &["init", "-b", "main"]);
+        git(
+            local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        head
+    }
+
     /// The durability barrier is ordered between object verification and the
     /// ref CAS, and a barrier that cannot make the fetched closure durable must
     /// leave the ref unpublished.
@@ -1368,21 +1403,7 @@ mod tests {
     fn fetch_leaves_refs_unpublished_when_it_cannot_make_fetched_objects_durable() {
         let root = tempfile::tempdir().unwrap();
         let local = root.path().join("local");
-        let remote = root.path().join("remote.git");
-        fs::create_dir(&local).unwrap();
-        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
-        git(&local, &["init", "-b", "main"]);
-        git(&local, &["config", "user.name", "kierandrewett"]);
-        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
-        git(&local, &["config", "commit.gpgsign", "false"]);
-        fs::write(local.join("state.txt"), "durability barrier state\n").unwrap();
-        git(&local, &["add", "state.txt"]);
-        git(&local, &["commit", "-m", "initial"]);
-        git(
-            &local,
-            &["remote", "add", "origin", remote.to_str().unwrap()],
-        );
-        git(&local, &["push", "origin", "refs/heads/main"]);
+        let head = remote_with_one_unseen_commit(root.path(), &local);
 
         let repository = Repository::discover(&local).unwrap();
         let request =
@@ -1390,6 +1411,11 @@ mod tests {
         assert_eq!(
             local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
             None
+        );
+        let objects = local.join(".git").join("objects");
+        assert!(
+            !fetched_object_on_disk(&objects, &head),
+            "the local repository must not already hold the commit under test"
         );
 
         // A non-empty alternates file marks a mirrored object database, which
@@ -1402,7 +1428,7 @@ mod tests {
         fs::create_dir_all(alternates.parent().unwrap()).unwrap();
         fs::write(
             &alternates,
-            format!("{}\n", remote.join("objects").display()),
+            format!("{}\n", root.path().join("remote.git").join("objects").display()),
         )
         .unwrap();
 
@@ -1540,22 +1566,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("create crash boundary root");
         let root = directory.path();
         let local = root.join("local");
-        let remote = root.join("remote.git");
-        fs::create_dir(&local).unwrap();
-        git(root, &["init", "--bare", remote.to_str().unwrap()]);
-        git(&local, &["init", "-b", "main"]);
-        git(&local, &["config", "user.name", "kierandrewett"]);
-        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
-        git(&local, &["config", "commit.gpgsign", "false"]);
-        fs::write(local.join("state.txt"), "crash boundary payload\n").unwrap();
-        git(&local, &["add", "state.txt"]);
-        git(&local, &["commit", "-m", "initial"]);
-        let head = git(&local, &["rev-parse", "HEAD"]);
-        git(
-            &local,
-            &["remote", "add", "origin", remote.to_str().unwrap()],
-        );
-        git(&local, &["push", "origin", "refs/heads/main"]);
+        let head = remote_with_one_unseen_commit(root, &local);
 
         let repository = Repository::discover(&local).unwrap();
         assert_eq!(
