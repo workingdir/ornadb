@@ -1507,6 +1507,31 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
             Some(0),
             "{key}: the Blob is the row's one field"
         );
+        // The descriptor the listing reports is the handle a caller uses to
+        // fetch the payload this listing deliberately did not read, so it must
+        // name a real committed object rather than an echo of the row or the
+        // commit it was read from.
+        let descriptor = listing["descriptor"].as_str().unwrap();
+        assert_eq!(
+            descriptor.len(),
+            40,
+            "{key}: a SHA-1 repository stores a 40-digit descriptor"
+        );
+        assert_ne!(
+            descriptor, listing["sha256"].as_str().unwrap(),
+            "{key}: the descriptor is an object id, not the payload digest"
+        );
+        let object = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory.path())
+            .args(["cat-file", "-t", descriptor])
+            .output()
+            .unwrap();
+        assert!(
+            object.status.success(),
+            "{key}: descriptor {descriptor} must name a committed object: {}",
+            String::from_utf8_lossy(&object.stderr)
+        );
         listed_length += listing["length"].as_u64().unwrap();
     }
     let on_disk: u64 = ["tone.wav", "pixel.png"]
