@@ -3674,13 +3674,13 @@ fn resolve_git_path(worktree: &Path, output: &[u8]) -> Result<PathBuf, GraphErro
     })
 }
 
-fn sync_directory(path: &Path) -> Result<(), GraphError> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), GraphError> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|_| GraphError::DurabilityFailed)
 }
 
-fn sync_all_pack_files(pack_dir: &Path) -> Result<(), GraphError> {
+pub(crate) fn sync_all_pack_files(pack_dir: &Path) -> Result<(), GraphError> {
     let entries = fs::read_dir(pack_dir).map_err(|_| GraphError::ObjectDurabilityUnavailable)?;
     let mut indexes = Vec::new();
     for entry in entries {
