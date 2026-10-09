@@ -3801,11 +3801,26 @@ impl DurableTransactionalEvaluator {
         let index = repository
             .index_generation()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut coordinator = RuntimePublicationCoordinator::prepare_from_runtime(
+        let prepared = RuntimePublicationCoordinator::prepare_from_runtime_allow_noop(
             repository, runtime, &head, index, &freeze, path_for, message,
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(mut coordinator) = prepared else {
+            // The frozen prefix folds to the bytes already committed, so the
+            // publication has nothing to stage. Complete the intent so the
+            // consumed range leaves the pending tail without an empty commit
+            // (ORNA-PUB-006: no false success, but also no fabricated commit).
+            let commit = repository
+                .head()
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+            let commit_id =
+                orna_runtime_v1::PublicationCommitId::new(commit.as_str().as_bytes().to_vec())
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            runtime.complete_publication(&freeze, &commit_id).await?;
+            return Ok(index);
+        };
         let published = coordinator
             .publish(repository)
             .map_err(|_| RuntimeError::StorageUnavailable)?;
