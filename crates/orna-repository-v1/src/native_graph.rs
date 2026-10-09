@@ -2585,6 +2585,24 @@ impl RepositoryReadScope {
     pub(crate) fn payload_bytes_read_for_test(&self) -> u64 {
         self.bytes_used.load(AtomicOrdering::Acquire)
     }
+
+    /// Cumulative OVB-2 media payload bytes this scope has charged to its
+    /// owner.
+    ///
+    /// Every payload byte that crosses the graph boundary is reserved here
+    /// before it is returned, so this counter is the reader-seam measurement
+    /// of "did this operation fetch media bytes". Structured metadata, index
+    /// nodes and descriptors are charged as objects, never as payload, so a
+    /// metadata-only query reports zero while still having read the graph.
+    pub fn payload_bytes_read(&self) -> u64 {
+        self.bytes_used.load(AtomicOrdering::Acquire)
+    }
+
+    /// Cumulative native Git objects this scope has charged to its owner,
+    /// including row pages, index nodes, descriptors and any payload chunks.
+    pub fn objects_read(&self) -> u64 {
+        self.objects_used.load(AtomicOrdering::Acquire)
+    }
 }
 
 struct PayloadReservation {
