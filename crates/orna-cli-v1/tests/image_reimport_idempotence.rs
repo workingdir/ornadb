@@ -49,13 +49,13 @@ async fn reimporting_the_same_image_capture_leaves_the_committed_row_unchanged()
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root);
 
-    commit_capture(&state, writer, &mut bindings, &expression, "image", 0xb0, true).await;
+    commit_capture(&repository, &state, writer, &mut bindings, &expression, "image", 0xb0, true).await;
     let first = state.committed_table_rows("media").await.unwrap();
     assert_eq!(first.len(), 1, "the insert commits one image row");
     assert_eq!(first[0].0, b"image".to_vec());
 
     // Re-import the identical capture as a replace: the committed row is unchanged.
-    commit_capture(&state, writer, &mut bindings, &expression, "image", 0xc0, false).await;
+    commit_capture(&repository, &state, writer, &mut bindings, &expression, "image", 0xc0, false).await;
     let second = state.committed_table_rows("media").await.unwrap();
     assert_eq!(second, first, "re-importing the same capture must not change the row");
 
