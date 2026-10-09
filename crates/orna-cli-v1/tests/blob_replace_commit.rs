@@ -30,6 +30,7 @@ const REPLACE_FIXTURE: &str = concat!(
     "/tests/fixtures/media/replace-image-capture.orna"
 );
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
+const PAYLOAD_PLACEHOLDER: &str = "__PAYLOAD__";
 
 /// The payload of the shared media fixture, so every test in this crate names
 /// the same bytes.
@@ -58,9 +59,19 @@ fn row_for<'a>(rows: &'a [(Vec<u8>, Vec<u8>)], key: &[u8]) -> &'a [u8] {
 }
 
 fn fixture_expression(fixture: &str, root: &str) -> String {
+    fixture_expression_for(fixture, root, "")
+}
+
+/// The replacement capture, retargeted at the payload file it should read.
+fn replacement_expression(root: &str, payload: &str) -> String {
+    fixture_expression_for(REPLACE_FIXTURE, root, payload)
+}
+
+fn fixture_expression_for(fixture: &str, root: &str, payload: &str) -> String {
     std::fs::read_to_string(fixture)
         .unwrap()
         .trim_end()
+        .replace(PAYLOAD_PLACEHOLDER, payload)
         .replace(MEDIA_ROOT_PLACEHOLDER, root)
 }
 
@@ -120,7 +131,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
 
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let original = fixture_expression(REIMPORT_FIXTURE, &root);
-    let replacement = fixture_expression(REPLACE_FIXTURE, &root);
+    let replacement = replacement_expression(&root, "pixel2.png");
 
     commit_capture(
         &repository,
@@ -187,8 +198,8 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
     );
     assert_eq!(
         after_metadata.suffix(),
-        Some("png"),
-        "replacing with the same suffix keeps the field's annotation"
+        before_metadata.suffix(),
+        "replacing under the same file name keeps the field's annotation"
     );
 
     // The replacement names a descriptor that only these bytes can produce:
@@ -257,8 +268,7 @@ async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let image = fixture_expression(REIMPORT_FIXTURE, &root);
     let clip = format!("sys.blob.capture_file({root}, \"clip.wav\", 65536)");
-    let replacement = fixture_expression(REPLACE_FIXTURE, &root);
-
+    let replacement = replacement_expression(&root, "replacement.wav");
     commit_capture(
         &repository,
         &state,
