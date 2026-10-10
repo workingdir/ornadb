@@ -213,7 +213,12 @@ fn diff_refuses_endpoints_that_record_different_repositories() {
 
     // Same tree, same identity, one commit later: still one repository, so a
     // diff of it must proceed rather than refuse.
-    let same_database = revision(root, "HEAD:.orna/database.orna");
+    let same_database = String::from_utf8(git_output(
+        root,
+        &["show", "HEAD:.orna/database.orna"],
+        None,
+    ))
+    .unwrap();
     let later = commit_metadata(root, &before, &same_database, "same identity");
 
     // A different database identity, exactly as reinitialization records it.
