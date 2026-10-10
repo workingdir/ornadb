@@ -197,7 +197,7 @@ fn assert_self_contained(copy: &Path) {
 /// proof must start from a pinned relation map, not a runtime-only mutation.
 async fn publish_native_blob_row(
     repository: &Repository,
-    root: &Path,
+    repository_root: &Path,
     relation_id: [u8; 16],
     key: &str,
     payload: &[u8],
@@ -219,7 +219,7 @@ async fn publish_native_blob_row(
     let pin = graph
         .protect_captured_blob(captured, &scope)
         .expect("protect the captured payload closure");
-    let root = root.to_path_buf();
+    let repository_root = repository_root.to_path_buf();
     let (candidate, ()) = orna_repository_v1::commit_protected_blob_row(
         &graph,
         pin,
@@ -227,9 +227,9 @@ async fn publish_native_blob_row(
         None,
         orna_repository_v1::ProtectedBlobRowInsert::new(TypedKey::Text(key.to_owned())),
         move |candidate| {
-            let root = root.clone();
+            let repository_root = repository_root.clone();
             async move {
-                commit_store_root(&root, &candidate.store_root().to_hex());
+                commit_store_root(&repository_root, &candidate.store_root().to_hex());
                 Ok::<_, std::convert::Infallible>(())
             }
         },
@@ -354,7 +354,7 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
             _ => unreachable!("the fixture loop has only known media keys"),
         };
         let payload = std::fs::read(Path::new(MEDIA_FIXTURES).join(payload_path)).unwrap();
-        publish_native_blob_row(&repository, source.path(), relation_id, key, &payload).await;
+        publish_native_blob_row(&repository, directory.path(), relation_id, key, &payload).await;
     }
     drop(bindings);
     drop(state);
