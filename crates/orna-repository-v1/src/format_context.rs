@@ -1695,11 +1695,16 @@ mod graph_bridge_tests {
             .expect("read the Blob the historical row stores");
         assert_eq!(stored.annotation().media_type(), "audio/mpeg");
         assert_eq!(stored.annotation().suffix(), Some("mp2"));
-        assert_eq!(stored.content_identity().length(), first_payload.len() as u64);
+        assert_eq!(
+            stored.content_identity(),
+            crate::blob_store::digest_bytes(first_payload)
+        );
+        assert_eq!(scope.payload_bytes_read_for_test(), 0);
         let range = graph
             .read_blob_range(stored.reference(), 0..first_payload.len() as u64, &scope)
             .expect("read the historical payload");
         assert_eq!(range.bytes(), first_payload);
+        assert_eq!(scope.payload_bytes_read_for_test(), first_payload.len() as u64);
         assert_eq!(
             range.verification(),
             crate::native_graph::RangeVerification::FullBlob
