@@ -135,6 +135,35 @@ fn admits_final_format_three_metadata_and_keeps_root_seams_pinned() {
         format!("{:?}", context.snapshot_pin()),
         "RepositorySnapshotPin { .. }"
     );
+
+    let capability = context
+        .final_format_capability()
+        .expect("issue capability after validating both roots");
+    assert_eq!(capability.database_id().to_string(), DATABASE_ID);
+    assert_eq!(capability.snapshot_id(), &context.snapshot_pin().snapshot_id());
+    assert_eq!(
+        capability.schema_root().snapshot_pin().snapshot_id(),
+        context.snapshot_pin().snapshot_id()
+    );
+    assert_eq!(
+        capability.store_root().snapshot_pin().snapshot_id(),
+        context.snapshot_pin().snapshot_id()
+    );
+}
+
+#[test]
+fn final_format_capability_rejects_a_missing_store_root() {
+    let directory = repository(Some(CANONICAL_DATABASE), None, false);
+    let context = Repository::discover(directory.path())
+        .expect("discover repository")
+        .open_format_context()
+        .expect("admit final format metadata");
+
+    assert!(context.validate_schema_root().is_ok());
+    assert_eq!(
+        context.final_format_capability().unwrap_err(),
+        RepositoryFormatContextError::StoreRootUnavailable
+    );
 }
 
 #[test]
@@ -172,7 +201,10 @@ fn dispatches_legacy_formats_as_explicit_read_only_inputs() {
     assert_eq!(context_one.repository_format_number(), 1);
     assert!(context_one.is_read_only());
     assert!(!context_one.supports_writes());
-    assert!(context_one.database_id().is_none());
+    assert!(matches!(
+        context_one.final_format_capability(),
+        Err(RepositoryFormatContextError::LegacyReadOnly(1))
+    ));
 
     let format_two = repository(Some(SIDECAR_DATABASE), Some(LEGACY_FORMAT_TWO), false);
     let context_two = Repository::discover(format_two.path())
@@ -182,6 +214,10 @@ fn dispatches_legacy_formats_as_explicit_read_only_inputs() {
     assert_eq!(context_two.repository_format_number(), 2);
     assert!(context_two.is_read_only());
     assert_eq!(context_two.database_id().unwrap().to_string(), DATABASE_ID);
+    assert!(matches!(
+        context_two.final_format_capability(),
+        Err(RepositoryFormatContextError::LegacyReadOnly(2))
+    ));
 }
 
 #[test]
