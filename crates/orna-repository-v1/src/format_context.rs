@@ -2988,6 +2988,35 @@ mod graph_bridge_tests {
         ));
     }
 
+    #[test]
+    fn indexed_range_includes_fence_and_excludes_next_child_minimum() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x7a; 16];
+        install_nested_row_store(root, &context(root), relation_id, 2, 2, 4);
+
+        let pinned = context(root);
+        let snapshot = pinned.load_row_map(relation_id).expect("load ORP identity");
+        let graph = pinned.open_native_graph(&snapshot).expect("issue graph");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let range = KeyRange::new(Some(TypedKey::UInt(40)), Some(TypedKey::UInt(90)), 8)
+            .expect("valid fence-aligned range");
+
+        let rows = graph.range_rows(&range, &scope).expect("bounded ORP range");
+        let keys: Vec<_> = rows.iter().map(|row| row.key().clone()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                TypedKey::UInt(40),
+                TypedKey::UInt(50),
+                TypedKey::UInt(60),
+                TypedKey::UInt(70),
+                TypedKey::UInt(80),
+            ]
+        );
+        assert_eq!(scope.payload_bytes_read_for_test(), 0);
+    }
+
     /// One relation's index shape and the objects a point lookup, a missing-key
     /// lookup and a bounded range read from it.
     struct IndexReads {
