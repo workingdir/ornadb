@@ -6484,12 +6484,18 @@ mod persisted_orp_tests {
             },
         );
         let store_root = fixture_git_node(root, &NodeData::StoreRoot { relation_map });
+        let snapshot_id = [0x38; 32];
+        let generation = u64::from_be_bytes(
+            snapshot_id[..8]
+                .try_into()
+                .expect("snapshot generation has eight bytes"),
+        );
         let schema_generation = crate::row_store::SchemaGeneration::issue(
             database_id,
             relation_id,
             schema_oid,
             schema_digest,
-            0,
+            generation,
         );
         let version = crate::row_store::RowMapVersion::issue(
             database_id,
@@ -6497,7 +6503,7 @@ mod persisted_orp_tests {
             store_root.clone(),
             schema_generation,
             primary_root,
-            0,
+            generation,
             Some(0),
         )
         .expect("consistent fixture row-map version");
@@ -6510,7 +6516,7 @@ mod persisted_orp_tests {
             [0x36; 32],
             database_id,
             [0x37; 16],
-            [0x38; 32],
+            snapshot_id,
             algorithm,
             store_root,
             schema_digest,
