@@ -94,7 +94,13 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     assert!(state.pending().await.unwrap().is_empty());
     assert_eq!(git_output(root, &["rev-parse", "HEAD"], None), head_before_capture);
 
-    let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
+    let annotated = value
+        .with_blob_annotation("application/json", Some("json"))
+        .unwrap();
+    let annotated_blob = annotated.blob().unwrap();
+    assert_eq!(annotated_blob.media_type(), "application/json");
+    assert_eq!(annotated_blob.suffix(), Some("json"));
+    let binding = bindings.accept_captured_blob_for_row(&annotated).unwrap();
     let expected_row_value = binding.encoded_value().to_vec();
     let transfer = binding.transfer_record();
     let pin_ref = format!(
