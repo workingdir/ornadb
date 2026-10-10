@@ -687,6 +687,23 @@ impl Repository {
         self.open_format_context_at(&snapshot)
     }
 
+    /// Resolves a named snapshot once and returns its exact commit together with
+    /// the format context admitted from that same immutable pin.
+    ///
+    /// History readers need the commit coordinate for revision walks as well as
+    /// the context for row-map reads. Returning both from one repository-issued
+    /// pin prevents a moving ref from selecting one commit for the walk and a
+    /// second commit for the schema or `.orna/store` root.
+    pub fn open_pinned_format_context_with_commit(
+        &self,
+        selector: &str,
+    ) -> Result<(crate::GitCommitRef, RepositoryFormatContext), FormatContextError> {
+        let snapshot = self.pin_snapshot(selector)?;
+        let commit = snapshot.commit.clone();
+        let context = self.open_format_context_at(&snapshot)?;
+        Ok((commit, context))
+    }
+
     /// Resolves one commit selector exactly once and opens its immutable
     /// format context read-only.
     ///
