@@ -521,8 +521,7 @@ fn copy_entry(source: &Path, destination: &Path) -> Result<(), RepositoryError> 
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         }
-        let bytes = fs::read(source).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        fs::write(destination, bytes).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::copy(source, destination).map_err(|_| RepositoryError::LocalStateUnavailable)?;
     }
     // A socket, fifo or device node is not repository payload.
     Ok(())
