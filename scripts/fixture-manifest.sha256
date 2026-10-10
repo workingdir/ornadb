@@ -246,7 +246,7 @@ be063ec603a3d99985683d92ef56e2f0669d4bc888a7ac8b6574a80e407a65bf  crates/orna-cl
 026c08136f7e4fcd673e59522652df2363b1b437b051d38e82bcd69ba00e4500  crates/orna-cli-v1/tests/fixtures/project-core-main.orna
 2d4584ab729bfdd4c56bc4f861580c6a1a80a34e72df1d249586cb15935a5918  crates/orna-cli-v1/tests/fixtures/project-run-zero.orna
 7251dc98a71ea7111b75549c3e574019e4db7c3e5185886d38caaaaf58535bec  crates/orna-cli-v1/tests/fixtures/project-uncaptured-std-main.orna
-8467f9f033fc11ba1b3e74d3757f9033a428e673331232acbcbc4a08957fe670  crates/orna-cli-v1/tests/fixtures/publication_metadata.orna
+25f7e7ee253dbdee3c69356992770dab086eb148d676960944bae9c5bfdd7b4b  crates/orna-cli-v1/tests/fixtures/publication_metadata.orna
 efaba490271b197f215c700a8a5e7aeaad0d4d222512e8d81511d734961a2a1e  crates/orna-cli-v1/tests/fixtures/reference-project/library.orna
 9c75a77db0ed8fb1d7b9e8e11e7a62b848711d3c877a2c605cf760f1a5a62ce0  crates/orna-cli-v1/tests/fixtures/reference-project/main.orna
 66cc78266af6c83c440160c24296bc3e5d8dc941bcefba5a833e7fc8da3a6c6b  crates/orna-cli-v1/tests/fixtures/reference-project/page.orna
