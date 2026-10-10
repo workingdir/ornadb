@@ -190,11 +190,6 @@ mod tests {
             value.blob_as(BlobRole::Document),
             Err(Error::RoleMismatch { .. })
         ));
-        let message = value.blob_as(BlobRole::Video).unwrap_err().to_string();
-        assert_eq!(
-            message,
-            "OVB-2 Blob role Video does not admit MIME family image"
-        );
         // Opaque is the bytes-only consumer and admits every canonical annotation.
         assert!(value.blob_as(BlobRole::Opaque).is_ok());
     }

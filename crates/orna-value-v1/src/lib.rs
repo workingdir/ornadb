@@ -692,10 +692,11 @@ impl fmt::Debug for Format3Context {
 }
 
 impl Format3Context {
-    // Reserved for the repository/runtime parser once it can issue the
-    // persisted-metadata and owner capability. It is intentionally not part
-    // of the public value API while that authority boundary is absent.
-    fn from_persisted(
+    /// Constructs a format-3 context from metadata already verified by its owning
+    /// repository/runtime. The caller must bind the pin and native roots to the
+    /// same persisted snapshot and provide a resolver that enforces that pin;
+    /// untrusted OIDs or user-selected roots must not be used here.
+    pub fn from_persisted(
         database_uuid: [u8; 16],
         pin: Snapshot,
         git_oid_algorithm: GitHash,
