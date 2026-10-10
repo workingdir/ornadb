@@ -271,6 +271,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap()
         .unwrap();
     assert_eq!(committed_value, expected_row_value);
+
     assert_eq!(
         state.latest_checkpoint().await.unwrap().unwrap().digest,
         [0x59; 32]
