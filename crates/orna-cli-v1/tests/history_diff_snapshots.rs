@@ -300,10 +300,11 @@ fn commit_metadata(directory: &Path, parent: &str, database: &str, message: &str
         .trim()
         .to_owned();
     git(directory, &["update-ref", &head_ref, &commit]);
-    // A dedicated ref keeps this commit a reachable snapshot after HEAD moves
-    // to the next one, so the diff can still name it.
-    let pin = format!("refs/checks/{}", message.replace(' ', "-"));
-    git(directory, &["update-ref", &pin, &commit]);
+    // A diff endpoint is resolved inside the repository, and a commit no ref
+    // reaches is not readable there. Both callers build a commit and then move
+    // HEAD to the next one, so each commit needs a stable, valid ref of its own.
+    let anchor = format!("refs/orna-diff-fixture/{}", message.replace(' ', "-"));
+    git(directory, &["update-ref", &anchor, &commit]);
     commit
 }
 
