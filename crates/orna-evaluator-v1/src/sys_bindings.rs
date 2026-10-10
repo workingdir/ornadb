@@ -132,7 +132,7 @@ impl SysHostBindingRegistry {
                 .lock()
                 .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
             let blob_identity = blob.content_identity();
-            let same_content = |captured: &&CapturedBlobForRow| {
+            let same_content = |captured: &CapturedBlobForRow| {
                 let captured_identity = captured.candidate.content_identity();
                 captured_identity.length() == blob_identity.length()
                     && captured_identity.sha256() == blob_identity.sha256()
