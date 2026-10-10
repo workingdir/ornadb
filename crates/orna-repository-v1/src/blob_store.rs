@@ -193,7 +193,7 @@ pub struct ChunkSpan {
 
 impl ChunkSpan {
     pub fn new(offset: u64, length: u64, sha256: [u8; 32]) -> Result<Self, BlobStoreError> {
-        if length == 0 || offset.checked_add(length).is_none() {
+        if length == 0 || length > GEAR_MAXIMUM as u64 || offset.checked_add(length).is_none() {
             return Err(BlobStoreError::InvalidChunkSpan);
         }
         Ok(Self {
@@ -529,5 +529,20 @@ impl std::error::Error for BlobStoreError {}
 impl From<GraphError> for BlobStoreError {
     fn from(error: GraphError) -> Self {
         Self::Native(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlobStoreError, ChunkSpan, GEAR_MAXIMUM};
+
+    #[test]
+    fn chunk_spans_enforce_the_gear_maximum() {
+        let digest = [0; 32];
+        assert!(ChunkSpan::new(0, GEAR_MAXIMUM as u64, digest).is_ok());
+        assert!(matches!(
+            ChunkSpan::new(0, GEAR_MAXIMUM as u64 + 1, digest),
+            Err(BlobStoreError::InvalidChunkSpan)
+        ));
     }
 }
