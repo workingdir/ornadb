@@ -6866,7 +6866,7 @@ mod persisted_orp_tests {
     }
 
     #[test]
-    fn publication_transaction_rejected_callback_or_pin_leaves_no_admitted_row() {
+    fn publication_transaction_keeps_capture_closure_pinned_until_rejected_callback_cleanup() {
         let (directory, graph) = capture_test_context();
         let scope = graph.open_read_scope().expect("owner read scope");
         let payload = b"candidate rejected by shared publication callback";
@@ -6877,8 +6877,28 @@ mod persisted_orp_tests {
             .protect_captured_blob(captured, &scope)
             .expect("protect complete OGB-2 closure");
         let original_pin_ref = pin.protected_ref.clone();
+        let descriptor_oid = pin.descriptor_oid.to_hex();
+        let reference = AdmittedBlobReference {
+            context: pin.context,
+            database_id: pin.database_id,
+            owner_id: pin.owner_id,
+            snapshot_id: pin.snapshot_id,
+            descriptor_oid: pin.descriptor_oid.clone(),
+            identity: pin.identity,
+        };
+        let closure_scope = graph.open_read_scope().expect("closure verification scope");
+        let closure_oids = graph
+            .verify_full_blob(&reference, &closure_scope)
+            .expect("enumerate the complete captured Blob closure")
+            .into_iter()
+            .map(|oid| oid.to_hex())
+            .collect::<Vec<_>>();
+        assert!(closure_oids.contains(&descriptor_oid));
         assert!(fixture_ref_exists(directory.path(), &original_pin_ref));
         let key = TypedKey::Text("rejected".to_owned());
+        let callback_key = key.clone();
+        let callback_pin_ref = original_pin_ref.clone();
+        let worktree = directory.path().to_path_buf();
         let result = block_on(crate::commit_protected_blob_row(
             &graph,
             pin,
@@ -6886,7 +6906,60 @@ mod persisted_orp_tests {
             None,
             crate::ProtectedBlobRowInsert::new(key.clone()),
             move |candidate| async move {
-                assert_eq!(candidate.key(), &key);
+                assert_eq!(candidate.key(), &callback_key);
+                assert_eq!(
+                    candidate
+                        .protected_content_transfer()
+                        .descriptor_oid()
+                        .to_hex(),
+                    descriptor_oid
+                );
+                assert!(fixture_ref_exists(&worktree, &callback_pin_ref));
+                let refs = Command::new("git")
+                    .current_dir(&worktree)
+                    .args(["for-each-ref", "--format=%(refname)", "refs/orna/pins"])
+                    .output()
+                    .expect("list protected candidate refs");
+                assert!(refs.status.success());
+                let candidate_ref = std::str::from_utf8(&refs.stdout)
+                    .expect("ref names are UTF-8")
+                    .lines()
+                    .find(|reference| reference.contains("/scratch/row-"))
+                    .expect("candidate store-root ref")
+                    .to_owned();
+                assert!(fixture_ref_exists(&worktree, &candidate_ref));
+
+                let gc = Command::new("git")
+                    .current_dir(&worktree)
+                    .args(["gc", "--prune=now", "--quiet"])
+                    .output()
+                    .expect("run GC while publication is pending");
+                assert!(
+                    gc.status.success(),
+                    "git gc failed: {}",
+                    String::from_utf8_lossy(&gc.stderr)
+                );
+                for oid in &closure_oids {
+                    let object = Command::new("git")
+                        .current_dir(&worktree)
+                        .args(["cat-file", "-e", oid])
+                        .output()
+                        .expect("verify captured graph object after GC");
+                    assert!(
+                        object.status.success(),
+                        "protected closure object {oid} was collected"
+                    );
+                }
+                let candidate_root = candidate.store_root().to_hex();
+                let root = Command::new("git")
+                    .current_dir(&worktree)
+                    .args(["cat-file", "-e", &candidate_root])
+                    .output()
+                    .expect("verify candidate store root after GC");
+                assert!(
+                    root.status.success(),
+                    "protected candidate root was collected"
+                );
                 Err::<(), _>("publication rejected")
             },
         ));
