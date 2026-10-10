@@ -434,23 +434,16 @@ fn git_listing_route(
     match request.path.as_str() {
         "/" => Some(commit_log_page(root, identity)),
         "/devtools/tables" => Some(devtools_tables_page(root)),
-        "/playground/theme.css" => Some(playground_style(
-            root,
-            Path::new("playground/web-ui/src/theme.css"),
-            &request.query,
+        "/devtools/serve-home.mjs" => Some(Response::new(
+            200,
+            "text/javascript; charset=utf-8",
+            include_str!("serve_home.mjs").as_bytes().to_vec(),
         )),
-        "/playground/layout.css" => Some(playground_style(
-            root,
-            Path::new("playground/web-ui/src/layout.css"),
-            &request.query,
+        "/devtools/presentation.mjs" => Some(Response::new(
+            200,
+            "text/javascript; charset=utf-8",
+            include_str!("serve_presentation.mjs").as_bytes().to_vec(),
         )),
-        "/playground/catalogue" | "/playground/catalogue/" => {
-            Some(playground_catalogue_page(root, identity, &request.query))
-        }
-        "/playground" => Some(playground_asset(root, identity, &request.path)),
-        path if path.starts_with("/playground/") => {
-            Some(playground_asset(root, identity, &request.path))
-        }
         path if path.starts_with("/tree/") => Some(tree_page(root, &path[6..])),
         path if path.starts_with("/blob/") => Some(blob_page(root, &path[6..])),
         _ => None,
@@ -480,20 +473,6 @@ fn commit_log_page(root: &Path, identity: RuntimeIdentity) -> Response {
         InspectionNode::List(branch_rows)
     };
     let content = InspectionNode::Record(vec![
-        (
-            "Database tables".into(),
-            InspectionNode::Link {
-                label: "Browse database tables".into(),
-                href: "/devtools/tables".into(),
-            },
-        ),
-        (
-            "Playground".into(),
-            InspectionNode::Link {
-                label: "Open the Orna playground".into(),
-                href: "/playground/".into(),
-            },
-        ),
         ("Recent commits".into(), commits),
         ("Branches".into(), branches),
     ]);
@@ -1869,7 +1848,7 @@ fn render_home_document(identity: RuntimeIdentity, content: &InspectionNode) -> 
         html_escape(&database)
     ));
     page.push_str(&format!(
-        "</main><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/playground/assets/serve-home.mjs\"></script></body></html>",
+        "</main><script type=\"application/json\" id=\"run-events-source\">{}</script><script type=\"module\" src=\"/devtools/serve-home.mjs\"></script></body></html>",
         json_string(LIVE_RUN_EVENTS_WATCH_SOURCE)
     ));
     Response::new(200, "text/html; charset=utf-8", page.into_bytes())
@@ -2584,18 +2563,27 @@ mod tests {
         assert_eq!(home.status, 200);
         let home = String::from_utf8(home.body).expect("commit listing HTML");
         assert!(home.contains("No commits in this repository."));
-        assert!(home.contains("Open the Orna playground"));
-        assert!(home.contains("href=\"/playground/\""));
+        assert!(!home.contains("playground"));
         assert!(home.contains("id=\"live-repl\""));
         assert!(home.contains("id=\"repl-source\""));
         assert!(home.contains(">serve()</textarea>"));
         assert!(home.contains("id=\"live-presentation\""));
         assert!(home.contains("id=\"run-events-source\""));
-        assert!(home.contains("src=\"/playground/assets/serve-home.mjs\""));
+        assert!(home.contains("src=\"/devtools/serve-home.mjs\""));
         assert!(home.contains("orna/serve/run-events/v1"));
         assert!(!home.contains("new WebSocket(endpoint"));
         assert!(!home.contains("/api/query"));
         assert!(!home.contains("wasm"));
+        let home_module = listing_page(directory.path(), "/devtools/serve-home.mjs");
+        assert_eq!(home_module.status, 200);
+        assert!(String::from_utf8(home_module.body)
+            .expect("serve home module")
+            .contains("/devtools/presentation.mjs"));
+        let presentation = listing_page(directory.path(), "/devtools/presentation.mjs");
+        assert_eq!(presentation.status, 200);
+        assert!(String::from_utf8(presentation.body)
+            .expect("generic presentation module")
+            .contains("export class LiveSession"));
         let query = host_route(
             directory.path(),
             identity,
