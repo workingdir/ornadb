@@ -1561,6 +1561,17 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
     // `--limit` bounds the listed window exactly as the graph range does.
     let limited = query_json(directory.path(), &[&relation, "--limit", "1"]);
     assert_eq!(limited["listings"].as_array().unwrap().len(), 1);
+    assert_eq!(limited["rows"].as_u64(), Some(1));
+    assert_eq!(
+        listing_keys(&limited),
+        vec!["image"],
+        "the bound returns the first committed key, not an arbitrary row"
+    );
+    assert_eq!(limited["media_payload_bytes_read"].as_u64(), Some(0));
+    assert!(
+        limited["native_objects_read"].as_u64().unwrap() > 0,
+        "bounded query reads committed graph objects without fetching media payloads"
+    );
 
     // The human listing states the same measurement on its summary line.
     let human = run_query(directory.path(), &[&relation]);
