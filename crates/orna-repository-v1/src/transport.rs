@@ -306,7 +306,7 @@ impl Repository {
             continuity.push(reference);
         }
         let request = PushRequest::new(remote, branch, continuity)?;
-        self.push(&request)
+        self.push_locked(&request)
     }
 }
 
@@ -792,6 +792,12 @@ impl Repository {
     /// allocator ref is isolated in the first push when present, so a later
     /// branch update cannot become visible before its allocation watermark.
     pub fn push(&self, request: &PushRequest) -> Result<(), FetchError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.push_locked(request)
+    }
+
+    /// Pushes with the repository coordination lock already held.
+    fn push_locked(&self, request: &PushRequest) -> Result<(), FetchError> {
         if !self
             .remote_names()?
             .iter()
@@ -801,26 +807,23 @@ impl Repository {
         }
         let branch_ref = format!("refs/heads/{}", request.branch());
         let mut internal = request.internal.clone();
-        internal.sort_by_key(|reference| {
-            if reference == ALLOCATOR_REF {
-                0
-            } else {
-                1
-            }
-        });
+        internal.sort_by_key(|reference| if reference == ALLOCATOR_REF { 0 } else { 1 });
         let mut ordered = internal
             .into_iter()
             .map(|reference| format!("{reference}:{reference}"))
             .collect::<Vec<_>>();
         ordered.push(format!("{branch_ref}:{branch_ref}"));
-        let _lock = self.acquire_coordination_lock()?;
         self.preflight_atomic(request.remote(), &branch_ref)?;
         let allocator = ordered
             .iter()
             .position(|refspec| refspec == &format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}"));
         if let Some(index) = allocator {
             let allocator_ref = ordered.remove(index);
-            self.push_refspecs(request.remote(), std::slice::from_ref(&allocator_ref), false)?;
+            self.push_refspecs(
+                request.remote(),
+                std::slice::from_ref(&allocator_ref),
+                false,
+            )?;
         }
         self.push_refspecs(request.remote(), &ordered, true)
     }
