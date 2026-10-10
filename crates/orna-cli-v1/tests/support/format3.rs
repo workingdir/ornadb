@@ -76,10 +76,7 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
     git(root, &["init", "--quiet"]);
-    git(
-        root,
-        &["config", "user.email", "kieran@drewett.dev"],
-    );
+    git(root, &["config", "user.email", "kieran@drewett.dev"]);
     git(root, &["config", "user.name", "kierandrewett"]);
     git(root, &["config", "commit.gpgsign", "false"]);
 
