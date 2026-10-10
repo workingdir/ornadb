@@ -91,6 +91,17 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
     git_output(source.path(), &["add", "tracked.txt"]);
     fs::write(source.path().join("tracked.txt"), b"unstaged bytes\n").unwrap();
     fs::write(source.path().join("new-source.txt"), b"untracked source\n").unwrap();
+    fs::write(source.path().join("new-executable.sh"), b"#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(
+            source.path().join("new-executable.sh"),
+            fs::Permissions::from_mode(0o751),
+        )
+        .unwrap();
+    }
     fs::write(source.path().join(".gitignore"), "ignored/\n").unwrap();
     fs::create_dir_all(source.path().join("ignored")).unwrap();
     fs::write(
@@ -214,6 +225,20 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
         fs::read(copy.destination().join("new-source.txt")).unwrap(),
         b"untracked source\n"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(
+            fs::metadata(copy.destination().join("new-executable.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o751,
+            "copying dirty source content preserves executable permissions"
+        );
+    }
     assert_eq!(
         fs::read(copy.destination().join("ignored/data.bin")).unwrap(),
         b"ignored source bytes"
