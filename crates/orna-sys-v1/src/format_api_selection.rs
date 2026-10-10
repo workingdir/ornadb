@@ -100,6 +100,11 @@ pub enum SystemCallableAvailability {
     AllRecordedContexts,
     HistoricalReadersOnly,
     FinalFormat3,
+    RestrictedFormats {
+        original_100: bool,
+        previous_110_draft: bool,
+        final_3: bool,
+    },
 }
 
 impl SystemCallableAvailability {
@@ -108,6 +113,43 @@ impl SystemCallableAvailability {
             Self::AllRecordedContexts => true,
             Self::HistoricalReadersOnly => context.is_historical_reader(),
             Self::FinalFormat3 => context.format().is_final(),
+            Self::RestrictedFormats {
+                original_100,
+                previous_110_draft,
+                final_3,
+            } => match context.format() {
+                RepositoryFormat::Original100 => original_100,
+                RepositoryFormat::Previous110Draft => previous_110_draft,
+                RepositoryFormat::Final3 => final_3,
+            },
+        }
+    }
+}
+
+fn callable_availability(contexts: Option<&[&str]>) -> SystemCallableAvailability {
+    let Some(contexts) = contexts else {
+        return SystemCallableAvailability::AllRecordedContexts;
+    };
+    let mut formats = [false; 3];
+    for context in contexts {
+        let index = match *context {
+            "format-1" => 0,
+            "format-2" => 1,
+            "format-3" => 2,
+            _ => panic!("invalid generated sys callable context: {context}"),
+        };
+        formats[index] = true;
+    }
+    match formats {
+        [true, true, true] => SystemCallableAvailability::AllRecordedContexts,
+        [true, true, false] => SystemCallableAvailability::HistoricalReadersOnly,
+        [false, false, true] => SystemCallableAvailability::FinalFormat3,
+        [original_100, previous_110_draft, final_3] => {
+            SystemCallableAvailability::RestrictedFormats {
+                original_100,
+                previous_110_draft,
+                final_3,
+            }
         }
     }
 }
@@ -180,23 +222,7 @@ impl SystemApiSelection {
             .functions
             .into_iter()
             .map(|function| {
-                let availability = match function.contexts.as_deref() {
-                    None => SystemCallableAvailability::AllRecordedContexts,
-                    Some(contexts)
-                        if contexts
-                            .iter()
-                            .all(|context| matches!(*context, "format-1" | "format-2")) =>
-                    {
-                        SystemCallableAvailability::HistoricalReadersOnly
-                    }
-                    Some(contexts) if contexts.len() == 1 && contexts[0] == "format-3" => {
-                        SystemCallableAvailability::FinalFormat3
-                    }
-                    Some(contexts) => panic!(
-                        "invalid generated sys callable contexts for {}: {contexts:?}",
-                        function.name
-                    ),
-                };
+                let availability = callable_availability(function.contexts.as_deref());
                 let effect = match function.effect {
                     "read" => SystemEffect::Read,
                     "invoke" => SystemEffect::Invoke,
@@ -347,6 +373,27 @@ mod tests {
             ReaderContext::Final20261005
         )
         .is_none());
+    }
+
+    #[test]
+    fn explicit_context_sets_admit_only_the_recorded_formats() {
+        let (original, draft) = historical_contexts();
+        let final_context = final_context();
+
+        let original_only = callable_availability(Some(&["format-1"]));
+        assert!(original_only.admits(original));
+        assert!(!original_only.admits(draft));
+        assert!(!original_only.admits(final_context));
+
+        let original_and_final = callable_availability(Some(&["format-1", "format-3"]));
+        assert!(original_and_final.admits(original));
+        assert!(!original_and_final.admits(draft));
+        assert!(original_and_final.admits(final_context));
+
+        let all_formats = callable_availability(Some(&["format-1", "format-2", "format-3"]));
+        assert!(all_formats.admits(original));
+        assert!(all_formats.admits(draft));
+        assert!(all_formats.admits(final_context));
     }
 
     #[test]
