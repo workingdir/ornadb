@@ -8700,6 +8700,29 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
         // migration published, so a copy that silently reused one for the other
         // is detectable here.
         assert_ne!(tree_identity, working_tree_identity);
+        // The whole copied tree includes untracked and ignored paths, not only
+        // entries already present in the clone's Git index.
+        assert!(copy.working_tree_entries() > 0);
+        fs::write(source.path().join("ignored/payload.bin"), b"changed ignored payload")
+            .unwrap();
+        let changed_copy =
+            orna_repository_v1::migration_copy::prepare_format3_migration(
+                &repo,
+                &directory.path().join("migrated-after-ignored-change"),
+                continuity.clone(),
+                defaults,
+            )
+            .unwrap();
+        assert_ne!(
+            copy.working_tree_identity(),
+            changed_copy.working_tree_identity(),
+            "ignored user data participates in the copied-tree identity"
+        );
+        assert_eq!(
+            fs::read(source.path().join("ignored/payload.bin")).unwrap(),
+            b"changed ignored payload",
+            "preparing a second copy leaves source ignored work untouched"
+        );
 
         // The prepared journal binds the copy's legacy head to the format-3
         // candidate and carries both migration coordinates, so the migration is
