@@ -629,13 +629,16 @@ impl NativeGraphContext {
             let mut nodes = BTreeSet::new();
             nodes.insert(root.clone());
             let mut payload = BTreeSet::new();
+            let mut validated_contexts = BTreeSet::new();
             collect_ordered_index_objects_with(
                 &mut read_node,
                 &root_node,
+                &root,
                 &domain,
                 None,
                 &mut nodes,
                 &mut payload,
+                &mut validated_contexts,
             )?;
             let limit = usize::try_from(expected_count).unwrap_or(usize::MAX);
             let mut raw = Vec::new();
@@ -5990,15 +5993,24 @@ fn ordered_token_anchor(height: u8, token: &[u8]) -> Result<bool, GraphError> {
 fn collect_ordered_index_objects_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     node: &NodeData,
+    node_oid: &NativeOid,
     expected_domain: &[u8],
     expected_height: Option<u8>,
     nodes: &mut BTreeSet<NativeOid>,
     payload: &mut BTreeSet<NativeOid>,
+    // One walk has a single fixed domain; include height so a shared OID
+    // reached at another level is validated again under that parent context.
+    validated_contexts: &mut BTreeSet<(NativeOid, Option<u8>)>,
 ) -> Result<(), GraphError> {
+    let context = (node_oid.clone(), expected_height);
     match node {
         NodeData::OrderedLeaf { domain, entries } => {
             if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
                 return Err(GraphError::InvalidDomain);
+            }
+            check_leaf_key_order(domain, entries)?;
+            if !validated_contexts.insert(context) {
+                return Ok(());
             }
             for entry in entries {
                 for dependency in leaf_value_dependencies(domain, &entry.value)? {
@@ -6019,18 +6031,44 @@ fn collect_ordered_index_objects_with(
             {
                 return Err(GraphError::InvalidDomain);
             }
+            check_branch_fence_order(domain, entries)?;
+            if !validated_contexts.insert(context) {
+                return Ok(());
+            }
+            let mut previous_fence: Option<crate::row_store::TypedKey> = None;
             for entry in entries {
-                if nodes.insert(entry.child.clone()) {
-                    let child = read_node(&entry.child)?;
-                    collect_ordered_index_objects_with(
-                        read_node,
-                        &child,
-                        expected_domain,
-                        Some(height - 1),
-                        nodes,
-                        payload,
-                    )?;
+                let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                let child = read_node(&entry.child)?;
+                let bounds = ordered_node_bounds_with(
+                    read_node,
+                    child.clone(),
+                    expected_domain,
+                    Some(*height - 1),
+                )?;
+                if bounds.0 != entry.row_count
+                    || bounds.2 != fence
+                    || previous_fence
+                        .as_ref()
+                        .is_some_and(|previous| bounds.1 <= *previous)
+                {
+                    return Err(GraphError::InvalidCount(
+                        usize::try_from(bounds.0).unwrap_or(usize::MAX),
+                    ));
                 }
+                let child_oid = entry.child.clone();
+                nodes.insert(child_oid.clone());
+                collect_ordered_index_objects_with(
+                    read_node,
+                    &child,
+                    &child_oid,
+                    expected_domain,
+                    Some(*height - 1),
+                    nodes,
+                    payload,
+                    validated_contexts,
+                )?;
+                previous_fence = Some(fence);
             }
             Ok(())
         }
@@ -7093,6 +7131,71 @@ mod persisted_orp_tests {
             .expect("candidate cleanup identity");
         assert!(fixture_ref_exists(directory.path(), &pin_ref));
         assert!(fixture_ref_exists(directory.path(), candidate_ref));
+    }
+
+    #[test]
+    fn row_index_collection_checks_each_shared_child_parent_fence() {
+        let domain = rows_domain(&[0x11; 16], &[0x22; 32]);
+        let key_a = TypedKey::Text("a".to_owned());
+        let key_b = TypedKey::Text("b".to_owned());
+        let key_c = TypedKey::Text("c".to_owned());
+        let leaf = NodeData::OrderedLeaf {
+            domain: domain.clone(),
+            entries: vec![
+                OrderedLeafEntry {
+                    key: key_a.canonical_bytes().expect("canonical key"),
+                    value: vec![0x80],
+                },
+                OrderedLeafEntry {
+                    key: key_b.canonical_bytes().expect("canonical key"),
+                    value: vec![0x80],
+                },
+            ],
+        };
+        let child_oid = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x33; 20])
+            .expect("valid child object id");
+        let root_oid = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x44; 20])
+            .expect("valid root object id");
+        let branch = NodeData::OrderedBranch {
+            domain: domain.clone(),
+            height: 1,
+            entries: vec![
+                OrderedBranchEntry {
+                    inclusive_max_key: key_b.canonical_bytes().expect("canonical fence"),
+                    child: child_oid.clone(),
+                    row_count: 2,
+                },
+                OrderedBranchEntry {
+                    inclusive_max_key: key_c.canonical_bytes().expect("canonical fence"),
+                    child: child_oid.clone(),
+                    row_count: 2,
+                },
+            ],
+        };
+        let mut read_node = |oid: &NativeOid| {
+            if oid == &child_oid {
+                Ok(leaf.clone())
+            } else {
+                Err(GraphError::ContextMismatch)
+            }
+        };
+        let mut nodes = BTreeSet::from([root_oid.clone()]);
+        let mut payload = BTreeSet::new();
+        let mut validated_contexts = BTreeSet::new();
+
+        assert!(matches!(
+            collect_ordered_index_objects_with(
+                &mut read_node,
+                &branch,
+                &root_oid,
+                &domain,
+                None,
+                &mut nodes,
+                &mut payload,
+                &mut validated_contexts,
+            ),
+            Err(GraphError::InvalidCount(2))
+        ));
     }
 
     #[test]
