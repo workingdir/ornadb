@@ -79,4 +79,4 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Test the orna-cli-v1 integration suite
-        run: cargo test --locked -p orna-cli-v1 -- --nocapture
+        run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture

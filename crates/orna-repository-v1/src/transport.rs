@@ -32,6 +32,11 @@ const MAX_FETCH_REFS: usize = 4096;
 /// the process there so a supervising test can kill it deterministically.
 const FAULT_INJECTION_HOLD_ENV: &str = "ORNA_FAULT_INJECTION_FETCH_HOLD_SECONDS";
 
+/// The owner-scoped private edit and capture pins an ordinary push keeps local.
+/// These refs record one owner's in-flight protected content, so publishing
+/// them would expose private pins (`ORNA-GIT-008`).
+const PRIVATE_PIN_REF_PREFIX: &str = "refs/orna/pins/";
+
 /// One ordinary branch or tag requested from a configured remote.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RequestedRef {
@@ -214,6 +219,94 @@ impl Repository {
             witnesses.push(RequiredInternalRef::new(reference, object_id));
         }
         Ok(witnesses)
+    }
+
+    /// The local `refs/orna/*` references an ordinary push publishes, paired
+    /// with the object ID each currently names.
+    ///
+    /// Allocator and consumer checkpoint refs are the continuity refs an
+    /// ordinary push synchronizes, while every private edit and capture pin
+    /// under [`PRIVATE_PIN_REF_PREFIX`] MUST NOT be exposed by an ordinary push
+    /// (`ORNA-GIT-008`). A repository with no local Orna refs publishes no
+    /// continuity ref rather than synthesizing one.
+    pub fn ordinary_push_refs(&self) -> Result<Vec<(OrnaInternalRef, String)>, FetchError> {
+        let mut command = self.observer_command();
+        command.args([
+            "for-each-ref",
+            "--sort=refname",
+            "--count=4097",
+            "--format=%(objectname)%09%(refname)",
+            "refs/orna/",
+        ]);
+        let output = command
+            .output()
+            .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
+        if !output.status.success() {
+            return Err(FetchError::Repository(
+                RepositoryError::GitOperationFailed,
+            ));
+        }
+        let text = String::from_utf8(output.stdout).map_err(|_| FetchError::InvalidContinuity)?;
+        let text = text.strip_suffix('\n').unwrap_or(&text);
+        let mut selected = Vec::new();
+        for record in text.split('\n') {
+            if record.is_empty() {
+                continue;
+            }
+            let (object_id, reference) = record
+                .split_once('\t')
+                .ok_or(FetchError::InvalidContinuity)?;
+            if reference.starts_with(PRIVATE_PIN_REF_PREFIX) {
+                continue;
+            }
+            let reference = OrnaInternalRef::new(reference.to_owned())
+                .map_err(|_| FetchError::InvalidContinuity)?;
+            selected.push((reference, object_id.to_owned()));
+        }
+        Ok(selected)
+    }
+
+    /// Publishes the continuity refs [`Repository::ordinary_push_refs`] selects
+    /// together with one ordinary branch ref.
+    ///
+    /// The selected continuity refs are transferred by pushing `refs/orna/*`
+    /// directly, so the remote and the local repository agree on each ref by
+    /// name. Every selected continuity ref must already match on the remote:
+    /// a ref that the remote is missing or names with a different object ID is
+    /// refused as a conflict instead of being republished under a different
+    /// reachability, which is the rule a later fetch revalidates
+    /// (`ORNA-GIT-008`).
+    pub fn push_ordinary_with_local_continuity(
+        &self,
+        remote: impl Into<String>,
+        branch: impl Into<String>,
+    ) -> Result<(), FetchError> {
+        let remote = remote.into();
+        let branch = branch.into();
+        if !valid_remote_name(&remote) || !valid_branch_name(&branch) {
+            return Err(FetchError::InvalidRemote);
+        }
+        let _lock = self.acquire_coordination_lock()?;
+        let selected = self.ordinary_push_refs()?;
+        let mut continuity = Vec::with_capacity(selected.len());
+        for (reference, object_id) in selected {
+            if object_id.len() != self.native_object_id_length()? {
+                return Err(FetchError::InvalidContinuity);
+            }
+            let advertised = advertise(
+                self,
+                &remote,
+                std::slice::from_ref(&reference.as_str().to_owned()),
+                object_id.len(),
+            )?;
+            match advertised.get(reference.as_str()) {
+                Some(remote_id) if remote_id.eq_ignore_ascii_case(&object_id) => {}
+                _ => return Err(FetchError::RefConflict),
+            }
+            continuity.push(reference);
+        }
+        let request = PushRequest::new(remote, branch, continuity)?;
+        self.push(&request)
     }
 }
 
@@ -1625,6 +1718,57 @@ mod tests {
             fetched_object_on_disk(&objects, &head),
             "the killed fetch must leave the durable bytes its barrier synced"
         );
+    }
+
+    #[test]
+    fn ordinary_push_refs_selects_continuity_refs_and_keeps_private_pins_local() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        fs::create_dir(&local).unwrap();
+        git(root.path(), &["init", "-b", "main", local.to_str().unwrap()]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("state.txt"), "allocator state\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "initial"]);
+        let head = git(&local, &["rev-parse", "HEAD"]);
+        git(&local, &["update-ref", ALLOCATOR_REF, &head]);
+        git(
+            &local,
+            &["update-ref", "refs/orna/checkpoints/0123456789abcdef", &head],
+        );
+        git(
+            &local,
+            &[
+                "update-ref",
+                "refs/orna/pins/0123456789abcdef/scratch/row-1",
+                &head,
+            ],
+        );
+        git(
+            &local,
+            &[
+                "update-ref",
+                "refs/orna/pins/ffffffffffffffff/pending/row-2",
+                &head,
+            ],
+        );
+        let repository = Repository::discover(&local).unwrap();
+        let selected = repository.ordinary_push_refs().unwrap();
+        let names = selected
+            .iter()
+            .map(|(reference, _)| reference.as_str().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                ALLOCATOR_REF.to_owned(),
+                "refs/orna/checkpoints/0123456789abcdef".to_owned(),
+            ],
+            "continuity refs are selected and no private pin ref is exposed"
+        );
+        assert_eq!(selected[0].1, head, "each ref keeps its own object ID");
     }
 
     #[test]
