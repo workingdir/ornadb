@@ -5577,19 +5577,13 @@ fn find_ordered_entry_with(
             {
                 return Err(GraphError::InvalidDomain);
             }
-            let bounds = ordered_node_bounds_with(
-                read_node,
-                NodeData::OrderedBranch {
-                    domain: domain.clone(),
-                    height,
-                    entries: entries.clone(),
-                },
-                expected_domain,
-                expected_height,
-            )?;
-            if lower_exclusive.is_some_and(|lower| bounds.1 <= *lower) {
-                return Err(GraphError::NonCanonicalData);
-            }
+            // The caller proved this node's minimum sorts above the lower
+            // exclusive bound when it descended here, so a point lookup does
+            // not recompute whole-branch bounds: it validates each child it
+            // probes and stops at the first child that answers. Recomputing
+            // them would read the first and last descendant of every level,
+            // which is what made a lookup on a deep index cost the whole
+            // index rather than the path to the key.
             let mut previous_fence = None;
             for entry in &entries {
                 let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
@@ -5600,27 +5594,38 @@ fn find_ordered_entry_with(
                 {
                     return Err(GraphError::NonCanonicalData);
                 }
-                // A fence is only a pruning hint after its child proves it.
-                // Validate every child visited before or at the search fence;
-                // otherwise a lying middle fence can hide a matching key.
-                let child = read_node(&entry.child)?;
-                let child_bounds = ordered_node_bounds_with(
-                    read_node,
-                    child.clone(),
-                    expected_domain,
-                    Some(height - 1),
-                )?;
-                if child_bounds.0 != entry.row_count
-                    || child_bounds.2 != fence
-                    || previous_fence
-                        .as_ref()
-                        .is_some_and(|previous| child_bounds.1 <= *previous)
-                {
-                    return Err(GraphError::InvalidCount(
-                        usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
-                    ));
-                }
+                // A fence is the child's own inclusive maximum key, so a child
+                // whose fence sorts below the search key holds no key at or
+                // above it and is left unread: a point lookup reads the path to
+                // the key plus the pages it probes, not the whole index. The
+                // probe is not cut short, so a miss in the child that covers
+                // the key continues into later children while their fences
+                // still reach it, and every child the probe descends into is
+                // validated before it is used. ORP-1 fixes the child ranges as
+                // nonoverlapping, so a fence that lies about its child is a
+                // malformed node, and probing the children the key reaches is
+                // what detects it.
                 if key <= &fence {
+                    // A fence is only a pruning hint after its child proves
+                    // it: validate the child this search descends into, and
+                    // reject a range that overlaps the previous child.
+                    let child = read_node(&entry.child)?;
+                    let child_bounds = ordered_node_bounds_with(
+                        read_node,
+                        child.clone(),
+                        expected_domain,
+                        Some(height - 1),
+                    )?;
+                    if child_bounds.0 != entry.row_count
+                        || child_bounds.2 != fence
+                        || previous_fence
+                            .as_ref()
+                            .is_some_and(|previous| child_bounds.1 <= *previous)
+                    {
+                        return Err(GraphError::InvalidCount(
+                            usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
+                        ));
+                    }
                     if let Some(found) = find_ordered_entry_with(
                         read_node,
                         child,
@@ -6045,40 +6050,54 @@ fn collect_ordered_range_with(
                 {
                     return Err(GraphError::NonCanonicalData);
                 }
-                let child = read_node(&entry.child)?;
-                let child_bounds = ordered_node_bounds_with(
-                    read_node,
-                    child.clone(),
-                    expected_domain,
-                    Some(height - 1),
-                )?;
-                if child_bounds.0 != entry.row_count
-                    || child_bounds.2 != fence
-                    || previous_fence
-                        .as_ref()
-                        .is_some_and(|previous| child_bounds.1 <= *previous)
-                {
-                    return Err(GraphError::InvalidCount(
-                        usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
-                    ));
-                }
-                let overlaps = lower_inclusive.is_none_or(|lower| child_bounds.2 >= *lower)
-                    && upper_exclusive.is_none_or(|upper| child_bounds.1 < *upper);
-                if overlaps {
-                    collect_ordered_range_with(
+                // A fence is the child's own inclusive maximum key, so a child
+                // whose fence sorts below the lower bound spans no key in the
+                // interval and is left unread. Children are ordered by fence,
+                // so the first child whose own minimum reaches the exclusive
+                // upper bound ends the range: it and every later child lie at
+                // or above it. That child is still read and validated, so the
+                // upper bound keeps its exact meaning, and every child the
+                // range does descend into is fully validated below. A bounded
+                // range therefore reads the pages that overlap its interval
+                // rather than the whole index.
+                let within_lower = lower_inclusive.is_none_or(|lower| fence >= *lower);
+                let mut past_upper = false;
+                if within_lower {
+                    let child = read_node(&entry.child)?;
+                    let child_bounds = ordered_node_bounds_with(
                         read_node,
-                        child,
+                        child.clone(),
                         expected_domain,
                         Some(height - 1),
-                        previous_fence.as_ref(),
-                        lower_inclusive,
-                        upper_exclusive,
-                        limit,
-                        output,
                     )?;
+                    if child_bounds.0 != entry.row_count
+                        || child_bounds.2 != fence
+                        || previous_fence
+                            .as_ref()
+                            .is_some_and(|previous| child_bounds.1 <= *previous)
+                    {
+                        return Err(GraphError::InvalidCount(
+                            usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
+                        ));
+                    }
+                    if upper_exclusive.is_some_and(|upper| child_bounds.1 >= *upper) {
+                        past_upper = true;
+                    } else {
+                        collect_ordered_range_with(
+                            read_node,
+                            child,
+                            expected_domain,
+                            Some(height - 1),
+                            previous_fence.as_ref(),
+                            lower_inclusive,
+                            upper_exclusive,
+                            limit,
+                            output,
+                        )?;
+                    }
                 }
                 previous_fence = Some(fence);
-                if output.len() >= limit {
+                if past_upper || output.len() >= limit {
                     break;
                 }
             }
