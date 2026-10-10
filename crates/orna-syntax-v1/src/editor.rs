@@ -20,7 +20,6 @@ pub const SOURCE_EXTENSION: &str = "orna";
 pub const SOURCE_SCOPE: &str = "source.orna";
 pub const LANGUAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const ARTIFACT_MANIFEST_PATH: &str = "editors/generated-artifacts.json";
-pub const MONACO_CONFIG_PATH: &str = "playground/web-ui/public/assets/orna-editor-config.json";
 pub const EDITOR_EMITTERS: &[&str] = &[
     "TextMate grammar and VSCode extension",
     "Tree-sitter grammar and package metadata",
@@ -31,7 +30,6 @@ pub const EDITOR_EMITTERS: &[&str] = &[
     "Emacs major mode and Eglot attachment",
     "Sublime syntax",
     "Semantic-token legend",
-    "Monaco language configuration and tokenizer",
 ];
 
 /// Stable editor-facing token classes from the 1.0.0 lexer.
@@ -372,7 +370,6 @@ pub fn generated_artifacts() -> Vec<GeneratedArtifact> {
             "editors/vscode/language-configuration.json",
             render_vscode_language_configuration(),
         ),
-        artifact(MONACO_CONFIG_PATH, render_monaco_config()),
         artifact(
             "editors/tree-sitter-orna/grammar.js",
             render_tree_sitter_grammar(),
@@ -527,82 +524,6 @@ fn keywords() -> Vec<&'static str> {
         .iter()
         .map(|keyword| keyword.spelling())
         .collect()
-}
-
-fn render_monaco_config() -> String {
-    let keyword_pattern = format!(r"\b(?:{})\b", regex_alternation(&keywords()));
-    let operator_pattern = format!("(?:{})", regex_alternation(OPERATORS));
-    let punctuation_pattern = format!("(?:{})", regex_alternation(PUNCTUATION));
-    let keywords_json = json_string_array(&keywords());
-    let operators_json = json_string_array(OPERATORS);
-    let language_configuration = render_vscode_language_configuration();
-    let root_rules = [
-        monarch_token(r"\s+", "white"),
-        monarch_token(
-            &format!("{}.*$", regex_escape(LINE_COMMENT_START)),
-            "comment",
-        ),
-        format!(
-            "[{}, {{ \"token\": \"comment\", \"next\": \"@comment\" }}]",
-            json_string(&regex_escape(BLOCK_COMMENT_START))
-        ),
-        format!(
-            "[{}, {{ \"token\": \"string.quote\", \"next\": \"@string\" }}]",
-            json_string(&STRING_DELIMITER.to_string())
-        ),
-        monarch_token(&keyword_pattern, "keyword"),
-        monarch_token(NUMBER_PATTERN, "number"),
-        format!(
-            "[{{ \"pattern\": {}, \"flags\": \"u\" }}, \"function\"]",
-            json_string(r"[\p{L}_$][\p{L}\p{N}_$]*(?=\s*\()")
-        ),
-        format!(
-            "[{{ \"pattern\": {}, \"flags\": \"u\" }}, \"identifier\"]",
-            json_string(r"[\p{L}_$][\p{L}\p{N}_$]*")
-        ),
-        monarch_token(&operator_pattern, "operator"),
-        monarch_token(&punctuation_pattern, "delimiter"),
-    ]
-    .join(",\n        ");
-    let comment_rules = [
-        monarch_token("[^*/]+", "comment"),
-        format!(
-            "[{}, {{ \"token\": \"comment\", \"next\": \"@pop\" }}]",
-            json_string(&regex_escape(BLOCK_COMMENT_END))
-        ),
-        monarch_token(r"[*/]", "comment"),
-    ]
-    .join(",\n        ");
-    let string_rules = [
-        monarch_token(r#"[^\\"]+"#, "string"),
-        monarch_token(r"\\.", "string.escape"),
-        format!(
-            "[{}, {{ \"token\": \"string.quote\", \"next\": \"@pop\" }}]",
-            json_string(&STRING_DELIMITER.to_string())
-        ),
-    ]
-    .join(",\n        ");
-
-    format!(
-        "{{\n  \"language\": {{ \"id\": {}, \"extensions\": [{}], \"aliases\": [\"Orna\", \"orna\"] }},\n  \"languageConfiguration\": {language_configuration},\n  \"monarchLanguage\": {{\n    \"defaultToken\": \"\",\n    \"tokenPostfix\": \".orna\",\n    \"keywords\": {keywords_json},\n    \"operators\": {operators_json},\n    \"tokenizer\": {{\n      \"root\": [\n        {root_rules}\n      ],\n      \"comment\": [\n        {comment_rules}\n      ],\n      \"string\": [\n        {string_rules}\n      ]\n    }}\n  }},\n  \"editorOptions\": {{ \"theme\": \"vs\", \"fontSize\": 14, \"tabSize\": 4, \"insertSpaces\": true, \"lineNumbers\": \"on\", \"minimap\": {{ \"enabled\": false }}, \"scrollBeyondLastLine\": false, \"wordWrap\": \"off\" }}\n}}\n",
-        json_string(LANGUAGE_ID),
-        json_string(&format!(".{SOURCE_EXTENSION}")),
-    )
-}
-
-fn monarch_token(pattern: &str, token: &str) -> String {
-    format!("[{}, {}]", json_string(pattern), json_string(token))
-}
-
-fn json_string_array(values: &[&str]) -> String {
-    format!(
-        "[{}]",
-        values
-            .iter()
-            .map(|value| json_string(value))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }
 
 fn json_string(value: &str) -> String {
