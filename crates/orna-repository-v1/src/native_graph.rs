@@ -2103,9 +2103,8 @@ impl NativeGraphContext {
         let mut written = BTreeSet::new();
         let new_relation_root = {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
-            let mut write_node = |node: &NodeData| {
-                self.write_capture_node(node, &mut written, scope.max_objects)
-            };
+            let mut write_node =
+                |node: &NodeData| self.write_capture_node(node, &mut written, scope.max_objects);
             replace_ordered_entry_with(
                 &mut read_node,
                 &mut write_node,
@@ -2150,7 +2149,6 @@ impl NativeGraphContext {
             let binding =
                 self.accept_protected_blob_pin_with_annotation(pin, media_type, suffix)?;
             let version = self.row_snapshot.version();
-            let count = version.row_count().ok_or(GraphError::ContextMismatch)?;
 
             let scope = self.open_read_scope()?;
             let key = mutation.key().clone();
@@ -2175,12 +2173,8 @@ impl NativeGraphContext {
             )?;
             let primary_root = maintenance.primary_root().clone();
             let row_count = maintenance.row_count();
-            let store_root = self.replace_relation_primary_root(
-                version,
-                &primary_root,
-                row_count,
-                &scope,
-            )?;
+            let store_root =
+                self.replace_relation_primary_root(version, &primary_root, row_count, &scope)?;
 
             let provisional_ref = format!(
                 "refs/orna/pins/{}/scratch/row-{}",
@@ -2267,6 +2261,7 @@ impl NativeGraphContext {
             || candidate.relation_id != *self.row_snapshot.version().relation_id()
             || candidate.schema_digest != *self.row_snapshot.version().schema().schema_digest()
             || candidate.primary_root.algorithm() != self.algorithm
+            || candidate.store_root.algorithm() != self.algorithm
         {
             return Err(GraphError::ContextMismatch);
         }
@@ -2280,23 +2275,14 @@ impl NativeGraphContext {
             scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
             Arc::clone(&scope.metadata_used),
         );
+        let domain = rows_domain_for_parts(&candidate.relation_id, &candidate.schema_digest);
         let node = self.read_native_node(&candidate.primary_root, scope, &mut objects)?;
-        let NodeData::OrderedLeaf { domain, entries } = node else {
-            return Err(GraphError::CandidateRequiresBranchRewrite);
-        };
-        if domain != rows_domain_for_parts(&candidate.relation_id, &candidate.schema_digest)
-            || entries.len() as u64 != candidate.row_count
-        {
-            return Err(GraphError::ContextMismatch);
-        }
-        for entry in entries {
-            let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
-                .map_err(|_| GraphError::NonCanonicalData)?;
-            if &entry_key == key {
-                return decode_candidate_blob_metadata(&entry.value, &candidate.transfer).map(Some);
-            }
-        }
-        Ok(None)
+        validate_ordered_root_node(&node, &domain, candidate.row_count)?;
+        let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+        let entry = find_ordered_entry_with(&mut read_node, node, &domain, None, None, key)?;
+        entry
+            .map(|entry| decode_candidate_blob_metadata(&entry.value, &candidate.transfer))
+            .transpose()
     }
 
     fn finish_protection(
@@ -6403,7 +6389,6 @@ mod persisted_orp_tests {
         let algorithm = GitHashAlgorithm::Sha1;
         let database_id = [0x31; 16];
         let relation_id = [0x32; 16];
-        let store_root = NativeOid::new(algorithm, [0x33; 20]).expect("store-root fixture ID");
         let primary_root = fixture_git_node(
             root,
             &NodeData::OrderedLeaf {
@@ -6411,6 +6396,30 @@ mod persisted_orp_tests {
                 entries: Vec::new(),
             },
         );
+        let relation_domain = canonical_value_bytes(&CborValue::Array(vec![
+            CborValue::Text("relations".to_owned()),
+            CborValue::Bytes(database_id.to_vec()),
+        ]));
+        let relation_key = TypedKey::Bytes(relation_id.to_vec())
+            .canonical_bytes()
+            .expect("canonical relation key");
+        let relation_value = canonical_value_bytes(&CborValue::Array(vec![
+            CborValue::Bytes(schema_oid.as_bytes().to_vec()),
+            CborValue::Bytes(primary_root.as_bytes().to_vec()),
+            CborValue::Null,
+            CborValue::Unsigned(0),
+        ]));
+        let relation_map = fixture_git_node(
+            root,
+            &NodeData::OrderedLeaf {
+                domain: relation_domain,
+                entries: vec![OrderedLeafEntry {
+                    key: relation_key,
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root = fixture_git_node(root, &NodeData::StoreRoot { relation_map });
         let schema_generation = crate::row_store::SchemaGeneration::issue(
             database_id,
             relation_id,
@@ -6945,7 +6954,40 @@ mod persisted_orp_tests {
 
     #[test]
     fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
-        let (directory, graph) = capture_test_context();
+        let (directory, mut graph) = capture_test_context();
+        let seed_scope = graph.open_read_scope().expect("owner seed scope");
+        let seed_value = RowValue::decode_canonical_fields(vec![0x80])
+            .expect("empty canonical fixture row");
+        let mutations: Vec<_> = (0..300)
+            .map(|index| RowIndexMutation::Insert {
+                key: TypedKey::Text(format!("row-{index:04}")),
+                value: seed_value.clone(),
+            })
+            .collect();
+        let seeded = graph
+            .maintain_row_index(&mutations, &seed_scope)
+            .expect("build a branched row map");
+        let version = graph.row_snapshot.version();
+        let seeded_store_root = graph
+            .replace_relation_primary_root(
+                version,
+                seeded.primary_root(),
+                seeded.row_count(),
+                &seed_scope,
+            )
+            .expect("publish seeded row root into relation map");
+        let seeded_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            seeded_store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            *version.relation_id(),
+        )
+        .expect("load branched row map from format-3 StoreRoot");
+        graph.store_root = seeded_store_root;
+        graph.row_snapshot = seeded_snapshot;
+        drop(seed_scope);
         let scope = graph.open_read_scope().expect("owner read scope");
         let payload = b"metadata lookup must not hydrate this payload";
         let captured = graph
@@ -6956,7 +6998,7 @@ mod persisted_orp_tests {
             .expect("protect complete OGB-2 closure");
         let identity = pin.content_identity();
         let pin_id = *pin.pin_id();
-        let key = TypedKey::Text("blob-1".to_owned());
+        let key = TypedKey::Text("row-0150-z".to_owned());
         let callback_key = key.clone();
         let reference = "refs/orna/test-publications/blob-1".to_owned();
         let durable_reference = reference.clone();
@@ -6976,7 +7018,7 @@ mod persisted_orp_tests {
                     .args([
                         "update-ref",
                         &durable_reference,
-                        &candidate.primary_root().to_hex(),
+                        &candidate.store_root().to_hex(),
                     ])
                     .output()
                     .expect("persist candidate through caller commit callback");
@@ -6988,6 +7030,28 @@ mod persisted_orp_tests {
         assert_eq!(receipt, "committed");
         assert!(fixture_ref_exists(directory.path(), &reference));
         assert!(pending_refs(directory.path()).is_empty());
+        let committed = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            candidate.store_root().clone(),
+            candidate.database_id().to_owned(),
+            graph.snapshot_id,
+            *candidate.relation_id(),
+        )
+        .expect("durable StoreRoot resolves the inserted relation row map");
+        assert_eq!(committed.version().primary_root(), candidate.primary_root());
+        assert_eq!(committed.version().row_count(), Some(301));
+        let mut root_objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let candidate_root = graph
+            .read_native_node(candidate.primary_root(), &scope, &mut root_objects)
+            .expect("read branched candidate root");
+        assert!(matches!(candidate_root, NodeData::OrderedBranch { .. }));
 
         let scope = graph.open_read_scope().expect("fresh owner read scope");
         let metadata = graph
