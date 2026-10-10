@@ -2194,6 +2194,7 @@ pub struct VfsTableRowReplacement {
     table: RuntimeTableIdentity,
     key: Vec<u8>,
     value: Option<Vec<u8>>,
+    content_pins: Vec<ProtectedContentPin>,
 }
 
 impl VfsTableRowReplacement {
@@ -2210,6 +2211,7 @@ impl VfsTableRowReplacement {
             table,
             key: mutation.key().to_vec(),
             value,
+            content_pins: Vec::new(),
         })
     }
 
@@ -2235,14 +2237,31 @@ impl VfsTableRowReplacement {
         self.value.as_deref()
     }
 
+    /// Carries graph-issued native content pins with the saved row so the
+    /// durable transaction can atomically attach them to its mutation and
+    /// accepted-pin manifest (VFS-003, VFS-021).
+    pub fn with_protected_content_pin(
+        mut self,
+        pin: ProtectedContentPin,
+    ) -> Result<Self, RuntimeError> {
+        self.content_pins.push(pin);
+        self.mutation()?;
+        Ok(self)
+    }
+
     pub fn mutation(&self) -> Result<TableMutation, RuntimeError> {
-        TableMutation::new(
+        let mutation = TableMutation::new(
             self.mutation_id,
             self.table.table(),
             self.key.clone(),
             self.value.clone(),
         )
-        .map(|mutation| mutation.with_table_object_id(self.table.object_id()))
+        .map(|mutation| mutation.with_table_object_id(self.table.object_id()))?;
+        self.content_pins
+            .iter()
+            .try_fold(mutation, |mutation, pin| {
+                mutation.with_protected_content_pin(pin)
+            })
     }
 }
 
@@ -2450,7 +2469,7 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
         let mutation = replacement
             .mutation()
             .map_err(TableActivationError::Runtime)?;
-        let mut content_pins: [ProtectedContentPin; 0] = [];
+        let mut content_pins = replacement.content_pins;
         commit_vfs_table_activation(
             self.runtime,
             ValidatedTableActivationCommit {
