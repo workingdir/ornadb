@@ -2420,6 +2420,18 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
             .ok()
             .flatten()
     }
+    fn validate_replacement(
+        &self,
+        replacement: &VfsTableRowReplacement,
+    ) -> Result<(), TableActivationError> {
+        if replacement.table() != &self.save.table || replacement.key() != self.save.key.as_slice()
+        {
+            return Err(TableActivationError::Runtime(
+                RuntimeError::InvalidTableMutation,
+            ));
+        }
+        Ok(())
+    }
 
     /// Commits one complete row replacement through the runtime's single
     /// validated transaction. The candidate relation is validated before any
@@ -2434,6 +2446,7 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
             replacement,
             mut validator,
         } = candidate;
+        self.validate_replacement(&replacement)?;
         let mutation = replacement
             .mutation()
             .map_err(TableActivationError::Runtime)?;
@@ -2559,6 +2572,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             .map_err(VfsSaveError::Activation)?;
         let candidate = admit(admission.coordinates(), Arc::clone(&candidate_bytes))
             .await
+            .map_err(VfsSaveError::Activation)?;
+        admission
+            .validate_replacement(candidate.replacement())
             .map_err(VfsSaveError::Activation)?;
         // A save that committed durably and then lost its acknowledgement (the
         // process died between the writer transaction's commit and this caller
