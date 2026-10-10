@@ -986,7 +986,7 @@ impl SysHostBindingRegistry {
         }
         let (media_type, suffix) = mime1_for_path(path);
         let blob = Blob::from_bytes_with_annotation(
-            source.captured_bytes().to_vec(),
+            source.into_captured_bytes(),
             media_type,
             suffix.as_deref(),
         )
