@@ -140,7 +140,10 @@ fn admits_final_format_three_metadata_and_keeps_root_seams_pinned() {
         .final_format_capability()
         .expect("issue capability after validating both roots");
     assert_eq!(capability.database_id().to_string(), DATABASE_ID);
-    assert_eq!(capability.snapshot_id(), &context.snapshot_pin().snapshot_id());
+    assert_eq!(
+        capability.snapshot_id(),
+        &context.snapshot_pin().snapshot_id()
+    );
     assert_eq!(
         capability.schema_root().snapshot_pin().snapshot_id(),
         context.snapshot_pin().snapshot_id()
