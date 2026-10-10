@@ -477,7 +477,7 @@ mod tests {
                 operation
                     .effects
                     .iter()
-                    .any(|effect| *effect == callable.descriptor().effect),
+                    .any(|effect| effect == callable.descriptor().effect),
                 "generated binding effects for `{name}` include the catalogue read effect"
             );
             checked += 1;
