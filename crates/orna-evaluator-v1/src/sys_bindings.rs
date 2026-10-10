@@ -131,16 +131,23 @@ impl SysHostBindingRegistry {
                 .capture_candidates
                 .lock()
                 .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+            let blob_identity = blob.content_identity();
+            let same_content = |captured: &&CapturedBlobForRow| {
+                let captured_identity = captured.candidate.content_identity();
+                captured_identity.length() == blob_identity.length()
+                    && captured_identity.sha256() == blob_identity.sha256()
+            };
+            // Annotation is mutable independently of captured bytes. Prefer an
+            // exact source annotation when duplicate captures exist, but let
+            // an annotated value consume its byte-identical capture otherwise.
             let index = candidates
                 .iter()
                 .rposition(|captured| {
-                    let captured_identity = captured.candidate.content_identity();
-                    let blob_identity = blob.content_identity();
-                    captured_identity.length() == blob_identity.length()
-                        && captured_identity.sha256() == blob_identity.sha256()
+                    same_content(captured)
                         && captured.media_type == blob.media_type()
                         && captured.suffix.as_deref() == blob.suffix()
                 })
+                .or_else(|| candidates.iter().rposition(same_content))
                 .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
             candidates.remove(index).candidate
         };
