@@ -2831,6 +2831,68 @@ mod graph_bridge_tests {
         ));
     }
 
+    #[test]
+    fn million_row_indexed_point_and_range_queries_read_bounded_objects() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x79; 16];
+        let total = install_nested_row_store(
+            root,
+            &context(root),
+            relation_id,
+            16,
+            250,
+            250,
+        );
+        assert_eq!(total, 1_000_000);
+
+        let pinned = context(root);
+        let snapshot = pinned.load_row_map(relation_id).expect("load one-million-row index");
+        assert!(!snapshot.is_materialized());
+        let graph = pinned.open_native_graph(&snapshot).expect("issue graph");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let index_nodes = 1_u64 + 16 + 16 * 250;
+
+        let point_key = TypedKey::UInt(5_000_000);
+        let before = scope.objects_read_for_test();
+        let point = graph
+            .lookup_row(&point_key, &scope)
+            .expect("bounded point lookup")
+            .expect("middle row exists");
+        let point_objects = scope.objects_read_for_test() - before;
+        assert_eq!(point.key(), &point_key);
+
+        let range = KeyRange::new(
+            Some(TypedKey::UInt(5_000_000)),
+            Some(TypedKey::UInt(5_000_050)),
+            8,
+        )
+        .expect("bounded key interval");
+        let before = scope.objects_read_for_test();
+        let ranged = graph.range_rows(&range, &scope).expect("bounded range read");
+        let range_objects = scope.objects_read_for_test() - before;
+        let keys: Vec<_> = ranged.iter().map(|row| row.key().clone()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                TypedKey::UInt(5_000_000),
+                TypedKey::UInt(5_000_010),
+                TypedKey::UInt(5_000_020),
+                TypedKey::UInt(5_000_030),
+                TypedKey::UInt(5_000_040),
+            ]
+        );
+        assert!(point_objects > 0 && point_objects <= MAX_RANGE_GRAPH_OBJECTS);
+        assert!(range_objects > 0 && range_objects <= MAX_RANGE_GRAPH_OBJECTS);
+        assert!(point_objects < index_nodes);
+        assert!(range_objects < index_nodes);
+        assert_eq!(scope.payload_bytes_read_for_test(), 0);
+        println!(
+            "ORP-1 one-million-row proof: rows={total}, index_nodes={index_nodes}, point_objects={point_objects}, range_objects={range_objects}, range_rows={}",
+            ranged.len()
+        );
+    }
+
     /// One relation's index shape and the objects a point lookup, a missing-key
     /// lookup and a bounded range read from it.
     struct IndexReads {
