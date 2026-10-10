@@ -1017,6 +1017,11 @@ impl NativeGraphContext {
             {
                 return Err(GraphError::ContextMismatch);
             }
+            if encoded_length <= crate::row_store::ROW_INLINE_LIMIT as u64
+                && direct_blob_reference_count(&rov_value)? <= 32
+            {
+                return Err(GraphError::NonCanonicalData);
+            }
             for dependency in actual_dependencies {
                 let dependency_node = self.read_native_node(&dependency, scope, objects)?;
                 match dependency_node {
@@ -6448,6 +6453,27 @@ mod persisted_orp_tests {
             &overflow_envelope,
         )
         .expect("OGS accepts a well-formed overflow edge");
+        let mut missing_edge = overflow_envelope.clone();
+        missing_edge.refs.clear();
+        assert!(matches!(
+            validate_native_node(&ValidatedRepositoryContext { algorithm }, &missing_edge),
+            Err(GraphError::MissingReference)
+        ));
+
+        let mut over_fanout = Vec::with_capacity(MAX_REFS + 1);
+        for index in 0..=MAX_REFS {
+            let mut bytes = [0u8; 20];
+            bytes[16..].copy_from_slice(&(index as u32).to_be_bytes());
+            over_fanout.push(NativeObjectId::new(algorithm, &bytes).unwrap());
+        }
+        assert!(matches!(
+            NodeData::DependencyIndex {
+                height: 0,
+                children: over_fanout,
+            }
+            .encode_canonical(),
+            Err(GraphError::FanoutExceeded(count)) if count == MAX_REFS + 1
+        ));
         assert!(RowValue::decode_canonical_fields(overflow_value).is_err());
     }
 
@@ -7864,6 +7890,30 @@ fn collect_row_dependencies(
         | CborValue::Null => {}
     }
     Ok(())
+}
+/// Counts Blob references belonging directly to this encoded value. A nested
+/// kind-3 reference is a separate bounded value and its dependencies are not
+/// charged to this parent's inline threshold.
+fn direct_blob_reference_count(value: &CborValue) -> Result<usize, GraphError> {
+    match value {
+        CborValue::Tag(60111, _) => Ok(1),
+        CborValue::Tag(60113, _) => Ok(0),
+        CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+        CborValue::Array(values) => values.iter().try_fold(0usize, |count, value| {
+            count
+                .checked_add(direct_blob_reference_count(value)?)
+                .ok_or(GraphError::InvalidCount(usize::MAX))
+        }),
+        CborValue::Map(entries) => entries.iter().try_fold(0usize, |count, (key, value)| {
+            let key_count = direct_blob_reference_count(key)?;
+            let value_count = direct_blob_reference_count(value)?;
+            count
+                .checked_add(key_count)
+                .and_then(|count| count.checked_add(value_count))
+                .ok_or(GraphError::InvalidCount(usize::MAX))
+        }),
+        _ => Ok(0),
+    }
 }
 
 fn insert_leaf_dependency(

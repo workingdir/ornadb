@@ -596,6 +596,10 @@ impl CaptureFileReader {
     pub fn captured_bytes(&self) -> &[u8] {
         &self.captured
     }
+    /// Consumes the reader and transfers its retained bytes without cloning them.
+    pub fn into_captured_bytes(self) -> Vec<u8> {
+        self.captured
+    }
 
     pub const fn exceeded(&self) -> bool {
         self.exceeded
