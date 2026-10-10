@@ -20699,7 +20699,14 @@ mod tests {
         let state = open_state(&repo).await;
         let object_id = TableObjectId::new(id(9));
         let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
-        let accepted_row = vec![0x42_u8, 0x43];
+        let accepted_value = CanonicalValue::new(publication_text_map(vec![
+            ("id", OvbRaw::Int(BigInt::from(42_u8))),
+            ("title", OvbRaw::Text("persisted".to_owned())),
+            ("target", OvbRaw::Int(BigInt::from(7_u8))),
+        ]))
+        .unwrap();
+        let accepted_row = accepted_value.encode().unwrap();
+        let accepted_key = query_test_key(42);
         let repository_cache = vfs::VfsRepositoryCache::new();
         let target = repository_cache
             .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
@@ -20716,10 +20723,11 @@ mod tests {
             id(4),
             activation_test_cwd_generation(0).clone(),
             identity.clone(),
-            vec![1],
+            accepted_key.clone(),
         );
-        let identity_for_admit = identity.clone();
+        let accepted_key_for_admit = accepted_key.clone();
         let accepted_for_validator = accepted_row.clone();
+        let identity_for_admit = identity.clone();
         let applied = target
             .commit_durable_document_save(
                 &draft,
@@ -20728,13 +20736,14 @@ mod tests {
                 move |coordinates, bytes| {
                     let identity = identity_for_admit.clone();
                     let accepted = accepted_for_validator.clone();
+                    let accepted_key = accepted_key_for_admit.clone();
                     async move {
                         assert_eq!(coordinates.table(), &identity);
-                        assert_eq!(coordinates.key(), &[1]);
+                        assert_eq!(coordinates.key(), accepted_key.as_slice());
                         let replacement = vfs::VfsTableRowReplacement::new(
                             id(7),
                             identity.clone(),
-                            vec![1],
+                            accepted_key,
                             Some(bytes.to_vec()),
                         )
                         .map_err(TableActivationError::Runtime)?;
@@ -20760,8 +20769,61 @@ mod tests {
             vfs::TemporaryRenameOutcome::Applied { generation: 1, .. }
         ));
         assert_eq!(
-            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            admitted_row(&state, &identity, &accepted_key)
+                .await
+                .as_deref(),
             Some(accepted_row.as_slice())
+        );
+
+        // An admission for one committed row cannot be redirected by the
+        // candidate builder, even to another otherwise valid relation.
+        let redirected_draft = target.open_draft(1 << 20).await;
+        redirected_draft.truncate(0).await.unwrap();
+        redirected_draft.write_at(0, &accepted_row).await.unwrap();
+        let other_identity =
+            RuntimeTableIdentity::new("other", TableObjectId::new(id(10))).unwrap();
+        let other_for_admit = (other_identity.clone(), accepted_row.clone());
+        let redirected = target
+            .commit_durable_document_save(
+                &redirected_draft,
+                &state,
+                vfs::VfsDurableSave::new(
+                    id(4),
+                    activation_test_cwd_generation(0).clone(),
+                    identity.clone(),
+                    accepted_key.clone(),
+                ),
+                move |coordinates, bytes| {
+                    let (other, accepted) = other_for_admit.clone();
+                    async move { admit_vfs_save(other, id(10), accepted, coordinates, bytes).await }
+                },
+                &NoFault,
+            )
+            .await;
+        assert!(matches!(
+            redirected,
+            Err(vfs::VfsSaveError::Activation(
+                TableActivationError::Runtime(RuntimeError::InvalidTableMutation)
+            ))
+        ));
+        assert_eq!(
+            redirected_draft.candidate_bytes().await.as_ref(),
+            accepted_row.as_slice()
+        );
+        assert_eq!(
+            admitted_row(&state, &identity, &accepted_key)
+                .await
+                .as_deref(),
+            Some(accepted_row.as_slice())
+        );
+        assert!(
+            admitted_row(&state, &other_identity, &accepted_key)
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            state.latest_checkpoint().await.unwrap().unwrap().generation,
+            1
         );
 
         // The same boundary refuses a candidate the caller's authority rejects:
@@ -20770,6 +20832,7 @@ mod tests {
         refused_draft.truncate(0).await.unwrap();
         refused_draft.write_at(0, b"refused").await.unwrap();
         let identity_for_refusal = identity.clone();
+        let accepted_for_refusal = accepted_row.clone();
         let refusal = target
             .commit_durable_document_save(
                 &refused_draft,
@@ -20778,7 +20841,7 @@ mod tests {
                     id(4),
                     activation_test_cwd_generation(0).clone(),
                     identity.clone(),
-                    vec![1],
+                    accepted_key.clone(),
                 ),
                 move |coordinates, bytes| {
                     let identity = identity_for_refusal.clone();
@@ -20797,7 +20860,7 @@ mod tests {
                             Box::new(AcceptingRowValidator {
                                 tables: vec![identity.table().to_owned()],
                                 table_object_ids,
-                                accepted: vec![0x42, 0x43],
+                                accepted: accepted_for_refusal,
                                 calls: 0,
                             }),
                         ))
@@ -20818,6 +20881,12 @@ mod tests {
                 .replacement_bytes(),
             b"refused"
         );
+        assert_eq!(state.pending().await.unwrap().len(), 1);
+        assert_eq!(
+            state.latest_checkpoint().await.unwrap().unwrap().generation,
+            1,
+            "the rejected transaction must not append a checkpoint"
+        );
 
         // The durable row proves the save crossed the runtime transaction: a
         // fresh runtime over the same repository reads it back, and the refused
@@ -20825,9 +20894,21 @@ mod tests {
         drop(state);
         let reopened = open_state(&repo).await;
         assert_eq!(
-            admitted_row(&reopened, &identity, &[1]).await.as_deref(),
+            admitted_row(&reopened, &identity, &accepted_key)
+                .await
+                .as_deref(),
             Some(accepted_row.as_slice()),
             "an accepted save is visible to a reopen of the same database"
+        );
+        assert_eq!(
+            CanonicalValue::decode(
+                &admitted_row(&reopened, &identity, &accepted_key)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            accepted_value,
+            "the persisted row still decodes to the accepted typed value"
         );
         assert_eq!(
             reopened
@@ -21073,7 +21154,13 @@ mod tests {
                 &state,
                 save(),
                 |coordinates, bytes| {
-                    admit_vfs_save(identity.clone(), id(7), first_row.clone(), coordinates, bytes)
+                    admit_vfs_save(
+                        identity.clone(),
+                        id(7),
+                        first_row.clone(),
+                        coordinates,
+                        bytes,
+                    )
                 },
                 &NoFault,
             )
@@ -21095,7 +21182,13 @@ mod tests {
                 &state,
                 save(),
                 |coordinates, bytes| {
-                    admit_vfs_save(identity.clone(), id(7), second_row.clone(), coordinates, bytes)
+                    admit_vfs_save(
+                        identity.clone(),
+                        id(7),
+                        second_row.clone(),
+                        coordinates,
+                        bytes,
+                    )
                 },
                 &NoFault,
             )
@@ -21107,7 +21200,10 @@ mod tests {
         else {
             panic!("a save from a superseded baseline must be refused as stale");
         };
-        assert_eq!(generation, 1, "the refusal reports the generation it lost to");
+        assert_eq!(
+            generation, 1,
+            "the refusal reports the generation it lost to"
+        );
         assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
         assert_eq!(diagnostic.class, DiagnosticClass::Transient);
         assert_eq!(
