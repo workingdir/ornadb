@@ -1,9 +1,9 @@
 //! Format- and context-scoped selection for native sys API declarations.
 //!
-//! This test-only module selects declaration metadata only. It deliberately
-//! does not implement Blob values, codecs, repository readers, or runtime
-//! execution, and is not wired into the production crate until those owners
-//! supply an owner-issued format/context capability.
+//! This module selects declaration metadata only. Callers must verify recorded
+//! repository format/profile before constructing a context; selection does not
+//! implement Blob values, codecs, repository readers, runtime execution, or
+//! invocation authority.
 
 use std::collections::BTreeMap;
 
@@ -14,59 +14,69 @@ use super::{SystemEffect, SystemFunctionDescriptor};
 const GENERATED_API_SELECTION: &str =
     include_str!(concat!(env!("OUT_DIR"), "/system_api_selection.json"));
 
-/// Repository writer/reader format coordinates recorded by the final
-/// publication. Format 3 is the only current writer.
+/// Repository writer/reader formats known to this compatibility catalogue.
+/// Format 3 is the only current writer.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-enum RepositoryFormat {
+pub enum RepositoryFormat {
     Original100 = 1,
     Previous110Draft = 2,
     Final3 = 3,
 }
 
 impl RepositoryFormat {
-    const fn is_final(self) -> bool {
+    pub const fn is_final(self) -> bool {
         matches!(self, Self::Final3)
     }
 }
 
-/// Internal labels used only by the non-production selector proof.
+/// Reader profile associated with persisted repository format metadata.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-enum ReaderContext {
+pub enum ReaderContext {
     Original100,
     Previous110Draft,
     Final20261005,
 }
 
 impl ReaderContext {
-    const fn is_historical(self) -> bool {
+    pub const fn is_historical(self) -> bool {
         !matches!(self, Self::Final20261005)
     }
 }
 
-/// Private format/context coordinate used only by the non-production selector.
-/// The repository/runtime owner must issue any production capability after
-/// reading persisted metadata; this module deliberately does not parse or
-/// issue that capability.
+/// Validated format/profile coordinates used to select catalogue metadata.
+///
+/// Callers must create this value only after checking the repository's
+/// recorded format/profile. It selects metadata; it does not grant execution
+/// authority or replace repository/runtime admission.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct SystemFormatContext {
+pub struct SystemFormatContext {
     format: RepositoryFormat,
     context: ReaderContext,
 }
 
 impl SystemFormatContext {
-    const fn format(self) -> RepositoryFormat {
+    pub const fn format(self) -> RepositoryFormat {
         self.format
     }
 
-    const fn is_writer(self) -> bool {
+    pub const fn reader_context(self) -> ReaderContext {
+        self.context
+    }
+
+    pub const fn is_writer(self) -> bool {
         matches!(self.format, RepositoryFormat::Final3)
     }
 
-    const fn is_historical_reader(self) -> bool {
+    pub const fn is_historical_reader(self) -> bool {
         self.context.is_historical()
     }
 
-    const fn new(format: RepositoryFormat, context: ReaderContext) -> Option<Self> {
+    /// Creates a coordinate only for a format/profile pair defined by this
+    /// catalogue. The caller remains responsible for verifying persisted data.
+    pub const fn from_recorded_pair(
+        format: RepositoryFormat,
+        context: ReaderContext,
+    ) -> Option<Self> {
         let matches_recorded_pair = matches!(
             (format, context),
             (RepositoryFormat::Original100, ReaderContext::Original100)
@@ -86,14 +96,14 @@ impl SystemFormatContext {
 
 /// Typed admission class for one callable contract.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-enum SystemCallableAvailability {
+pub enum SystemCallableAvailability {
     AllRecordedContexts,
     HistoricalReadersOnly,
     FinalFormat3,
 }
 
 impl SystemCallableAvailability {
-    const fn admits(self, context: SystemFormatContext) -> bool {
+    pub const fn admits(self, context: SystemFormatContext) -> bool {
         match self {
             Self::AllRecordedContexts => true,
             Self::HistoricalReadersOnly => context.is_historical_reader(),
@@ -104,17 +114,21 @@ impl SystemCallableAvailability {
 
 /// One native callable contract and its bounded format admission class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SystemCallable {
+pub struct SystemCallable {
     descriptor: SystemFunctionDescriptor,
     availability: SystemCallableAvailability,
 }
 
 impl SystemCallable {
-    const fn availability(self) -> SystemCallableAvailability {
+    pub const fn descriptor(self) -> SystemFunctionDescriptor {
+        self.descriptor
+    }
+
+    pub const fn availability(self) -> SystemCallableAvailability {
         self.availability
     }
 
-    const fn is_admitted(self, context: SystemFormatContext) -> bool {
+    pub const fn is_admitted(self, context: SystemFormatContext) -> bool {
         self.availability.admits(context)
     }
 }
@@ -151,10 +165,10 @@ struct RawFunction<'a> {
     contexts: Option<Vec<&'a str>>,
 }
 
-/// Immutable native API selection keyed by callable name, then selected through a
-/// recorded [`SystemFormatContext`].
+/// Immutable native API selection keyed by callable name, then selected through
+/// a caller-verified recorded [`SystemFormatContext`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct SystemApiSelection {
+pub struct SystemApiSelection {
     callables: BTreeMap<String, SystemCallable>,
 }
 
@@ -214,7 +228,7 @@ impl SystemApiSelection {
     }
 
     /// Select a callable using the recorded format/context pair.
-    fn dispatch(
+    pub fn dispatch(
         &self,
         context: SystemFormatContext,
         name: &str,
@@ -232,11 +246,11 @@ impl SystemApiSelection {
         Ok(callable)
     }
 
-    fn select(&self, context: SystemFormatContext, name: &str) -> Option<&SystemCallable> {
+    pub fn select(&self, context: SystemFormatContext, name: &str) -> Option<&SystemCallable> {
         self.dispatch(context, name).ok()
     }
 
-    fn descriptor(
+    pub fn descriptor(
         &self,
         context: SystemFormatContext,
         name: &str,
@@ -245,11 +259,11 @@ impl SystemApiSelection {
             .map(|callable| &callable.descriptor)
     }
 
-    fn callables(&self) -> impl Iterator<Item = &SystemCallable> {
+    pub fn callables(&self) -> impl Iterator<Item = &SystemCallable> {
         self.callables.values()
     }
 
-    fn available(&self, context: SystemFormatContext) -> impl Iterator<Item = &SystemCallable> {
+    pub fn available(&self, context: SystemFormatContext) -> impl Iterator<Item = &SystemCallable> {
         self.callables
             .values()
             .filter(move |callable| callable.is_admitted(context))
@@ -259,7 +273,7 @@ impl SystemApiSelection {
 /// A context-aware dispatch failure. This layer only chooses metadata; it does
 /// not attempt to execute an admitted operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum SystemDispatchError {
+pub enum SystemDispatchError {
     UnknownCallable(String),
     Unavailable {
         name: String,
@@ -268,22 +282,22 @@ enum SystemDispatchError {
 }
 
 /// The native typed format/context API selection.
-fn system_api_selection() -> &'static SystemApiSelection {
+pub fn system_api_selection() -> &'static SystemApiSelection {
     static API_SELECTION: std::sync::LazyLock<SystemApiSelection> =
         std::sync::LazyLock::new(SystemApiSelection::from_generated);
     &API_SELECTION
 }
 
 /// Context-aware descriptor selection for callers that only need metadata.
-fn system_function_descriptor_for(
+pub fn system_function_descriptor_for(
     context: SystemFormatContext,
     name: &str,
 ) -> Option<&'static SystemFunctionDescriptor> {
     system_api_selection().descriptor(context, name)
 }
 
-/// Compatibility alias for the context-aware selector.
-fn system_callable_for(
+/// Context-aware callable selection for admission code.
+pub fn system_callable_for(
     context: SystemFormatContext,
     name: &str,
 ) -> Result<&'static SystemCallable, SystemDispatchError> {
@@ -295,15 +309,21 @@ mod tests {
     use super::*;
 
     fn final_context() -> SystemFormatContext {
-        SystemFormatContext::new(RepositoryFormat::Final3, ReaderContext::Final20261005)
-            .expect("internal final selector context")
+        SystemFormatContext::from_recorded_pair(
+            RepositoryFormat::Final3,
+            ReaderContext::Final20261005,
+        )
+        .expect("internal final selector context")
     }
 
     fn historical_contexts() -> (SystemFormatContext, SystemFormatContext) {
         (
-            SystemFormatContext::new(RepositoryFormat::Original100, ReaderContext::Original100)
-                .expect("explicit original reader context"),
-            SystemFormatContext::new(
+            SystemFormatContext::from_recorded_pair(
+                RepositoryFormat::Original100,
+                ReaderContext::Original100,
+            )
+            .expect("explicit original reader context"),
+            SystemFormatContext::from_recorded_pair(
                 RepositoryFormat::Previous110Draft,
                 ReaderContext::Previous110Draft,
             )
@@ -312,19 +332,21 @@ mod tests {
     }
 
     #[test]
-    fn internal_context_projection_remains_non_production() {
+    fn recorded_format_profile_pair_is_validated() {
         let context = final_context();
         assert_eq!(context.format(), RepositoryFormat::Final3);
-        assert_eq!(context.context, ReaderContext::Final20261005);
+        assert_eq!(context.reader_context(), ReaderContext::Final20261005);
         assert!(context.is_writer());
-        assert!(
-            SystemFormatContext::new(RepositoryFormat::Final3, ReaderContext::Original100)
-                .is_none()
-        );
-        assert!(
-            SystemFormatContext::new(RepositoryFormat::Original100, ReaderContext::Final20261005)
-                .is_none()
-        );
+        assert!(SystemFormatContext::from_recorded_pair(
+            RepositoryFormat::Final3,
+            ReaderContext::Original100
+        )
+        .is_none());
+        assert!(SystemFormatContext::from_recorded_pair(
+            RepositoryFormat::Original100,
+            ReaderContext::Final20261005
+        )
+        .is_none());
     }
 
     #[test]
@@ -385,6 +407,7 @@ mod tests {
                 Err(SystemDispatchError::Unavailable { .. })
             ));
             assert!(system_function_descriptor_for(final_context, name).is_none());
+            assert!(crate::system_function_descriptor(name).is_none());
         }
     }
 
@@ -394,37 +417,39 @@ mod tests {
         let abi = crate::system_provider_abi();
         let mut checked = 0usize;
         for callable in system_api_selection().available(final_context) {
-            let name = callable.descriptor.name;
+            let name = callable.descriptor().name;
             let operation = abi.operation(name).unwrap_or_else(|| {
                 panic!("admitted final callable `{name}` has no generated binding")
             });
             assert_eq!(
-                operation.signature.source, callable.descriptor.signature,
+                operation.signature.source,
+                callable.descriptor().signature,
                 "generated binding signature for `{name}` matches the catalogue read"
             );
             assert!(
                 operation
                     .effects
                     .iter()
-                    .any(|effect| *effect == callable.descriptor.effect),
+                    .any(|effect| *effect == callable.descriptor().effect),
                 "generated binding effects for `{name}` include the catalogue read effect"
             );
             checked += 1;
         }
-        assert_eq!(checked, system_api_selection().available(final_context).count());
+        assert_eq!(
+            checked,
+            system_api_selection().available(final_context).count()
+        );
         assert!(checked > 0, "final catalogue admits at least one callable");
     }
 
     #[test]
-    fn generated_selection_is_internal_and_context_scoped() {
+    fn generated_selection_exposes_final_catalogue() {
         let final_context = final_context();
         let selection = system_api_selection();
         assert_eq!(selection.callables().count(), 84);
         assert_eq!(selection.available(final_context).count(), 82);
-        assert!(
-            selection
-                .descriptor(final_context, "sys.blob.length")
-                .is_some()
-        );
+        assert!(selection
+            .descriptor(final_context, "sys.blob.length")
+            .is_some());
     }
 }
