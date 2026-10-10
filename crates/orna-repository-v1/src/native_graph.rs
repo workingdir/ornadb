@@ -603,6 +603,7 @@ impl NativeGraphContext {
     /// the stored value and Blob-descriptor objects the rewrite kept, which no
     /// maintenance pass rewrites. The new root stays unreachable until the
     /// caller names it from a row-map version or publication candidate.
+
     pub fn maintain_row_index(
         &self,
         mutations: &[RowIndexMutation],
@@ -800,6 +801,63 @@ impl NativeGraphContext {
             index_objects_created,
             index_objects_reused,
             payload_objects_reused,
+        })
+    }
+
+    /// Applies typed row operations to one exact pinned relation version and
+    /// returns the OID of the complete successor `.orna/store` StoreRoot.
+    /// A stale or substituted version is rejected before writes.
+    pub fn maintain_relation_rows(
+        &self,
+        expected: &crate::row_store::RowMapVersion,
+        operations: &[RowIndexMutation],
+        scope: &RepositoryReadScope,
+    ) -> Result<NativeOid, GraphError> {
+        self.maintain_relation_row_candidate(expected, operations, scope)
+            .map(|candidate| candidate.store_root)
+    }
+
+    fn maintain_relation_row_candidate(
+        &self,
+        expected: &crate::row_store::RowMapVersion,
+        operations: &[RowIndexMutation],
+        scope: &RepositoryReadScope,
+    ) -> Result<RelationIndexCandidate, GraphError> {
+        scope.authorize(self)?;
+        if expected != self.row_snapshot.version() || expected.store_root() != &self.store_root {
+            return Err(GraphError::ContextMismatch);
+        }
+
+        let maintenance = self.maintain_row_index(operations, scope)?;
+        let store_root = self.replace_relation_primary_root(
+            expected,
+            maintenance.primary_root(),
+            maintenance.row_count(),
+            scope,
+        )?;
+        let successor = load_format3_row_map(
+            &self.repository,
+            self.algorithm,
+            store_root.clone(),
+            *expected.database_id(),
+            self.snapshot_id,
+            *expected.relation_id(),
+        )?;
+        let successor_version = successor.version();
+        if successor_version.database_id() != expected.database_id()
+            || successor_version.relation_id() != expected.relation_id()
+            || successor_version.schema() != expected.schema()
+            || successor_version.primary_root() != maintenance.primary_root()
+            || successor_version.row_count() != Some(maintenance.row_count())
+            || successor_version.store_root() != &store_root
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+
+        Ok(RelationIndexCandidate {
+            primary_root: maintenance.primary_root().clone(),
+            row_count: maintenance.row_count(),
+            store_root,
         })
     }
 
@@ -2087,6 +2145,7 @@ impl NativeGraphContext {
         };
         let (schema_oid, old_primary, secondary, old_count) =
             decode_relation_value(&relation.value, self.algorithm)?;
+        // A primary-only rewrite would stale any independent secondary index.
         if schema_oid != *version.schema().schema_oid()
             || old_primary != *version.primary_root()
             || secondary.is_some()
@@ -2103,9 +2162,8 @@ impl NativeGraphContext {
         let mut written = BTreeSet::new();
         let new_relation_root = {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
-            let mut write_node = |node: &NodeData| {
-                self.write_capture_node(node, &mut written, scope.max_objects)
-            };
+            let mut write_node =
+                |node: &NodeData| self.write_capture_node(node, &mut written, scope.max_objects);
             replace_ordered_entry_with(
                 &mut read_node,
                 &mut write_node,
@@ -2150,7 +2208,6 @@ impl NativeGraphContext {
             let binding =
                 self.accept_protected_blob_pin_with_annotation(pin, media_type, suffix)?;
             let version = self.row_snapshot.version();
-            let count = version.row_count().ok_or(GraphError::ContextMismatch)?;
 
             let scope = self.open_read_scope()?;
             let key = mutation.key().clone();
@@ -2165,22 +2222,17 @@ impl NativeGraphContext {
                 )],
             )
             .map_err(|_| GraphError::NonCanonicalData)?;
-            let scope = self.open_read_scope()?;
-            let maintenance = self.maintain_row_index(
+            let candidate = self.maintain_relation_row_candidate(
+                version,
                 &[RowIndexMutation::Insert {
                     key: key.clone(),
                     value,
                 }],
                 &scope,
             )?;
-            let primary_root = maintenance.primary_root().clone();
-            let row_count = maintenance.row_count();
-            let store_root = self.replace_relation_primary_root(
-                version,
-                &primary_root,
-                row_count,
-                &scope,
-            )?;
+            let primary_root = candidate.primary_root;
+            let row_count = candidate.row_count;
+            let store_root = candidate.store_root;
 
             let provisional_ref = format!(
                 "refs/orna/pins/{}/scratch/row-{}",
@@ -2267,6 +2319,7 @@ impl NativeGraphContext {
             || candidate.relation_id != *self.row_snapshot.version().relation_id()
             || candidate.schema_digest != *self.row_snapshot.version().schema().schema_digest()
             || candidate.primary_root.algorithm() != self.algorithm
+            || candidate.store_root.algorithm() != self.algorithm
         {
             return Err(GraphError::ContextMismatch);
         }
@@ -2280,23 +2333,14 @@ impl NativeGraphContext {
             scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
             Arc::clone(&scope.metadata_used),
         );
+        let domain = rows_domain_for_parts(&candidate.relation_id, &candidate.schema_digest);
         let node = self.read_native_node(&candidate.primary_root, scope, &mut objects)?;
-        let NodeData::OrderedLeaf { domain, entries } = node else {
-            return Err(GraphError::CandidateRequiresBranchRewrite);
-        };
-        if domain != rows_domain_for_parts(&candidate.relation_id, &candidate.schema_digest)
-            || entries.len() as u64 != candidate.row_count
-        {
-            return Err(GraphError::ContextMismatch);
-        }
-        for entry in entries {
-            let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
-                .map_err(|_| GraphError::NonCanonicalData)?;
-            if &entry_key == key {
-                return decode_candidate_blob_metadata(&entry.value, &candidate.transfer).map(Some);
-            }
-        }
-        Ok(None)
+        validate_ordered_root_node(&node, &domain, candidate.row_count)?;
+        let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+        let entry = find_ordered_entry_with(&mut read_node, node, &domain, None, None, key)?;
+        entry
+            .map(|entry| decode_candidate_blob_metadata(&entry.value, &candidate.transfer))
+            .transpose()
     }
 
     fn finish_protection(
@@ -3937,6 +3981,12 @@ impl IndexMaintenance {
     pub fn payload_objects_reused(&self) -> &[NativeOid] {
         &self.payload_objects_reused
     }
+}
+
+struct RelationIndexCandidate {
+    primary_root: NativeOid,
+    row_count: u64,
+    store_root: NativeOid,
 }
 
 /// Upper bound on commits one revision walk may list.
@@ -6403,7 +6453,6 @@ mod persisted_orp_tests {
         let algorithm = GitHashAlgorithm::Sha1;
         let database_id = [0x31; 16];
         let relation_id = [0x32; 16];
-        let store_root = NativeOid::new(algorithm, [0x33; 20]).expect("store-root fixture ID");
         let primary_root = fixture_git_node(
             root,
             &NodeData::OrderedLeaf {
@@ -6411,12 +6460,42 @@ mod persisted_orp_tests {
                 entries: Vec::new(),
             },
         );
+        let relation_domain = canonical_value_bytes(&CborValue::Array(vec![
+            CborValue::Text("relations".to_owned()),
+            CborValue::Bytes(database_id.to_vec()),
+        ]));
+        let relation_key = TypedKey::Bytes(relation_id.to_vec())
+            .canonical_bytes()
+            .expect("canonical relation key");
+        let relation_value = canonical_value_bytes(&CborValue::Array(vec![
+            CborValue::Bytes(schema_oid.as_bytes().to_vec()),
+            CborValue::Bytes(primary_root.as_bytes().to_vec()),
+            CborValue::Null,
+            CborValue::Unsigned(0),
+        ]));
+        let relation_map = fixture_git_node(
+            root,
+            &NodeData::OrderedLeaf {
+                domain: relation_domain,
+                entries: vec![OrderedLeafEntry {
+                    key: relation_key,
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root = fixture_git_node(root, &NodeData::StoreRoot { relation_map });
+        let snapshot_id = [0x38; 32];
+        let generation = u64::from_be_bytes(
+            snapshot_id[..8]
+                .try_into()
+                .expect("snapshot generation has eight bytes"),
+        );
         let schema_generation = crate::row_store::SchemaGeneration::issue(
             database_id,
             relation_id,
             schema_oid,
             schema_digest,
-            0,
+            generation,
         );
         let version = crate::row_store::RowMapVersion::issue(
             database_id,
@@ -6424,7 +6503,7 @@ mod persisted_orp_tests {
             store_root.clone(),
             schema_generation,
             primary_root,
-            0,
+            generation,
             Some(0),
         )
         .expect("consistent fixture row-map version");
@@ -6437,7 +6516,7 @@ mod persisted_orp_tests {
             [0x36; 32],
             database_id,
             [0x37; 16],
-            [0x38; 32],
+            snapshot_id,
             algorithm,
             store_root,
             schema_digest,
@@ -6944,8 +7023,126 @@ mod persisted_orp_tests {
     }
 
     #[test]
-    fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
+    fn relation_candidate_rejects_substituted_relation_and_keeps_source_root_selected() {
         let (directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let original = graph.row_snapshot.version().clone();
+        let substituted_relation_id = [0x42; 16];
+        let substituted_schema = crate::row_store::SchemaGeneration::issue(
+            *original.database_id(),
+            substituted_relation_id,
+            original.schema().schema_oid().clone(),
+            *original.schema().schema_digest(),
+            original.schema().generation(),
+        );
+        let substituted = crate::row_store::RowMapVersion::issue(
+            *original.database_id(),
+            substituted_relation_id,
+            original.store_root().clone(),
+            substituted_schema,
+            original.primary_root().clone(),
+            original.generation(),
+            original.row_count(),
+        )
+        .expect("internally consistent substituted relation binding");
+        let key = TypedKey::Text("must-not-be-written".to_owned());
+        let value = RowValue::decode_canonical_fields(vec![0x80])
+            .expect("canonical empty row");
+
+        assert!(matches!(
+            graph.maintain_relation_rows(
+                &substituted,
+                &[RowIndexMutation::Insert {
+                    key: key.clone(),
+                    value: value.clone(),
+                }],
+                &scope,
+            ),
+            Err(GraphError::ContextMismatch)
+        ));
+
+        assert_eq!(graph.store_root, *original.store_root());
+        let selected = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            graph.store_root.clone(),
+            *original.database_id(),
+            graph.snapshot_id,
+            *original.relation_id(),
+        )
+        .expect("prior selected relation root remains admitted");
+        assert_eq!(selected.version().store_root(), original.store_root());
+        assert_eq!(selected.version().schema(), original.schema());
+        assert_eq!(selected.version().primary_root(), original.primary_root());
+        assert_eq!(selected.version().row_count(), original.row_count());
+        assert!(graph
+            .lookup_row(&key, &scope)
+            .expect("lookup selected source map")
+            .is_none());
+        assert!(pending_refs(directory.path()).is_empty());
+
+        let candidate_store_root = graph
+            .maintain_relation_rows(
+                &original,
+                &[RowIndexMutation::Insert { key, value }],
+                &scope,
+            )
+            .expect("admit rows against the exact pinned relation version");
+        assert_ne!(&candidate_store_root, original.store_root());
+        let successor = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            candidate_store_root,
+            *original.database_id(),
+            graph.snapshot_id,
+            *original.relation_id(),
+        )
+        .expect("candidate StoreRoot resolves its successor relation map");
+        assert_eq!(successor.version().schema(), original.schema());
+        assert_eq!(successor.version().row_count(), Some(1));
+        assert_eq!(graph.store_root, *original.store_root());
+        assert!(graph
+            .lookup_row(&TypedKey::Text("must-not-be-written".to_owned()), &scope)
+            .expect("source root remains selected")
+            .is_none());
+    }
+
+    #[test]
+    fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
+        let (directory, mut graph) = capture_test_context();
+        let seed_scope = graph.open_read_scope().expect("owner seed scope");
+        let seed_value = RowValue::decode_canonical_fields(vec![0x80])
+            .expect("empty canonical fixture row");
+        let mutations: Vec<_> = (0..300)
+            .map(|index| RowIndexMutation::Insert {
+                key: TypedKey::Text(format!("row-{index:04}")),
+                value: seed_value.clone(),
+            })
+            .collect();
+        let seeded = graph
+            .maintain_row_index(&mutations, &seed_scope)
+            .expect("build a branched row map");
+        let version = graph.row_snapshot.version();
+        let seeded_store_root = graph
+            .replace_relation_primary_root(
+                version,
+                seeded.primary_root(),
+                seeded.row_count(),
+                &seed_scope,
+            )
+            .expect("publish seeded row root into relation map");
+        let seeded_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            seeded_store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            *version.relation_id(),
+        )
+        .expect("load branched row map from format-3 StoreRoot");
+        graph.store_root = seeded_store_root;
+        graph.row_snapshot = seeded_snapshot;
+        drop(seed_scope);
         let scope = graph.open_read_scope().expect("owner read scope");
         let payload = b"metadata lookup must not hydrate this payload";
         let captured = graph
@@ -6956,7 +7153,7 @@ mod persisted_orp_tests {
             .expect("protect complete OGB-2 closure");
         let identity = pin.content_identity();
         let pin_id = *pin.pin_id();
-        let key = TypedKey::Text("blob-1".to_owned());
+        let key = TypedKey::Text("row-0150-z".to_owned());
         let callback_key = key.clone();
         let reference = "refs/orna/test-publications/blob-1".to_owned();
         let durable_reference = reference.clone();
@@ -6976,7 +7173,7 @@ mod persisted_orp_tests {
                     .args([
                         "update-ref",
                         &durable_reference,
-                        &candidate.primary_root().to_hex(),
+                        &candidate.store_root().to_hex(),
                     ])
                     .output()
                     .expect("persist candidate through caller commit callback");
@@ -6988,6 +7185,28 @@ mod persisted_orp_tests {
         assert_eq!(receipt, "committed");
         assert!(fixture_ref_exists(directory.path(), &reference));
         assert!(pending_refs(directory.path()).is_empty());
+        let committed = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            candidate.store_root().clone(),
+            candidate.database_id().to_owned(),
+            graph.snapshot_id,
+            *candidate.relation_id(),
+        )
+        .expect("durable StoreRoot resolves the inserted relation row map");
+        assert_eq!(committed.version().primary_root(), candidate.primary_root());
+        assert_eq!(committed.version().row_count(), Some(301));
+        let mut root_objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let candidate_root = graph
+            .read_native_node(candidate.primary_root(), &scope, &mut root_objects)
+            .expect("read branched candidate root");
+        assert!(matches!(candidate_root, NodeData::OrderedBranch { .. }));
 
         let scope = graph.open_read_scope().expect("fresh owner read scope");
         let metadata = graph
