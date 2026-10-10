@@ -2724,8 +2724,8 @@ mod graph_bridge_tests {
         // interval needs reads the same few objects from both.
         let small = measure_index_reads(root, [0x76; 16], 2, 2, 4);
         let large = measure_index_reads(root, [0x78; 16], 4, 4, 4);
-        assert_eq!(small.objects, 1 + 2 + 4);
-        assert_eq!(large.objects, 1 + 4 + 16);
+        assert_eq!(small.index_nodes, 1 + 2 + 4);
+        assert_eq!(large.index_nodes, 1 + 4 + 16);
         assert_eq!(small.rows, 16);
         assert_eq!(large.rows, 64);
 
