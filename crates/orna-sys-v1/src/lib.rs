@@ -684,22 +684,20 @@ pub enum SystemEffect {
 mod system_api;
 pub use system_api::*;
 
-// The format/context selector remains an internal proof until the repository
-// owner supplies an owner-issued capability seam.
-#[cfg(test)]
-mod format_api_selection;
+pub mod format_api_selection;
 
 /// Returns final-format declaration metadata for a portable system function.
 ///
-/// This compatibility lookup exposes final-format declaration metadata only.
-/// Repository/runtime context selection remains an internal non-production
-/// projection until the repository owner supplies an owner-issued capability.
-/// The descriptor is static declaration metadata and does not grant
-/// invocation or administrative authority.
+/// This context-free compatibility lookup assumes format 3. Callers handling
+/// historical repositories must use [`format_api_selection`] with the
+/// repository's verified recorded format/profile. The descriptor is static
+/// metadata and does not grant invocation or administrative authority.
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
-    SYSTEM_FUNCTION_DESCRIPTORS
-        .iter()
-        .find(|descriptor| descriptor.name == name)
+    let context = format_api_selection::SystemFormatContext::from_recorded_pair(
+        format_api_selection::RepositoryFormat::Final3,
+        format_api_selection::ReaderContext::Final20261005,
+    )?;
+    format_api_selection::system_function_descriptor_for(context, name)
 }
 
 /// A descriptive object reference in an explanation.
