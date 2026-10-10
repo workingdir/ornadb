@@ -24,11 +24,11 @@ pub fn maintenance_last_publication(job: sys.MaintenanceJob): Instant? = job.las
 pub fn read_storage_pending_rows(): Int = sys.Storage | map(storage => storage.pending_rows) | first() ?? -1;
 pub fn read_storage_pending_bytes(): Int = sys.Storage | map(storage => storage.pending_bytes) | first() ?? -1;
 pub fn read_storage_published_rows(): Int = sys.Storage | map(storage => storage.published_rows) | first() ?? -1;
-pub fn read_storage_policy_target(): Int = ((sys.Storage | map(storage => storage.publication_policy.compressed_target_bytes) | first()) ?? Some(-1)) ?? -1;
+pub fn read_storage_policy_target(): Int = sys.Storage | map(storage => storage.publication_policy.compressed_target_bytes) | first() ?? -1;
 pub fn read_maintenance_pending_rows(): Int = sys.MaintenanceJob | map(job => job.pending_rows) | first() ?? -1;
 pub fn read_maintenance_pending_bytes(): Int = sys.MaintenanceJob | map(job => job.pending_bytes) | first() ?? -1;
 pub fn read_maintenance_published_rows(): Int = sys.MaintenanceJob | map(job => job.published_rows) | first() ?? -1;
-pub fn read_maintenance_policy_target(): Int = ((sys.MaintenanceJob | map(job => job.publication_policy.compressed_target_bytes) | first()) ?? Some(-1)) ?? -1;
+pub fn read_maintenance_policy_target(): Int = sys.MaintenanceJob | map(job => job.publication_policy.compressed_target_bytes) | first() ?? -1;
 
 pub fn main(): Bool {
     let metadata_matches =
