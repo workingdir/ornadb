@@ -4094,6 +4094,14 @@
           "type": "Int"
         },
         {
+          "name": "published_rows",
+          "type": "Int"
+        },
+        {
+          "name": "published_bytes",
+          "type": "Int"
+        },
+        {
           "name": "compression",
           "type": "Str?"
         },
@@ -4115,7 +4123,7 @@
         },
         {
           "name": "publication_policy",
-          "type": "sys.Value"
+          "type": "sys.PublicationPolicy"
         },
         {
           "name": "verification",
@@ -4529,6 +4537,30 @@
           "type": "Decimal?"
         },
         {
+          "name": "pending_rows",
+          "type": "Int"
+        },
+        {
+          "name": "pending_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "published_rows",
+          "type": "Int"
+        },
+        {
+          "name": "published_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "publication_policy",
+          "type": "sys.PublicationPolicy"
+        },
+        {
+          "name": "last_publication",
+          "type": "Instant?"
+        },
+        {
           "name": "failure",
           "type": "sys.Diagnostic?"
         }
@@ -4851,6 +4883,27 @@
         "does not grant authority",
         "live references are runtime-generation-bound"
       ]
+    },
+    {
+      "name": "sys.PublicationPolicy",
+      "kind": "record",
+      "purpose": "Effective bounds for batching pending row-store mutations.",
+      "type_parameters": [],
+      "fields": [
+        {
+          "name": "compressed_target_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "max_file_bytes",
+          "type": "Int"
+        },
+        {
+          "name": "max_pending_age_seconds",
+          "type": "Int"
+        }
+      ],
+      "invariants": []
     },
     {
       "name": "sys.Value",
