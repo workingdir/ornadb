@@ -15,7 +15,10 @@
 //! local repository alone: no fetch, no remote, and no media payload.
 
 use super::*;
-use orna_repository_v1::{AdmittedRow, KeyRange, Repository, RepositoryFormatContext, TypedKey};
+
+use orna_repository_v1::{
+    AdmittedRow, FormatContextError, KeyRange, Repository, RepositoryFormatContext, TypedKey,
+};
 
 use std::collections::BTreeMap;
 
@@ -427,22 +430,18 @@ fn pin_snapshot(
             format!("{selector:?} names more than one branch, tag or remote branch"),
         ));
     }
-    let commit = repository.resolve_snapshot(selector).map_err(|error| {
-        history_error(
-            "Snapshot could not be resolved",
-            format!("{selector:?}: {error:?}"),
-        )
-    })?;
-    let start = commit.as_str().to_owned();
-    let format = repository
-        .open_pinned_format_context(&start)
+    let (commit, format) = repository
+        .open_pinned_format_context_with_commit(selector)
         .map_err(|error| {
-            history_error(
-                "Snapshot could not be pinned",
-                format!("{selector:?}: {error:?}"),
-            )
+            let message = match error {
+                FormatContextError::SnapshotUnavailable | FormatContextError::SnapshotInvalid => {
+                    "Snapshot could not be resolved"
+                }
+                _ => "Snapshot could not be pinned",
+            };
+            history_error(message, format!("{selector:?}: {error:?}"))
         })?;
-    Ok((start, format))
+    Ok((commit.as_str().to_owned(), format))
 }
 
 /// Only exact matches count. `git for-each-ref <pattern>` matches by prefix, so
