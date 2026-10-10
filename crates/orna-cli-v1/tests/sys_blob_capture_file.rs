@@ -94,7 +94,16 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     assert!(state.pending().await.unwrap().is_empty());
     assert_eq!(git_output(root, &["rev-parse", "HEAD"], None), head_before_capture);
 
-    let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
+    // MIME-1 stores a preferred suffix as an omitted hint; consumers still see
+    // its effective suffix through the annotation.
+    let annotated = value
+        .with_blob_annotation("application/json", Some("json"))
+        .unwrap();
+    let annotated_blob = annotated.blob().unwrap();
+    assert_eq!(annotated_blob.media_type(), "application/json");
+    assert_eq!(annotated_blob.suffix(), None);
+    assert_eq!(annotated_blob.annotation().selected_suffix(), "json");
+    let binding = bindings.accept_captured_blob_for_row(&annotated).unwrap();
     let expected_row_value = binding.encoded_value().to_vec();
     let transfer = binding.transfer_record();
     let pin_ref = format!(
@@ -178,13 +187,19 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
-    assert_eq!(
-        state
-            .committed_table_row("captures", b"capture.json")
-            .await
-            .unwrap(),
-        Some(expected_row_value.clone())
-    );
+    let committed_value = state
+        .committed_table_row("captures", b"capture.json")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(committed_value, expected_row_value);
+    let committed_blob = ContextValue::decode(&committed_value, ValueFormat::Ovb2)
+        .unwrap()
+        .blob()
+        .unwrap();
+    assert_eq!(committed_blob.media_type(), "application/json");
+    assert_eq!(committed_blob.suffix(), None);
+    assert_eq!(committed_blob.annotation().selected_suffix(), "json");
     assert_eq!(
         state.latest_checkpoint().await.unwrap().unwrap().digest,
         [0x59; 32]
