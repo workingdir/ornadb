@@ -2036,6 +2036,26 @@ mod graph_bridge_tests {
         relation_id: [u8; 16],
         semantic_digest_override: Option<[u8; 32]>,
     ) -> ([u8; 16], [u8; 32]) {
+        let text = vec![b'x'; crate::row_store::ROW_INLINE_LIMIT + 1];
+        let mut encoded = vec![0x81];
+        cbor_head(&mut encoded, 3, text.len() as u64);
+        encoded.extend_from_slice(&text);
+        install_overflow_row_store_with_bytes(
+            directory,
+            context,
+            relation_id,
+            &encoded,
+            semantic_digest_override,
+        )
+    }
+
+    fn install_overflow_row_store_with_bytes(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+        overflow_bytes: &[u8],
+        semantic_digest_override: Option<[u8; 32]>,
+    ) -> ([u8; 16], [u8; 32]) {
         let algorithm = context
             .validate_store_root()
             .expect("pinned format-3 store")
@@ -2043,7 +2063,6 @@ mod graph_bridge_tests {
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
         let (schema_oid, schema_digest) = schema_node(directory, context);
-        let overflow_bytes = [0x81, 0x01];
         let semantic_digest: [u8; 32] = Sha256::digest(overflow_bytes).into();
         let stored_digest = semantic_digest_override.unwrap_or(semantic_digest);
         let chunk_oid = write_git_object(directory, algorithm, "blob", &overflow_bytes);
@@ -2785,7 +2804,7 @@ mod graph_bridge_tests {
         let RowValue::Overflow(reference) = row.value() else {
             panic!("verified kind-3 row should decode as overflow");
         };
-        assert_eq!(reference.encoded_length(), 2);
+        assert!(reference.encoded_length() > crate::row_store::ROW_INLINE_LIMIT as u64);
         assert_eq!(reference.semantic_digest(), &expected_digest);
 
         let range = KeyRange::new(Some(TypedKey::UInt(7)), None, 1).unwrap();
@@ -2809,6 +2828,30 @@ mod graph_bridge_tests {
             Err(crate::native_graph::GraphError::ContentIdentityMismatch)
         ));
     }
+    #[test]
+    fn rejects_small_noncanonical_overflow_value() {
+        let directory = repository();
+        let root = directory.path();
+        let initial = context(root);
+        let relation_id = [0x79; 16];
+        install_overflow_row_store_with_bytes(
+            root,
+            &initial,
+            relation_id,
+            &[0x81, 0x01],
+            None,
+        );
+
+        let pinned = context(root);
+        let snapshot = pinned.load_row_map(relation_id).unwrap();
+        let graph = pinned.open_native_graph(&snapshot).unwrap();
+        let scope = graph.open_read_scope().unwrap();
+        assert!(matches!(
+            graph.lookup_row(&TypedKey::UInt(7), &scope),
+            Err(crate::native_graph::GraphError::NonCanonicalData)
+        ));
+    }
+
 
     #[test]
     fn indexed_point_and_range_reads_walk_only_the_pages_they_need() {
