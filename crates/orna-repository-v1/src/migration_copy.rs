@@ -140,8 +140,9 @@ impl MigratedCopy {
         self.source_format.number()
     }
 
-    /// The identity written into the copy's canonical `.orna/database.orna`,
-    /// which is fresh because the copy is a new repository.
+    /// The stable database identity written into the candidate's canonical
+    /// `.orna/database.orna`. A recorded legacy sidecar is preserved; older
+    /// repositories without one receive a new identity.
     pub const fn database_id(&self) -> DatabaseId {
         self.database_id
     }
@@ -263,7 +264,7 @@ pub fn prepare_format3_migration(
     // legacy `.orna` records: a migration must never install new bytes before
     // it is published. The format-3 records the copy needs to read as format 3
     // travel in the candidate below, so nothing here writes metadata.
-    let database_id = DatabaseId::new_v4();
+    let database_id = context.database_id().unwrap_or_else(DatabaseId::new_v4);
 
     // The candidate is built with a hidden index derived from the source's
     // recorded tree and never touches the copy's ordinary index or worktree.
