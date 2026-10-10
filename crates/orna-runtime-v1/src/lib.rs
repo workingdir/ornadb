@@ -22248,10 +22248,11 @@ mod tests {
             None
         );
 
-        let mut validator = ObservingTableActivationValidator {
+        let mut validator = ProtectedContentObservingTableActivationValidator {
             tables: vec!["books".into()],
             calls: 0,
             seen: None,
+            expected_transfer: expected_transfer.clone(),
         };
         let rejected = state
             .commit_validated_table_activation(ValidatedTableActivationCommit {
@@ -34145,6 +34146,39 @@ mod tests {
         fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
             self.calls += 1;
             Ok(())
+        }
+    }
+
+    struct ProtectedContentObservingTableActivationValidator {
+        tables: Vec<String>,
+        calls: usize,
+        seen: Option<RuntimeTableRows>,
+        expected_transfer: ProtectedContentTransferEvidence,
+    }
+
+    impl TableActivationCandidateValidator for ProtectedContentObservingTableActivationValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn cwd_generation(&self) -> &CwdGeneration {
+            activation_test_cwd_generation(0)
+        }
+
+        fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            self.calls += 1;
+            self.seen = Some(rows.clone());
+            Ok(())
+        }
+
+        fn validate_content_pins(
+            &mut self,
+            _: &RuntimeTableRows,
+            transfers: &[ProtectedContentTransfer],
+        ) -> bool {
+            transfers.len() == 1
+                && ProtectedContentTransferEvidence::from_transfer(&transfers[0])
+                    == self.expected_transfer
         }
     }
 
