@@ -1,4 +1,4 @@
-import { LiveSession, renderPresent, runResultFromPresentation } from '/playground/assets/presentation.mjs';
+import { LiveSession, renderPresent, runResultFromPresentation } from '/devtools/presentation.mjs';
 
 const page = document.querySelector('#live-repl');
 const source = document.querySelector('#repl-source');
