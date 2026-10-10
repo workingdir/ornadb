@@ -1496,6 +1496,68 @@ mod graph_bridge_tests {
             "an unchanged rewrite reuses its index nodes"
         );
 
+        // Isolate the production index-node write count for each mutation from
+        // the same committed root; the page counter excludes media objects.
+        let prepend = graph
+            .maintain_row_index(
+                &[RowIndexMutation::Insert {
+                    key: TypedKey::UInt(0),
+                    value: RowValue::inline(inline_value(), Vec::new())
+                        .expect("canonical prepended row"),
+                }],
+                &scope,
+            )
+            .expect("measure prepend page writes");
+        let delete = graph
+            .maintain_row_index(
+                &[RowIndexMutation::Delete {
+                    key: TypedKey::UInt(2),
+                }],
+                &scope,
+            )
+            .expect("measure delete page writes");
+        let rekey = graph
+            .maintain_row_index(
+                &[RowIndexMutation::Rekey {
+                    from: TypedKey::UInt(10),
+                    to: TypedKey::UInt(50),
+                }],
+                &scope,
+            )
+            .expect("measure rekey page writes");
+        assert_eq!(prepend.row_count(), 21);
+        assert_eq!(delete.row_count(), 19);
+        assert_eq!(rekey.row_count(), 20);
+        for (mutation, pass) in [
+            ("prepend", &prepend),
+            ("delete", &delete),
+            ("rekey", &rekey),
+        ] {
+            assert_eq!(pass.previous_root(), snapshot.version().primary_root());
+            assert_ne!(pass.primary_root(), pass.previous_root());
+            assert!(
+                !pass.index_objects_created().is_empty(),
+                "{mutation} writes at least one ORP-1 index node"
+            );
+            assert!(
+                pass.index_objects_created()
+                    .iter()
+                    .all(|oid| !pass.index_objects_reused().contains(oid)),
+                "{mutation} reports written and reused nodes separately"
+            );
+            assert!(
+                pass.payload_objects_reused().contains(&descriptor),
+                "{mutation} preserves the untouched Blob descriptor"
+            );
+            eprintln!(
+                "ORP1_CHURN mutation={mutation} rows={} index_nodes_written={} index_nodes_reused={} payload_objects_reused={}",
+                pass.row_count(),
+                pass.index_objects_created().len(),
+                pass.index_objects_reused().len(),
+                pass.payload_objects_reused().len(),
+            );
+        }
+
         // A real churn pass: prepend, delete and rekey, with one media row left
         // untouched.
         let mutations = [
