@@ -420,6 +420,10 @@ pub enum DiagnosticCode {
     /// A table or cross-table assertion evaluated false. This is the primary
     /// safe diagnostic code; assertion provenance is carried separately.
     TableAssertionFalse,
+    /// The captured write/temp-create baseline is no longer the accepted row,
+    /// so the save is refused as a stale edit rather than a failed validation
+    /// (ORNA-VFS-011). The caller's retained draft is untouched.
+    StaleBaseline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -748,8 +752,7 @@ impl InMemoryCheckpointBackend {
         let key = lease.delivery.checkpoint_key();
         match self.leases.get(&key) {
             Some(current)
-                if current == lease
-                    && current.delivery.successor == lease.delivery.successor =>
+                if current == lease && current.delivery.successor == lease.delivery.successor =>
             {
                 self.leases.remove(&key);
                 self.retry_claims.remove(&key);

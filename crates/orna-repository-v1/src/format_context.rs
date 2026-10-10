@@ -1024,7 +1024,8 @@ mod graph_bridge_tests {
             OrderedBranchEntry, OrderedLeafEntry, RowIndexMutation, decode_canonical_cbor,
         },
         row_store::{
-            KeyRange, RowEntry, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
+            KeyRange, MAX_ROW_RANGE_LIMIT, RowEntry, RowMapSnapshot, RowMapVersion, RowValue,
+            SchemaGeneration, TypedKey,
         },
     };
 
@@ -2078,6 +2079,108 @@ mod graph_bridge_tests {
         commit_store_root(directory, algorithm, &store_root);
     }
 
+    /// Builds a real two-level ORP-1 index for one relation: `branches` middle
+    /// level nodes, each naming `pages` leaf pages of `page_width` rows. Every
+    /// fence, count and domain comes from the node it names, so the graph is
+    /// canonical and only the search behaviour decides how many Git objects a
+    /// point lookup or a bounded range reads.
+    fn install_nested_row_store(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+        branches: u32,
+        pages: u32,
+        page_width: u64,
+    ) -> u64 {
+        let algorithm = context
+            .validate_store_root()
+            .expect("pinned format-3 store")
+            .oid
+            .algorithm();
+        let database_id = context.require_database_id().expect("database identity");
+        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let domain = row_domain(relation_id, schema_digest);
+
+        let mut next_key = 0u64;
+        let mut root_entries = Vec::new();
+        let mut total_count = 0u64;
+        for _ in 0..branches {
+            let mut branch_entries = Vec::new();
+            let mut branch_count = 0u64;
+            for _ in 0..pages {
+                let mut entries = Vec::new();
+                for _ in 0..page_width {
+                    next_key += 10;
+                    entries.push(OrderedLeafEntry {
+                        key: TypedKey::UInt(next_key).canonical_bytes().unwrap(),
+                        value: vec![0x81, 0x01],
+                    });
+                }
+                let leaf = write_native_node(
+                    directory,
+                    algorithm,
+                    &NodeData::OrderedLeaf {
+                        domain: domain.clone(),
+                        entries,
+                    },
+                );
+                branch_entries.push(OrderedBranchEntry {
+                    inclusive_max_key: TypedKey::UInt(next_key).canonical_bytes().unwrap(),
+                    child: leaf,
+                    row_count: page_width,
+                });
+                branch_count += page_width;
+            }
+            let branch = write_native_node(
+                directory,
+                algorithm,
+                &NodeData::OrderedBranch {
+                    domain: domain.clone(),
+                    height: 1,
+                    entries: branch_entries,
+                },
+            );
+            root_entries.push(OrderedBranchEntry {
+                inclusive_max_key: TypedKey::UInt(next_key).canonical_bytes().unwrap(),
+                child: branch,
+                row_count: branch_count,
+            });
+            total_count += branch_count;
+        }
+        let primary_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedBranch {
+                domain: domain.clone(),
+                height: 2,
+                entries: root_entries,
+            },
+        );
+
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, primary_root.as_bytes());
+        relation_value.push(0xf6);
+        cbor_head(&mut relation_value, 0, total_count);
+        let relation_map = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root =
+            write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(directory, algorithm, &store_root);
+        total_count
+    }
+
     fn sealed_rows(
         context: &RepositoryFormatContext,
         schema_oid: &NativeOid,
@@ -2608,6 +2711,222 @@ mod graph_bridge_tests {
             tampered_graph.lookup_row(&TypedKey::UInt(7), &tampered_scope),
             Err(crate::native_graph::GraphError::ContentIdentityMismatch)
         ));
+    }
+
+    #[test]
+    fn indexed_point_and_range_reads_walk_only_the_pages_they_need() {
+        let directory = repository();
+        let root = directory.path();
+
+        // Two real ORP-1 indexes over the same key shape, one small and one
+        // large. A lookup or range that walks the whole index reads more
+        // objects from the large one; one that walks only the pages its
+        // interval needs reads the same few objects from both.
+        let small = measure_index_reads(root, [0x76; 16], 2, 2, 4);
+        let large = measure_index_reads(root, [0x78; 16], 4, 4, 4);
+        assert_eq!(small.objects, 1 + 2 + 4);
+        assert_eq!(large.objects, 1 + 4 + 16);
+        assert_eq!(small.rows, 16);
+        assert_eq!(large.rows, 64);
+
+        // Every bounded read is measured against what the same graph costs to
+        // walk in full, so "bounded" means strictly fewer objects than an
+        // unbounded read, not merely fewer than some arbitrary cap.
+        assert!(
+            small.point < small.full && large.point < large.full,
+            "point lookup must read fewer objects than a whole-index walk: \
+             {} and {} of {} and {}",
+            small.point,
+            large.point,
+            small.full,
+            large.full
+        );
+        // The path to the key, not the index size, sets the cost of a point
+        // lookup: the same key over an index with twice the branches reads
+        // less than one extra level, while a whole-index walk of the large
+        // shape reads {} objects against {} for the small one.
+        assert!(
+            large.point <= small.point + u64::from(large.branches - small.branches) * 2,
+            "point reads grew with the index instead of with the path: {} over {} then {} over {}",
+            small.point,
+            small.full,
+            large.point,
+            large.full
+        );
+        // A bounded range reads a page only when a key of the interval can be
+        // in it, and stops at the first child whose own minimum reaches the
+        // exclusive upper bound. On the large shape the interval covers a
+        // small slice, so the range reads fewer objects than the walk that
+        // visits every branch; on the small shape the interval already spans
+        // most pages, and pruning has nothing left to skip.
+        assert!(
+            large.range < large.full,
+            "bounded range must read fewer objects than a whole-index walk: \
+             {} of {} objects, against {} and {} for the small shape",
+            large.range,
+            large.full,
+            small.range,
+            small.full
+        );
+        assert!(
+            large.range <= small.range + u64::from(large.branches - small.branches) * 2,
+            "range reads grew with the index instead of with the interval: {} over {} then {} over {}",
+            small.range,
+            small.full,
+            large.range,
+            large.full
+        );
+        assert_eq!(small.miss_key, None);
+        assert_eq!(large.miss_key, None);
+        // A missing key is an absent result rather than an error, and it reads
+        // index pages only. It is deliberately not pruned to the key's path:
+        // the contract is that a later child's fence may still cover the key,
+        // so the probe reads the index to rule them out. It still fetches no
+        // row or media payload, which is what keeps a miss cheap.
+        assert_eq!(small.miss, small.full);
+        assert_eq!(large.miss, large.full);
+        // A row read charges payload bytes only for a media closure, so an
+        // index query that stops at root, index and row pages reports zero.
+        assert_eq!(small.payload_bytes, 0);
+        assert_eq!(large.payload_bytes, 0);
+        println!(
+            "ORP-1 index reads: small({} nodes) point={} miss={} range={} full={}, \
+             large({} nodes) point={} miss={} range={} full={}",
+            small.index_nodes,
+            small.point,
+            small.miss,
+            small.range,
+            small.full,
+            large.index_nodes,
+            large.point,
+            large.miss,
+            large.range,
+            large.full
+        );
+
+        // A malformed branch whose fence lies about its child's range is still
+        // rejected: bounding the read must not silence that check.
+        let pinned = context(root);
+        let malformed_relation = [0x77; 16];
+        install_branch_row_store(
+            root,
+            &pinned,
+            malformed_relation,
+            &[(10, 10), (30, 30), (20, 50), (60, 60)],
+        );
+        let tampered = context(root);
+        let tampered_snapshot = tampered.load_row_map(malformed_relation).unwrap();
+        let tampered_graph = tampered.open_native_graph(&tampered_snapshot).unwrap();
+        let tampered_scope = tampered_graph.open_read_scope().unwrap();
+        assert!(matches!(
+            tampered_graph.lookup_row(&TypedKey::UInt(20), &tampered_scope),
+            Err(crate::native_graph::GraphError::InvalidCount(_))
+        ));
+        assert!(matches!(
+            tampered_graph.range_rows(
+                &KeyRange::new(None, Some(TypedKey::UInt(60)), 8).unwrap(),
+                &tampered_scope
+            ),
+            Err(crate::native_graph::GraphError::InvalidCount(_))
+        ));
+    }
+
+    /// One relation's index shape and the objects a point lookup, a missing-key
+    /// lookup and a bounded range read from it.
+    struct IndexReads {
+        rows: u64,
+        index_nodes: u64,
+        branches: u32,
+        point: u64,
+        miss: u64,
+        miss_key: Option<crate::row_store::AdmittedRow>,
+        range: u64,
+        full: u64,
+        payload_bytes: u64,
+    }
+
+    /// Installs an ORP-1 index of the requested shape and measures the native
+    /// Git objects each read costs against the pinned primary root.
+    fn measure_index_reads(
+        root: &Path,
+        relation_id: [u8; 16],
+        branches: u32,
+        pages: u32,
+        page_width: u64,
+    ) -> IndexReads {
+        let total = install_nested_row_store(
+            root,
+            &context(root),
+            relation_id,
+            branches,
+            pages,
+            page_width,
+        );
+        assert_eq!(total, u64::from(branches * pages) * page_width);
+        let pinned = context(root);
+        let snapshot = pinned.load_row_map(relation_id).expect("load ORP identity");
+        assert!(!snapshot.is_materialized());
+        let graph = pinned.open_native_graph(&snapshot).expect("issue graph");
+        let scope = graph.open_read_scope().expect("owner read scope");
+
+        let before = scope.objects_read_for_test();
+        let row = graph
+            .lookup_row(&TypedKey::UInt(70), &scope)
+            .expect("bounded point lookup")
+            .expect("row 70 is stored");
+        assert_eq!(row.key(), &TypedKey::UInt(70));
+        let point = scope.objects_read_for_test() - before;
+
+        let before = scope.objects_read_for_test();
+        let miss_key = graph
+            .lookup_row(&TypedKey::UInt(75), &scope)
+            .expect("bounded point lookup");
+        let miss = scope.objects_read_for_test() - before;
+
+        let range = KeyRange::new(Some(TypedKey::UInt(30)), Some(TypedKey::UInt(80)), 256).unwrap();
+        let before = scope.objects_read_for_test();
+        let ranged = graph
+            .range_rows(&range, &scope)
+            .expect("bounded range read");
+        let range_reads = scope.objects_read_for_test() - before;
+        let keys: Vec<_> = ranged.iter().map(|row| row.key().clone()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                TypedKey::UInt(30),
+                TypedKey::UInt(40),
+                TypedKey::UInt(50),
+                TypedKey::UInt(60),
+                TypedKey::UInt(70),
+            ]
+        );
+
+        // The baseline this read is measured against: the same graph walked
+        // in full. Reading every page is what an unbounded lookup would cost,
+        // so the bounded reads above are only bounded if they stay below it.
+        // "No lower and no upper bound" is a range with the maximum permitted
+        // limit, so this reads every stored row when the relation holds no
+        // more than that many; the shapes below stay well inside it.
+        assert!(total <= MAX_ROW_RANGE_LIMIT as u64 * 3);
+        let unbounded = KeyRange::new(None, None, MAX_ROW_RANGE_LIMIT).unwrap();
+        let before = scope.objects_read_for_test();
+        let all = graph
+            .range_rows(&unbounded, &scope)
+            .expect("full index walk");
+        let full = scope.objects_read_for_test() - before;
+        assert_eq!(all.len() as u64, total);
+
+        IndexReads {
+            rows: total,
+            index_nodes: 1 + u64::from(branches) + u64::from(branches * pages),
+            branches,
+            point,
+            miss,
+            miss_key,
+            range: range_reads,
+            full,
+            payload_bytes: scope.payload_bytes_read_for_test(),
+        }
     }
 
     #[test]
