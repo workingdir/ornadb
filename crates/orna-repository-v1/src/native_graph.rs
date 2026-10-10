@@ -2046,6 +2046,88 @@ impl NativeGraphContext {
         Ok(OrpBlobBinding { encoded_value, pin })
     }
 
+    fn replace_relation_primary_root(
+        &self,
+        version: &crate::row_store::RowMapVersion,
+        primary_root: &NativeOid,
+        row_count: u64,
+        scope: &RepositoryReadScope,
+    ) -> Result<NativeOid, GraphError> {
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let root = self.read_native_node(&self.store_root, scope, &mut objects)?;
+        let NodeData::StoreRoot { relation_map } = root else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::StoreRoot,
+                actual: root.kind(),
+            });
+        };
+        let relation_node = self.read_native_node(&relation_map, scope, &mut objects)?;
+        let domain = canonical_value_bytes(&CborValue::Array(vec![
+            CborValue::Text("relations".to_owned()),
+            CborValue::Bytes(version.database_id().to_vec()),
+        ]));
+        let key = crate::row_store::TypedKey::Bytes(version.relation_id().to_vec());
+        let relation = {
+            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+            find_ordered_entry_with(
+                &mut read_node,
+                relation_node.clone(),
+                &domain,
+                None,
+                None,
+                &key,
+            )?
+            .ok_or(GraphError::ContextMismatch)?
+        };
+        let (schema_oid, old_primary, secondary, old_count) =
+            decode_relation_value(&relation.value, self.algorithm)?;
+        if schema_oid != *version.schema().schema_oid()
+            || old_primary != *version.primary_root()
+            || secondary.is_some()
+            || old_count != version.row_count().ok_or(GraphError::ContextMismatch)?
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+        let value = canonical_value_bytes(&CborValue::Array(vec![
+            CborValue::Bytes(schema_oid.as_bytes().to_vec()),
+            CborValue::Bytes(primary_root.as_bytes().to_vec()),
+            CborValue::Null,
+            CborValue::Unsigned(row_count),
+        ]));
+        let mut written = BTreeSet::new();
+        let new_relation_root = {
+            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+            let mut write_node = |node: &NodeData| {
+                self.write_capture_node(node, &mut written, scope.max_objects)
+            };
+            replace_ordered_entry_with(
+                &mut read_node,
+                &mut write_node,
+                relation_node,
+                &domain,
+                None,
+                None,
+                &key,
+                value,
+            )?
+        };
+        let store_root = self.write_capture_node(
+            &NodeData::StoreRoot {
+                relation_map: new_relation_root,
+            },
+            &mut written,
+            scope.max_objects,
+        )?;
+        self.sync_object_closure(&written, scope)?;
+        Ok(store_root)
+    }
+
     /// Prepares one graph-backed ORP row insertion. The transaction module
     /// keeps the resulting root protected until its caller-owned durable
     /// publication/runtime-intent callback returns.
@@ -2069,95 +2151,36 @@ impl NativeGraphContext {
                 self.accept_protected_blob_pin_with_annotation(pin, media_type, suffix)?;
             let version = self.row_snapshot.version();
             let count = version.row_count().ok_or(GraphError::ContextMismatch)?;
-            if count >= crate::row_store::MAX_PAGE_ENTRIES as u64 {
-                return Err(GraphError::CandidateRequiresBranchRewrite);
-            }
 
             let scope = self.open_read_scope()?;
-            let mut objects = ObjectBudget::new(
-                scope.max_objects,
-                scope.max_objects,
-                Arc::clone(&scope.objects_used),
-                scope.metadata_quota,
-                Arc::clone(&scope.metadata_used),
-            );
-            let previous = self.read_native_node(version.primary_root(), &scope, &mut objects)?;
-            let domain = rows_domain_for_version(version);
-            let mut entries = match previous {
-                NodeData::OrderedLeaf {
-                    domain: actual,
-                    entries,
-                } => {
-                    if actual != domain {
-                        return Err(GraphError::InvalidDomain);
-                    }
-                    if entries.len() as u64 != count {
-                        return Err(GraphError::InvalidCount(entries.len()));
-                    }
-                    entries
-                }
-                NodeData::OrderedBranch { .. } => {
-                    return Err(GraphError::CandidateRequiresBranchRewrite);
-                }
-                other => {
-                    return Err(GraphError::WrongNodeKind {
-                        expected: NodeKind::OrderedLeaf,
-                        actual: other.kind(),
-                    });
-                }
-            };
-
             let key = mutation.key().clone();
-            let encoded_key = key
-                .canonical_bytes()
-                .map_err(|_| GraphError::NonCanonicalData)?;
-            let mut insertion_index = entries.len();
-            for (index, entry) in entries.iter().enumerate() {
-                let existing = crate::row_store::TypedKey::decode_canonical(&entry.key)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                match existing.cmp(&key) {
-                    std::cmp::Ordering::Equal => return Err(GraphError::DuplicateRowKey),
-                    std::cmp::Ordering::Greater => {
-                        insertion_index = index;
-                        break;
-                    }
-                    std::cmp::Ordering::Less => {}
-                }
-            }
-
             let mut encoded_row = Vec::new();
             array(&mut encoded_row, 1);
             encoded_row.extend_from_slice(binding.encoded_value());
-            entries.insert(
-                insertion_index,
-                OrderedLeafEntry {
-                    key: encoded_key,
-                    value: encoded_row,
-                },
-            );
-            let node = NodeData::OrderedLeaf {
-                domain: domain.clone(),
-                entries,
-            };
-            let NodeData::OrderedLeaf { entries, .. } = &node else {
-                unreachable!("constructed ordered leaf")
-            };
-            for (index, entry) in entries
-                .iter()
-                .enumerate()
-                .take(entries.len().saturating_sub(1))
-            {
-                if index + 1 >= crate::row_store::MIN_PAGE_ENTRIES {
-                    let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
-                        .map_err(|_| GraphError::NonCanonicalData)?;
-                    if row_page_anchor(0, &entry_key)? {
-                        return Err(GraphError::CandidateRequiresBranchRewrite);
-                    }
-                }
-            }
-            let mut written = BTreeSet::new();
-            let primary_root = self.write_capture_node(&node, &mut written, scope.max_objects)?;
-            self.sync_object_closure(&written, &scope)?;
+            let value = crate::row_store::RowValue::inline(
+                encoded_row,
+                vec![crate::row_store::RowDependency::new(
+                    binding.descriptor_oid().clone(),
+                    NativeObjectKind::Blob,
+                )],
+            )
+            .map_err(|_| GraphError::NonCanonicalData)?;
+            let scope = self.open_read_scope()?;
+            let maintenance = self.maintain_row_index(
+                &[RowIndexMutation::Insert {
+                    key: key.clone(),
+                    value,
+                }],
+                &scope,
+            )?;
+            let primary_root = maintenance.primary_root().clone();
+            let row_count = maintenance.row_count();
+            let store_root = self.replace_relation_primary_root(
+                version,
+                &primary_root,
+                row_count,
+                &scope,
+            )?;
 
             let provisional_ref = format!(
                 "refs/orna/pins/{}/scratch/row-{}",
@@ -2167,12 +2190,12 @@ impl NativeGraphContext {
             candidate_cleanup = Some(PendingPrivateRefCleanup::new(
                 Arc::clone(&self.private_ref_owner),
                 provisional_ref,
-                primary_root.clone(),
+                store_root.clone(),
             ));
             let cleanup = candidate_cleanup
                 .as_ref()
                 .expect("candidate cleanup remains armed during preparation");
-            self.create_protected_ref(&cleanup.reference, &primary_root)?;
+            self.create_protected_ref(&cleanup.reference, &store_root)?;
             self.sync_git_ref(&cleanup.reference)?;
 
             let candidate = OrpGraphCandidate {
@@ -2182,13 +2205,15 @@ impl NativeGraphContext {
                 schema_digest: *version.schema().schema_digest(),
                 previous_root: version.primary_root().clone(),
                 primary_root,
-                row_count: count + 1,
+                store_root,
+                row_count,
                 key,
                 content_identity: binding.content_identity(),
                 media_type: media_type.to_owned(),
                 suffix: suffix.map(str::to_owned),
                 transfer: binding.transfer_record(),
             };
+
             Ok(PreparedOrpGraphCandidate {
                 candidate,
                 _binding: binding,
@@ -4215,6 +4240,7 @@ pub struct OrpGraphCandidate {
     schema_digest: [u8; 32],
     previous_root: NativeOid,
     primary_root: NativeOid,
+    store_root: NativeOid,
     row_count: u64,
     key: crate::row_store::TypedKey,
     content_identity: crate::ContentIdentity,
@@ -4242,6 +4268,10 @@ impl OrpGraphCandidate {
 
     pub fn primary_root(&self) -> &NativeOid {
         &self.primary_root
+    }
+
+    pub fn store_root(&self) -> &NativeOid {
+        &self.store_root
     }
 
     pub const fn row_count(&self) -> u64 {
@@ -5645,6 +5675,107 @@ fn find_ordered_entry_with(
                 previous_fence = Some(fence);
             }
             Ok(None)
+        }
+        other => Err(GraphError::WrongNodeKind {
+            expected: NodeKind::OrderedLeaf,
+            actual: other.kind(),
+        }),
+    }
+}
+
+fn replace_ordered_entry_with(
+    read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
+    write_node: &mut impl FnMut(&NodeData) -> Result<NativeOid, GraphError>,
+    node: NodeData,
+    expected_domain: &[u8],
+    expected_height: Option<u8>,
+    lower_exclusive: Option<&crate::row_store::TypedKey>,
+    key: &crate::row_store::TypedKey,
+    value: Vec<u8>,
+) -> Result<NativeOid, GraphError> {
+    match node {
+        NodeData::OrderedLeaf { domain, mut entries } => {
+            if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
+                return Err(GraphError::InvalidDomain);
+            }
+            check_leaf_key_order(&domain, &entries)?;
+            if lower_exclusive.is_some_and(|lower| {
+                entries
+                    .first()
+                    .and_then(|entry| crate::row_store::TypedKey::decode_canonical(&entry.key).ok())
+                    .is_some_and(|minimum| minimum <= *lower)
+            }) {
+                return Err(GraphError::NonCanonicalData);
+            }
+            let index = entries
+                .binary_search_by(|entry| {
+                    crate::row_store::TypedKey::decode_canonical(&entry.key)
+                        .map(|candidate| candidate.cmp(key))
+                        .unwrap_or(std::cmp::Ordering::Less)
+                })
+                .map_err(|_| GraphError::ContextMismatch)?;
+            entries[index].value = value;
+            write_node(&NodeData::OrderedLeaf { domain, entries })
+        }
+        NodeData::OrderedBranch {
+            domain,
+            height,
+            mut entries,
+        } => {
+            if domain != expected_domain
+                || height == 0
+                || expected_height.is_some_and(|expected| expected != height)
+                || entries.is_empty()
+            {
+                return Err(GraphError::InvalidDomain);
+            }
+            check_branch_fence_order(&domain, &entries)?;
+            let mut previous_fence: Option<crate::row_store::TypedKey> = None;
+            let mut selected = None;
+            for (index, entry) in entries.iter().enumerate() {
+                let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                if key <= &fence {
+                    let child = read_node(&entry.child)?;
+                    let bounds = ordered_node_bounds_with(
+                        read_node,
+                        child.clone(),
+                        expected_domain,
+                        Some(height - 1),
+                    )?;
+                    if bounds.0 != entry.row_count
+                        || bounds.2 != fence
+                        || previous_fence
+                            .as_ref()
+                            .is_some_and(|previous| bounds.1 <= *previous)
+                    {
+                        return Err(GraphError::InvalidCount(
+                            usize::try_from(bounds.0).unwrap_or(usize::MAX),
+                        ));
+                    }
+                    selected = Some((index, child, previous_fence.as_ref().cloned()));
+                    break;
+                }
+                previous_fence = Some(fence);
+            }
+            let Some((index, child, lower_bound)) = selected else {
+                return Err(GraphError::ContextMismatch);
+            };
+            entries[index].child = replace_ordered_entry_with(
+                read_node,
+                write_node,
+                child,
+                expected_domain,
+                Some(height - 1),
+                lower_bound.as_ref(),
+                key,
+                value,
+            )?;
+            write_node(&NodeData::OrderedBranch {
+                domain,
+                height,
+                entries,
+            })
         }
         other => Err(GraphError::WrongNodeKind {
             expected: NodeKind::OrderedLeaf,
