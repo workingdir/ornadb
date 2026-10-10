@@ -3201,9 +3201,21 @@ mod graph_bridge_tests {
             .expect("admit the repository-owned graph context");
         let write_scope = graph.open_read_scope().expect("owner write scope");
 
-        let payload: Vec<u8> = (0..(2 * crate::blob_store::GEAR_MAXIMUM + 73))
-            .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
+        let payload_length = 2 * crate::blob_store::GEAR_MAXIMUM + 73;
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let payload: Vec<u8> = (0..payload_length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
             .collect();
+        let chunk_spans = crate::blob_store::GearChunker::new()
+            .spans(&payload)
+            .expect("chunk the test payload");
+        assert!(chunk_spans.len() > 1, "fixture must contain multiple chunks");
+        let chunk_boundary = chunk_spans[0].offset() + chunk_spans[0].length();
         let mut input = std::io::Cursor::new(payload.clone());
         let candidate = graph
             .capture_blob_candidate(&mut input, payload.len() as u64, &write_scope)
@@ -3307,6 +3319,7 @@ mod graph_bridge_tests {
         let length = identity.length();
         for range in [
             0..1,
+            chunk_boundary - 1..chunk_boundary + 1,
             maximum - 1..maximum + 1,
             maximum..2 * maximum,
             length - 1..length,
@@ -3314,6 +3327,11 @@ mod graph_bridge_tests {
             7..7,
         ] {
             let range_scope = admitted_graph.open_read_scope().unwrap();
+            let expected_payload_reads = chunk_spans
+                .iter()
+                .filter(|span| span.offset() < range.end && span.offset() + span.length() > range.start)
+                .map(crate::blob_store::ChunkSpan::length)
+                .sum::<u64>();
             let read = admitted_graph
                 .read_blob_range(&reference, range.clone(), &range_scope)
                 .unwrap_or_else(|error| panic!("range {range:?} failed: {error:?}"));
@@ -3321,6 +3339,11 @@ mod graph_bridge_tests {
                 read.bytes(),
                 &payload[range.start as usize..range.end as usize],
                 "range {range:?} returned the wrong bytes"
+            );
+            assert_eq!(
+                range_scope.payload_bytes_read_for_test(),
+                expected_payload_reads,
+                "range {range:?} reads only payload from intersecting chunks"
             );
         }
 
@@ -3369,6 +3392,89 @@ mod graph_bridge_tests {
             later_graph.resolve_row_node(&row, &descriptor_oid, &later_scope),
             Err(crate::native_graph::GraphError::ContextMismatch)
         ));
+    }
+
+    #[test]
+    fn nested_byte_index_ranges_read_only_intersecting_chunks() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x7b; 16];
+        let payload_length = 112 * 1024 * 1024;
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let payload: Vec<u8> = (0..payload_length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let chunk_spans = crate::blob_store::GearChunker::new()
+            .spans(&payload)
+            .expect("chunk the nested-index fixture");
+        assert!(
+            chunk_spans.len() > crate::native_graph::MAX_REFS,
+            "fixture must require nested byte-index nodes"
+        );
+
+        let descriptor_oid = install_annotated_blob_row_store(
+            root,
+            relation_id,
+            7,
+            &payload,
+            "application/octet-stream",
+            None,
+            false,
+        );
+        let admitted_context = context(root);
+        let snapshot = admitted_context
+            .load_row_map(relation_id)
+            .expect("load the committed ORP row map");
+        let graph = admitted_context
+            .open_native_graph(&snapshot)
+            .expect("admit the committed graph context");
+        let scope = graph.open_read_scope().expect("read scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(7), &scope)
+            .unwrap()
+            .expect("committed Blob row");
+        let reference = graph
+            .admit_blob_reference(&row, &descriptor_oid, &scope)
+            .expect("admit only the descriptor stored in the row");
+
+        let boundary = chunk_spans[crate::native_graph::MAX_REFS - 1].offset()
+            + chunk_spans[crate::native_graph::MAX_REFS - 1].length();
+        let range_start = boundary - 4 * 1024 * 1024;
+        let range_end = (boundary + 4 * 1024 * 1024).min(payload.len() as u64);
+        let range = range_start..range_end;
+        let expected_payload_reads = chunk_spans
+            .iter()
+            .filter(|span| span.offset() < range.end && span.offset() + span.length() > range.start)
+            .map(crate::blob_store::ChunkSpan::length)
+            .sum::<u64>();
+        let before_objects = scope.objects_read_for_test();
+        let read = graph
+            .read_blob_range(&reference, range.clone(), &scope)
+            .unwrap_or_else(|error| panic!("nested range {range:?} failed: {error:?}"));
+
+        assert_eq!(
+            read.bytes(),
+            &payload[range.start as usize..range.end as usize],
+            "nested-index range returned the wrong bytes"
+        );
+        assert_eq!(
+            scope.payload_bytes_read_for_test(),
+            expected_payload_reads,
+            "range reads payload only from intersecting chunks"
+        );
+        assert!(
+            scope.objects_read_for_test() - before_objects > 2,
+            "range must traverse the descriptor and nested byte-index objects"
+        );
+        assert_eq!(
+            read.verification(),
+            crate::native_graph::RangeVerification::ReturnedChunks
+        );
     }
 
     #[test]
