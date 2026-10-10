@@ -75,12 +75,14 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     assert_eq!(blob.read_to_end().unwrap(), payload);
     assert_eq!(blob.media_type(), "application/json");
     assert_eq!(blob.suffix(), None);
+    assert_eq!(blob.annotation().selected_suffix(), "json");
 
     let round_trip = ContextValue::decode(&value.encode().unwrap(), ValueFormat::Ovb2).unwrap();
     let round_trip_blob = round_trip.blob().unwrap();
     assert_eq!(round_trip_blob.read_to_end().unwrap(), payload);
     assert_eq!(round_trip_blob.media_type(), "application/json");
     assert_eq!(round_trip_blob.suffix(), None);
+    assert_eq!(round_trip_blob.annotation().selected_suffix(), "json");
 
     // Capture finishes with only owner-scoped scratch state. It has not
     // inserted a runtime row or created a public commit.

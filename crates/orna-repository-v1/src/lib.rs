@@ -72,8 +72,8 @@ pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
 };
 pub use row_store::{
-    AdmittedRow, KeyRange, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity, RowMapSnapshot,
-    TypedKey,
+    AdmittedRow, KeyRange, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity, RowDependency,
+    RowMapSnapshot, RowValue, TypedKey,
 };
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
@@ -2444,8 +2444,27 @@ impl Repository {
         store_root: &NativeOid,
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
+        self.build_frozen_publication_candidate_with_changes(
+            expected_head,
+            graph,
+            store_root,
+            &[],
+            message,
+        )
+    }
+
+    /// Builds one frozen publication candidate with the new native store root
+    /// and its matching loose-row projections in the same Git tree.
+    pub fn build_frozen_publication_candidate_with_changes(
+        &self,
+        expected_head: &GitCommitRef,
+        graph: &NativeGraphContext,
+        store_root: &NativeOid,
+        changes: &[ManagedFileChange],
+        message: &str,
+    ) -> Result<PrivateCommit, RepositoryError> {
         if message.is_empty() || message.contains('\0') {
-            return Err(RepositoryError::NoManagedPaths);
+            return Err(RepositoryError::InvalidCommitMessage);
         }
         let _lock = self.acquire_coordination_lock()?;
         self.ensure_no_git_operation_in_progress()?;
@@ -2453,15 +2472,19 @@ impl Repository {
         if &actual != expected_head {
             return Err(RepositoryError::StaleHead);
         }
-        // A candidate is only built for a batch admitted by this graph
-        // context, so a mismatched identity is refused before any object is
-        // written.
         if store_root.algorithm() != graph.algorithm() {
             return Err(RepositoryError::Graph(GraphError::InvalidOidWidth {
                 expected: graph.algorithm().width(),
                 actual: store_root.as_bytes().len(),
             }));
         }
+        let mut paths = HashSet::new();
+        for change in changes {
+            if !paths.insert(change.path.clone()) || change.path.as_path().to_str().is_none() {
+                return Err(RepositoryError::UnsafeManagedPath);
+            }
+        }
+        self.reject_final_loose_path_collisions(expected_head, changes)?;
 
         self.runtime.ensure_exists()?;
         fs::create_dir_all(self.runtime.locks())
@@ -2484,6 +2507,35 @@ impl Repository {
                 .env("GIT_INDEX_FILE", &index)
                 .args(["read-tree", expected_head.as_str()]);
             self.run(read_tree)?;
+
+            for change in changes {
+                if let Some(bytes) = change.bytes() {
+                    let object = self.hash_object(bytes)?;
+                    let cacheinfo = format!(
+                        "100644,{object},{}",
+                        change
+                            .path
+                            .as_path()
+                            .to_str()
+                            .ok_or(RepositoryError::UnsafeManagedPath)?
+                    );
+                    let mut update = self.command();
+                    update.env("GIT_INDEX_FILE", &index).args([
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &cacheinfo,
+                    ]);
+                    self.run(update)?;
+                } else {
+                    let mut update = self.command();
+                    update
+                        .env("GIT_INDEX_FILE", &index)
+                        .args(["update-index", "--force-remove", "--"])
+                        .arg(change.path.as_path());
+                    self.run(update)?;
+                }
+            }
 
             // The store root must be a real decodable OGS-1 tree, so a raw
             // object ID cannot be planted at the store position.
