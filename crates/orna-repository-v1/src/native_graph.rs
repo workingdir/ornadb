@@ -7991,6 +7991,7 @@ mod persisted_orp_tests {
         let version = graph.row_snapshot.version();
         let seeded_store_root = graph
             .replace_relation_primary_root(
+                version.store_root(),
                 version,
                 seeded.primary_root(),
                 seeded.row_count(),
@@ -8082,6 +8083,7 @@ mod persisted_orp_tests {
         let version = graph.row_snapshot.version();
         let seeded_store_root = graph
             .replace_relation_primary_root(
+                version.store_root(),
                 version,
                 seeded.primary_root(),
                 seeded.row_count(),
