@@ -1605,10 +1605,17 @@ pub struct PublicationFreeze {
 /// move instead of reducing it to a replacement at the source key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PublicationRowOperation {
-    Insert { value: Vec<u8> },
-    Replacement { value: Vec<u8> },
+    Insert {
+        value: Vec<u8>,
+    },
+    Replacement {
+        value: Vec<u8>,
+    },
     Deletion,
-    Rekey { destination_key: Vec<u8>, value: Vec<u8> },
+    Rekey {
+        destination_key: Vec<u8>,
+        value: Vec<u8>,
+    },
 }
 
 /// One validated operation from the runtime's ordered publication prefix.
@@ -32279,7 +32286,10 @@ mod tests {
         assert_eq!(batch.candidate_digest, freeze.candidate_digest);
         assert_eq!(batch.mutations.len(), 3);
         assert_eq!(batch.mutations[0].table_id, id(10));
-        assert_eq!(batch.mutations[0].candidate_generation, checkpoint.generation);
+        assert_eq!(
+            batch.mutations[0].candidate_generation,
+            checkpoint.generation
+        );
         assert_eq!(
             batch
                 .mutations
