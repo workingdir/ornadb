@@ -1929,6 +1929,21 @@ impl NativeGraphContext {
             &mut written,
             scope.max_objects,
         )?;
+        // Root the finished graph before the potentially long full-closure
+        // verification and durability pass. Git GC must not collect a child
+        // edge after it has been written but before the candidate is issued.
+        let pin_id = *crate::Uuid::new_v4().as_bytes();
+        let provisional_ref = scratch_content_ref(&self.owner_id, &pin_id);
+        if let Err(error) = self.create_protected_ref(&provisional_ref, &descriptor_oid) {
+            let _ = self.delete_protected_ref(&provisional_ref, &descriptor_oid);
+            return Err(error);
+        }
+        let cleanup = PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            provisional_ref,
+            descriptor_oid.clone(),
+        );
+
         let descriptor = self.read_blob_descriptor(
             &descriptor_oid,
             scope,
@@ -1944,17 +1959,6 @@ impl NativeGraphContext {
         let objects = self.verify_full_blob(&reference, scope)?;
         self.sync_object_closure(&objects, scope)?;
 
-        let pin_id = *crate::Uuid::new_v4().as_bytes();
-        let provisional_ref = scratch_content_ref(&self.owner_id, &pin_id);
-        if let Err(error) = self.create_protected_ref(&provisional_ref, &descriptor_oid) {
-            let _ = self.delete_protected_ref(&provisional_ref, &descriptor_oid);
-            return Err(error);
-        }
-        let cleanup = PendingPrivateRefCleanup::new(
-            Arc::clone(&self.private_ref_owner),
-            provisional_ref,
-            descriptor_oid.clone(),
-        );
         Ok(CapturedBlobCandidate {
             context: self.identity,
             repository_id: self.repository_id,
@@ -8018,6 +8022,17 @@ mod persisted_orp_tests {
                 &accepted_content_ref(&decode_pin_id(&owner_hex), &unaccepted_pin_id),
             ),
             "unaccepted pending content is reclaimed"
+        );
+
+        let gc = Command::new("git")
+            .current_dir(root)
+            .args(["gc", "--prune=now", "--quiet"])
+            .output()
+            .expect("collect objects after owner recovery");
+        assert!(
+            gc.status.success(),
+            "git gc failed after recovery: {}",
+            String::from_utf8_lossy(&gc.stderr)
         );
 
         // The remaining private root must still serve its full OGB-2 content
