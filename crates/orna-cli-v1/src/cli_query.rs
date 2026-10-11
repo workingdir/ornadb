@@ -419,7 +419,7 @@ impl<'a> PredicatePlan<'a> {
 
     fn human_line(&self) -> String {
         format!(
-            "plan: annotation predicate over {}; coordinates {}; decoded-payload coordinates {}; \
+            "plan: annotation predicate over {}; coordinates {}; decode-required coordinates {}; \
              candidates {} matched {}; subject {}",
             self.subject,
             self.coordinates().join(","),
