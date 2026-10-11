@@ -1254,11 +1254,15 @@ async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
 }
 
 #[tokio::test]
-async fn listing_projects_suffix_column_for_song_and_image_rows() {
+async fn listing_does_not_repeat_preferred_suffix_hints_for_song_and_image_rows() {
     let (_directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
-        std::fs::copy(Path::new(MEDIA_FIXTURES).join(name), source.path().join(name)).unwrap();
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
     }
 
     let runtime_identity = RuntimeIdentity {
@@ -1277,10 +1281,29 @@ async fn listing_projects_suffix_column_for_song_and_image_rows() {
         .with_repository_capture_capability(capability);
 
     let song = import_expression(PROJECTION_SONG_IMPORT_FIXTURE, source.path());
-    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
+    import_media(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &song,
+        "song",
+        0x70,
+        true,
+    )
+    .await;
     let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
-    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
-
+    import_media(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &image,
+        "image",
+        0x80,
+        true,
+    )
+    .await;
     let listing = list_media(&state).await;
     let suffixes: Vec<(Vec<u8>, Option<String>)> = listing
         .into_iter()
@@ -1288,10 +1311,8 @@ async fn listing_projects_suffix_column_for_song_and_image_rows() {
         .collect();
     assert_eq!(
         suffixes,
-        vec![
-            (b"image".to_vec(), Some("png".to_owned())),
-            (b"song".to_vec(), Some("wav".to_owned())),
-        ]
+        vec![(b"image".to_vec(), None), (b"song".to_vec(), None)],
+        "preferred MIME-1 suffixes are implicit; only explicit hints are stored"
     );
 }
 
@@ -1534,6 +1555,7 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
         );
         listed_length += listing["length"].as_u64().unwrap();
     }
+
     let on_disk: u64 = ["tone.wav", "pixel.png"]
         .iter()
         .map(|file| std::fs::metadata(Path::new(MEDIA_FIXTURES).join(file)).unwrap().len())

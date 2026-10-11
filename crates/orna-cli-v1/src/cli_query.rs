@@ -9,7 +9,7 @@
 //! `payload_bytes_read` stays at zero because the row's own field tuple
 //! carries the length, SHA-256 and MIME-1 annotation. Media bytes are only
 //! fetched by an explicit Blob read, never by a listing or summary.
-//!
+
 //! The predicate is evaluated against those same stored annotation
 //! coordinates, so a filtered listing reports the plan it used and the payload
 //! bytes it did not fetch. Coordinates a stored ROV-3 annotation does not bind
