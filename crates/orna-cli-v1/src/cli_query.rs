@@ -275,12 +275,11 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             format!("no row with key {:?}", options.key.unwrap_or_default()),
         ));
     }
-    // Each field is projected from the row's own stored tuple; a field that
-    // is not a Blob in canonical shape is not a Blob, so it is skipped rather
-    // than reported with a fabricated summary. Naming a field decodes only
-    // that field; otherwise the row is walked once so a Blob at any index is
-    // reported with the index it actually occupies.
+    // Project each row once and apply the annotation predicate as each Blob's
+    // stored metadata is decoded. Non-matches never enter the listing buffer,
+    // and predicate evaluation never opens a descriptor or payload chunk.
     let mut listings = Vec::new();
+    let mut candidates = 0;
     for row in &rows {
         match options.field {
             Some(field) => {
@@ -288,29 +287,28 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     query_error("Row fields could not be decoded", format!("{error:?}"))
                 })?;
                 if let Some(metadata) = metadata {
-                    listings.push((row.key().clone(), field, metadata));
+                    candidates += 1;
+                    if options.predicate.matches(&metadata) {
+                        listings.push((row.key().clone(), field, metadata));
+                    }
                 }
             }
             None => {
                 for (field, metadata) in row.blob_fields().map_err(|error| {
                     query_error("Row fields could not be decoded", format!("{error:?}"))
                 })? {
-                    listings.push((row.key().clone(), field, metadata));
+                    candidates += 1;
+                    if options.predicate.matches(&metadata) {
+                        listings.push((row.key().clone(), field, metadata));
+                    }
                 }
             }
         }
     }
-    // The predicate is evaluated over the same stored annotation
-    // coordinates the listing already decoded, so narrowing a listing costs no
-    // additional read and never enters a descriptor or a payload chunk. A
-    // candidate that does not match is dropped rather than reported, and the
-    // plan below states which coordinates answered it.
-    let candidates = listings.len();
     let subject = options.field.map_or_else(
         || "all fields".to_owned(),
         |field| format!("field {field}"),
     );
-    listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
     let matched = listings.len();
     let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
     match options.format {
