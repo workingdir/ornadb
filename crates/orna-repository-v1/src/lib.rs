@@ -1031,7 +1031,6 @@ impl PublicationJournal {
         )
     }
 
-
     /// The reported annotation-default coordinate of this migration. `None`
     /// means the caller has not declared one, and publication refuses.
     pub const fn migration_annotation_defaults(&self) -> Option<MigrationAnnotationDefaults> {
