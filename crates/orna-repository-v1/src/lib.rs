@@ -2605,7 +2605,8 @@ impl Repository {
         base_index: &[u8],
         _git_lock: &GitIndexLock,
     ) -> Result<IndexGeneration, RepositoryError> {
-        if self.head()?.as_ref() != Some(candidate.commit()) {
+        let selected_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        if !self.publication_candidate_is_ancestor_of_head(candidate.commit())? {
             return Err(RepositoryError::StaleHead);
         }
         let index = self.git_path("index")?;
@@ -2651,7 +2652,7 @@ impl Repository {
                 .map_err(|_| RepositoryError::LocalStateUnavailable)?;
             let current_index =
                 fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            if current_index != base_index || self.head()?.as_ref() != Some(candidate.commit()) {
+            if current_index != base_index || self.head()?.as_ref() != Some(&selected_head) {
                 return Err(RepositoryError::StaleHead);
             }
             fs::rename(&candidate_index, &index)
@@ -3092,7 +3093,7 @@ impl Repository {
         // before the separately durable runtime completion.  Do not discard
         // the journal in that state: PUB-1 recovery must retain it to
         // reconcile the newer ref rather than treating cleanup as complete.
-        if self.head()?.as_ref() != Some(journal.new_head()) {
+        if !self.publication_journal_head_is_safe(journal)? {
             return Err(RepositoryError::StaleHead);
         }
         journal.advance(PublicationJournalStage::RuntimeCompleted)?;
@@ -3105,6 +3106,61 @@ impl Repository {
     /// Resumes a persisted publication after a process interruption. The
     /// journal is advanced only after each observable boundary is verified;
     /// unexpected ref, index, or worktree state remains a typed conflict.
+    /// Reports whether the current branch contains an already-published commit.
+    /// This is the recovery fence for a later ordinary branch update: callers
+    /// may reconcile against descendants but never move the ref backwards.
+    pub fn publication_candidate_is_ancestor_of_head(
+        &self,
+        candidate: &GitCommitRef,
+    ) -> Result<bool, RepositoryError> {
+        let Some(head) = self.head()? else {
+            return Ok(false);
+        };
+        if &head == candidate {
+            return Ok(true);
+        }
+        let mut command = self.command();
+        command.args([
+            "merge-base",
+            "--is-ancestor",
+            candidate.as_str(),
+            head.as_str(),
+        ]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
+    }
+
+    /// Confirms a journal's candidate remains an ancestor and that later
+    /// commits did not replace any managed path published by that candidate.
+    pub fn publication_journal_head_is_safe(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<bool, RepositoryError> {
+        let candidate = self.candidate_from_journal(journal)?;
+        if !self.publication_candidate_is_ancestor_of_head(candidate.commit())? {
+            return Ok(false);
+        }
+        let head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        let selected = PrivateCommit {
+            tree: candidate.tree.clone(),
+            commit: head,
+        };
+        for entry in journal.entries() {
+            if self.candidate_tree_entry(&candidate, &entry.path)?
+                != self.candidate_tree_entry(&selected, &entry.path)?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub fn recover_publication(&self) -> Result<Option<IndexGeneration>, RepositoryError> {
         let _coordination_lock = self.acquire_coordination_lock()?;
         self.require_no_pending_checkout_recovery_locked()?;
@@ -3141,7 +3197,7 @@ impl Repository {
                 | PublicationJournalStage::RefAdvanced
                 | PublicationJournalStage::IndexReconciled
         ) {
-            if self.head()?.as_ref() != Some(journal.new_head()) {
+            if !self.publication_journal_head_is_safe(&journal)? {
                 return Err(RepositoryError::StaleHead);
             }
             let index = self.git_path("index")?;
@@ -3190,7 +3246,7 @@ impl Repository {
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
         if journal.stage() == PublicationJournalStage::WorktreeReconciled {
-            if self.head()?.as_ref() != Some(journal.new_head()) {
+            if !self.publication_journal_head_is_safe(&journal)? {
                 return Err(RepositoryError::StaleHead);
             }
             return Err(RepositoryError::RuntimeCompletionRequired);
@@ -3198,7 +3254,7 @@ impl Repository {
         if matches!(
             journal.stage(),
             PublicationJournalStage::RuntimeCompleted | PublicationJournalStage::Complete
-        ) && self.head()?.as_ref() != Some(journal.new_head())
+        ) && !self.publication_journal_head_is_safe(&journal)?
         {
             return Err(RepositoryError::StaleHead);
         }

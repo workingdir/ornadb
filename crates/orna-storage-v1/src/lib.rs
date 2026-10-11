@@ -1351,11 +1351,9 @@ impl RuntimePublicationCoordinator {
             // Do not assume the journal candidate is still the selected Git
             // snapshot: a native writer may have advanced HEAD between the
             // receipt and journal finalization.
-            if repository
-                .head()
+            if !repository
+                .publication_journal_head_is_safe(&journal)
                 .map_err(map_publication_repository_error)?
-                .as_ref()
-                != Some(journal.new_head())
             {
                 return Err(Error::RefConflict);
             }
@@ -1644,11 +1642,9 @@ impl RuntimePublicationCoordinator {
         if self.journal.stage() != orna_repository_v1::PublicationJournalStage::WorktreeReconciled {
             return Err(Error::PublicationPending);
         }
-        if repository
-            .head()
+        if !repository
+            .publication_journal_head_is_safe(&self.journal)
             .map_err(map_publication_repository_error)?
-            .as_ref()
-            != Some(self.journal.new_head())
         {
             return Err(Error::RefConflict);
         }
@@ -1787,11 +1783,9 @@ impl RuntimePublicationCoordinator {
         {
             return Err(Error::InvalidTransition);
         }
-        if repository
-            .head()
+        if !repository
+            .publication_journal_head_is_safe(&journal)
             .map_err(map_publication_repository_error)?
-            .as_ref()
-            != Some(journal.new_head())
         {
             return Err(Error::RefConflict);
         }
