@@ -451,6 +451,7 @@ impl NativeGraphContext {
             return Err(GraphError::ContentIdentityMismatch);
         }
         let mut digest = crate::blob_store::ContentDigest::new();
+        let mut chunk_boundaries = GearBoundaryVerifier::new();
         self.walk_full_index(
             &byte_root,
             encoded_length,
@@ -458,6 +459,7 @@ impl NativeGraphContext {
             &scope,
             &mut objects,
             &mut digest,
+            &mut chunk_boundaries,
         )?;
         let actual = digest.finish();
         if actual.length() != encoded_length || actual.sha256() != schema_digest {
@@ -2637,6 +2639,7 @@ impl NativeGraphContext {
             return Err(GraphError::ReadQuotaExceeded);
         }
         let mut digest = crate::blob_store::ContentDigest::new();
+        let mut chunk_boundaries = GearBoundaryVerifier::new();
         if let Some(root) = descriptor.byte_root.as_ref() {
             let height = self.walk_full_index(
                 root,
@@ -2645,6 +2648,7 @@ impl NativeGraphContext {
                 scope,
                 &mut objects,
                 &mut digest,
+                &mut chunk_boundaries,
             )?;
             if height > MAX_GRAPH_HEIGHT {
                 return Err(GraphError::HeightExceeded(height));
@@ -2664,6 +2668,7 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
         objects: &mut ObjectBudget,
         digest: &mut crate::blob_store::ContentDigest,
+        chunk_boundaries: &mut GearBoundaryVerifier,
     ) -> Result<u8, GraphError> {
         scope.check_cancelled()?;
         let node = self.read_native_node(oid, scope, objects)?;
@@ -2706,6 +2711,7 @@ impl NativeGraphContext {
                 {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
+                chunk_boundaries.push_chunk(&chunk)?;
                 digest
                     .update(&chunk)
                     .map_err(|_| GraphError::InvalidLength(u64::MAX))?;
@@ -2718,6 +2724,7 @@ impl NativeGraphContext {
                     scope,
                     objects,
                     digest,
+                    chunk_boundaries,
                 )?;
             }
         }
@@ -3367,13 +3374,13 @@ struct ParsedGitTreeEntry {
     oid: NativeOid,
 }
 
-struct StreamingGearChunker {
+struct GearCutState {
     table: [u64; 256],
     accumulator: u64,
-    chunk: Vec<u8>,
+    length: usize,
 }
 
-impl StreamingGearChunker {
+impl GearCutState {
     fn new() -> Self {
         let mut table = [0u64; 256];
         for (byte, slot) in table.iter_mut().enumerate() {
@@ -3385,22 +3392,73 @@ impl StreamingGearChunker {
         Self {
             table,
             accumulator: 0,
+            length: 0,
+        }
+    }
+
+    fn push(&mut self, byte: u8) -> bool {
+        self.accumulator = self
+            .accumulator
+            .wrapping_shl(1)
+            .wrapping_add(self.table[byte as usize]);
+        self.length += 1;
+        if self.length >= crate::blob_store::GEAR_MINIMUM
+            && (self.accumulator & crate::blob_store::GEAR_MASK == 0
+                || self.length == crate::blob_store::GEAR_MAXIMUM)
+        {
+            self.accumulator = 0;
+            self.length = 0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct GearBoundaryVerifier {
+    state: GearCutState,
+    chunks_seen: bool,
+}
+
+impl GearBoundaryVerifier {
+    fn new() -> Self {
+        Self {
+            state: GearCutState::new(),
+            chunks_seen: false,
+        }
+    }
+
+    fn push_chunk(&mut self, chunk: &[u8]) -> Result<(), GraphError> {
+        if chunk.is_empty() || (self.chunks_seen && self.state.length != 0) {
+            return Err(GraphError::InvalidByteIndex);
+        }
+        for (index, byte) in chunk.iter().copied().enumerate() {
+            if self.state.push(byte) && index + 1 != chunk.len() {
+                return Err(GraphError::InvalidByteIndex);
+            }
+        }
+        self.chunks_seen = true;
+        Ok(())
+    }
+
+}
+
+struct StreamingGearChunker {
+    state: GearCutState,
+    chunk: Vec<u8>,
+}
+
+impl StreamingGearChunker {
+    fn new() -> Self {
+        Self {
+            state: GearCutState::new(),
             chunk: Vec::with_capacity(crate::blob_store::GEAR_MAXIMUM),
         }
     }
 
     fn push(&mut self, byte: u8) -> Option<Vec<u8>> {
-        self.accumulator = self
-            .accumulator
-            .wrapping_shl(1)
-            .wrapping_add(self.table[byte as usize]);
         self.chunk.push(byte);
-        let length = self.chunk.len();
-        if length >= crate::blob_store::GEAR_MINIMUM
-            && (self.accumulator & crate::blob_store::GEAR_MASK == 0
-                || length == crate::blob_store::GEAR_MAXIMUM)
-        {
-            self.accumulator = 0;
+        if self.state.push(byte) {
             Some(std::mem::replace(
                 &mut self.chunk,
                 Vec::with_capacity(crate::blob_store::GEAR_MAXIMUM),
@@ -7135,7 +7193,7 @@ mod persisted_orp_tests {
 
     #[test]
     fn row_index_collection_checks_each_shared_child_parent_fence() {
-        let domain = rows_domain(&[0x11; 16], &[0x22; 32]);
+        let domain = rows_domain([0x11; 16], [0x22; 32]);
         let key_a = TypedKey::Text("a".to_owned());
         let key_b = TypedKey::Text("b".to_owned());
         let key_c = TypedKey::Text("c".to_owned());
@@ -7195,6 +7253,67 @@ mod persisted_orp_tests {
                 &mut validated_contexts,
             ),
             Err(GraphError::InvalidCount(2))
+        ));
+    }
+
+    #[test]
+    fn full_blob_verification_rejects_noncanonical_gear_chunk_boundaries() {
+        let (directory, graph) = capture_test_context();
+        let bytes = b"ab";
+        let identity = crate::blob_store::digest_bytes(bytes);
+
+        let build_reference = |chunks: &[&[u8]]| {
+            let mut entries = Vec::new();
+            for chunk in chunks {
+                let oid = fixture_git_object(directory.path(), "blob", chunk);
+                let span = crate::blob_store::ChunkSpan::new(
+                    0,
+                    chunk.len() as u64,
+                    crate::blob_store::digest_bytes(chunk).sha256(),
+                )
+                .expect("valid chunk span");
+                entries.push(ByteIndexEntry {
+                    span_length: span.length(),
+                    target: oid,
+                    chunk_sha256: Some(span.sha256()),
+                });
+            }
+            let byte_root = fixture_git_node(
+                directory.path(),
+                &NodeData::ByteIndex {
+                    height: 0,
+                    total_length: bytes.len() as u64,
+                    entries,
+                },
+            );
+            let descriptor_oid = fixture_git_node(
+                directory.path(),
+                &NodeData::BlobDescriptor {
+                    length: bytes.len() as u64,
+                    raw_sha256: identity.sha256(),
+                    byte_root: Some(byte_root),
+                },
+            );
+            AdmittedBlobReference {
+                context: graph.identity,
+                database_id: graph.database_id,
+                owner_id: graph.owner_id,
+                snapshot_id: graph.snapshot_id,
+                descriptor_oid,
+                identity,
+            }
+        };
+
+        let scope = graph.open_read_scope().expect("verification scope");
+        graph
+            .verify_full_blob(&build_reference(&[bytes]), &scope)
+            .expect("single final tail is canonical");
+
+        let noncanonical = build_reference(&[b"a", b"b"]);
+        let scope = graph.open_read_scope().expect("fresh verification scope");
+        assert!(matches!(
+            graph.verify_full_blob(&noncanonical, &scope),
+            Err(GraphError::InvalidByteIndex)
         ));
     }
 
