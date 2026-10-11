@@ -3838,7 +3838,7 @@ mod graph_bridge_tests {
         assert_eq!(copied_key, TypedKey::UInt(key));
         assert_eq!(metadata.length(), payload.len() as u64);
         let expected_sha: [u8; 32] = Sha256::digest(&payload).into();
-        assert_eq!(metadata.sha256(), &expected_sha);
+        assert_eq!(metadata.sha256(), expected_sha);
         assert_eq!(metadata.media_type(), "audio/wav");
         assert_eq!(metadata.suffix(), Some("wav"));
         assert_eq!(metadata_scope.payload_bytes_read(), 0);
