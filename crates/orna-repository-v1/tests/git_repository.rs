@@ -6334,6 +6334,98 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
 }
 
 #[test]
+fn recovery_reconciles_publication_without_rewinding_a_concurrent_branch_update() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let old_head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &old_head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"published row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+    let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        old_head.clone(),
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [27; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"published row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.write_publication_journal(&journal).unwrap();
+    repo.advance_current_ref(&old_head, &candidate).unwrap();
+    git(root.path(), &["read-tree", candidate.commit().as_str()]);
+    fs::write(root.path().join("concurrent.txt"), b"concurrent update\n").unwrap();
+    let blob = git(
+        root.path(),
+        &["hash-object", "-w", "--", "concurrent.txt"],
+    );
+    git(
+        root.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{blob},concurrent.txt"),
+        ],
+    );
+    let tree = git(root.path(), &["write-tree"]);
+    let concurrent = git(
+        root.path(),
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            candidate.commit().as_str(),
+            "-m",
+            "concurrent branch update",
+        ],
+    );
+    git(
+        root.path(),
+        &[
+            "update-ref",
+            "refs/heads/main",
+            &concurrent,
+            candidate.commit().as_str(),
+        ],
+    );
+
+    assert!(repo.publication_journal_head_is_safe(&journal).unwrap());
+    let recovery = repo.recover_publication();
+    assert!(
+        matches!(
+            recovery,
+            Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
+        ),
+        "recovery returned {recovery:?}"
+    );
+    assert_eq!(repo.head().unwrap().unwrap().as_str(), concurrent);
+    assert_eq!(
+        repo.managed_file_bytes(&managed).unwrap().as_deref(),
+        Some(&b"published row\n"[..])
+    );
+    assert_eq!(
+        fs::read(root.path().join("concurrent.txt")).unwrap(),
+        b"concurrent update\n"
+    );
+    let mut journal = repo.read_publication_journal().unwrap().unwrap();
+    repo.mark_runtime_complete([27; 16], &mut journal).unwrap();
+    assert_eq!(repo.head().unwrap().unwrap().as_str(), concurrent);
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
+
+#[test]
 fn compact_publication_rejects_schema_identity_and_type_substitution() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
