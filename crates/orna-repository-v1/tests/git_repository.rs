@@ -8491,6 +8491,20 @@ fn interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer
     let mut resumed = repo.read_publication_journal().unwrap().unwrap();
     assert_eq!(resumed.runtime_intent_id(), Some(intent));
     assert_eq!(resumed.migration_continuity(), Some(&continuity));
+    // Resume at the durable publication boundary, not only while Prepared.
+    let defaults = MigrationAnnotationDefaults::new(0).unwrap();
+    assert_eq!(
+        resumed
+            .resume_migration_annotation_defaults(defaults)
+            .unwrap(),
+        defaults
+    );
+    assert_eq!(
+        resumed
+            .resume_migration_continuity(continuity.clone())
+            .unwrap(),
+        continuity
+    );
     assert_eq!(
         resumed.migration_continuity().unwrap().successor_for(
             legacy_consumer,
