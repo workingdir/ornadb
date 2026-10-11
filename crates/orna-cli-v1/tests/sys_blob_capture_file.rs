@@ -98,6 +98,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
 
     // MIME-1 stores a preferred suffix as an omitted hint; consumers still see
     // its effective suffix through the annotation.
+    // MIME-1 omits the preferred suffix from the wire but preserves its effective value.
     let annotated = value
         .with_blob_annotation("application/json", Some("json"))
         .unwrap();
