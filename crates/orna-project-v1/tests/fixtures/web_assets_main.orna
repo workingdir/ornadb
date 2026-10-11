@@ -1,2 +1,2 @@
-use playground;
+use web_assets;
 pub fn main(): Int = 42;

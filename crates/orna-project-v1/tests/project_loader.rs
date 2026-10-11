@@ -891,15 +891,15 @@ fn discovers_table_rows_with_dots_in_encoded_key_components() {
     let (directory, repository) = repository(&[
         (
             "main.orna",
-            include_str!("fixtures/playground_asset_main.orna"),
+            include_str!("fixtures/web_assets_main.orna"),
         ),
         (
-            "playground.orna",
-            include_str!("fixtures/playground_asset_schema.orna"),
+            "web_assets.orna",
+            include_str!("fixtures/web_assets_schema.orna"),
         ),
         (
-            "playground/Asset/assets~2fapp.js.orna",
-            include_str!("fixtures/playground_asset_row.orna"),
+            "web_assets/Asset/web~2fapp.js.orna",
+            include_str!("fixtures/web_assets_row.orna"),
         ),
     ]);
     commit_all(&directory);
@@ -909,10 +909,10 @@ fn discovers_table_rows_with_dots_in_encoded_key_components() {
     assert_eq!(loaded.loose_rows().len(), 1);
     assert_eq!(
         loaded.loose_rows()[0].logical_path(),
-        "playground/Asset/assets~2fapp.js.orna"
+        "web_assets/Asset/web~2fapp.js.orna"
     );
-    assert_eq!(loaded.loose_rows()[0].table_path(), "playground/Asset");
-    assert_eq!(loaded.loose_rows()[0].key_path(), ["assets~2fapp.js.orna"]);
+    assert_eq!(loaded.loose_rows()[0].table_path(), "web_assets/Asset");
+    assert_eq!(loaded.loose_rows()[0].key_path(), ["web~2fapp.js.orna"]);
 }
 
 #[cfg(unix)]
