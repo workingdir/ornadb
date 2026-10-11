@@ -1814,8 +1814,9 @@ impl RuntimePublicationCoordinator {
 /// The repository coordination lock stays held from witness proof through the
 /// runtime transaction, so concurrent Orna publishers cannot change the
 /// publication boundary during cleanup. Native Git writers remain outside that
-/// lock; completion rechecks HEAD and retains the journal if one wins that
-/// external race after runtime commit.
+/// lock. Completion accepts descendant HEADs only when the candidate remains an
+/// ancestor and journal-managed paths are unchanged, preserving unrelated Git
+/// updates while retaining the journal for conflicting managed-path changes.
 ///
 pub async fn complete_verified_compact_runtime_prefix(
     repository: &Repository,
@@ -3120,7 +3121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_ref_drift_after_runtime_commit_preserves_journal_and_tail() {
+    async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
         let (temp, repository, runtime, freeze, plan) = compact_runtime_unpublished_fixture().await;
         let pending = repository
             .publish_compact_repository_boundary(plan)
@@ -3133,24 +3134,40 @@ mod tests {
             .complete_compact_publication(&pending, &freeze)
             .await
             .unwrap();
+
+        let journal = repository.read_publication_journal().unwrap().unwrap();
+        let candidate = journal.new_head().clone();
         fs::write(temp.path().join("ordinary.txt"), "native writer\n").unwrap();
         git(temp.path(), &["add", "ordinary.txt"]);
         git(temp.path(), &["commit", "-m", "native writer"]);
+        let concurrent = repository.head().unwrap().unwrap();
 
+        let visibility = RuntimePublicationCoordinator::compact_reader_visibility(
+            &repository,
+            &runtime,
+        )
+        .await
+        .unwrap();
+        assert_eq!(visibility.snapshot(), &candidate);
         assert_eq!(
-            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
-            Err(Error::RefConflict)
+            visibility.tail(),
+            CompactTailWindow::AfterWatermark(freeze.checkpoint.mutation_sequence)
         );
-        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
+
         let result = RuntimePublicationCoordinator::recover_compact_validated(
             &repository,
             &runtime,
-            &profile,
+            &CompactOvbProfile::new(compact_schema()).unwrap(),
         )
         .await;
-        assert_eq!(result, Err(Error::RefConflict));
+        assert!(result.unwrap().is_some());
+        assert_eq!(repository.head().unwrap(), Some(concurrent));
+        assert_eq!(
+            fs::read(temp.path().join("ordinary.txt")).unwrap(),
+            b"native writer\n"
+        );
         assert_eq!(runtime.pending().await.unwrap().len(), 1);
-        assert!(repository.read_publication_journal().unwrap().is_some());
+        assert!(repository.read_publication_journal().unwrap().is_none());
     }
 
     fn path() -> LoosePath {
