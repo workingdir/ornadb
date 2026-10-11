@@ -5554,9 +5554,16 @@ mod tests {
         let journal = repository.read_publication_journal().unwrap().unwrap();
         let entry = journal.entries().first().expect("manifest journal entry");
         let path = temp.path().join(entry.path().as_path());
+        let candidate_bytes = entry.next().expect("published managed bytes").to_vec();
         fs::write(&path, b"replaced managed entry").unwrap();
         test_git(temp.path(), &["add", "--all"]);
         test_git(temp.path(), &["commit", "-m", "replace managed entry"]);
+        // Restore index and worktree to the candidate; only the descendant tree differs.
+        fs::write(&path, candidate_bytes).unwrap();
+        test_git(
+            temp.path(),
+            &["add", entry.path().as_path().to_str().unwrap()],
+        );
 
         assert!(!repository.compact_candidate_head_is_safe(&journal).unwrap());
     }
