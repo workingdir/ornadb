@@ -1039,6 +1039,10 @@ pub(crate) fn partition_token_ranges(
     height: u8,
     node_overhead: usize,
 ) -> Result<Vec<std::ops::Range<usize>>, RowStoreError> {
+    if height > MAX_PAGE_HEIGHT {
+        return Err(RowStoreError::PageHeightExceeded(height));
+    }
+
     if node_overhead >= NODE_DATA_LIMIT {
         return Err(RowStoreError::EntryTooLarge(node_overhead));
     }
@@ -1589,5 +1593,18 @@ mod tests {
             .expect("matching boundary")
             .expect("original row remains");
         assert_eq!(row.value().encoded_fields(), Some(&[0x81, 0x01][..]));
+    }
+    #[test]
+    fn partition_token_ranges_rejects_heights_above_format_bound() {
+        assert_eq!(
+            partition_token_ranges(&[], MAX_PAGE_HEIGHT, 0).expect("height 64 is allowed"),
+            Vec::<std::ops::Range<usize>>::new()
+        );
+        for height in [MAX_PAGE_HEIGHT + 1, u8::MAX] {
+            assert!(matches!(
+                partition_token_ranges(&[], height, 0),
+                Err(RowStoreError::PageHeightExceeded(actual)) if actual == height
+            ));
+        }
     }
 }
