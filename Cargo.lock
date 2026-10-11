@@ -1245,7 +1245,6 @@ dependencies = [
 name = "orna-cli-v1"
 version = "0.1.0"
 dependencies = [
- "base64",
  "getrandom 0.3.4",
  "orna-application-v1",
  "orna-client",
@@ -1418,7 +1417,6 @@ dependencies = [
  "orna-syntax-v1",
  "serde",
  "serde_json",
- "wasm-bindgen",
 ]
 
 [[package]]
