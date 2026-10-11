@@ -3550,10 +3550,7 @@ mod tests {
         let TemporaryRenameOutcome::Stale { diagnostic } = stale_outcome else {
             panic!("a draft over a replaced image must be stale");
         };
-        let stale_diagnostic = SafeDiagnostic {
-            code: DiagnosticCode::ExecutionRejected,
-            class: DiagnosticClass::Transient,
-        };
+        let stale_diagnostic = stale_baseline_diagnostic();
         assert_eq!(diagnostic, stale_diagnostic);
         assert_eq!(row_store.transaction_count(), before_stale_commits);
         assert_eq!(row_store.accepted(), row_text);
