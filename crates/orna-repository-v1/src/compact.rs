@@ -3094,11 +3094,11 @@ impl Repository {
     }
 
     /// Recovers the repository portion of a compact publication without
-    /// running runtime cleanup. If an external writer advanced the selected
-    /// branch after this compact candidate, returns the reloaded current
-    /// manifest as an explicit reconciliation boundary and retains the
-    /// journal. In particular, it never forces the stale candidate or treats
-    /// a previously consumed frozen prefix as reusable.
+    /// running runtime cleanup. A branch that advanced from the compact
+    /// candidate is eligible for pending-receipt recovery only when it is a
+    /// descendant on the selected ref and all journal-managed paths remain
+    /// unchanged. Divergent refs or changed managed paths remain an explicit
+    /// reconciliation boundary; recovery never rewinds the branch.
     pub fn recover_compact_publication_boundary(
         &self,
     ) -> Result<Option<CompactPublicationRecovery>, RepositoryError> {
@@ -3119,6 +3119,13 @@ impl Repository {
                 let journal = self
                     .read_publication_journal()?
                     .ok_or(RepositoryError::InvalidPublicationJournal)?;
+                if journal.stage() == PublicationJournalStage::WorktreeReconciled
+                    && self.compact_candidate_head_is_safe(&journal)?
+                {
+                    return self.pending_compact_publication().map(|pending| {
+                        pending.map(CompactPublicationRecovery::PendingRuntimeReceipt)
+                    });
+                }
                 return self.compact_reconciliation_boundary(&journal).map(Some);
             }
             Err(error) => return Err(error),
@@ -3126,15 +3133,64 @@ impl Repository {
         let pending = self
             .pending_compact_publication()?
             .ok_or(RepositoryError::InvalidPublicationJournal)?;
-        if self.head()?.as_ref() == Some(pending.commit()) {
+        let journal = self
+            .read_publication_journal()?
+            .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        if self.head()?.as_ref() == Some(pending.commit())
+            || self.compact_candidate_head_is_safe(&journal)?
+        {
             return Ok(Some(CompactPublicationRecovery::PendingRuntimeReceipt(
                 pending,
             )));
         }
-        let journal = self
-            .read_publication_journal()?
-            .ok_or(RepositoryError::InvalidPublicationJournal)?;
         self.compact_reconciliation_boundary(&journal).map(Some)
+    }
+
+    /// The selected HEAD may be the candidate or a descendant, but each
+    /// journal-managed tree entry must still equal the candidate's value.
+    /// This observational check never advances or resets a Git ref.
+    fn compact_candidate_head_is_safe(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<bool, RepositoryError> {
+        let witness = journal
+            .compact_manifest()
+            .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        if journal.stage() != PublicationJournalStage::WorktreeReconciled
+            || self.symbolic_head_ref()? != witness.selected_ref()
+        {
+            return Ok(false);
+        }
+        let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        let mut command = self.command();
+        command.args([
+            "merge-base",
+            "--is-ancestor",
+            journal.new_head().as_str(),
+            current_head.as_str(),
+        ]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            if output.status.code() == Some(1) {
+                return Ok(false);
+            }
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let candidate = self.candidate_from_journal(journal)?;
+        for entry in journal.entries() {
+            if self.candidate_tree_entry(&candidate, &entry.path)?
+                != self.tree_entry_at(&current_head, &entry.path)?
+            {
+                return Ok(false);
+            }
+            let target = self.managed_target(&entry.path)?;
+            if self.read_managed_file(&target)?.as_deref() != entry.next() {
+                return Ok(false);
+            }
+        }
+        self.index_entries_match_candidate(&candidate, journal.entries())
     }
 
     /// Authenticates a durable runtime receipt using the fixed verification
@@ -3232,7 +3288,7 @@ impl Repository {
         }
         let candidate = self.candidate_from_journal(journal)?;
         self.verify_compact_publication_binding(journal, &candidate)?;
-        if self.head()?.as_ref() != Some(journal.new_head()) {
+        if !self.compact_candidate_head_is_safe(journal)? {
             return Err(RepositoryError::StaleHead);
         }
         Ok(CompactRuntimeCompletionFence {
@@ -3347,7 +3403,7 @@ impl Repository {
         }
         let candidate = self.candidate_from_journal(journal)?;
         self.verify_compact_publication_binding(journal, &candidate)?;
-        if self.head()?.as_ref() != Some(journal.new_head()) {
+        if !self.compact_candidate_head_is_safe(journal)? {
             return Err(RepositoryError::StaleHead);
         }
         journal.advance(PublicationJournalStage::RuntimeCompleted)?;
@@ -5411,6 +5467,160 @@ mod tests {
             .read_verified_compact_segment(pending.commit(), NESTED_TABLE, &manifest.entries()[0])
             .unwrap();
         drop(root);
+    }
+
+    fn compact_recovery_fixture() -> (TempDir, Repository, CompactPublicationPending, GitCommitRef)
+    {
+        let (temp, repository) = test_repository();
+        let head = repository.head().unwrap().unwrap();
+        let schema = schema_descriptor_fingerprint(&bool_schema(BOOL_TABLE, BOOL_FIELD)).unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(BOOL_TABLE, schema),
+                [31; 16],
+                [32; 32],
+                &[],
+                "compact recovery fixture",
+            )
+            .unwrap();
+        let pending = repository
+            .publish_compact_repository_boundary(plan)
+            .unwrap();
+        (temp, repository, pending, head)
+    }
+
+    #[test]
+    fn compact_recovery_accepts_safe_unrelated_descendant() {
+        let (temp, repository, pending, _) = compact_recovery_fixture();
+        fs::write(temp.path().join("ordinary.txt"), "unrelated update\n").unwrap();
+        test_git(temp.path(), &["add", "ordinary.txt"]);
+        test_git(temp.path(), &["commit", "-m", "unrelated update"]);
+        let descendant = repository.head().unwrap().unwrap();
+        let journal = repository.read_publication_journal().unwrap().unwrap();
+        let candidate = repository.candidate_from_journal(&journal).unwrap();
+        let index_before = repository.index_generation().unwrap();
+        let selected_ref = repository.symbolic_head_ref().unwrap();
+
+        let recovered = repository
+            .recover_compact_publication_boundary()
+            .unwrap()
+            .expect("safe descendant preserves pending runtime receipt");
+        let CompactPublicationRecovery::PendingRuntimeReceipt(recovered) = recovered else {
+            panic!("safe descendant must remain eligible for receipt recovery");
+        };
+        assert_eq!(recovered.commit(), pending.commit());
+        assert_eq!(repository.head().unwrap(), Some(descendant.clone()));
+        assert_eq!(repository.symbolic_head_ref().unwrap(), selected_ref);
+        let persisted_journal = repository.read_publication_journal().unwrap().unwrap();
+        assert_eq!(
+            persisted_journal.stage(),
+            PublicationJournalStage::WorktreeReconciled
+        );
+        assert_eq!(repository.index_generation().unwrap(), index_before);
+        for entry in journal.entries() {
+            assert_eq!(
+                repository
+                    .candidate_tree_entry(&candidate, entry.path())
+                    .unwrap(),
+                repository.tree_entry_at(&descendant, entry.path()).unwrap()
+            );
+            let target = repository.managed_target(entry.path()).unwrap();
+            assert_eq!(
+                repository.read_managed_file(&target).unwrap().as_deref(),
+                entry.next()
+            );
+        }
+        assert!(
+            repository
+                .index_entries_match_candidate(&candidate, journal.entries())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn compact_recovery_rejects_divergent_head() {
+        let (_temp, repository, _pending, base) = compact_recovery_fixture();
+        let journal = repository.read_publication_journal().unwrap().unwrap();
+        test_git(repository.worktree(), &["reset", "--hard", base.as_str()]);
+
+        assert!(!repository.compact_candidate_head_is_safe(&journal).unwrap());
+    }
+
+    #[test]
+    fn compact_recovery_rejects_changed_managed_tree_entry() {
+        let (temp, repository, _pending, _) = compact_recovery_fixture();
+        let journal = repository.read_publication_journal().unwrap().unwrap();
+        let entry = journal.entries().first().expect("manifest journal entry");
+        let path = temp.path().join(entry.path().as_path());
+        fs::write(&path, b"replaced managed entry").unwrap();
+        test_git(temp.path(), &["add", "--all"]);
+        test_git(temp.path(), &["commit", "-m", "replace managed entry"]);
+
+        assert!(!repository.compact_candidate_head_is_safe(&journal).unwrap());
+    }
+
+    #[test]
+    fn compact_recovery_rejects_changed_managed_worktree_bytes() {
+        let (temp, repository, _pending, _) = compact_recovery_fixture();
+        let journal = repository.read_publication_journal().unwrap().unwrap();
+        let entry = journal.entries().first().expect("manifest journal entry");
+        fs::write(temp.path().join(entry.path().as_path()), b"local edit").unwrap();
+
+        assert!(!repository.compact_candidate_head_is_safe(&journal).unwrap());
+    }
+
+    #[test]
+    fn compact_recovery_rejects_changed_managed_index_entry() {
+        let (temp, repository, _pending, _) = compact_recovery_fixture();
+        let journal = repository.read_publication_journal().unwrap().unwrap();
+        let entry = journal.entries().first().expect("manifest journal entry");
+        let path = temp.path().join(entry.path().as_path());
+        let candidate_bytes = entry.next().expect("published managed bytes").to_vec();
+        fs::write(&path, b"staged edit").unwrap();
+        test_git(
+            temp.path(),
+            &["add", entry.path().as_path().to_str().unwrap()],
+        );
+        // Keep the worktree at the candidate state so only the index fence fails.
+        fs::write(path, candidate_bytes).unwrap();
+
+        assert!(!repository.compact_candidate_head_is_safe(&journal).unwrap());
+    }
+
+    #[test]
+    fn compact_recovery_rejects_journal_before_worktree_reconciled_stage() {
+        let (_temp, repository) = test_repository();
+        let head = repository.head().unwrap().unwrap();
+        let schema = schema_descriptor_fingerprint(&bool_schema(BOOL_TABLE, BOOL_FIELD)).unwrap();
+        let plan = repository
+            .prepare_compact_publication(
+                &head,
+                repository.index_generation().unwrap(),
+                CompactManifest::empty(BOOL_TABLE, schema),
+                [41; 16],
+                [42; 32],
+                &[],
+                "prepared compact recovery fixture",
+            )
+            .unwrap();
+
+        assert_eq!(plan.journal.stage(), PublicationJournalStage::Prepared);
+        assert!(
+            !repository
+                .compact_candidate_head_is_safe(&plan.journal)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn compact_recovery_rejects_switched_selected_branch() {
+        let (temp, repository, _pending, _) = compact_recovery_fixture();
+        let journal = repository.read_publication_journal().unwrap().unwrap();
+        test_git(temp.path(), &["checkout", "-b", "other"]);
+
+        assert!(!repository.compact_candidate_head_is_safe(&journal).unwrap());
     }
 
     fn test_git(directory: &Path, arguments: &[&str]) {
