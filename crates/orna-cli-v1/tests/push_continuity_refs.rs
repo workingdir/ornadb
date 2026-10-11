@@ -144,6 +144,8 @@ impl Fixture {
 #[test]
 fn push_publishes_the_branch_and_never_exposes_private_pins() {
     let fixture = Fixture::new();
+    let allocator = fixture.remote_ref(ALLOCATOR_REF);
+    let checkpoint = fixture.remote_ref(CHECKPOINT_REF);
     let head = fixture.head();
     let checkpoint = fixture.remote_ref(CHECKPOINT_REF);
 
@@ -165,9 +167,9 @@ fn push_publishes_the_branch_and_never_exposes_private_pins() {
         "the ordinary branch ref must advance on the remote"
     );
     assert_eq!(
-        fixture.remote_ref(ALLOCATOR_REF).as_deref(),
-        Some(head.as_str()),
-        "the allocator continuity ref must be published"
+        fixture.remote_ref(ALLOCATOR_REF),
+        allocator,
+        "the allocator continuity ref must retain its own object ID"
     );
     assert_eq!(
         fixture.remote_ref(CHECKPOINT_REF),
