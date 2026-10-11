@@ -269,13 +269,11 @@ impl Repository {
     /// Publishes the continuity refs [`Repository::ordinary_push_refs`] selects
     /// together with one ordinary branch ref.
     ///
-    /// The selected continuity refs are transferred by pushing `refs/orna/*`
-    /// directly, so the remote and the local repository agree on each ref by
-    /// name. Every selected continuity ref must already match on the remote:
-    /// a ref that the remote is missing or names with a different object ID is
-    /// refused as a conflict instead of being republished under a different
-    /// reachability, which is the rule a later fetch revalidates
-    /// (`ORNA-GIT-008`).
+    /// The allocator is advanced to the published branch when that branch
+    /// contains its current watermark. Consumer checkpoints retain their own
+    /// independently synchronized position; advancing them to the branch tip
+    /// would claim consumption that did not occur. Missing or divergent
+    /// continuity refs are refused (`ORNA-GIT-008`).
     pub fn push_ordinary_with_local_continuity(
         &self,
         remote: impl Into<String>,
@@ -314,10 +312,12 @@ impl Repository {
             } else {
                 local_id.clone()
             };
-            if is_fast_forward(self, &target_id, &branch_head)? {
-                target_id.clone_from(&branch_head);
-            } else if !is_fast_forward(self, &branch_head, &target_id)? {
-                return Err(FetchError::RefConflict);
+            if reference_name == ALLOCATOR_REF {
+                if is_fast_forward(self, &target_id, &branch_head)? {
+                    target_id.clone_from(&branch_head);
+                } else if !is_fast_forward(self, &branch_head, &target_id)? {
+                    return Err(FetchError::RefConflict);
+                }
             }
             ref_plans.push(RefPlan {
                 source: reference_name.clone(),
