@@ -683,6 +683,7 @@ pub fn restore_complete_copy(
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
+        verify_format3_snapshot(destination, &member.commit)?;
     }
 
     for dependency in &manifest.dependencies {
@@ -734,6 +735,7 @@ pub fn materialize_complete_copy(
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
+        verify_format3_snapshot(copy, &member.commit)?;
     }
     checkout(copy, &manifest.snapshot)?;
     for dependency in &manifest.dependencies {
@@ -1104,6 +1106,40 @@ fn verify_recorded_closure(
             scope: format!("{scope}: object {unrecorded} is not recorded"),
         });
     }
+    Ok(())
+}
+
+/// Re-admits a copied snapshot's format-3 schema and store roots from its own
+/// object database. Generic Git closure checks alone do not prove that the
+/// reconstructed commit still opens as the format-3 repository the exporter
+/// promised.
+fn verify_format3_snapshot(directory: &Path, commit: &str) -> Result<(), CompleteCopyError> {
+    let snapshot_scope = format!("snapshot {commit}");
+    let repository =
+        Repository::discover(directory).map_err(|_| CompleteCopyError::IntegrityMismatch {
+            scope: format!("{snapshot_scope}: repository"),
+        })?;
+    let pin =
+        repository
+            .pin_snapshot(commit)
+            .map_err(|_| CompleteCopyError::IntegrityMismatch {
+                scope: format!("{snapshot_scope}: commit"),
+            })?;
+    let format = repository.open_format_context_at(&pin).map_err(|_| {
+        CompleteCopyError::IntegrityMismatch {
+            scope: format!("{snapshot_scope}: format-3 metadata"),
+        }
+    })?;
+    format
+        .validate_schema_root()
+        .map_err(|_| CompleteCopyError::IntegrityMismatch {
+            scope: format!("{snapshot_scope}: schema root"),
+        })?;
+    format
+        .validate_store_root()
+        .map_err(|_| CompleteCopyError::IntegrityMismatch {
+            scope: format!("{snapshot_scope}: store root"),
+        })?;
     Ok(())
 }
 
