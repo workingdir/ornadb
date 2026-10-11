@@ -296,7 +296,9 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
         "publish failed: {}",
         stderr(&published)
     );
-    let source_rows = committed_rows(&repository, relation_id);
+    let published_repository =
+        orna_repository_v1::Repository::discover(project).expect("discover published repository");
+    let source_rows = committed_rows(&published_repository, relation_id);
     assert_eq!(source_rows.len(), 1, "publish commits the imported row");
     let publication = stdout(&published)
         .split_whitespace()
