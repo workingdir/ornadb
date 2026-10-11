@@ -213,7 +213,7 @@ fn diff_refuses_endpoints_that_record_different_repositories() {
 
     // Same tree, same identity, one commit later: still one repository, so a
     // diff of it must proceed rather than refuse.
-    let same_database = revision(root, "HEAD:.orna/database.orna");
+    let same_database = std::fs::read_to_string(root.join(".orna/database.orna")).unwrap();
     let later = commit_metadata(root, &before, &same_database, "same identity");
 
     // A different database identity, exactly as reinitialization records it.
@@ -303,7 +303,7 @@ fn commit_metadata(directory: &Path, parent: &str, database: &str, message: &str
     // A diff endpoint is resolved inside the repository, and a commit no ref
     // reaches is not readable there. Both callers build a commit and then move
     // HEAD to the next one, so each commit needs a stable, valid ref of its own.
-    let anchor = format!("refs/orna-diff-fixture/{}", message.replace(' ', "-"));
+    let anchor = format!("refs/orna-diff-fixture/{commit}");
     git(directory, &["update-ref", &anchor, &commit]);
     commit
 }
