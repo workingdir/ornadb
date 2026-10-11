@@ -1,6 +1,6 @@
 # Work ADR 0116: Playground as a Database-Hosted Application
 
-**Status:** Binding architecture for S2; execution-session work is S4 and generic renderer work is S5
+**Status:** Superseded by work ADR 0117; retained as historical implementation context
 
 ## Decision
 
