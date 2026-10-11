@@ -817,6 +817,75 @@ impl NativeGraphContext {
             .map(|candidate| candidate.store_root)
     }
 
+    /// Publishes row-index candidates for several relations in one successor
+    /// StoreRoot. Every version and index candidate must have been derived
+    /// from this graph's exact source StoreRoot; no worktree row files are
+    /// created or consulted.
+    ///
+    /// The candidates may be produced by separate relation graph contexts
+    /// opened at the same snapshot. Duplicate relation IDs and stale roots
+    /// are rejected. The returned root is the only root callers need to name
+    /// from their publication commit.
+    pub fn maintain_relations_rows(
+        &self,
+        candidates: &[(&crate::row_store::RowMapVersion, &IndexMaintenance)],
+        scope: &RepositoryReadScope,
+    ) -> Result<NativeOid, GraphError> {
+        scope.authorize(self)?;
+        let mut seen = BTreeSet::new();
+        let mut store_root = self.store_root.clone();
+        for (version, maintenance) in candidates {
+            if version.database_id() != &self.database_id
+                || version.store_root() != &self.store_root
+                || maintenance.previous_root() != version.primary_root()
+                || !seen.insert(*version.relation_id())
+            {
+                return Err(GraphError::ContextMismatch);
+            }
+            let mut objects = ObjectBudget::new(
+                scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+                scope.max_objects,
+                Arc::clone(&scope.objects_used),
+                scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+                Arc::clone(&scope.metadata_used),
+            );
+            let root = self.read_native_node(maintenance.primary_root(), scope, &mut objects)?;
+            validate_ordered_root_node(
+                &root,
+                &rows_domain_for_version(version),
+                maintenance.row_count(),
+            )?;
+            store_root = self.replace_relation_primary_root(
+                &store_root,
+                version,
+                maintenance.primary_root(),
+                maintenance.row_count(),
+                scope,
+            )?;
+        }
+        for (version, maintenance) in candidates {
+            let successor = load_format3_row_map(
+                &self.repository,
+                self.algorithm,
+                store_root.clone(),
+                self.database_id,
+                self.snapshot_id,
+                *version.relation_id(),
+            )?;
+            let successor = successor.version();
+            if successor.database_id() != version.database_id()
+                || successor.relation_id() != version.relation_id()
+                || successor.schema() != version.schema()
+                || successor.primary_root() != maintenance.primary_root()
+                || successor.row_count() != Some(maintenance.row_count())
+                || successor.store_root() != &store_root
+            {
+                return Err(GraphError::ContextMismatch);
+            }
+        }
+        Ok(store_root)
+    }
+
     fn maintain_relation_row_candidate(
         &self,
         expected: &crate::row_store::RowMapVersion,
@@ -830,6 +899,7 @@ impl NativeGraphContext {
 
         let maintenance = self.maintain_row_index(operations, scope)?;
         let store_root = self.replace_relation_primary_root(
+            &self.store_root,
             expected,
             maintenance.primary_root(),
             maintenance.row_count(),
@@ -860,6 +930,7 @@ impl NativeGraphContext {
             store_root,
         })
     }
+
 
     /// Projects the payload-free Blob metadata of one admitted row field.
     ///
@@ -2106,6 +2177,7 @@ impl NativeGraphContext {
 
     fn replace_relation_primary_root(
         &self,
+        store_root: &NativeOid,
         version: &crate::row_store::RowMapVersion,
         primary_root: &NativeOid,
         row_count: u64,
@@ -2118,7 +2190,7 @@ impl NativeGraphContext {
             scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
             Arc::clone(&scope.metadata_used),
         );
-        let root = self.read_native_node(&self.store_root, scope, &mut objects)?;
+        let root = self.read_native_node(store_root, scope, &mut objects)?;
         let NodeData::StoreRoot { relation_map } = root else {
             return Err(GraphError::WrongNodeKind {
                 expected: NodeKind::StoreRoot,
@@ -7108,6 +7180,130 @@ mod persisted_orp_tests {
     }
 
     #[test]
+    fn one_native_store_root_publishes_row_changes_for_multiple_relations() {
+        let (directory, mut graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let original = graph.row_snapshot.version().clone();
+        let second_relation = [0x42; 16];
+        let algorithm = graph.algorithm;
+        let schema_oid = original.schema().schema_oid().clone();
+        let schema_digest = *original.schema().schema_digest();
+        let second_primary = fixture_git_node(
+            directory.path(),
+            &NodeData::OrderedLeaf {
+                domain: rows_domain(second_relation, schema_digest),
+                entries: Vec::new(),
+            },
+        );
+        let relation_domain = canonical_value_bytes(&CborValue::Array(vec![
+            CborValue::Text("relations".to_owned()),
+            CborValue::Bytes(original.database_id().to_vec()),
+        ]));
+        let relation_entry = |relation_id: [u8; 16], primary_root: &NativeOid| {
+            OrderedLeafEntry {
+                key: TypedKey::Bytes(relation_id.to_vec())
+                    .canonical_bytes()
+                    .expect("canonical relation key"),
+                value: canonical_value_bytes(&CborValue::Array(vec![
+                    CborValue::Bytes(schema_oid.as_bytes().to_vec()),
+                    CborValue::Bytes(primary_root.as_bytes().to_vec()),
+                    CborValue::Null,
+                    CborValue::Unsigned(0),
+                ])),
+            }
+        };
+        let relation_map = fixture_git_node(
+            directory.path(),
+            &NodeData::OrderedLeaf {
+                domain: relation_domain,
+                entries: vec![
+                    relation_entry(*original.relation_id(), original.primary_root()),
+                    relation_entry(second_relation, &second_primary),
+                ],
+            },
+        );
+        let source_root = fixture_git_node(
+            directory.path(),
+            &NodeData::StoreRoot { relation_map },
+        );
+        let first_snapshot = load_format3_row_map(
+            &graph.repository,
+            algorithm,
+            source_root.clone(),
+            *original.database_id(),
+            graph.snapshot_id,
+            *original.relation_id(),
+        )
+        .expect("load first relation in shared source StoreRoot");
+        let second_snapshot = load_format3_row_map(
+            &graph.repository,
+            algorithm,
+            source_root.clone(),
+            *original.database_id(),
+            graph.snapshot_id,
+            second_relation,
+        )
+        .expect("load second relation in shared source StoreRoot");
+        let first_version = first_snapshot.version().clone();
+        let second_version = second_snapshot.version().clone();
+        graph.store_root = source_root;
+        graph.row_snapshot = first_snapshot;
+
+        let first_mutation = [RowIndexMutation::Insert {
+            key: TypedKey::Text("first".to_owned()),
+            value: RowValue::decode_canonical_fields(vec![0x80]).expect("canonical empty row"),
+        }];
+        let first = graph
+            .maintain_row_index(&first_mutation, &scope)
+            .expect("mutate first relation natively");
+        graph.row_snapshot = second_snapshot;
+        let second_mutation = [RowIndexMutation::Insert {
+            key: TypedKey::Text("second".to_owned()),
+            value: RowValue::decode_canonical_fields(vec![0x80]).expect("canonical empty row"),
+        }];
+        let second = graph
+            .maintain_row_index(&second_mutation, &scope)
+            .expect("mutate second relation natively");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            algorithm,
+            graph.store_root.clone(),
+            *original.database_id(),
+            graph.snapshot_id,
+            *original.relation_id(),
+        )
+        .expect("restore first relation context");
+
+        let published_root = graph
+            .maintain_relations_rows(
+                &[(&first_version, &first), (&second_version, &second)],
+                &scope,
+            )
+            .expect("publish both relation changes into one StoreRoot");
+        assert_ne!(published_root, graph.store_root);
+        graph.store_root = published_root.clone();
+        for (relation_id, key) in [
+            (*first_version.relation_id(), TypedKey::Text("first".to_owned())),
+            (second_relation, TypedKey::Text("second".to_owned())),
+        ] {
+            graph.row_snapshot = load_format3_row_map(
+                &graph.repository,
+                algorithm,
+                published_root.clone(),
+                *original.database_id(),
+                graph.snapshot_id,
+                relation_id,
+            )
+            .expect("load updated relation from shared published root");
+            assert_eq!(graph.row_snapshot.version().row_count(), Some(1));
+            assert!(graph
+                .lookup_row(&key, &scope)
+                .expect("read published native row")
+                .is_some());
+        }
+    }
+
+    #[test]
     fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
         let (directory, mut graph) = capture_test_context();
         let seed_scope = graph.open_read_scope().expect("owner seed scope");
@@ -7125,6 +7321,7 @@ mod persisted_orp_tests {
         let version = graph.row_snapshot.version();
         let seeded_store_root = graph
             .replace_relation_primary_root(
+                &graph.store_root,
                 version,
                 seeded.primary_root(),
                 seeded.row_count(),
