@@ -12,6 +12,7 @@ mod cli_row_key;
 mod cli_export;
 mod cli_import;
 mod cli_mount;
+mod cli_annotate;
 mod cli_publish;
 mod cli_status;
 mod cli_serve;

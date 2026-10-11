@@ -26,6 +26,8 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  mount exit codes: 0 attached, released or reported; 1 snapshot, mountpoint or record unavailable",
     "  diff [GIT_DIFF_ARGS...]",
     "  log [GIT_LOG_ARGS...]",
+    "  annotate FILE --type MEDIA_TYPE --output FILE [--suffix HINT]  write an annotated OVB-2 Blob",
+    "  annotate exit status: 0 OVB-2 file written; 1 file or annotation failure; 2 invalid arguments or format size limit",
     "  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]",
     "  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid",
     "  export DEST --at SELECTOR [--at SELECTOR]... [--dependency PATH=DIR]...",
