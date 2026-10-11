@@ -2286,14 +2286,8 @@ impl NativeGraphContext {
             let mut encoded_row = Vec::new();
             array(&mut encoded_row, 1);
             encoded_row.extend_from_slice(binding.encoded_value());
-            let value = crate::row_store::RowValue::inline(
-                encoded_row,
-                vec![crate::row_store::RowDependency::new(
-                    binding.descriptor_oid().clone(),
-                    NativeObjectKind::Blob,
-                )],
-            )
-            .map_err(|_| GraphError::NonCanonicalData)?;
+            let value = crate::row_store::RowValue::decode_canonical_fields(encoded_row)
+                .map_err(|_| GraphError::NonCanonicalData)?;
             let candidate = self.maintain_relation_row_candidate(
                 version,
                 &[RowIndexMutation::Insert {
@@ -7392,6 +7386,30 @@ mod persisted_orp_tests {
         )
         .expect("durable StoreRoot resolves the inserted relation row map");
         assert_eq!(committed.version().primary_root(), candidate.primary_root());
+        let descriptor = candidate
+            .protected_content_transfer()
+            .descriptor_oid()
+            .to_hex();
+        let chunk = fixture_git_object(directory.path(), "blob", payload);
+        let listing = Command::new("git")
+            .current_dir(directory.path())
+            .args([
+                "ls-tree",
+                "-r",
+                "-t",
+                "--full-tree",
+                &candidate.store_root().to_hex(),
+            ])
+            .output()
+            .expect("enumerate published StoreRoot closure");
+        assert!(listing.status.success());
+        let reachable: BTreeSet<&str> = std::str::from_utf8(&listing.stdout)
+            .expect("Git tree listing is UTF-8")
+            .lines()
+            .filter_map(|line| line.split_ascii_whitespace().nth(2))
+            .collect();
+        assert!(reachable.contains(descriptor.as_str()));
+        assert!(reachable.contains(chunk.to_hex().as_str()));
         assert_eq!(committed.version().row_count(), Some(301));
         let mut root_objects = ObjectBudget::new(
             scope.max_objects,
@@ -8166,7 +8184,6 @@ struct VerifiedValueOverflow {
     semantic_value: CborValue,
 }
 
-
 /// Collects every OVB-2 Blob value reachable inside a canonical stored row
 /// value, in the order the value holds them.
 ///
@@ -8177,7 +8194,10 @@ struct VerifiedValueOverflow {
 /// and identity and the caller detects the ambiguity.
 fn collect_blob_value_fields(
     value: &CborValue,
-    output: &mut Vec<(crate::blob_store::BlobAnnotation, crate::blob_store::ContentIdentity)>,
+    output: &mut Vec<(
+        crate::blob_store::BlobAnnotation,
+        crate::blob_store::ContentIdentity,
+    )>,
 ) -> Result<(), GraphError> {
     match value {
         CborValue::Tag(60112, payload) => {
