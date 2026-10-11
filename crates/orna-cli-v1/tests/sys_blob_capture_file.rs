@@ -95,18 +95,27 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     assert!(state.pending().await.unwrap().is_empty());
     assert_eq!(git_output(root, &["rev-parse", "HEAD"], None), head_before_capture);
 
-    // MIME-1 stores a preferred suffix as an omitted hint; consumers still see
-    // its effective suffix through the annotation.
-    // MIME-1 omits the preferred suffix from the wire but preserves its effective value.
+    // MIME-1 preserves an explicit compatible suffix that differs from the
+    // source capture's annotation.
     let annotated = value
-        .with_blob_annotation("application/json", Some("json"))
+        .with_blob_annotation("text/javascript;charset=utf-8", Some("mjs"))
         .unwrap();
     let annotated_blob = annotated.blob().unwrap();
-    assert_eq!(annotated_blob.media_type(), "application/json");
-    assert_eq!(annotated_blob.suffix(), None);
-    assert_eq!(annotated_blob.annotation().selected_suffix(), "json");
+    assert_eq!(annotated_blob.media_type(), "text/javascript;charset=utf-8");
+    assert_eq!(annotated_blob.suffix(), Some("mjs"));
+    assert_eq!(annotated_blob.annotation().selected_suffix(), "mjs");
     let binding = bindings.accept_captured_blob_for_row(&annotated).unwrap();
     let expected_row_value = binding.encoded_value().to_vec();
+    assert!(
+        expected_row_value
+            .windows(b"text/javascript;charset=utf-8".len())
+            .any(|window| window == b"text/javascript;charset=utf-8")
+    );
+    assert!(
+        expected_row_value
+            .windows(b"mjs".len())
+            .any(|window| window == b"mjs")
+    );
     let transfer = binding.transfer_record();
     let pin_ref = format!(
         "refs/orna/pins/{}/pending/{}",
