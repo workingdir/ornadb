@@ -1111,7 +1111,8 @@ fn verify_recorded_closure(
 
 /// Re-admits a copied snapshot's format-3 schema and store roots from its own
 /// object database. Generic Git closure checks alone do not prove that the
-/// reconstructed commit still opens as the format-3 repository promised.
+/// reconstructed commit still opens as the format-3 repository the exporter
+/// promised.
 fn verify_format3_snapshot(directory: &Path, commit: &str) -> Result<(), CompleteCopyError> {
     let snapshot_scope = format!("snapshot {commit}");
     let repository =
