@@ -3775,6 +3775,88 @@ mod graph_bridge_tests {
         )));
         assert_eq!(stats.schema_version(), 1, "--version reports the stats schema");
     }
+
+    #[test]
+    fn complete_copy_reopens_orp_blob_row_offline_after_source_removal() {
+        let source = repository();
+        let source_root = source.path();
+        let relation_id = [0x7d; 16];
+        let key = 7;
+        let payload: Vec<u8> = (0..32_768)
+            .map(|index| ((index * 29 + index / 13) % 251) as u8)
+            .collect();
+        let descriptor_oid = install_annotated_blob_row_store(
+            source_root,
+            relation_id,
+            key,
+            &payload,
+            "audio/wav",
+            Some("wav"),
+            false,
+        );
+        let source_repository = Repository::discover(source_root).expect("discover source");
+        let archive_parent = TempDir::new().expect("create archive parent");
+        let archive = archive_parent.path().join("archive");
+        crate::complete_copy::export_complete_copy(
+            &source_repository,
+            "HEAD",
+            &archive,
+            &[],
+        )
+        .expect("export committed ORP and Blob closure");
+
+        // Delete the entire source object database before reconstructing or
+        // reading the row. No source alternate or remote can answer this path.
+        drop(source_repository);
+        drop(source);
+
+        let copy_parent = TempDir::new().expect("create copy parent");
+        let copy = copy_parent.path().join("restored");
+        let manifest = crate::complete_copy::restore_complete_copy(&archive, &copy)
+            .expect("restore the complete copy offline");
+        crate::complete_copy::materialize_complete_copy(&copy, &manifest)
+            .expect("materialize the copied snapshot");
+        assert!(git_output(&copy, &["remote"], None).is_empty());
+        assert!(!copy.join(".git/objects/info/alternates").exists());
+
+        let copied_repository = Repository::discover(&copy).expect("discover restored copy");
+        let copied_context = copied_repository
+            .open_format_context()
+            .expect("admit the copied format-3 context");
+        let rows = copied_context
+            .load_row_map(relation_id)
+            .expect("load the copied committed ORP row map");
+        let graph = copied_context
+            .open_native_graph(&rows)
+            .expect("admit the copied native graph");
+
+        let metadata_scope = graph.open_read_scope().expect("metadata scope");
+        let (copied_key, metadata) = graph
+            .project_blob_metadata(&TypedKey::UInt(key), 0, &metadata_scope)
+            .expect("project copied row metadata")
+            .expect("copied row exists");
+        assert_eq!(copied_key, TypedKey::UInt(key));
+        assert_eq!(metadata.length(), payload.len() as u64);
+        let expected_sha: [u8; 32] = Sha256::digest(&payload).into();
+        assert_eq!(metadata.sha256(), &expected_sha);
+        assert_eq!(metadata.media_type(), "audio/wav");
+        assert_eq!(metadata.suffix(), Some("wav"));
+        assert_eq!(metadata_scope.payload_bytes_read(), 0);
+
+        let payload_scope = graph.open_read_scope().expect("payload scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(key), &payload_scope)
+            .expect("lookup copied ORP row")
+            .expect("copied row exists");
+        let reference = graph
+            .admit_blob_reference(&row, &descriptor_oid, &payload_scope)
+            .expect("admit the descriptor named by the copied row");
+        let read = graph
+            .read_blob_range(&reference, 0..payload.len() as u64, &payload_scope)
+            .expect("read the copied Blob payload");
+        assert_eq!(read.bytes(), payload);
+        assert_eq!(payload_scope.payload_bytes_read(), payload.len() as u64);
+    }
 }
 
 /// Why a repository could not issue capture authority for a relation.
