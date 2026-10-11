@@ -14,10 +14,11 @@ use orna_runtime_v1::{
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{
-    AvailabilityState, Blob, BlobResolver, ContentIdentity, ContentReference, ContextValue,
-    Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
-    ValueFormat,
+    decode_rov3_blob_metadata, AvailabilityState, Blob, BlobResolver, ContentIdentity,
+    ContentReference, ContextValue, Error as BlobError, Format3Context, Format3Quota, GitHash,
+    NativeOid, OwnerLifetime, Snapshot, ValueFormat,
 };
+use tempfile::TempDir;
 
 #[tokio::test]
 async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
@@ -271,7 +272,17 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap()
         .unwrap();
     assert_eq!(committed_value, expected_row_value);
-
+    // Acceptance stores the Blob as a canonical ROV-3 reference, not its OVB-2
+    // capture envelope; inspect the native descriptor profile and annotation.
+    let committed_blob = decode_rov3_blob_metadata(&committed_value).unwrap();
+    assert_eq!(committed_blob.media_type(), "audio/mp4");
+    assert_eq!(committed_blob.suffix(), Some("m4b"));
+    assert_eq!(committed_blob.length(), transfer.content_identity().length());
+    assert_eq!(committed_blob.sha256(), transfer.content_identity().sha256());
+    assert_eq!(
+        committed_blob.descriptor_oid().map(|oid| oid.as_bytes()),
+        Some(transfer.descriptor_oid().as_bytes())
+    );
     assert_eq!(
         state.latest_checkpoint().await.unwrap().unwrap().digest,
         [0x59; 32]
