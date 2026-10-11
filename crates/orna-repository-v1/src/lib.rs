@@ -6280,19 +6280,9 @@ impl Repository {
             ),
             _ => return Err(RepositoryError::LocalStateUnavailable),
         };
-        // A departed owner's private pin refs are reclaimed before this
-        // process records itself as the new owner. Reclamation happens before
-        // the identity is overwritten so a failed attempt leaves the departed
-        // owner recorded and retries on the next takeover. A retained
-        // publication journal remains the recovery authority for a candidate
-        // that may still be rooted through those refs, so reclamation waits
-        // until that recovery has cleared the journal.
-        if let Some(dead_owner) = previous_owner
-            && self.read_publication_journal_locked()?.is_none()
-        {
-            native_graph::reclaim_dead_owner_pin_refs(self, dead_owner)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        }
+        // Keep the departed identity observable until the durable runtime
+        // manifest is available. In particular, lock acquisition cannot
+        // distinguish accepted pending pins from unaccepted private refs.
         file.set_len(0)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         file.seek(SeekFrom::Start(0))
@@ -6303,6 +6293,7 @@ impl Repository {
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         Ok(RuntimeOwnerLock {
             file,
+            repository: self.clone(),
             previous_owner,
         })
     }
@@ -6660,6 +6651,7 @@ impl Drop for CoordinationLock {
 /// A process-lifetime local runtime owner lock.
 pub struct RuntimeOwnerLock {
     file: fs::File,
+    repository: Repository,
     previous_owner: Option<[u8; 16]>,
 }
 
@@ -6667,6 +6659,29 @@ impl RuntimeOwnerLock {
     /// Returns the owner identity recorded by the previous holder, if any.
     pub fn previous_owner(&self) -> Option<[u8; 16]> {
         self.previous_owner
+    }
+
+    /// Reconciles the previous owner's pins against an already-validated
+    /// accepted-content manifest. Retained entries map durable pin IDs to
+    /// their expected Blob descriptor OIDs. Call only after runtime recovery
+    /// has verified that manifest; an in-flight publication journal defers
+    /// cleanup because it remains authoritative for candidate roots.
+    pub fn reclaim_previous_owner_pins(
+        &self,
+        accepted_pending: &std::collections::BTreeMap<[u8; 16], native_graph::NativeOid>,
+    ) -> Result<usize, RepositoryError> {
+        let Some(dead_owner) = self.previous_owner else {
+            return Ok(0);
+        };
+        if self.repository.read_publication_journal()?.is_some() {
+            return Err(RepositoryError::PublicationPending);
+        }
+        native_graph::reclaim_dead_owner_pin_refs(
+            &self.repository,
+            dead_owner,
+            accepted_pending,
+        )
+        .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
 }
 
