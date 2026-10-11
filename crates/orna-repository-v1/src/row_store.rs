@@ -1612,11 +1612,19 @@ mod tests {
         }
     }
     #[test]
-    fn partition_token_ranges_rejects_size_overflow() {
-        let token = BoundaryToken::new(vec![0], usize::MAX, 0);
-        assert!(matches!(
-            partition_token_ranges(&[token], 0, 1),
-            Err(RowStoreError::EntryTooLarge(usize::MAX))
-        ));
+    fn partition_token_ranges_enforces_node_size_boundary() {
+        let at_limit = BoundaryToken::new(vec![0], NODE_DATA_LIMIT - 1, 0);
+        assert_eq!(
+            partition_token_ranges(&[at_limit], 0, 1).expect("exact node limit is valid"),
+            vec![0..1]
+        );
+
+        for size in [NODE_DATA_LIMIT, usize::MAX] {
+            let token = BoundaryToken::new(vec![0], size, 0);
+            assert!(matches!(
+                partition_token_ranges(&[token], 0, 1),
+                Err(RowStoreError::EntryTooLarge(actual)) if actual == size
+            ));
+        }
     }
 }
