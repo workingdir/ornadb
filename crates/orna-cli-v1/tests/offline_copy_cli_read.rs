@@ -193,6 +193,118 @@ fn assert_self_contained(copy: &Path) {
     );
 }
 
+/// Commits one protected ORP Blob row in the fixture repository. The copy
+/// proof must start from a pinned relation map, not a runtime-only mutation.
+async fn publish_native_blob_row(
+    repository: &Repository,
+    root: &Path,
+    relation_id: [u8; 16],
+    key: &str,
+    payload: &[u8],
+) {
+    let format = repository
+        .open_format_context()
+        .expect("open the current format-3 snapshot");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the pinned relation map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the pinned native graph");
+    let scope = graph.open_read_scope().expect("open a graph scope");
+    let mut input = std::io::Cursor::new(payload);
+    let captured = graph
+        .capture_blob_candidate(&mut input, payload.len() as u64, &scope)
+        .expect("capture the fixture payload");
+    let pin = graph
+        .protect_captured_blob(captured, &scope)
+        .expect("protect the captured payload closure");
+    let root = root.to_path_buf();
+    let (candidate, ()) = orna_repository_v1::commit_protected_blob_row(
+        &graph,
+        pin,
+        "application/octet-stream",
+        None,
+        orna_repository_v1::ProtectedBlobRowInsert::new(TypedKey::Text(key.to_owned())),
+        move |candidate| {
+            let root = root.clone();
+            async move {
+                commit_store_root(&root, &candidate.store_root().to_hex());
+                Ok::<_, std::convert::Infallible>(())
+            }
+        },
+    )
+    .await
+    .expect("commit the protected ORP row candidate");
+    assert_eq!(candidate.key(), &TypedKey::Text(key.to_owned()));
+}
+
+/// Advances HEAD with a commit whose `.orna/store` tree is the protected
+/// candidate root, preserving every other tree entry.
+fn commit_store_root(directory: &Path, store_root: &str) {
+    let native_entries = String::from_utf8(git_output(directory, &["ls-tree", "HEAD:.orna"], None))
+        .expect("format-3 entries are UTF-8");
+    let mut replaced_store = false;
+    let native_entries = native_entries
+        .lines()
+        .map(|entry| {
+            let (_, path) = entry.split_once('\t').expect("tree entry has a path");
+            if path == "store" {
+                replaced_store = true;
+                format!("040000 tree {store_root}\tstore")
+            } else {
+                entry.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(replaced_store, "format-3 snapshot has a store tree");
+    let native_tree = git_tree(directory, &format!("{native_entries}\n"));
+
+    let root_entries = String::from_utf8(git_output(directory, &["ls-tree", "HEAD"], None))
+        .expect("fixture root entries are UTF-8");
+    let mut replaced_native_tree = false;
+    let root_entries = root_entries
+        .lines()
+        .map(|entry| {
+            let (_, path) = entry.split_once('\t').expect("tree entry has a path");
+            if path == ".orna" {
+                replaced_native_tree = true;
+                format!("040000 tree {native_tree}\t.orna")
+            } else {
+                entry.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(replaced_native_tree, "fixture root contains `.orna`");
+    let tree = git_tree(directory, &format!("{root_entries}\n"));
+    let parent = String::from_utf8(git_output(directory, &["rev-parse", "HEAD"], None))
+        .expect("HEAD is UTF-8")
+        .trim()
+        .to_owned();
+    let commit = String::from_utf8(git_output(
+        directory,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &parent,
+            "-m",
+            "orna: publish native media row",
+        ],
+        None,
+    ))
+    .expect("commit ID is UTF-8")
+    .trim()
+    .to_owned();
+    let head_ref = String::from_utf8(git_output(directory, &["symbolic-ref", "HEAD"], None))
+        .expect("HEAD ref is UTF-8")
+        .trim()
+        .to_owned();
+    git(directory, &["update-ref", &head_ref, &commit, &parent]);
+}
+
 #[tokio::test]
 async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
     let (directory, repository, relation_id) = empty_format3_repository();
@@ -236,6 +348,13 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
             true,
         )
         .await;
+        let payload_path = match key {
+            "song" => "tone.wav",
+            "image" => "pixel.png",
+            _ => unreachable!("the fixture loop has only known media keys"),
+        };
+        let payload = std::fs::read(Path::new(MEDIA_FIXTURES).join(payload_path)).unwrap();
+        publish_native_blob_row(&repository, source.path(), relation_id, key, &payload).await;
     }
     drop(bindings);
     drop(state);
@@ -250,6 +369,17 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
     });
 
     let project = directory.path().to_path_buf();
+    let relation = relation_hex(relation_id);
+    let source_query = run(&project, &["query", &relation, "--format", "json"]);
+    assert_eq!(
+        source_query.status.code(),
+        Some(0),
+        "source query failed: {}",
+        String::from_utf8_lossy(&source_query.stderr)
+    );
+    let source_report: serde_json::Value = serde_json::from_slice(&source_query.stdout).unwrap();
+    assert_eq!(source_report["media_payload_bytes_read"].as_u64(), Some(0));
+    assert_eq!(source_report["listings"].as_array().unwrap().len(), 2);
     let snapshot = String::from_utf8(git_output(&project, &["rev-parse", "HEAD"], None))
         .unwrap()
         .trim()
@@ -317,7 +447,6 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
 
     // Query the copy: both rows are listed from their committed metadata, and
     // the listing charges no payload byte.
-    let relation = relation_hex(relation_id);
     let query = run(&restored, &["query", &relation, "--format", "json"]);
     assert_eq!(
         query.status.code(),
@@ -326,6 +455,10 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
         String::from_utf8_lossy(&query.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&query.stdout).unwrap();
+    assert_eq!(
+        report["listings"], source_report["listings"],
+        "the restored copy preserves the source's canonical row metadata"
+    );
     assert_eq!(
         report["media_payload_bytes_read"].as_u64(),
         Some(0),

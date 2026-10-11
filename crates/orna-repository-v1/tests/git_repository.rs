@@ -8529,6 +8529,170 @@ fn interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer
 }
 
 #[test]
+fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edits() {
+    let format = include_str!("fixtures/format-context/format-1.orna");
+    let root = repository_with_legacy_format(format);
+    let repo = Repository::discover(root.path()).unwrap();
+    let old_head = repo.head().unwrap().unwrap();
+
+    // A staged user edit is outside the migration journal and must survive the
+    // ref transition and recovery reconciliation unchanged.
+    fs::write(root.path().join("ordinary.txt"), "staged user edit\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let expected_index = repo.index_generation().unwrap();
+    let database = include_str!("fixtures/format-context/database-final.orna");
+    let store_root = b"verified candidate store root";
+    let candidate = repo
+        .build_private_commit(
+            &old_head,
+            &[
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/database.orna").unwrap(),
+                    Some(database.as_bytes().to_vec()),
+                ),
+                ManagedFileChange::new(ManagedPath::new(".orna/format.orna").unwrap(), None),
+                ManagedFileChange::new(
+                    ManagedPath::new(".orna/store/root").unwrap(),
+                    Some(store_root.to_vec()),
+                ),
+            ],
+            "interrupted explicit format 3 migration",
+        )
+        .unwrap();
+    let entries = vec![
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/database.orna").unwrap(),
+            None,
+            Some(database.as_bytes().to_vec()),
+        ),
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/format.orna").unwrap(),
+            Some(format.as_bytes().to_vec()),
+            None,
+        ),
+        PublicationJournalEntry::new(
+            ManagedPath::new(".orna/store/root").unwrap(),
+            None,
+            Some(store_root.to_vec()),
+        ),
+    ];
+    let continuity =
+        MigrationContinuityRecord::new(vec![StreamCheckpointIdentityPredecessor::new(
+            [91; 32],
+            b"legacy-source".to_vec(),
+            Some(b"legacy-partition".to_vec()),
+            [92; 32],
+            b"format3-source".to_vec(),
+            Some(b"format3-partition".to_vec()),
+        )
+        .unwrap()])
+        .unwrap();
+    let intent = [93; 16];
+    let journal = PublicationJournal::new_with_runtime_intent(
+        old_head.clone(),
+        candidate.commit().clone(),
+        expected_index.tree().unwrap().clone(),
+        intent,
+        entries,
+    )
+    .unwrap()
+    .with_migration_continuity(continuity)
+    .unwrap()
+    .with_migration_annotation_defaults(MigrationAnnotationDefaults::new(0).unwrap())
+    .unwrap();
+
+    // Crash after the branch ref moves but before the journal records that
+    // boundary. The checkout remains on its original branch; recovery must
+    // finish the prepared transition rather than expose a mixed snapshot.
+    repo.write_publication_journal(&journal).unwrap();
+    assert_eq!(
+        git(root.path(), &["symbolic-ref", "HEAD"]),
+        "refs/heads/main"
+    );
+    assert_eq!(
+        git(root.path(), &["rev-parse", "--show-toplevel"]),
+        root.path().to_str().unwrap()
+    );
+    assert_eq!(repo.head().unwrap(), Some(old_head.clone()));
+    assert_eq!(
+        repo.open_format_context()
+            .unwrap()
+            .repository_format_number(),
+        1
+    );
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged user edit"
+    );
+    git(
+        root.path(),
+        &[
+            "update-ref",
+            "refs/heads/main",
+            candidate.commit().as_str(),
+            old_head.as_str(),
+        ],
+    );
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(RepositoryError::RuntimeCompletionRequired)
+    ));
+    assert_eq!(repo.head().unwrap(), Some(candidate.commit().clone()));
+    assert_eq!(
+        git(root.path(), &["symbolic-ref", "HEAD"]),
+        "refs/heads/main"
+    );
+    assert_eq!(
+        git(root.path(), &["rev-parse", "--show-toplevel"]),
+        root.path().to_str().unwrap()
+    );
+    assert_eq!(
+        repo.open_format_context()
+            .unwrap()
+            .repository_format_number(),
+        3
+    );
+    assert_eq!(
+        repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+            .unwrap(),
+        format.as_bytes(),
+        "the legacy snapshot remains readable under its original format"
+    );
+    assert_eq!(
+        fs::read(root.path().join(".orna/database.orna")).unwrap(),
+        database.as_bytes()
+    );
+    assert_eq!(
+        fs::read(root.path().join(".orna/store/root")).unwrap(),
+        store_root
+    );
+    assert!(!root.path().join(".orna/format.orna").exists());
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged user edit",
+        "recovery must preserve the user's staged blob"
+    );
+    assert!(git(root.path(), &["diff", "--cached", "--name-only"])
+        .lines()
+        .any(|path| path == "ordinary.txt"));
+    assert_eq!(
+        fs::read(root.path().join("ordinary.txt")).unwrap(),
+        b"staged user edit\n",
+        "recovery must preserve the checked-out user file"
+    );
+
+    let mut resumed = repo.read_publication_journal().unwrap().unwrap();
+    assert_eq!(resumed.stage(), PublicationJournalStage::WorktreeReconciled);
+    repo.mark_runtime_complete(intent, &mut resumed).unwrap();
+    assert!(repo.read_publication_journal().unwrap().is_none());
+    assert_eq!(repo.head().unwrap(), Some(candidate.commit().clone()));
+    assert!(git(root.path(), &["diff", "--cached", "--name-only"])
+        .lines()
+        .any(|path| path == "ordinary.txt"));
+}
+
+#[test]
 fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates() {
     for (format, format_number) in [
         (include_str!("fixtures/format-context/format-1.orna"), 1u8),

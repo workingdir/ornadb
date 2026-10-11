@@ -984,10 +984,13 @@ impl RowMapBuilder {
                 value.encoded_metadata_len() as u64
             ));
         }
-        if self.entries.insert(key, value).is_some() {
-            return Err(RowStoreError::DuplicateKey);
+        match self.entries.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(value);
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(_) => Err(RowStoreError::DuplicateKey),
         }
-        Ok(())
     }
 
     pub fn build(self) -> Result<OrderedRowMap, RowStoreError> {
@@ -1559,5 +1562,32 @@ mod tests {
             RepositoryVfsFieldIdentity::new(row_identity, vec![[0; 16]]),
             Err(RowStoreError::VersionIdentityMismatch)
         ));
+    }
+    #[test]
+    fn duplicate_row_map_insert_preserves_first_value() {
+        let boundary = RowMapBoundary::new([0x11; 16], oid(0x55), [0x44; 32], [0x22; 16]);
+        let key = TypedKey::Text("song".to_owned());
+        let mut builder = RowMapBuilder::new(boundary.clone());
+
+        builder
+            .insert(
+                key.clone(),
+                RowValue::decode_canonical_fields(vec![0x81, 0x01]).expect("first row value"),
+            )
+            .expect("first insertion");
+        assert!(matches!(
+            builder.insert(
+                key.clone(),
+                RowValue::decode_canonical_fields(vec![0x81, 0x02]).expect("duplicate row value"),
+            ),
+            Err(RowStoreError::DuplicateKey)
+        ));
+
+        let map = builder.build().expect("build original row map");
+        let row = map
+            .lookup(&boundary, &key)
+            .expect("matching boundary")
+            .expect("original row remains");
+        assert_eq!(row.value().encoded_fields(), Some(&[0x81, 0x01][..]));
     }
 }

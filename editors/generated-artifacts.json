@@ -10,15 +10,13 @@
     "Neovim native LSP attachment",
     "Emacs major mode and Eglot attachment",
     "Sublime syntax",
-    "Semantic-token legend",
-    "Monaco language configuration and tokenizer"
+    "Semantic-token legend"
   ],
   "generatedFiles": [
     "editors/textmate/orna.tmLanguage.json",
     "editors/vscode/syntaxes/orna.tmLanguage.json",
     "editors/semantic-token-legend.json",
     "editors/vscode/language-configuration.json",
-    "playground/web-ui/public/assets/orna-editor-config.json",
     "editors/tree-sitter-orna/grammar.js",
     "editors/tree-sitter-orna/queries/highlights.scm",
     "editors/vim/syntax/orna.vim",
