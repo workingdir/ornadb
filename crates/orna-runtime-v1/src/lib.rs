@@ -1598,6 +1598,51 @@ pub struct PublicationFreeze {
     pub mutations: Vec<PublicationFreezeMutation>,
 }
 
+/// An operation for projecting frozen runtime mutations against a pinned row root.
+///
+/// Insert remains insert-only; replacement may create or replace a row, while
+/// deletion removes the key. Rekey preserves the explicit source-to-destination
+/// move instead of reducing it to a replacement at the source key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublicationRowOperation {
+    Insert {
+        value: Vec<u8>,
+    },
+    Replacement {
+        value: Vec<u8>,
+    },
+    Deletion,
+    Rekey {
+        destination_key: Vec<u8>,
+        value: Vec<u8>,
+    },
+}
+
+/// One validated operation from the runtime's ordered publication prefix.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationRowMutation {
+    pub table_id: [u8; 16],
+    pub sequence: u64,
+    pub mutation_id: [u8; 16],
+    pub table: String,
+    pub logical_key: Vec<u8>,
+    pub operation: PublicationRowOperation,
+    pub schema_fingerprint: [u8; 32],
+    pub row_encoding_identity: PublicationRowEncoding,
+    pub value_encoding_identity: PublicationValueEncoding,
+    pub candidate_generation: u64,
+    pub equivalence_witness: PublicationEquivalenceWitness,
+}
+
+/// Validated, ordered operations covered by one persisted publication freeze.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationRowMutationBatch {
+    pub intent_id: [u8; 16],
+    pub checkpoint: Checkpoint,
+    pub candidate_digest: [u8; 32],
+    pub mutations: Vec<PublicationRowMutation>,
+}
+
 /// Authoritative compact profile identity supplied by schema admission.
 ///
 /// Runtime table rows intentionally do not invent a schema or physical table
@@ -11024,6 +11069,79 @@ impl RuntimeState {
         Ok(freeze.mutations.clone())
     }
 
+    /// Returns the ordered row operations covered by a persisted freeze.
+    ///
+    /// The batch preserves insert-only and re-key intent, validates every
+    /// operation against its compact freeze witness, and excludes later tails.
+    pub async fn frozen_row_mutation_batch(
+        &self,
+        freeze: &PublicationFreeze,
+    ) -> Result<PublicationRowMutationBatch, RuntimeError> {
+        let frozen = self.frozen_pending_mutations(freeze).await?;
+        let pending = self.pending_table_mutations_through(freeze).await?;
+        if frozen.len() != pending.len() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+
+        let mut mutations = Vec::with_capacity(frozen.len());
+        let mut previous_sequence = 0;
+        for (frozen_mutation, mutation) in frozen.iter().zip(&pending) {
+            if frozen_mutation.sequence <= previous_sequence
+                || frozen_mutation.sequence > freeze.checkpoint.mutation_sequence
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            let identity = PublicationTableIdentity {
+                table: frozen_mutation.table.clone(),
+                table_id: frozen_mutation.table_id,
+                schema_fingerprint: frozen_mutation.schema_fingerprint,
+                candidate_generation: freeze.checkpoint.generation,
+            };
+            let expected = publication_freeze_mutation(
+                frozen_mutation.sequence,
+                mutation,
+                freeze.checkpoint.generation,
+                freeze.candidate_digest,
+                &identity,
+            )?;
+            if expected != *frozen_mutation {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            mutations.push(PublicationRowMutation {
+                table_id: frozen_mutation.table_id,
+                sequence: frozen_mutation.sequence,
+                mutation_id: frozen_mutation.mutation_id,
+                table: frozen_mutation.table.clone(),
+                logical_key: frozen_mutation.logical_key.clone(),
+                operation: publication_row_operation(mutation)?,
+                schema_fingerprint: frozen_mutation.schema_fingerprint,
+                row_encoding_identity: frozen_mutation.row_encoding_identity,
+                value_encoding_identity: frozen_mutation.value_encoding_identity,
+                candidate_generation: frozen_mutation.candidate_generation,
+                equivalence_witness: frozen_mutation.equivalence_witness,
+            });
+            previous_sequence = frozen_mutation.sequence;
+        }
+        if (freeze.checkpoint.mutation_sequence != 0
+            && previous_sequence != freeze.checkpoint.mutation_sequence)
+            || publication_candidate_digest(
+                freeze.checkpoint.generation,
+                frozen
+                    .iter()
+                    .zip(&pending)
+                    .map(|(record, mutation)| (record.sequence, mutation)),
+            ) != freeze.candidate_digest
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        Ok(PublicationRowMutationBatch {
+            intent_id: freeze.intent_id,
+            checkpoint: freeze.checkpoint.clone(),
+            candidate_digest: freeze.candidate_digest,
+            mutations,
+        })
+    }
+
     /// Returns the newest durable checkpoint, if this runtime has committed
     /// one. Checkpoints are never inferred from a pending mutation.
     pub async fn latest_checkpoint(&self) -> Result<Option<Checkpoint>, RuntimeError> {
@@ -11063,7 +11181,10 @@ impl RuntimeState {
             if &stored != checkpoint {
                 return Err(RuntimeError::ConflictingPublicationIntent);
             }
-            let candidate_digest = publication_candidate_digest(stored.generation, &[]);
+            let candidate_digest = publication_candidate_digest(
+                stored.generation,
+                std::iter::empty::<(u64, &TableMutation)>(),
+            );
             return Ok(PublicationFreeze {
                 intent_id,
                 checkpoint: stored,
@@ -11097,7 +11218,10 @@ impl RuntimeState {
         if &stored != checkpoint {
             return Err(RuntimeError::ConflictingPublicationIntent);
         }
-        let candidate_digest = publication_candidate_digest(stored.generation, &[]);
+        let candidate_digest = publication_candidate_digest(
+            stored.generation,
+            std::iter::empty::<(u64, &TableMutation)>(),
+        );
         Ok(PublicationFreeze {
             intent_id,
             checkpoint: stored,
@@ -12800,7 +12924,12 @@ impl RuntimeState {
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        let candidate_digest = publication_candidate_digest(checkpoint.generation, &decoded);
+        let candidate_digest = publication_candidate_digest(
+            checkpoint.generation,
+            decoded
+                .iter()
+                .map(|(sequence, mutation)| (*sequence, mutation)),
+        );
         decoded
             .iter()
             .map(|(sequence, mutation)| {
@@ -12852,7 +12981,10 @@ impl RuntimeState {
             .ok_or(RuntimeError::RecoveryInvalid)?;
         Ok(PublicationFreeze {
             intent_id,
-            candidate_digest: publication_candidate_digest(checkpoint.generation, &[]),
+            candidate_digest: publication_candidate_digest(
+                checkpoint.generation,
+                std::iter::empty::<(u64, &TableMutation)>(),
+            ),
             mutations: Vec::new(),
             checkpoint,
         })
@@ -18062,7 +18194,29 @@ fn publication_mutation_state(mutation: &TableMutation) -> PublicationMutationSt
     }
 }
 
-fn publication_candidate_digest(generation: u64, mutations: &[(u64, TableMutation)]) -> [u8; 32] {
+fn publication_row_operation(
+    mutation: &TableMutation,
+) -> Result<PublicationRowOperation, RuntimeError> {
+    match (mutation.rekey_to(), mutation.is_insert(), mutation.value()) {
+        (Some(destination_key), false, Some(value)) => Ok(PublicationRowOperation::Rekey {
+            destination_key: destination_key.to_vec(),
+            value: value.to_vec(),
+        }),
+        (None, true, Some(value)) => Ok(PublicationRowOperation::Insert {
+            value: value.to_vec(),
+        }),
+        (None, false, Some(value)) => Ok(PublicationRowOperation::Replacement {
+            value: value.to_vec(),
+        }),
+        (None, false, None) => Ok(PublicationRowOperation::Deletion),
+        _ => Err(RuntimeError::InvalidTableMutation),
+    }
+}
+
+fn publication_candidate_digest<'a>(
+    generation: u64,
+    mutations: impl IntoIterator<Item = (u64, &'a TableMutation)>,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"ORNA-COMPACT-CANDIDATE-1\0");
     hasher.update(generation.to_be_bytes());
@@ -32092,6 +32246,61 @@ mod tests {
                 .await
                 .unwrap(),
             vec![expected]
+        );
+    }
+
+    #[tokio::test]
+    async fn frozen_row_batch_preserves_insert_replace_delete_operations() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let expected = vec![
+            TableMutation::new(id(5), "books", vec![1], Some(vec![10])).unwrap(),
+            TableMutation::insert(id(6), "books", vec![2], vec![20]).unwrap(),
+            TableMutation::new(id(7), "books", vec![3], None).unwrap(),
+        ];
+        state
+            .commit_table_activation(lease, &context, &expected, digest(8), &NoFault)
+            .await
+            .unwrap();
+
+        let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+        let freeze = state
+            .freeze_compact(
+                id(9),
+                &checkpoint,
+                &[PublicationTableIdentity {
+                    table: "books".to_owned(),
+                    table_id: id(10),
+                    schema_fingerprint: digest(11),
+                    candidate_generation: checkpoint.generation,
+                }],
+            )
+            .await
+            .unwrap();
+        let batch = state.frozen_row_mutation_batch(&freeze).await.unwrap();
+
+        assert_eq!(batch.intent_id, freeze.intent_id);
+        assert_eq!(batch.checkpoint, checkpoint);
+        assert_eq!(batch.candidate_digest, freeze.candidate_digest);
+        assert_eq!(batch.mutations.len(), 3);
+        assert_eq!(batch.mutations[0].table_id, id(10));
+        assert_eq!(
+            batch.mutations[0].candidate_generation,
+            checkpoint.generation
+        );
+        assert_eq!(
+            batch
+                .mutations
+                .iter()
+                .map(|mutation| mutation.operation.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                PublicationRowOperation::Replacement { value: vec![10] },
+                PublicationRowOperation::Insert { value: vec![20] },
+                PublicationRowOperation::Deletion,
+            ]
         );
     }
 
