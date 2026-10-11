@@ -1054,7 +1054,11 @@ pub(crate) fn partition_token_ranges(
         if token.refs > MAX_REFS {
             return Err(RowStoreError::PageFanoutExceeded(token.refs));
         }
-        if token.size + node_overhead > NODE_DATA_LIMIT {
+        if token
+            .size
+            .checked_add(node_overhead)
+            .map_or(true, |size| size > NODE_DATA_LIMIT)
+        {
             return Err(RowStoreError::EntryTooLarge(token.size));
         }
         let count = index - start;
@@ -1606,5 +1610,13 @@ mod tests {
                 Err(RowStoreError::PageHeightExceeded(actual)) if actual == height
             ));
         }
+    }
+    #[test]
+    fn partition_token_ranges_rejects_size_overflow() {
+        let token = BoundaryToken::new(vec![0], usize::MAX, 0);
+        assert!(matches!(
+            partition_token_ranges(&[token], 0, 1),
+            Err(RowStoreError::EntryTooLarge(usize::MAX))
+        ));
     }
 }
