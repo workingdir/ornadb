@@ -354,7 +354,7 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
             _ => unreachable!("the fixture loop has only known media keys"),
         };
         let payload = std::fs::read(Path::new(MEDIA_FIXTURES).join(payload_path)).unwrap();
-        publish_native_blob_row(&repository, source.path(), relation_id, key, &payload).await;
+        publish_native_blob_row(&repository, directory.path(), relation_id, key, &payload).await;
     }
     drop(bindings);
     drop(state);
