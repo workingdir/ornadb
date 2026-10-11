@@ -991,15 +991,16 @@ impl PublicationJournal {
         Ok(self)
     }
 
-    /// Re-admits a prepared journal whose annotation-default coordinate was
-    /// already durably recorded, so a resumed publisher reports the same
-    /// semantic transition without re-deriving it.
+    /// Re-admits a migration journal before runtime completion whose
+    /// annotation-default coordinate was already durably recorded, so a
+    /// resumed publisher reports the same semantic transition without
+    /// re-deriving it.
     ///
     /// This is the resume counterpart of
     /// [`Self::with_migration_annotation_defaults`]: only a wire-version-7
-    /// prepared legacy migration that already carries a non-inspecting
-    /// coordinate is admitted, and the coordinate must be supplied exactly as
-    /// it was persisted. It returns the record's own value so a caller cannot
+    /// legacy migration that already carries a non-inspecting coordinate is
+    /// admitted, and the coordinate must be supplied exactly as it was
+    /// persisted. It returns the record's own value so a caller cannot
     /// substitute a second, unrecorded transition for the durable evidence.
     pub fn resume_migration_annotation_defaults(
         &self,
@@ -1010,7 +1011,7 @@ impl PublicationJournal {
             .ok_or(RepositoryError::InvalidFormatMigration)?;
         if self.wire_version != 7
             || self.binding_version != 7
-            || self.stage != PublicationJournalStage::Prepared
+            || !self.is_resumable_migration_stage()
             || self.compact_manifest.is_some()
             || self.migration_continuity.is_none()
             || defaults.payload_inspected()
@@ -1020,6 +1021,15 @@ impl PublicationJournal {
         }
         Ok(recorded)
     }
+    fn is_resumable_migration_stage(&self) -> bool {
+        matches!(
+            self.stage,
+            PublicationJournalStage::Prepared
+                | PublicationJournalStage::RefAdvanced
+                | PublicationJournalStage::IndexReconciled
+                | PublicationJournalStage::WorktreeReconciled
+        )
+    }
 
     /// The reported annotation-default coordinate of this migration. `None`
     /// means the caller has not declared one, and publication refuses.
@@ -1027,17 +1037,18 @@ impl PublicationJournal {
         self.migration_annotation_defaults
     }
 
-    /// Re-admits a prepared migration journal whose stream/checkpoint identity
-    /// inventory was already durably recorded, so a resumed publisher resolves
-    /// the same successor identities instead of re-deriving them.
+    /// Re-admits a migration journal before runtime completion whose
+    /// stream/checkpoint identity inventory was already durably recorded, so
+    /// a resumed publisher resolves the same successor identities instead
+    /// of re-deriving them.
     ///
     /// This is the resume counterpart of [`Self::with_migration_continuity`],
     /// which refuses a journal that already carries an inventory. A resumed
     /// publisher must supply the inventory exactly as it was persisted, and a
     /// substituted one is rejected: re-deriving a successor identity is the
     /// reset this coordinate exists to prevent. It returns the record's own
-    /// value, so the resumed publisher reports the durable evidence rather than
-    /// the copy the caller supplied.
+    /// value, so the resumed publisher reports the durable evidence rather
+    /// than the copy the caller supplied.
     ///
     /// The returned record is the only supported source of successor
     /// identities; [`MigrationContinuityRecord::successor_for`] answers the
@@ -1052,7 +1063,7 @@ impl PublicationJournal {
             .as_ref()
             .ok_or(RepositoryError::InvalidFormatMigration)?;
         if self.compact_manifest().is_some()
-            || self.stage != PublicationJournalStage::Prepared
+            || !self.is_resumable_migration_stage()
             || recorded != &continuity
         {
             return Err(RepositoryError::InvalidFormatMigration);
