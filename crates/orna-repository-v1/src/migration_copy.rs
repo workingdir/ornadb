@@ -259,6 +259,7 @@ pub fn prepare_format3_migration(
     // submodule administrative repositories and index separately so the copy
     // retains independently editable dirty submodules and staged state.
     copy_submodule_admin(&source_root, &root)?;
+    clear_checkout(&root)?;
     copy_working_tree(&source_root, &root)?;
     copy_index_blobs(&source_root, &root)?;
     copy_source_index(&source_root, &root)?;
@@ -448,13 +449,12 @@ fn clone_source_graph(source_root: &Path, destination: &Path) -> Result<PathBuf,
     Ok(root)
 }
 
-/// Removes the clone's own checkout, leaving its commit graph and index intact.
+/// Removes the clone's checkout while retaining its Git metadata.
 fn clear_checkout(root: &Path) -> Result<(), RepositoryError> {
     let entries = fs::read_dir(root).map_err(|_| RepositoryError::LocalStateUnavailable)?;
     for entry in entries {
         let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let name = entry.file_name();
-        if name == ".git" {
+        if entry.file_name() == ".git" {
             continue;
         }
         let path = entry.path();
@@ -503,8 +503,7 @@ fn git_path(root: &Path, name: &str) -> Result<PathBuf, RepositoryError> {
     if !output.status.success() {
         return Err(RepositoryError::GitOperationFailed);
     }
-    let path = String::from_utf8(output.stdout)
-        .map_err(|_| RepositoryError::GitOperationFailed)?;
+    let path = String::from_utf8(output.stdout).map_err(|_| RepositoryError::GitOperationFailed)?;
     Ok(PathBuf::from(path.trim_end_matches('\n')))
 }
 
@@ -522,7 +521,11 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
         return Err(RepositoryError::GitOperationFailed);
     }
 
-    for entry in output.stdout.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
+    for entry in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
         let header = entry
             .split(|byte| *byte == b'\t')
             .next()
@@ -536,8 +539,8 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
         if object_id.is_empty() || !object_id.iter().all(u8::is_ascii_hexdigit) {
             return Err(RepositoryError::GitOperationFailed);
         }
-        let object_id = std::str::from_utf8(object_id)
-            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let object_id =
+            std::str::from_utf8(object_id).map_err(|_| RepositoryError::GitOperationFailed)?;
 
         let mut exists = git_command(destination);
         exists
@@ -610,7 +613,11 @@ fn copy_source_index(source: &Path, destination: &Path) -> Result<(), Repository
         .ok_or(RepositoryError::LocalStateUnavailable)?;
     for entry in fs::read_dir(source_parent).map_err(|_| RepositoryError::LocalStateUnavailable)? {
         let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        if !entry.file_name().to_string_lossy().starts_with("sharedindex.") {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("sharedindex.")
+        {
             continue;
         }
         fs::copy(entry.path(), parent.join(entry.file_name()))

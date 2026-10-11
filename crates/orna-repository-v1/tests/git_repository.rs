@@ -8737,12 +8737,17 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             ],
         );
         git(source.path(), &["commit", "-m", "add module"]);
+        fs::write(source.path().join("removed.txt"), "tracked before removal\n").unwrap();
+        git(source.path(), &["add", "removed.txt"]);
+        git(source.path(), &["commit", "-m", "add tracked file"]);
         let repo = Repository::discover(source.path()).unwrap();
         let source_head = repo.head().unwrap().unwrap();
         // Preserve an unrelated staged version separately from its later
         // unstaged edit, plus untracked and ignored user data.
         fs::write(source.path().join("ordinary.txt"), "staged\n").unwrap();
         git(source.path(), &["add", "ordinary.txt"]);
+        fs::remove_file(source.path().join("removed.txt")).unwrap();
+        git(source.path(), &["add", "-u", "--", "removed.txt"]);
         let source_index = repo.index_generation().unwrap();
         fs::write(source.path().join("ordinary.txt"), "dirty\n").unwrap();
         fs::write(source.path().join("untracked.txt"), "untracked\n").unwrap();
@@ -8796,6 +8801,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             "dirty\n"
         );
         assert_eq!(git(source.path(), &["show", ":ordinary.txt"]), "staged");
+        assert!(!source.path().join("removed.txt").exists());
         assert_eq!(
             git(&module_worktree, &["show", ":module.txt"]),
             "module staged"
@@ -8814,15 +8820,19 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
         let migrated = Repository::discover(&copy.destination()).unwrap();
         assert_eq!(copy.source_commit(), &source_head);
         assert_eq!(migrated.head().unwrap(), Some(source_head.clone()));
-        assert_eq!(git(copy.destination(), &["show", ":ordinary.txt"]), "staged");
+        assert_eq!(
+            git(copy.destination(), &["show", ":ordinary.txt"]),
+            "staged"
+        );
         assert_eq!(
             git(copy.destination(), &["diff", "--cached", "--name-only"]),
-            "ordinary.txt"
+            "ordinary.txt\nremoved.txt"
         );
         assert_eq!(
             git(copy.destination(), &["diff", "--name-only"]),
             "ordinary.txt"
         );
+        assert!(!copy.destination().join("removed.txt").exists());
         let migrated_module = copy.destination().join("deps/lib");
         assert_eq!(
             git(&migrated_module, &["rev-parse", "--show-toplevel"]),
