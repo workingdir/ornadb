@@ -3746,6 +3746,85 @@ mod graph_bridge_tests {
         )));
         assert_eq!(stats.schema_version(), 1, "--version reports the stats schema");
     }
+
+    #[test]
+    fn complete_copy_restores_native_published_row_and_worktree_offline() {
+        let source = repository();
+        let source_path = source.path();
+        let relation_id = [0x7d; 16];
+        install_overflow_row_store(source_path, &context(source_path), relation_id, None);
+
+        let source_repository = Repository::discover(source_path).expect("discover source");
+        let format = source_repository
+            .open_format_context()
+            .expect("admit source format-3 snapshot");
+        let row_map = format
+            .load_row_map(relation_id)
+            .expect("load seeded relation map");
+        let graph = format
+            .open_native_graph(&row_map)
+            .expect("open native graph");
+        let scope = graph.open_read_scope().expect("open graph scope");
+        let version = row_map.version().clone();
+        let changes = [RowIndexMutation::Insert {
+            key: TypedKey::Text("offline-copy-row".to_owned()),
+            value: RowValue::decode_canonical_fields(vec![0x80])
+                .expect("encode canonical empty row"),
+        }];
+        let index = graph
+            .maintain_row_index(&changes, &scope)
+            .expect("prepare native row-map update");
+        let store_root = graph
+            .maintain_relations_rows(&[(&version, &index)], &scope)
+            .expect("publish row through the native relation update path");
+        commit_store_root(source_path, graph.algorithm(), &store_root);
+        drop(scope);
+        drop(graph);
+        drop(format);
+        drop(source_repository);
+
+        let archive_parent = TempDir::new().expect("create archive parent");
+        let archive = archive_parent.path().join("archive");
+        let source_repository = Repository::discover(source_path).expect("reopen source");
+        crate::complete_copy::export_complete_copy(&source_repository, "HEAD", &archive, &[])
+            .expect("export the committed native row root");
+        drop(source_repository);
+        drop(source);
+
+        let copy_parent = TempDir::new().expect("create copy parent");
+        let copy = copy_parent.path().join("restored");
+        let manifest = crate::complete_copy::restore_complete_copy(&archive, &copy)
+            .expect("restore and verify format-3 snapshot offline");
+        crate::complete_copy::materialize_complete_copy(&copy, &manifest)
+            .expect("populate the copied worktree");
+        assert_eq!(
+            fs::read_to_string(copy.join("main.orna")).expect("read copied worktree"),
+            MAIN_SOURCE
+        );
+        assert!(git_output(&copy, &["remote"], None).is_empty());
+        assert!(!copy.join(".git/objects/info/alternates").exists());
+
+        let copied = Repository::discover(&copy).expect("discover restored repository");
+        let copied_format = copied
+            .open_format_context()
+            .expect("admit restored format-3 snapshot");
+        let copied_rows = copied_format
+            .load_row_map(relation_id)
+            .expect("load restored relation map");
+        let copied_graph = copied_format
+            .open_native_graph(&copied_rows)
+            .expect("open restored native graph");
+        let copied_scope = copied_graph
+            .open_read_scope()
+            .expect("open restored graph scope");
+        assert!(copied_graph
+            .lookup_row(
+                &TypedKey::Text("offline-copy-row".to_owned()),
+                &copied_scope,
+            )
+            .expect("read restored native row")
+            .is_some());
+    }
 }
 
 /// Why a repository could not issue capture authority for a relation.
