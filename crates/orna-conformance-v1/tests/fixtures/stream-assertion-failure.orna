@@ -1,0 +1,12 @@
+pub type Sample { pub sensor: Str, pub sequence: Int, pub value: Decimal, }
+pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }
+pub table Marker(id: Int) { note: Str, }
+assert every(Reading, reading =>
+    exists(Marker, marker => marker.id == reading.sequence)
+);
+pub fn input() = Stream.from_list([
+    Sample { sensor: "greenhouse", sequence: 0, value: 18.25 },
+], source_identity: "example:sensors:assertion-failure");
+pub fn ingest() { input() | for_each(sample => {
+    Reading.insert({ sensor: sample.sensor, sequence: sample.sequence, value: sample.value });
+}); }

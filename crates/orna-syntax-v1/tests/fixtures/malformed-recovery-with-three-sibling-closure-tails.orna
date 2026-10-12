@@ -1,0 +1,46 @@
+pub fn bad(flag: Bool): Int { case flag {
+true: "prefix {outer => { let outer_saved = outer; case outer {
+true: outer_prefix => { case outer_prefix {
+true: 1,
+false: 2
+} },
+false 0 { value: 3 },
+true 1 { other_value: 4 },
+false 2 { third_value: 5 },
+true 3 { fourth_value: 6 }
+};
+outer_tail => { case outer_tail {
+true: outer_saved,
+false: "outer tail {flag}"
+} }
+}} middle {left => { let left_saved = left; case left {
+true: left_prefix => { case left_prefix {
+true: 7,
+false: 8
+} },
+false 4 { fifth_value: 9 },
+true 5 { sixth_value: 10 },
+false 6 { seventh_value: 11 },
+true 7 { eighth_value: 12 }
+};
+left_tail => { case left_tail {
+true: left_saved,
+false: "left tail {flag}"
+} }
+}} and {right => { let right_saved = right; case right {
+true: right_prefix => { case right_prefix {
+true: 13,
+false: 14
+} },
+false 8 { ninth_value: 15 },
+true 9 { tenth_value: 16 },
+false 10 { eleventh_value: 17 },
+true 11 { twelfth_value: 18 }
+};
+right_tail => { case right_tail {
+true: right_saved,
+false: "right tail {flag}"
+} }
+}} end",
+false: "fallback {flag} done"
+}}

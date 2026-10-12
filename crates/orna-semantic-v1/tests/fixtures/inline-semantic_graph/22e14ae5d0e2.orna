@@ -1,0 +1,1 @@
+table Reading(id: Str) { speed: Float, tags: [Str], } fn write() { let row = {value}; Reading.insert(row); }

@@ -1,0 +1,7 @@
+sys.Storage
+    | take(0)
+    | union(sys.Storage | project(storage => sys.Storage.lookup(storage.id).title) | filter(title => title == "current") | take(1) | union(sys.Storage | project(storage => sys.Storage.lookup(storage.id).title) | filter(title => title == "current") | take(1) | union(sys.Storage | project(storage => sys.Storage.lookup(storage.id).title) | filter(title => title == "later") | take(1) | union(sys.Storage | project(storage => sys.Storage.lookup(storage.target).title)))))
+    | filter(title => title == "later")
+    | take(1)
+    | count()
+    |? (failure => failure.code)

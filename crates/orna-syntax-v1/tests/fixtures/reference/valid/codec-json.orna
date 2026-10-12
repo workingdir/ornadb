@@ -1,0 +1,4 @@
+pub fn roundtrip(contact: Contact) {
+    let text = std.encoding.json.encode(contact);
+    std.encoding.json.decode(text, as: Contact)
+}

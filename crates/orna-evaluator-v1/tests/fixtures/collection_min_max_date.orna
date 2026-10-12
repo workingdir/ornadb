@@ -1,0 +1,1 @@
+fn earliest(rows: [Date]) = min(rows); fn latest(rows: [Date]) = std.collection.max(rows);

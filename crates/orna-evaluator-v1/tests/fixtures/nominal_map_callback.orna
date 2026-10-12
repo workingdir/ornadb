@@ -1,0 +1,2 @@
+fn select(value: Int) = value.value;
+fn run() = std.collection.map([Thing { value: 7 }], select);

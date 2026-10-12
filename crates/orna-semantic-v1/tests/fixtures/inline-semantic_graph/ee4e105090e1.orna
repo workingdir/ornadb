@@ -1,0 +1,8 @@
+
+            type EmailHeader { address: Str, }
+            pub type EmailAddress {
+                value: Str,
+                impl From<Str> { fn from(value) = EmailAddress { value: value }; }
+                impl From<EmailHeader> { fn from(header) = EmailAddress { value: header.address }; }
+            }
+        

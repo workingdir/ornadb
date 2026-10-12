@@ -1,0 +1,15026 @@
+use std::collections::BTreeSet;
+
+use orna_sys_v1::{
+    DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput, DependencyKind,
+    ExplainError,
+    FileRef, FunctionPlanDescription, FunctionRef, ObjectRef, PlanDetail, PlanNodeKind, PlanOrdering,
+    PlanSortDirection, PlanNullOrder, QueryJoinDescription, QueryPlanDescription,
+    QuerySourceStatistics, QueryMutationDescription, QueryMutationKind,
+    MutableBranchSnapshot, SnapshotRef, MAX_PLAN_EXPRESSIONS,
+    SystemEffect, explain_function, explain_query, system_function_descriptor, SourceSpan,
+};
+use serde_json::Value;
+
+const DEPENDENCY_DIAMOND: &str = include_str!("fixtures/dependency_diamond.orna");
+const MUTABLE_BRANCH_QUERY: &str = include_str!("fixtures/mutable_branch_query.orna");
+const ROUNDING_TAIL_INTERPLAY: &str = include_str!("fixtures/rounding_tail_interplay.orna");
+const WRITE_MATERIALIZATION_EDGE_TAIL: &str =
+    include_str!("fixtures/write_materialization_edge_tail.orna");
+const WRITE_MATERIALIZATION_ROUNDING_TAIL: &str =
+    include_str!("fixtures/write_materialization_rounding_tail.orna");
+const MAX_SOURCE_MATERIALIZED_WRITE_TAIL: &str =
+    include_str!("fixtures/max_source_materialized_write_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_CLOSURE_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_closure_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_OVERFLOW_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_overflow_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_AGGREGATE_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_aggregate_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_LAST_BLOCK_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_last_block_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_TERMINAL_BYTE_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_terminal_byte_tail.orna");
+const MAX_SOURCE_MATERIALIZATION_FIRST_REMAINDER_TAIL: &str =
+    include_str!("fixtures/max_source_materialization_first_remainder_tail.orna");
+const MAX_SOURCE_FIRST_REMAINDER_OVERFLOW_TAIL: &str =
+    include_str!("fixtures/max_source_first_remainder_overflow_tail.orna");
+const MAX_SOURCE_FIRST_REMAINDER_LOCAL_TAIL: &str =
+    include_str!("fixtures/max_source_first_remainder_local_tail.orna");
+const FIRST_REMAINDER_PARTIAL_BOUND_MATERIALIZE_TAIL: &str =
+    include_str!("fixtures/first_remainder_partial_bound_materialize_tail.orna");
+const FIRST_REMAINDER_PARTIAL_WRITE_BOUND_TAIL: &str =
+    include_str!("fixtures/first_remainder_partial_write_bound_tail.orna");
+const FIRST_REMAINDER_PARTIAL_BOUND_EDGE_TAIL: &str =
+    include_str!("fixtures/first_remainder_partial_bound_edge_tail.orna");
+const FIRST_REMAINDER_PARTIAL_BOUND_PIN_TAIL: &str =
+    include_str!("fixtures/first_remainder_partial_bound_pin_tail.orna");
+const FIRST_REMAINDER_UNKNOWN_JOIN_BOUND_TAIL: &str =
+    include_str!("fixtures/first_remainder_unknown_join_bound_tail.orna");
+const FIRST_REMAINDER_UNKNOWN_JOIN_EDGE_TAIL: &str =
+    include_str!("fixtures/first_remainder_unknown_join_edge_tail.orna");
+const FIRST_REMAINDER_UNKNOWN_JOIN_CHAIN_EDGE_TAIL: &str =
+    include_str!("fixtures/first_remainder_unknown_join_chain_edge_tail.orna");
+const FIRST_REMAINDER_UNKNOWN_CLOSURE_SUFFIX_TAIL: &str =
+    include_str!("fixtures/first_remainder_unknown_closure_suffix_tail.orna");
+const FIRST_REMAINDER_UNKNOWN_JOIN_MUTATION_TAIL: &str =
+    include_str!("fixtures/first_remainder_unknown_join_mutation_tail.orna");
+const FIRST_REMAINDER_SCAN_CLOSURE_EDGE_TAIL: &str =
+    include_str!("fixtures/first_remainder_scan_closure_edge_tail.orna");
+const FIRST_REMAINDER_SCAN_MUTATION_TAIL: &str =
+    include_str!("fixtures/first_remainder_scan_mutation_tail.orna");
+const FIRST_REMAINDER_SOURCE_SCAN_EDGE_TAIL: &str =
+    include_str!("fixtures/first_remainder_source_scan_edge_tail.orna");
+const SOURCE_REMAINDER_MULTISCAN_CLOSURE_TAIL: &str =
+    include_str!("fixtures/source_remainder_multiscan_closure_tail.orna");
+const SOURCE_REMAINDER_SCAN_BOUNDARY_TAIL: &str =
+    include_str!("fixtures/source_remainder_scan_boundary_tail.orna");
+const SOURCE_REMAINDER_SCAN_BOUND_CLOSURE_TAIL: &str =
+    include_str!("fixtures/source_remainder_scan_bound_closure_tail.orna");
+const SOURCE_REMAINDER_MIXED_SCAN_BOUNDS_TAIL: &str =
+    include_str!("fixtures/source_remainder_mixed_scan_bounds_tail.orna");
+const SOURCE_REMAINDER_UNKNOWN_SCAN_EDGE_TAIL: &str =
+    include_str!("fixtures/source_remainder_unknown_scan_edge_tail.orna");
+const SOURCE_REMAINDER_AFTER_UNKNOWN_TAIL: &str =
+    include_str!("fixtures/source_remainder_after_unknown_tail.orna");
+const SOURCE_REMAINDER_SPLIT_UNKNOWN_EDGE_TAIL: &str =
+    include_str!("fixtures/source_remainder_split_unknown_edge_tail.orna");
+const SOURCE_REMAINDER_ROW_PREFIX_UNKNOWN_TAIL: &str =
+    include_str!("fixtures/source_remainder_row_prefix_unknown_tail.orna");
+const REMAINDER_AFTER_UNKNOWN_MULTI_SCAN_TAIL: &str =
+    include_str!("fixtures/remainder_after_unknown_multi_scan_tail.orna");
+const POST_UNKNOWN_REMAINDER_SCAN_INTERPLAY_TAIL: &str =
+    include_str!("fixtures/post_unknown_remainder_scan_interplay_tail.orna");
+const UNKNOWN_SCAN_SPLIT_REMAINDER_EDGE_TAIL: &str =
+    include_str!("fixtures/unknown_scan_split_remainder_edge_tail.orna");
+const SOURCE_REMAINDER_KNOWN_SCAN_AFTER_UNKNOWN_TAIL: &str =
+    include_str!("fixtures/source_remainder_known_scan_after_unknown_tail.orna");
+const SOURCE_REMAINDER_SPLIT_BOUNDS_AFTER_UNKNOWN_TAIL: &str =
+    include_str!("fixtures/source_remainder_split_bounds_after_unknown_tail.orna");
+const SOURCE_REMAINDER_BYTES_THEN_ROWS_AFTER_UNKNOWN_TAIL: &str =
+    include_str!("fixtures/source_remainder_bytes_then_rows_after_unknown_tail.orna");
+const SOURCE_REMAINDER_BYTES_THEN_RESET_TAIL: &str =
+    include_str!("fixtures/source_remainder_bytes_then_reset_tail.orna");
+const BYTE_REMAINDER_RESET_EDGE_TAIL: &str =
+    include_str!("fixtures/byte_remainder_reset_edge_tail.orna");
+const BYTE_REMAINDER_REPEATED_RESET_TAIL: &str =
+    include_str!("fixtures/byte_remainder_repeated_reset_tail.orna");
+const BYTE_WORK_REPEATED_RESET_EDGE_TAIL: &str =
+    include_str!("fixtures/byte_work_repeated_reset_edge_tail.orna");
+const SPLIT_BYTE_REMAINDER_REPEATED_RESET_TAIL: &str =
+    include_str!("fixtures/split_byte_remainder_repeated_reset_tail.orna");
+const MULTISCAN_SPLIT_BYTE_RESET_TAIL: &str =
+    include_str!("fixtures/multiscan_split_byte_reset_tail.orna");
+const SPLIT_BYTE_WORK_UNKNOWN_EDGE_TAIL: &str =
+    include_str!("fixtures/split_byte_work_unknown_edge_tail.orna");
+const MULTI_UNKNOWN_BYTE_WORK_EDGE_TAIL: &str =
+    include_str!("fixtures/multi_unknown_byte_work_edge_tail.orna");
+const BYTE_WORK_UNKNOWN_GAP_ROUNDING_EDGE_TAIL: &str =
+    include_str!("fixtures/byte_work_unknown_gap_rounding_edge_tail.orna");
+const BYTE_ROUNDING_UNKNOWN_GAP_EDGE_TAIL: &str =
+    include_str!("fixtures/byte_rounding_unknown_gap_edge_tail.orna");
+const KNOWN_BYTE_ROUNDING_RESET_TAIL: &str =
+    include_str!("fixtures/known_byte_rounding_reset_tail.orna");
+const KNOWN_BYTE_ROUNDING_THREE_RESET_TAIL: &str =
+    include_str!("fixtures/known_byte_rounding_three_reset_tail.orna");
+const KNOWN_BYTE_WORK_THREE_SCAN_RESET_TAIL: &str =
+    include_str!("fixtures/known_byte_work_three_scan_reset_tail.orna");
+const BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL: &str =
+    include_str!("fixtures/byte_work_three_scan_first_byte_tail.orna");
+
+fn obj(name: &str) -> ObjectRef {
+    ObjectRef::descriptive(name)
+}
+
+fn graph() -> DependencyGraph {
+    let a = obj("module:a");
+    let b = obj("function:b");
+    let c = obj("table:c");
+    let d = obj("function:d");
+    DependencyGraph::new(
+        SnapshotRef::descriptive("snapshot:one"),
+        [a.clone(), b.clone(), c.clone(), d.clone()],
+        [
+            DependencyInput::new(
+                a.clone(),
+                b.clone(),
+                DependencyKind::Import,
+                None,
+                None,
+                DependencyConfidence::Exact,
+                false,
+            ),
+            DependencyInput::new(
+                b.clone(),
+                c.clone(),
+                DependencyKind::TableRead,
+                None,
+                None,
+                DependencyConfidence::Exact,
+                false,
+            ),
+            DependencyInput::new(
+                c.clone(),
+                a.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Possible,
+                true,
+            ),
+            DependencyInput::new(
+                d.clone(),
+                b.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Exact,
+                false,
+            ),
+            DependencyInput::new(
+                c.clone(),
+                d.clone(),
+                DependencyKind::TableWrite,
+                None,
+                None,
+                DependencyConfidence::Conservative,
+                false,
+            ),
+        ],
+    )
+    .expect("valid graph")
+}
+
+#[test]
+fn planner_and_dependency_functions_are_registered_as_read_only_sys_operations() {
+    for name in [
+        "sys.explain(Query)",
+        "sys.explain(FunctionRef)",
+        "sys.dependencies",
+        "sys.dependents",
+    ] {
+        assert_eq!(
+            system_function_descriptor(name)
+                .expect("registered system operation")
+                .effect,
+            SystemEffect::Read,
+            "{name} must remain read-only"
+        );
+    }
+}
+
+#[test]
+fn dependency_traversal_is_typed_cycle_safe_and_breadth_first() {
+    let graph = graph();
+    let a = obj("module:a");
+    let direct = graph.dependencies(&a, false, None).expect("direct edges");
+    assert_eq!(direct.len(), 1);
+    assert_eq!(direct[0].from().as_str(), "module:a");
+    assert_eq!(direct[0].to().as_str(), "function:b");
+    assert!(direct[0].reference().as_str().starts_with("dependency:"));
+    assert_eq!(direct[0].kind(), DependencyKind::Import);
+    assert_eq!(direct[0].confidence(), DependencyConfidence::Exact);
+    assert!(!direct[0].is_conditional());
+
+    let transitive = graph.dependencies(&a, true, None).expect("transitive edges");
+    assert_eq!(
+        transitive
+            .iter()
+            .map(|edge| (edge.from().as_str(), edge.to().as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("module:a", "function:b"),
+            ("function:b", "table:c"),
+            ("table:c", "function:d"),
+            ("table:c", "module:a"),
+            ("function:d", "function:b"),
+        ]
+    );
+    assert_eq!(
+        transitive
+            .iter()
+            .map(|edge| edge.reference().as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        transitive.len(),
+        "natural dependency keys produce unique typed references"
+    );
+}
+
+#[test]
+fn dependency_filters_apply_to_traversal_and_dependents_keep_edge_direction() {
+    let graph = graph();
+    let a = obj("module:a");
+    let only_calls = BTreeSet::from([DependencyKind::Call]);
+    assert!(graph
+        .dependencies(&a, true, Some(&only_calls))
+        .expect("filtered outgoing edges")
+        .is_empty());
+
+    let b = obj("function:b");
+    let incoming = graph
+        .dependents(&b, true, None)
+        .expect("incoming transitive edges");
+    assert_eq!(incoming[0].from().as_str(), "function:d");
+    assert_eq!(incoming[0].to().as_str(), "function:b");
+    assert_eq!(incoming[0].kind(), DependencyKind::Call);
+    assert!(incoming.iter().any(|edge| {
+        edge.from().as_str() == "function:d" && edge.to().as_str() == "function:b"
+    }));
+}
+
+#[test]
+fn dependency_fixture_proves_deterministic_diamond_and_cycle_traversal() {
+    let parsed = orna_syntax_v1::parse_module(DEPENDENCY_DIAMOND);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+    let dashboard = obj("function:dashboard");
+    let render = obj("function:render_contacts");
+    let active = obj("function:active_contacts");
+    let graph = DependencyGraph::new(
+        SnapshotRef::descriptive("snapshot:fixture"),
+        [dashboard.clone(), render.clone(), active.clone()],
+        [
+            DependencyInput::new(
+                dashboard.clone(),
+                render.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Exact,
+                false,
+            ),
+            DependencyInput::new(
+                dashboard.clone(),
+                active.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Exact,
+                false,
+            ),
+            DependencyInput::new(
+                render.clone(),
+                active.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Exact,
+                false,
+            ),
+            // Cycles are legal catalogue facts; visited-object tracking keeps
+            // the transitive query finite and preserves this return edge.
+            DependencyInput::new(
+                active.clone(),
+                dashboard.clone(),
+                DependencyKind::Call,
+                None,
+                None,
+                DependencyConfidence::Conservative,
+                true,
+            ),
+        ],
+    )
+    .expect("fixture dependency graph");
+
+    let traversed = graph
+        .dependencies(&dashboard, true, None)
+        .expect("cycle-safe traversal");
+    assert_eq!(
+        traversed
+            .iter()
+            .map(|edge| (edge.from().as_str(), edge.to().as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("function:dashboard", "function:active_contacts"),
+            ("function:dashboard", "function:render_contacts"),
+            ("function:active_contacts", "function:dashboard"),
+            ("function:render_contacts", "function:active_contacts"),
+        ]
+    );
+    assert_eq!(traversed.len(), 4);
+
+    let reverse = graph
+        .dependents(&active, true, None)
+        .expect("transitive reverse traversal");
+    assert!(reverse.iter().any(|edge| {
+        edge.from() == &dashboard && edge.to() == &active
+    }));
+    assert!(reverse.iter().all(|edge| {
+        edge.kind() == DependencyKind::Call
+    }));
+}
+
+#[test]
+fn dependency_graph_rejects_unknown_endpoints_and_query_roots() {
+    let a = obj("module:a");
+    let missing = obj("missing:object");
+    let edge = DependencyInput::new(
+        a.clone(),
+        missing.clone(),
+        DependencyKind::Call,
+        None,
+        None,
+        DependencyConfidence::Exact,
+        false,
+    );
+    assert_eq!(
+        DependencyGraph::new(SnapshotRef::descriptive("snapshot"), [a.clone()], [edge]),
+        Err(DependencyGraphError::UnknownEndpoint)
+    );
+    assert_eq!(
+        graph().dependencies(&missing, false, None),
+        Err(DependencyGraphError::UnknownObject)
+    );
+
+    let invalid_span = SourceSpan {
+        file: FileRef::descriptive("module.orna"),
+        start_byte: 8,
+        end_byte: 3,
+        start_line: 1,
+        start_column: 4,
+        end_line: 1,
+        end_column: 8,
+    };
+    assert_eq!(
+        DependencyGraph::new(
+            SnapshotRef::descriptive("snapshot"),
+            [a.clone(), missing.clone()],
+            [DependencyInput::new(
+                a,
+                missing,
+                DependencyKind::Call,
+                None,
+                Some(invalid_span),
+                DependencyConfidence::Exact,
+                false,
+            )],
+        ),
+        Err(DependencyGraphError::InvalidSpan)
+    );
+}
+
+#[test]
+fn query_explain_returns_a_snapshot_pinned_scan_fallback_without_fabricated_stats() {
+    let query = QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:one"),
+        source: obj("table:contacts"),
+        source_statistics: None,
+        joins: Vec::new(),
+        predicate: Some(orna_sys_v1::ExpressionRef::descriptive("expr:active")),
+        projections: vec![orna_sys_v1::ExpressionRef::descriptive("expr:name")],
+        distinct: true,
+        ordering: vec![PlanOrdering {
+            expression: orna_sys_v1::ExpressionRef::descriptive("expr:name"),
+            direction: PlanSortDirection::Ascending,
+            null_order: PlanNullOrder::Last,
+        }],
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    };
+    let explained = explain_query(&query).expect("structured query plan");
+    assert_eq!(
+        explained
+            .nodes()
+            .iter()
+            .map(|node| node.kind())
+            .collect::<Vec<_>>(),
+        [
+            PlanNodeKind::Limit,
+            PlanNodeKind::Sort,
+            PlanNodeKind::Aggregate,
+            PlanNodeKind::Project,
+            PlanNodeKind::Filter,
+            PlanNodeKind::Scan,
+        ]
+    );
+    assert_eq!(explained.root().reference(), explained.plan().root());
+    assert_eq!(explained.nodes()[0].inputs(), &[explained.nodes()[1].reference().clone()]);
+    assert_eq!(explained.nodes().last().unwrap().object(), Some(&obj("table:contacts")));
+    assert!(explained
+        .nodes()
+        .iter()
+        .all(|node| node.actual_rows().is_none()));
+    assert!(!explained.plan().actual_available());
+    assert_eq!(explained.plan().estimated_cost(), None);
+
+    let same = explain_query(&query).expect("deterministic explain");
+    assert_eq!(explained, same);
+    let other_snapshot = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:two"),
+        ..query
+    })
+    .expect("same query at another snapshot");
+    assert_ne!(explained.plan().id(), other_snapshot.plan().id());
+
+    let rendered = serde_json::to_value(explained.nodes()).expect("safe JSON projection");
+    let rendered = rendered.as_array().unwrap();
+    assert!(rendered.iter().all(|node| node.get("actual_rows").is_none()));
+    assert!(rendered.iter().all(|node| node.get("actual_bytes").is_none()));
+    assert!(rendered.iter().all(|node| node.get("estimated_rows").is_none()));
+    let rendered_plan = serde_json::to_value(explained.plan()).expect("portable plan row");
+    assert!(rendered_plan.get("estimated_cost").is_none());
+    assert_eq!(rendered_plan["actual_available"], Value::Bool(false));
+}
+
+#[test]
+fn explain_builds_a_deep_join_materialization_plan_from_mutable_branch_stats() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 8);
+    let query = QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:workspace-generation-7"),
+        source: obj("table:Contact"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1_000),
+            estimated_bytes: Some(64_000),
+            mutable_branch: Some(MutableBranchSnapshot {
+                name: "branch:working".to_owned(),
+                generation: 7,
+            }),
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ContactTag"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(100),
+                estimated_bytes: Some(8_000),
+                mutable_branch: Some(MutableBranchSnapshot {
+                    name: "branch:working".to_owned(),
+                    generation: 7,
+                }),
+            }),
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+                "expr:contact.id=tag.contact_id",
+            )),
+        }, QueryJoinDescription {
+            source: obj("table:ContactBadge"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(40),
+                estimated_bytes: Some(1_600),
+                mutable_branch: Some(MutableBranchSnapshot {
+                    name: "branch:working".to_owned(),
+                    generation: 7,
+                }),
+            }),
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+                "expr:contact.id=badge.contact_id",
+            )),
+        }],
+        predicate: Some(orna_sys_v1::ExpressionRef::descriptive("expr:contact.active")),
+        projections: vec![orna_sys_v1::ExpressionRef::descriptive("expr:contact.name")],
+        distinct: true,
+        ordering: vec![PlanOrdering {
+            expression: orna_sys_v1::ExpressionRef::descriptive("expr:contact.name"),
+            direction: PlanSortDirection::Ascending,
+            null_order: PlanNullOrder::Last,
+        }],
+        limit: Some(30),
+        mutations: vec![
+            QueryMutationDescription {
+                table: obj("table:Contact"),
+                kind: QueryMutationKind::Insert,
+                estimated_affected_rows: Some(5),
+                estimated_write_bytes: Some(240),
+                estimated_table_rows_before: None,
+            },
+            QueryMutationDescription {
+                table: obj("table:ContactTag"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(2),
+                estimated_write_bytes: Some(96),
+                estimated_table_rows_before: None,
+            },
+            QueryMutationDescription {
+                table: obj("table:ContactTag"),
+                kind: QueryMutationKind::Rekey,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(80),
+                estimated_table_rows_before: None,
+            },
+            QueryMutationDescription {
+                table: obj("table:Contact"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(2),
+                estimated_write_bytes: Some(64),
+                estimated_table_rows_before: None,
+            },
+        ],
+        materialize_into: Some(obj("materialization:active_contact_names")),
+    };
+    let explained = explain_query(&query).expect("deep query plan");
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().object(), Some(&obj("materialization:active_contact_names")));
+    assert_eq!(explained.root().estimated_work(), Some(3));
+    assert_eq!(
+        explained.root().details().get("estimated_work"),
+        Some(&PlanDetail::Integer(3))
+    );
+    assert!(explained.nodes().iter().any(|node| node.kind() == PlanNodeKind::Join));
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join operator");
+    assert_eq!(join.inputs().len(), 2);
+    assert_eq!(join.estimated_rows(), Some(40_000));
+    let join_estimates = explained
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .map(|node| node.estimated_rows())
+        .collect::<Vec<_>>();
+    assert_eq!(join_estimates, [Some(40_000), Some(10_000)]);
+    assert_eq!(
+        explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Filter)
+            .unwrap()
+            .estimated_rows(),
+        Some(20_000)
+    );
+    assert_eq!(
+        explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Aggregate)
+            .unwrap()
+            .estimated_rows(),
+        Some(10_000)
+    );
+    assert_eq!(
+        explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Limit)
+            .unwrap()
+            .estimated_rows(),
+        Some(30)
+    );
+    let contact_mutations = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:Contact"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(contact_mutations.len(), 2);
+    assert_eq!(contact_mutations[0].estimated_rows(), Some(2));
+    assert_eq!(contact_mutations[1].estimated_rows(), Some(5));
+    let tag_mutations = explained
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ContactTag"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tag_mutations.len(), 2);
+    assert_eq!(tag_mutations[0].estimated_rows(), Some(1));
+    assert_eq!(tag_mutations[1].estimated_rows(), Some(2));
+    assert_eq!(explained.nodes()[0].inputs(), &[explained.nodes()[1].reference().clone()]);
+    for position in 1..4 {
+        assert_eq!(
+            explained.nodes()[position].inputs(),
+            &[explained.nodes()[position + 1].reference().clone()]
+        );
+        assert_eq!(
+            explained.nodes()[position + 1].parent(),
+            Some(explained.nodes()[position].reference())
+        );
+    }
+    assert_eq!(explained.nodes()[5].kind(), PlanNodeKind::Limit);
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:Contact"))
+            && node.estimated_rows() == Some(1_000)
+    }));
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:ContactTag"))
+            && node.estimated_rows() == Some(100)
+    }));
+    assert!(explained.plan().estimated_cost().is_some());
+    assert!(explained
+        .nodes()
+        .iter()
+        .all(|node| node.actual_rows().is_none()));
+    assert!(explained
+        .nodes()
+        .iter()
+        .all(|node| node.estimated_bytes().is_none() || node.estimated_rows().is_some()));
+    assert!(!explained.plan().actual_available());
+
+    let rendered = serde_json::to_value(explained.nodes()).expect("structured plan nodes");
+    let contact_scan = rendered
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["kind"] == "scan" && node["object"] == "table:Contact")
+        .expect("serialized contact scan");
+    assert_eq!(contact_scan["details"]["mutable_branch"], "branch:working");
+    assert_eq!(contact_scan["details"]["branch_generation"], 7);
+    assert_eq!(contact_scan["details"]["statistics_scope"], "overlay_inclusive");
+    let delete_node = rendered
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["mutation"] == "delete")
+        .expect("mutation tail");
+    assert_eq!(delete_node["details"]["table_rows_before"], 1_005);
+    assert_eq!(delete_node["details"]["table_rows_after"], 1_003);
+    assert_eq!(delete_node["details"]["estimated_work"], 3);
+    assert_eq!(rendered.as_array().unwrap()[0]["details"]["estimated_work"], 3);
+    for kind in ["update", "rekey"] {
+        let node = rendered
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["details"]["mutation"] == kind)
+            .expect("cardinality-preserving mutation tail");
+        assert_eq!(node["details"]["table_rows_before"], 100);
+        assert_eq!(node["details"]["table_rows_after"], 100);
+    }
+    let total_work = rendered
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["details"]["estimated_work"].as_u64())
+        .sum::<u64>();
+    let expected_cost = total_work.to_string();
+    assert_eq!(explained.plan().estimated_cost(), Some(expected_cost.as_str()));
+    let sys_surface = serde_json::to_value(&explained).expect("complete sys.explain surface");
+    assert_eq!(sys_surface["plan"]["estimated_cost"], expected_cost);
+    assert_eq!(
+        sys_surface["plan"]["root"],
+        sys_surface["nodes"][0]["reference"]
+    );
+    assert_eq!(
+        sys_surface["nodes"][0]["details"]["estimated_work"],
+        3
+    );
+
+    let mut next_generation = query.clone();
+    next_generation.source_statistics.as_mut().unwrap().mutable_branch.as_mut().unwrap().generation = 8;
+    next_generation.source_statistics.as_mut().unwrap().estimated_rows = Some(1_050);
+    let changed = explain_query(&next_generation).expect("new mutable branch state");
+    assert_ne!(explained.plan().id(), changed.plan().id());
+    assert_eq!(
+        changed
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:Contact")))
+            .unwrap()
+            .estimated_rows(),
+        Some(1_050)
+    );
+
+    let fallback = explain_query(&QueryPlanDescription {
+        materialize_into: None,
+        ..query
+    })
+    .expect("reference scan/query fallback");
+    assert_ne!(fallback.root().kind(), PlanNodeKind::Materialize);
+    assert!(fallback.nodes().iter().any(|node| node.kind() == PlanNodeKind::Scan));
+}
+
+#[test]
+fn explain_estimate_reporting_distinguishes_unknown_zero_and_partial_cost() {
+    let zero = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:zero-estimates"),
+        source: obj("table:empty"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(0),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(0),
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:empty")),
+    })
+    .expect("known empty plan");
+    assert_eq!(zero.plan().estimated_cost(), Some("0"));
+    assert!(zero
+        .nodes()
+        .iter()
+        .all(|node| node.estimated_work() == Some(0)));
+
+    let partial = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:partial-estimates"),
+        source: obj("table:known"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(2),
+            estimated_bytes: Some(32),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:unknown"),
+            statistics: None,
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive("expr:join")),
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("partially estimated plan");
+    assert_eq!(partial.plan().estimated_cost(), None);
+    assert_eq!(
+        partial.root().details().get("estimated_cost_overflow"),
+        None
+    );
+    let known_scan = partial
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:known")))
+        .expect("known input estimate");
+    assert_eq!(known_scan.estimated_work(), Some(3));
+    let unknown_scan = partial
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:unknown")))
+        .expect("unknown input estimate");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    assert!(partial
+        .nodes()
+        .iter()
+        .all(|node| node.actual_rows().is_none() && node.actual_bytes().is_none()));
+}
+
+#[test]
+fn explain_total_work_overflow_keeps_known_operator_estimates_in_the_tail() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let half = u64::MAX / 2;
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:work-total-overflow"),
+        source: obj("table:left"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(half),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:right"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(half),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:left"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(1),
+            estimated_write_bytes: Some(0),
+            estimated_table_rows_before: Some(17),
+        }],
+        materialize_into: Some(obj("materialization:overflow-proof")),
+    })
+    .expect("bounded plan with overflowing aggregate work");
+
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_work(), Some(1));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join estimate");
+    assert_eq!(join.estimated_work(), Some(u64::MAX - 1));
+    for (table, work) in [("table:left", half), ("table:right", half)] {
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table))
+            })
+            .expect("scan estimate");
+        assert_eq!(scan.estimated_work(), Some(work));
+    }
+
+    let surface = serde_json::to_value(&explained).expect("structured overflow plan");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work"], 1);
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    let mutation = surface["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["mutation"] == "update")
+        .expect("mutation tail");
+    assert_eq!(mutation["details"]["estimated_work"], 1);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_cost_boundary_includes_final_mutation_and_materialization_work() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_after_update = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:tail-cost-boundary"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:large"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(0),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:tail-boundary")),
+        })
+        .expect("estimate boundary plan")
+    };
+
+    let exact = explain_after_update(0);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_work(), Some(0));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None
+    );
+    let exact_mutation = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Invoke)
+        .expect("update tail");
+    assert_eq!(exact_mutation.estimated_work(), Some(0));
+    assert!(exact.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:large"))
+            && node.estimated_work() == Some(u64::MAX)
+    }));
+
+    let overflow = explain_after_update(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(1));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+    }));
+    let overflow_surface = serde_json::to_value(&overflow).expect("cost overflow tail surface");
+    assert_eq!(overflow_surface["nodes"][0]["details"]["estimated_work"], 1);
+    assert_eq!(
+        overflow_surface["nodes"][0]["details"]["estimated_cost_overflow"],
+        true
+    );
+    assert!(overflow_surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_known_cost_overflow_survives_an_unknown_final_tail() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_after_update = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:overflow-with-unknown-tail"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(affected_rows),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:unknown-tail")),
+        })
+        .expect("plan with an incomplete final tail")
+    };
+
+    let exact_known_subtotal = explain_after_update(0);
+    assert_eq!(exact_known_subtotal.plan().estimated_cost(), None);
+    assert_eq!(
+        exact_known_subtotal
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    assert!(exact_known_subtotal.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan && node.estimated_work() == Some(u64::MAX)
+    }));
+
+    let explained = explain_after_update(1);
+
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let unknown_insert = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Invoke && node.estimated_rows().is_none())
+        .expect("unknown mutation estimate tail");
+    assert_eq!(unknown_insert.estimated_work(), None);
+    assert_eq!(unknown_insert.details().get("estimated_work_overflow"), None);
+    let surface = serde_json::to_value(&explained).expect("unknown overflow tail surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"][0]["details"].get("estimated_work").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_unknown_mutation_tail_retains_cost_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_insert_tail = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-unknown-mutation-tail"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(0),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(affected_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:partial-unknown-tail")),
+        })
+        .expect("partially known mutation estimate at the final plan tail")
+    };
+
+    let exact = explain_with_insert_tail(0);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "known rows contribute zero, leaving the exact scan subtotal at u64::MAX"
+    );
+    let exact_insert = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("partial final insert");
+    assert_eq!(exact_insert.estimated_rows(), Some(0));
+    assert_eq!(exact_insert.estimated_bytes(), None);
+    assert_eq!(exact_insert.estimated_work(), None);
+
+    let overflow = explain_with_insert_tail(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one known affected row pushes the MAX scan subtotal over the boundary"
+    );
+    let overflow_insert = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("partial final insert");
+    assert_eq!(overflow_insert.estimated_rows(), Some(1));
+    assert_eq!(overflow_insert.estimated_bytes(), None);
+    assert_eq!(overflow_insert.estimated_work(), None);
+    let surface = serde_json::to_value(&overflow).expect("partial-tail overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_unknown_write_tail_retains_cost_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_partial_insert = |write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-unknown-write-tail"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(0),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:partial-unknown-write")),
+        })
+        .expect("partially known write-byte estimate at the final plan tail")
+    };
+
+    let exact = explain_with_partial_insert(0);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "zero known write blocks leave the exact scan subtotal at u64::MAX"
+    );
+    let exact_insert = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("partial final insert");
+    assert_eq!(exact_insert.estimated_rows(), None);
+    assert_eq!(exact_insert.estimated_bytes(), Some(0));
+    assert_eq!(exact_insert.estimated_work(), None);
+
+    let overflow = explain_with_partial_insert(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one byte rounds to a known write block and pushes the MAX scan subtotal over"
+    );
+    let overflow_insert = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("partial final insert");
+    assert_eq!(overflow_insert.estimated_rows(), None);
+    assert_eq!(overflow_insert.estimated_bytes(), Some(1));
+    assert_eq!(overflow_insert.estimated_work(), None);
+    let surface = serde_json::to_value(&overflow).expect("partial-write overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_write_lower_bounds_accumulate_through_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_last_write = |last_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-write-lower-bound-tail"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 2),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(0),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(1),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:partial-write-tail")),
+        })
+        .expect("partial write bounds separated by an unknown mutation tail")
+    };
+
+    let exact = explain_with_last_write(4_096);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "one block from each partial write plus the scan is exactly u64::MAX"
+    );
+    let partial_insert = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("first partial write tail");
+    assert_eq!(partial_insert.estimated_rows(), None);
+    assert_eq!(partial_insert.estimated_bytes(), Some(1));
+    assert_eq!(partial_insert.estimated_work(), None);
+    let unknown_update = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+                && node.estimated_work().is_none()
+        })
+        .expect("fully unknown mutation between partial writes");
+    assert_eq!(unknown_update.estimated_rows(), None);
+    assert_eq!(unknown_update.estimated_bytes(), None);
+    let exact_delete = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("final partial write tail");
+    assert_eq!(exact_delete.estimated_rows(), None);
+    assert_eq!(exact_delete.estimated_bytes(), Some(4_096));
+    assert_eq!(exact_delete.estimated_work(), None);
+
+    let overflow = explain_with_last_write(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the second partial write rounds to two blocks and carries overflow across the unknown update"
+    );
+    let surface = serde_json::to_value(&overflow).expect("accumulated partial-write boundary");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_mixed_partial_write_bounds_accumulate_across_unknown_tail() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_final_bytes = |write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:mixed-partial-write-bound-tail"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 2),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(0),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:mixed-partial-tail")),
+        })
+        .expect("mixed partial write bounds around an unknown mutation")
+    };
+
+    // The known scan subtotal plus a one-row lower bound and one 4 KiB
+    // write-block lower bound reaches MAX exactly; the nullable plan cost
+    // remains absent because these mutation estimates are still partial.
+    let exact = explain_with_final_bytes(4_096);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let partial_insert = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("row-bounded partial insert");
+    assert_eq!(partial_insert.estimated_rows(), Some(1));
+    assert_eq!(partial_insert.estimated_bytes(), None);
+    assert_eq!(partial_insert.estimated_work(), None);
+    let unknown_update = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+                && node.estimated_rows().is_none()
+        })
+        .expect("unknown estimate between partial writes");
+    assert_eq!(unknown_update.estimated_work(), None);
+    let partial_delete = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("byte-bounded partial delete");
+    assert_eq!(partial_delete.estimated_rows(), None);
+    assert_eq!(partial_delete.estimated_bytes(), Some(4_096));
+    assert_eq!(partial_delete.estimated_work(), None);
+
+    let overflow = explain_with_final_bytes(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the rounded byte lower bound combines with the row lower bound across an unknown tail"
+    );
+    let surface = serde_json::to_value(&overflow).expect("mixed-bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_mixed_partial_write_bounds_survive_multiple_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let mutation = |kind, rows, bytes, before| QueryMutationDescription {
+        table: obj("table:large"),
+        kind,
+        estimated_affected_rows: rows,
+        estimated_write_bytes: bytes,
+        estimated_table_rows_before: before,
+    };
+    let explain_with_last_write = |write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:mixed-bounds-multiple-unknown-tails"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 4),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                mutation(QueryMutationKind::Insert, Some(1), None, Some(1)),
+                mutation(QueryMutationKind::Update, None, None, None),
+                mutation(QueryMutationKind::Delete, None, Some(4_096), Some(1)),
+                mutation(QueryMutationKind::Rekey, None, None, None),
+                mutation(QueryMutationKind::Insert, Some(1), None, Some(1)),
+                mutation(QueryMutationKind::Delete, None, Some(write_bytes), Some(1)),
+            ],
+            materialize_into: Some(obj("materialization:mixed-multiple-unknown-tail")),
+        })
+        .expect("mixed partial bounds separated by several unknown mutations")
+    };
+
+    // Unknown mutations do not erase earlier lower bounds. Two known row
+    // counts and two known write blocks bring the scan subtotal to MAX.
+    let exact = explain_with_last_write(4_096);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let partial_inserts = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .collect::<Vec<_>>();
+    assert_eq!(partial_inserts.len(), 2);
+    assert!(partial_inserts.iter().all(|node| {
+        node.estimated_rows() == Some(1)
+            && node.estimated_bytes().is_none()
+            && node.estimated_work().is_none()
+    }));
+    let partial_deletes = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .collect::<Vec<_>>();
+    assert_eq!(partial_deletes.len(), 2);
+    assert!(partial_deletes.iter().all(|node| {
+        node.estimated_rows().is_none()
+            && node.estimated_bytes() == Some(4_096)
+            && node.estimated_work().is_none()
+    }));
+    let unknown_count = exact
+        .nodes()
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.details().get("mutation"),
+                Some(PlanDetail::Text(kind)) if kind == "update" || kind == "rekey"
+            ) && node.estimated_rows().is_none()
+                && node.estimated_bytes().is_none()
+        })
+        .count();
+    assert_eq!(unknown_count, 2);
+
+    let overflow = explain_with_last_write(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the final rounded byte bound pushes the accumulated total past MAX"
+    );
+    let surface = serde_json::to_value(&overflow).expect("multiple-tail mixed-bound surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_mixed_bound_overflow_state_survives_unknown_suffix() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_final_rows = |final_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:mixed-bound-unknown-suffix"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 3),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(4_096),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Rekey,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(final_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:mixed-bound-suffix")),
+        })
+        .expect("mixed partial bounds followed by unknown mutations")
+    };
+
+    // Treat unknown suffixes as adding no provable work while retaining the
+    // lower-bound state already established by known nonnegative components.
+    let exact = explain_with_final_rows(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let exact_surface = serde_json::to_value(&exact).expect("exact mixed-bound suffix");
+    assert!(exact_surface["plan"].get("estimated_cost").is_none());
+
+    let overflow = explain_with_final_rows(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the known partial bounds prove overflow before the final unknown update"
+    );
+    let partial_insert = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned()))
+                && node.estimated_rows() == Some(2)
+        })
+        .expect("row-bounded final insert before the unknown suffix");
+    assert_eq!(partial_insert.estimated_bytes(), None);
+    assert_eq!(partial_insert.estimated_work(), None);
+    let partial_delete = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("byte-bounded delete between unknown tails");
+    assert_eq!(partial_delete.estimated_rows(), None);
+    assert_eq!(partial_delete.estimated_bytes(), Some(4_096));
+    assert_eq!(partial_delete.estimated_work(), None);
+    assert_eq!(
+        overflow
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+                    && node.estimated_rows().is_none()
+                    && node.estimated_bytes().is_none()
+            })
+            .count(),
+        2,
+        "both the middle unknown update and the suffix update remain unknown"
+    );
+    let surface = serde_json::to_value(&overflow).expect("overflow through unknown suffix");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_mixed_partial_bounds_accumulate_through_unknown_join_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let mutation = |kind, rows, bytes| QueryMutationDescription {
+        table: obj("table:large"),
+        kind,
+        estimated_affected_rows: rows,
+        estimated_write_bytes: bytes,
+        estimated_table_rows_before: Some(1),
+    };
+    let explain_with_final_rows = |final_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:mixed-bounds-unknown-joins"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 4),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:unknown-first-join"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-second-join"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                mutation(QueryMutationKind::Insert, Some(1), None),
+                mutation(QueryMutationKind::Update, None, None),
+                mutation(QueryMutationKind::Delete, None, Some(4_096)),
+                mutation(QueryMutationKind::Insert, Some(final_rows), None),
+            ],
+            materialize_into: Some(obj("materialization:mixed-unknown-joins")),
+        })
+        .expect("mixed partial writes over unknown join tails")
+    };
+
+    // Join estimates are unknown, but their nullable work must not discard
+    // row- and byte-derived mutation lower bounds accumulated at the boundary.
+    let exact = explain_with_final_rows(2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let exact_surface = serde_json::to_value(&exact).expect("exact mixed bounds through joins");
+    assert!(exact_surface["plan"].get("estimated_cost").is_none());
+    assert!(exact.nodes().iter().filter(|node| node.kind() == PlanNodeKind::Join).all(|node| {
+        node.estimated_work().is_none()
+    }));
+
+    let overflow = explain_with_final_rows(3);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the mixed lower bounds exceed MAX even though both join tails are unknown"
+    );
+    let partial_inserts = overflow
+        .nodes()
+        .iter()
+        .filter(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .collect::<Vec<_>>();
+    assert_eq!(partial_inserts.len(), 2);
+    assert!(partial_inserts.iter().all(|node| {
+        node.estimated_bytes().is_none() && node.estimated_work().is_none()
+    }));
+    let partial_delete = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("byte-bounded partial write");
+    assert_eq!(partial_delete.estimated_rows(), None);
+    assert_eq!(partial_delete.estimated_bytes(), Some(4_096));
+    assert_eq!(partial_delete.estimated_work(), None);
+    assert_eq!(
+        overflow.nodes().iter().filter(|node| node.kind() == PlanNodeKind::Join).count(),
+        2
+    );
+    let surface = serde_json::to_value(&overflow).expect("mixed-bound overflow through joins");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_scan_bounds_accumulate_across_unknown_join_chain() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_last_rows = |last_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-scan-join-chain"),
+            source: obj("table:row-bounded"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 3),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:byte-bounded"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(4_096),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:tail-row-bounded"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(last_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-scan-join-chain")),
+        })
+        .expect("partial scan statistics through unknown join operators")
+    };
+
+    // Each scan has one known nonnegative work component. The joins remain
+    // unknown, but the independent scan lower bounds still define the total boundary.
+    let exact = explain_with_last_rows(2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let scans = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Scan)
+        .collect::<Vec<_>>();
+    assert_eq!(scans.len(), 3);
+    for scan in &scans {
+        assert_eq!(scan.estimated_work(), None);
+    }
+    for (table, rows, bytes) in [
+        ("table:row-bounded", Some(u64::MAX - 3), None),
+        ("table:byte-bounded", None, Some(4_096)),
+        ("table:tail-row-bounded", Some(2), None),
+    ] {
+        let scan = scans
+            .iter()
+            .find(|node| node.object() == Some(&obj(table)))
+            .expect("partial-statistics scan");
+        assert_eq!(scan.estimated_rows(), rows);
+        assert_eq!(scan.estimated_bytes(), bytes);
+    }
+    let joins = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect::<Vec<_>>();
+    assert_eq!(joins.len(), 2);
+    assert!(joins.iter().all(|node| node.estimated_work().is_none()));
+
+    let overflow = explain_with_last_rows(3);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the row and byte scan bounds exceed MAX across the unknown join chain"
+    );
+    let surface = serde_json::to_value(&overflow).expect("partial scans overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_scan_byte_rounding_boundary_through_unknown_tail() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_bytes = |partial_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-byte-rounding-boundary"),
+            source: obj("table:row-bound"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 1),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:partial-byte-scan"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(partial_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-final-scan"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-byte-rounding")),
+        })
+        .expect("partial byte scan around the 4-KiB boundary")
+    };
+
+    // Partial scan bytes round up to work blocks: 1 through 4096 bytes adds
+    // one, while 4097 bytes adds two. An unknown final scan does not alter it.
+    for bytes in [4_095, 4_096] {
+        let exact = explain_with_bytes(bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let partial_scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:partial-byte-scan")))
+            .expect("partial byte scan at exact cost boundary");
+        assert_eq!(partial_scan.estimated_rows(), None);
+        assert_eq!(partial_scan.estimated_bytes(), Some(bytes));
+        assert_eq!(partial_scan.estimated_work(), None);
+    }
+
+    let overflow = explain_with_bytes(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the second rounded block crosses the exact boundary"
+    );
+    let nodes = overflow.nodes();
+    let partial_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:partial-byte-scan")))
+        .expect("partial byte scan that proves overflow");
+    assert_eq!(nodes[partial_scan_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[partial_scan_position].estimated_work(), None);
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:unknown-final-scan")))
+        .expect("unknown final scan");
+    assert!(unknown_scan_position > partial_scan_position);
+    assert_eq!(nodes[unknown_scan_position].estimated_work(), None);
+    let surface = serde_json::to_value(&overflow).expect("rounded byte overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_byte_scan_boundary_survives_unknown_final_scan() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_tail_bytes = |tail_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-byte-final-scan"),
+            source: obj("table:exact-max-scan"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:partial-byte-scan"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-final-scan"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-byte-final-scan")),
+        })
+        .expect("partial byte scan before an unknown final scan")
+    };
+
+    // A known zero-byte scan contributes zero, while any positive byte count
+    // rounds to one 4-KiB work unit; unknown final scans preserve either state.
+    let exact = explain_with_tail_bytes(0);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let overflow = explain_with_tail_bytes(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one byte rounds to a block beyond the exact MAX scan"
+    );
+
+    let nodes = overflow.nodes();
+    let full_scan = nodes
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:exact-max-scan")))
+        .expect("exact maximum source scan");
+    assert_eq!(full_scan.estimated_work(), Some(u64::MAX));
+    let partial_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:partial-byte-scan")))
+        .expect("partial byte scan");
+    assert_eq!(nodes[partial_scan_position].estimated_rows(), None);
+    assert_eq!(nodes[partial_scan_position].estimated_bytes(), Some(1));
+    assert_eq!(nodes[partial_scan_position].estimated_work(), None);
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:unknown-final-scan")))
+        .expect("unknown final scan");
+    assert!(unknown_scan_position > partial_scan_position);
+    assert_eq!(nodes[unknown_scan_position].estimated_work(), None);
+
+    let surface = serde_json::to_value(&overflow).expect("unknown final scan overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_scan_overflow_survives_unknown_scan_suffixes() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_last_rows = |last_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-scan-unknown-suffix"),
+            source: obj("table:row-bounded"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 2),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:byte-bounded"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(4_096),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:tail-row-bounded"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(last_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-tail-first"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-tail-second"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-scan-suffix")),
+        })
+        .expect("partial scan boundary followed by unknown scan suffixes")
+    };
+
+    // Bounds from the leading scans reach the boundary before the unknown
+    // right-side scans; those suffixes cannot clear or create overflow state.
+    let exact = explain_with_last_rows(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let overflow = explain_with_last_rows(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "overflow established by partial scan bounds survives unknown scan suffixes"
+    );
+
+    let nodes = overflow.nodes();
+    let bounded_tail_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:tail-row-bounded")))
+        .expect("last scan with a known row bound");
+    for table in ["table:unknown-tail-first", "table:unknown-tail-second"] {
+        let unknown_position = nodes
+            .iter()
+            .position(|node| node.object() == Some(&obj(table)))
+            .expect("unknown suffix scan");
+        assert!(unknown_position > bounded_tail_position);
+        assert_eq!(nodes[unknown_position].estimated_work(), None);
+    }
+    assert!(nodes.iter().filter(|node| node.kind() == PlanNodeKind::Join).all(|node| {
+        node.estimated_work().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow).expect("partial scan overflow suffix surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_scan_bounds_survive_unknown_scan_chain() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_last_rows = |last_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-scan-unknown-chain"),
+            source: obj("table:unknown-source"),
+            source_statistics: None,
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:row-bound"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(u64::MAX - 3),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-middle"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:byte-bound"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(4_096),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:tail-row-bound"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(last_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-scan-unknown-chain")),
+        })
+        .expect("partial scan bounds with wholly unknown scans in the join chain")
+    };
+
+    // An entirely unknown scan contributes no work and cannot erase the
+    // independent row- and byte-derived lower bounds from later scan inputs.
+    let exact = explain_with_last_rows(2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let scans = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Scan)
+        .collect::<Vec<_>>();
+    assert_eq!(scans.len(), 5);
+    assert!(scans.iter().all(|scan| scan.estimated_work().is_none()));
+    for (table, rows, bytes) in [
+        ("table:unknown-source", None, None),
+        ("table:row-bound", Some(u64::MAX - 3), None),
+        ("table:unknown-middle", None, None),
+        ("table:byte-bound", None, Some(4_096)),
+        ("table:tail-row-bound", Some(2), None),
+    ] {
+        let scan = scans
+            .iter()
+            .find(|node| node.object() == Some(&obj(table)))
+            .expect("scan in unknown join chain");
+        assert_eq!(scan.estimated_rows(), rows);
+        assert_eq!(scan.estimated_bytes(), bytes);
+    }
+    let joins = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect::<Vec<_>>();
+    assert_eq!(joins.len(), 4);
+    assert!(joins.iter().all(|join| join.estimated_work().is_none()));
+
+    let overflow = explain_with_last_rows(3);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "later partial scans still push the accumulated lower bound past MAX"
+    );
+    let surface = serde_json::to_value(&overflow).expect("unknown-scan overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_source_bounds_accumulate_through_unknown_join_and_mutation_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain = |source_rows, source_bytes, mutation_rows, mutation_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-source-bound-tails"),
+            source: obj("table:large"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: source_rows,
+                estimated_bytes: source_bytes,
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:unknown-right"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: mutation_rows,
+                    estimated_write_bytes: mutation_bytes,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:large"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:partial-source-bound")),
+        })
+        .expect("partial source bound through unknown plan tails")
+    };
+
+    // A one-field scan statistic is not an exact node cost, but rows and
+    // 4-KiB blocks are independent nonnegative lower bounds for aggregation.
+    let exact_rows = explain(Some(u64::MAX - 1), None, Some(1), None);
+    assert_eq!(exact_rows.plan().estimated_cost(), None);
+    assert_eq!(exact_rows.root().details().get("estimated_cost_overflow"), None);
+    let partial_row_scan = exact_rows
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large")))
+        .expect("scan with a known row lower bound");
+    assert_eq!(partial_row_scan.estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(partial_row_scan.estimated_bytes(), None);
+    assert_eq!(partial_row_scan.estimated_work(), None);
+    let partial_row_update = exact_rows
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("mutation with a known row lower bound");
+    assert_eq!(partial_row_update.estimated_work(), None);
+    let exact_overflow = explain(Some(u64::MAX - 1), None, Some(2), None);
+    assert_eq!(
+        exact_overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the partial scan and mutation row bounds together exceed MAX"
+    );
+
+    let exact_bytes = explain(None, Some(4_096), Some(u64::MAX - 1), Some(0));
+    assert_eq!(exact_bytes.plan().estimated_cost(), None);
+    assert_eq!(exact_bytes.root().details().get("estimated_cost_overflow"), None);
+    let partial_byte_scan = exact_bytes
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large")))
+        .expect("scan with a known byte lower bound");
+    assert_eq!(partial_byte_scan.estimated_rows(), None);
+    assert_eq!(partial_byte_scan.estimated_bytes(), Some(4_096));
+    assert_eq!(partial_byte_scan.estimated_work(), None);
+    let exact_update = exact_bytes
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("exact mutation contribution after the partial scan");
+    assert_eq!(exact_update.estimated_work(), Some(u64::MAX - 1));
+    let bytes_overflow = explain(None, Some(4_096), Some(u64::MAX), Some(0));
+    assert_eq!(
+        bytes_overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one known scan block overflows the MAX mutation contribution"
+    );
+    let surface = serde_json::to_value(&bytes_overflow).expect("partial source byte overflow");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_partial_bounds_survive_unknown_source_and_join_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_last_bytes = |write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-bound-unknown-join-tails"),
+            source: obj("table:missing-stats"),
+            source_statistics: None,
+            joins: vec![QueryJoinDescription {
+                source: obj("table:large"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX - 2),
+                    estimated_bytes: Some(0),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:missing-stats"),
+                    kind: QueryMutationKind::Insert,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:missing-stats"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:missing-stats"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:partial-bound-unknown-join")),
+        })
+        .expect("partial mutation bounds across unknown input and join estimates")
+    };
+
+    // An unknown left input makes the join and total unknown. The known right
+    // scan and partial mutation components still establish a useful lower bound.
+    let exact = explain_with_last_bytes(4_096);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let known_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large")))
+        .expect("known right scan under unknown join");
+    assert_eq!(known_scan.estimated_work(), Some(u64::MAX - 2));
+    let unknown_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:missing-stats"))
+        })
+        .expect("unknown left scan");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let join = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join with unknown input cardinality");
+    assert_eq!(join.estimated_work(), None);
+    let partial_insert = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("insert".to_owned())))
+        .expect("row-bounded partial insert");
+    assert_eq!(partial_insert.estimated_rows(), Some(1));
+    assert_eq!(partial_insert.estimated_bytes(), None);
+    assert_eq!(partial_insert.estimated_work(), None);
+    let partial_delete = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("byte-bounded partial delete");
+    assert_eq!(partial_delete.estimated_rows(), None);
+    assert_eq!(partial_delete.estimated_bytes(), Some(4_096));
+    assert_eq!(partial_delete.estimated_work(), None);
+
+    let overflow = explain_with_last_bytes(8_192);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the rounded byte lower bound crosses MAX despite unknown source and join work"
+    );
+    let surface = serde_json::to_value(&overflow).expect("partial-bound overflow through join");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_cost_overflow_survives_unknown_intermediate_estimates() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    // A missing left-side statistic makes the join and materialization
+    // estimates unknown. The known mutation and later right scan still prove
+    // an overflowing lower bound; unknown estimates cannot reduce that cost.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:overflow-through-unknown-join"),
+        source: obj("table:missing-stats"),
+        source_statistics: None,
+        joins: vec![QueryJoinDescription {
+            source: obj("table:large"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:missing-stats"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(1),
+            estimated_write_bytes: Some(0),
+            estimated_table_rows_before: Some(1),
+        }],
+        materialize_into: Some(obj("materialization:unknown-intermediate")),
+    })
+    .expect("plan with an unknown intermediate and overflowing known tail");
+
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join with missing input cardinality");
+    assert_eq!(join.estimated_work(), None);
+    assert_eq!(join.details().get("estimated_work_overflow"), None);
+    let unknown_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:missing-stats"))
+        })
+        .expect("unknown left scan");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let known_tail = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large"))
+        })
+        .expect("known right scan after the unknown join");
+    assert_eq!(known_tail.estimated_work(), Some(u64::MAX));
+
+    let surface = serde_json::to_value(&explained).expect("unknown-intermediate plan surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_unknown_intermediate_keeps_exact_maximum_known_subtotal() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    // Unknown join/input work makes total cost unavailable, but the update,
+    // its materialization, and the later known scan sum to u64::MAX exactly.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:unknown-at-exact-cost-boundary"),
+        source: obj("table:missing-stats"),
+        source_statistics: None,
+        joins: vec![QueryJoinDescription {
+            source: obj("table:large"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 2),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:missing-stats"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(1),
+            estimated_write_bytes: Some(0),
+            estimated_table_rows_before: Some(1),
+        }],
+        materialize_into: Some(obj("materialization:unknown-boundary")),
+    })
+    .expect("unknown estimates around an exact maximum known subtotal");
+
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(explained.root().estimated_work(), Some(1));
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        None,
+        "exactly u64::MAX of known nonnegative work is representable"
+    );
+    let mutation = explained
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("known mutation work before the unknown join");
+    assert_eq!(mutation.estimated_work(), Some(1));
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("unknown join work");
+    assert_eq!(join.estimated_work(), None);
+    let unknown_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:missing-stats"))
+        })
+        .expect("unknown left scan");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let known_tail = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:large"))
+        })
+        .expect("known right scan after unknown estimates");
+    assert_eq!(known_tail.estimated_work(), Some(u64::MAX - 2));
+
+    let surface = serde_json::to_value(&explained).expect("unknown-boundary plan surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"][0]["details"]
+        .get("estimated_cost_overflow")
+        .is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_cost_boundary_retains_overflow_before_unknown_join_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_after_updates = |last_update_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:boundary-before-unknown-join-tails"),
+            source: obj("table:missing-stats"),
+            source_statistics: None,
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:unknown-first-join"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-second-join"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:missing-stats"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(u64::MAX - 2),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:missing-stats"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(last_update_rows),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:boundary-before-unknown-joins")),
+        })
+        .expect("known cost boundary followed by unknown join tails")
+    };
+
+    let exact = explain_after_updates(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().estimated_work(), Some(1));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "the known prefix is exactly u64::MAX before the unknown scan"
+    );
+    let exact_known_work = exact
+        .nodes()
+        .iter()
+        .filter_map(|node| node.estimated_work())
+        .collect::<Vec<_>>();
+    assert_eq!(exact_known_work, [1, 1, u64::MAX - 2]);
+    let unknown_tail = &exact.nodes()[3..];
+    assert_eq!(
+        unknown_tail
+            .iter()
+            .filter(|node| node.kind() == PlanNodeKind::Join)
+            .count(),
+        2
+    );
+    assert_eq!(
+        unknown_tail
+            .iter()
+            .filter(|node| node.kind() == PlanNodeKind::Scan)
+            .count(),
+        3
+    );
+    assert!(unknown_tail.iter().all(|node| node.estimated_work().is_none()));
+
+    let overflow = explain_after_updates(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(2));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "overflow proven before the unknown scan remains visible on the root"
+    );
+    assert!(overflow.nodes()[3..]
+        .iter()
+        .all(|node| node.estimated_work().is_none()));
+    let surface = serde_json::to_value(&overflow).expect("boundary overflow with unknown tails");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_unknown_join_chain_retains_known_scan_cost_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_right_tail = |last_scan_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:unknown-join-known-scan-boundary"),
+            source: obj("table:missing-stats"),
+            source_statistics: None,
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:known-first-right"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(u64::MAX - 3),
+                        estimated_bytes: Some(0),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:known-second-right"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(last_scan_rows),
+                        estimated_bytes: Some(0),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:missing-stats"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(0),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:unknown-join-boundary")),
+        })
+        .expect("known scan tails behind joins with unknown left cardinality")
+    };
+
+    let exact = explain_with_right_tail(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().estimated_work(), Some(1));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "mutation, materialization, and both right scans sum to exactly u64::MAX"
+    );
+    let joins = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect::<Vec<_>>();
+    assert_eq!(joins.len(), 2);
+    assert!(joins.iter().all(|node| node.estimated_work().is_none()));
+    let unknown_left = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:missing-stats"))
+        })
+        .expect("unknown left scan");
+    assert_eq!(unknown_left.estimated_work(), None);
+    for (table, rows) in [
+        ("table:known-first-right", u64::MAX - 3),
+        ("table:known-second-right", 1),
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("known right scan under unknown join");
+        assert_eq!(scan.estimated_work(), Some(rows));
+    }
+
+    let overflow = explain_with_right_tail(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&overflow).expect("unknown-join boundary surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_unknown_final_join_tails_retain_known_left_scan_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    // Missing right-side cardinalities keep join work unknown: a known zero
+    // byte estimate cannot stand in for missing row counts. Independently
+    // known left-scan work still counts at the total boundary through tails.
+    let explain_with_mutation_tail = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:unknown-final-join-tail-boundary"),
+            source: obj("table:known-left"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 2),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:unknown-right-first"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(0),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-right-second"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(0),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:known-left"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(0),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:unknown-final-joins")),
+        })
+        .expect("known left scan followed by unknown final join tails")
+    };
+
+    let exact = explain_with_mutation_tail(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().estimated_work(), Some(1));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "known left scan plus mutation and materialization sum to u64::MAX"
+    );
+    let left_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:known-left"))
+        })
+        .expect("known left scan under the joins");
+    assert_eq!(left_scan.estimated_work(), Some(u64::MAX - 2));
+    let join_nodes = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect::<Vec<_>>();
+    assert_eq!(join_nodes.len(), 2);
+    assert!(join_nodes.iter().all(|node| node.estimated_work().is_none()));
+    for table in ["table:unknown-right-first", "table:unknown-right-second"] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("unknown right scan");
+        assert_eq!(scan.estimated_work(), None);
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(0));
+    }
+
+    let overflow = explain_with_mutation_tail(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&overflow).expect("unknown final join boundary surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_local_work_overflow_is_explicit_on_cost_and_write_tails() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:local-work-overflow"),
+        source: obj("table:large"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(u64::MAX),
+            estimated_bytes: Some(4_096),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:small"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: vec![
+            orna_sys_v1::ExpressionRef::descriptive("expr:first"),
+            orna_sys_v1::ExpressionRef::descriptive("expr:second"),
+        ],
+        distinct: true,
+        ordering: vec![PlanOrdering {
+            expression: orna_sys_v1::ExpressionRef::descriptive("expr:ordered"),
+            direction: PlanSortDirection::Ascending,
+            null_order: PlanNullOrder::Last,
+        }],
+        limit: None,
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:large"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(u64::MAX),
+            estimated_write_bytes: Some(4_096),
+            estimated_table_rows_before: Some(u64::MAX),
+        }],
+        materialize_into: Some(obj("materialization:large")),
+    })
+    .expect("plan with local work overflow");
+
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    for kind in [
+        PlanNodeKind::Materialize,
+        PlanNodeKind::Invoke,
+        PlanNodeKind::Sort,
+        PlanNodeKind::Aggregate,
+        PlanNodeKind::Project,
+        PlanNodeKind::Join,
+        PlanNodeKind::Scan,
+    ] {
+        let node = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == kind)
+            .expect("plan tail operator");
+        assert_eq!(node.estimated_work(), None);
+        assert_eq!(
+            node.details().get("estimated_work_overflow"),
+            Some(&PlanDetail::Boolean(true))
+        );
+    }
+    let small_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:small")))
+        .expect("nonoverflowing scan estimate");
+    assert_eq!(small_scan.estimated_work(), Some(1));
+    assert_eq!(small_scan.details().get("estimated_work_overflow"), None);
+    let surface = serde_json::to_value(&explained).expect("structured local overflow plan");
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work_overflow"], true);
+    let mutation = surface["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["details"]["mutation"] == "update")
+        .expect("mutation tail");
+    assert_eq!(mutation["details"]["estimated_work_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn mutation_estimate_edges_keep_unknown_overflow_and_underflow_unfabricated() {
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:mutation-estimates"),
+        source: obj("table:partial_stats"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(512),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: vec![
+            QueryMutationDescription {
+                table: obj("table:overflow"),
+                kind: QueryMutationKind::Insert,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(16),
+                estimated_table_rows_before: Some(u64::MAX),
+            },
+            QueryMutationDescription {
+                table: obj("table:underflow"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(2),
+                estimated_write_bytes: Some(16),
+                estimated_table_rows_before: Some(1),
+            },
+            QueryMutationDescription {
+                table: obj("table:stable"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(3),
+                estimated_write_bytes: Some(96),
+                estimated_table_rows_before: Some(20),
+            },
+            QueryMutationDescription {
+                table: obj("table:stable"),
+                kind: QueryMutationKind::Rekey,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(32),
+                estimated_table_rows_before: None,
+            },
+            QueryMutationDescription {
+                table: obj("table:unknown"),
+                kind: QueryMutationKind::Insert,
+                estimated_affected_rows: None,
+                estimated_write_bytes: None,
+                estimated_table_rows_before: None,
+            },
+        ],
+        materialize_into: None,
+    })
+    .expect("bounded mutation plan");
+
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let nodes = serde_json::to_value(explained.nodes()).expect("portable plan details");
+    let nodes = nodes.as_array().unwrap();
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|node| node["object"] == "table:partial_stats")
+            .unwrap()["estimated_bytes"],
+        512
+    );
+    for table in ["table:overflow", "table:underflow", "table:unknown"] {
+        let node = nodes
+            .iter()
+            .find(|node| node["object"] == table && node["kind"] == "invoke")
+            .expect("mutation node");
+        assert!(node["details"].get("table_rows_after").is_none());
+        assert!(node.get("actual_rows").is_none());
+    }
+    for kind in ["update", "rekey"] {
+        let node = nodes
+            .iter()
+            .find(|node| node["details"]["mutation"] == kind)
+            .expect("known table cardinality");
+        assert_eq!(node["details"]["table_rows_after"], 20);
+    }
+}
+
+#[test]
+fn join_estimates_handle_empty_cross_partial_and_overflow_cardinalities() {
+    let explain = |left: QuerySourceStatistics,
+                   right: QuerySourceStatistics,
+                   predicate: Option<orna_sys_v1::ExpressionRef>| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:join-estimates"),
+            source: obj("table:left"),
+            source_statistics: Some(left),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:right"),
+                statistics: Some(right),
+                predicate,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("query with a single join")
+    };
+    let stats = |rows, bytes| QuerySourceStatistics {
+        estimated_rows: rows,
+        estimated_bytes: bytes,
+        mutable_branch: None,
+    };
+
+    let empty = explain(
+        stats(Some(0), Some(0)),
+        stats(Some(7), Some(140)),
+        Some(orna_sys_v1::ExpressionRef::descriptive("expr:join")),
+    );
+    let join = empty
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .unwrap();
+    assert_eq!(join.estimated_rows(), Some(0));
+    assert_eq!(join.estimated_bytes(), Some(0));
+    assert!(empty.plan().estimated_cost().is_some());
+
+    let cross = explain(stats(Some(2), Some(32)), stats(Some(3), Some(15)), None);
+    let join = cross
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .unwrap();
+    assert_eq!(join.estimated_rows(), Some(6));
+    assert_eq!(join.estimated_bytes(), Some(126));
+    let cross_details = serde_json::to_value(join).unwrap();
+    assert_eq!(cross_details["details"]["join_type"], "cross");
+
+    let partial = explain(stats(Some(3), Some(30)), stats(None, Some(40)), None);
+    let join = partial
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .unwrap();
+    assert_eq!(join.estimated_rows(), None);
+    assert_eq!(join.estimated_bytes(), None);
+    assert_eq!(partial.plan().estimated_cost(), None);
+
+    let overflow = explain(
+        stats(Some(u64::MAX), Some(0)),
+        stats(Some(u64::MAX), Some(0)),
+        None,
+    );
+    let join = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .unwrap();
+    assert_eq!(join.estimated_rows(), None);
+    assert_eq!(join.estimated_bytes(), None);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+}
+
+#[test]
+fn function_explain_keeps_direct_effect_edges_visible() {
+    let function = obj("function:main");
+    let table = obj("table:contacts");
+    let target = obj("function:normalize");
+    let edges = vec![
+        DependencyInput::new(
+            function.clone(),
+            table.clone(),
+            DependencyKind::TableRead,
+            None,
+            None,
+            DependencyConfidence::Exact,
+            false,
+        ),
+        DependencyInput::new(
+            function.clone(),
+            target.clone(),
+            DependencyKind::Call,
+            None,
+            None,
+            DependencyConfidence::Exact,
+            false,
+        ),
+        DependencyInput::new(
+            function.clone(),
+            obj("type:contact"),
+            DependencyKind::TypeReference,
+            None,
+            None,
+            DependencyConfidence::Exact,
+            false,
+        ),
+    ];
+    let explained = explain_function(&FunctionPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:one"),
+        function: FunctionRef::descriptive("function:main"),
+        dependencies: edges,
+    })
+    .expect("function plan");
+    assert_eq!(explained.root().kind(), PlanNodeKind::Invoke);
+    assert_eq!(explained.root().object(), Some(&function));
+    assert_eq!(explained.root().inputs().len(), 2);
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan && node.object() == Some(&table)
+    }));
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Invoke && node.object() == Some(&target)
+    }));
+}
+
+#[test]
+fn explain_rejects_conflicting_function_edges_and_over_limit_query_shapes() {
+    let function = obj("function:main");
+    let target = obj("function:normalize");
+    let exact = DependencyInput::new(
+        function.clone(),
+        target.clone(),
+        DependencyKind::Call,
+        None,
+        None,
+        DependencyConfidence::Exact,
+        false,
+    );
+    let conflicting = DependencyInput::new(
+        function.clone(),
+        target.clone(),
+        DependencyKind::Call,
+        None,
+        None,
+        DependencyConfidence::Exact,
+        true,
+    );
+    assert_eq!(
+        explain_function(&FunctionPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:one"),
+            function: FunctionRef::descriptive("function:main"),
+            dependencies: vec![exact, conflicting],
+        }),
+        Err(ExplainError::InvalidDependency)
+    );
+
+    let over_limit = QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:one"),
+        source: obj("table:contacts"),
+        source_statistics: None,
+        joins: Vec::new(),
+        predicate: Some(orna_sys_v1::ExpressionRef::descriptive("expr:active")),
+        projections: (0..MAX_PLAN_EXPRESSIONS)
+            .map(|position| {
+                orna_sys_v1::ExpressionRef::descriptive(format!("expr:{position}"))
+            })
+            .collect(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    };
+    assert_eq!(
+        explain_query(&over_limit),
+        Err(ExplainError::TooManyExpressions)
+    );
+
+    let invalid_expression = QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:one"),
+        source: obj("table:contacts"),
+        source_statistics: None,
+        joins: Vec::new(),
+        predicate: Some(orna_sys_v1::ExpressionRef::descriptive("\n")),
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    };
+    assert_eq!(
+        explain_query(&invalid_expression),
+        Err(ExplainError::InvalidExpression)
+    );
+}
+
+#[test]
+fn explain_rounds_partial_scan_byte_tails_per_scan_before_unknown_suffix() {
+    let parsed = orna_syntax_v1::parse_module(MUTABLE_BRANCH_QUERY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+
+    let explain_with_last_scan_bytes = |last_scan_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-byte-rounding-tail"),
+            source: obj("table:row-boundary"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 1),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:partial-byte-first"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(4_095),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:partial-byte-tail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(last_scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:unknown-final-scan"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-byte-rounding-tail")),
+        })
+        .expect("partial byte scans followed by unknown scan tail")
+    };
+
+    // Statistics do not promise bytes can be combined across scans before
+    // costing. Round each known scan independently, preserving its lower
+    // bound through unknown joins and the final unknown scan.
+    let exact = explain_with_last_scan_bytes(0);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    // Although these scan byte counts sum to exactly 4 KiB, separate scan
+    // blocks cost two units. The second unit exceeds MAX after the row bound.
+    let overflow = explain_with_last_scan_bytes(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let nodes = overflow.nodes();
+    let row_scan = nodes
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:row-boundary")))
+        .expect("known row-bound source scan");
+    assert_eq!(row_scan.estimated_work(), None);
+    let first_byte_scan = nodes
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:partial-byte-first")))
+        .expect("first partial byte scan");
+    assert_eq!(first_byte_scan.estimated_bytes(), Some(4_095));
+    assert_eq!(first_byte_scan.estimated_work(), None);
+    let last_byte_scan = nodes
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:partial-byte-tail")))
+        .expect("last partial byte scan");
+    assert_eq!(last_byte_scan.estimated_bytes(), Some(1));
+    assert_eq!(last_byte_scan.estimated_work(), None);
+    let unknown_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:unknown-final-scan")))
+        .expect("unknown final scan");
+    let last_byte_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:partial-byte-tail")))
+        .expect("last partial byte scan");
+    assert!(unknown_position > last_byte_scan_position);
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+
+    let surface = serde_json::to_value(&overflow).expect("partial rounding overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_per_scan_rounding_bounds_through_mutation_and_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    let explain_with_mutation_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:rounding-mutation-tail"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(4_095),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:RoundingTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(1),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:UnknownTail"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:RoundingWrite"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(affected_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:RoundingWrite"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:rounding-mutation-tail")),
+        })
+        .expect("rounded scans and partial mutation followed by unknown tails")
+    };
+
+    // ORNA-PLAN-002/003 require planner introspection and a correct fallback,
+    // but leave byte-cost units unspecified. Preserve the existing 4-KiB
+    // heuristic: round each scan independently, then carry its nonnegative
+    // lower bound into the total even when later estimates are unknown.
+    let exact = explain_with_mutation_rows(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let exact_nodes = exact.nodes();
+    for (table, bytes) in [("table:RoundingFirst", 4_095), ("table:RoundingTail", 1)] {
+        let scan = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj(table)))
+            .expect("fixture scan in plan");
+        assert_eq!(scan.estimated_bytes(), Some(bytes));
+        assert_eq!(scan.estimated_work(), None);
+    }
+    let update = exact_nodes
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("partially estimated update");
+    assert_eq!(update.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(update.estimated_bytes(), None);
+    assert_eq!(update.estimated_work(), None);
+    let unknown_mutation = exact_nodes
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("unknown mutation tail");
+    assert_eq!(unknown_mutation.estimated_work(), None);
+
+    // The two scan tails round to two units although their raw bytes total
+    // exactly one 4-KiB block. Adding MAX-1 mutation rows therefore proves
+    // overflow; unknown scans/mutations and materialization keep cost null.
+    let overflow = explain_with_mutation_rows(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let nodes = overflow.nodes();
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| node.object() == Some(&obj("table:UnknownTail")))
+        .expect("unknown scan tail");
+    let update_position = nodes
+        .iter()
+        .position(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("known partial mutation");
+    assert!(unknown_scan_position > update_position);
+    assert_eq!(nodes[unknown_scan_position].estimated_work(), None);
+    let surface = serde_json::to_value(&overflow).expect("unknown mutation tail surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_rounds_complete_scan_bytes_independently_before_materialization() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:complete-scan-rounding-tail"),
+        source: obj("table:RoundingFirst"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:RoundingTail"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:complete-scan-rounding-tail")),
+    })
+    .expect("complete scan estimates with materialized join output");
+
+    // ORNA-PLAN-002/003 specify planner introspection and a correct fallback,
+    // not the byte-cost unit. Keep the current 4-KiB rule explicit: each
+    // half-block scan rounds on its own, and materialization prices the joined
+    // one-block output separately.
+    for table in ["table:RoundingFirst", "table:RoundingTail"] {
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("fixture scan in complete-cost plan");
+        assert_eq!(scan.estimated_rows(), Some(1));
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), Some(2));
+    }
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join of the two fixture scans");
+    assert_eq!(join.estimated_rows(), Some(1));
+    assert_eq!(join.estimated_bytes(), Some(4_096));
+    assert_eq!(join.estimated_work(), Some(2));
+    let materialize = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Materialize)
+        .expect("materialized join output");
+    assert_eq!(materialize.estimated_rows(), Some(1));
+    assert_eq!(materialize.estimated_bytes(), Some(4_096));
+    assert_eq!(materialize.estimated_work(), Some(2));
+    assert_eq!(explained.plan().estimated_cost(), Some("8"));
+
+    let surface = serde_json::to_value(&explained).expect("complete scan rounding surface");
+    assert_eq!(surface["plan"]["estimated_cost"], "8");
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_per_scan_rounding_at_zero_and_one_byte_join_tails() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    for (tail_bytes, tail_work, joined_bytes, expected_cost) in
+        [(0, 1, 4_095, 7), (1, 2, 4_096, 8)]
+    {
+        let explained = explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:rounding-closure-edge"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(4_095),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:RoundingTail"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(1),
+                    estimated_bytes: Some(tail_bytes),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:rounding-closure-edge")),
+        })
+        .expect("complete scan estimates at the positive-byte boundary");
+
+        // ORNA-PLAN leaves byte-cost units unspecified. Under the existing
+        // 4-KiB rule, a positive byte adds one block to that scan on its own;
+        // 4095+1 bytes across scans therefore charge two blocks. Join output
+        // is priced from its own combined cardinality before materialization.
+        for (table, bytes, work) in [
+            ("table:RoundingFirst", 4_095, 2),
+            ("table:RoundingTail", tail_bytes, tail_work),
+        ] {
+            let scan = explained
+                .nodes()
+                .iter()
+                .find(|node| {
+                    node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table))
+                })
+                .expect("fixture scan in closure proof");
+            assert_eq!(scan.estimated_rows(), Some(1));
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(work));
+        }
+        let join = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Join)
+            .expect("fixture scan join");
+        assert_eq!(join.estimated_rows(), Some(1));
+        assert_eq!(join.estimated_bytes(), Some(joined_bytes));
+        assert_eq!(join.estimated_work(), Some(2));
+        let materialize = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Materialize)
+            .expect("materialization tail");
+        assert_eq!(materialize.estimated_rows(), Some(1));
+        assert_eq!(materialize.estimated_bytes(), Some(joined_bytes));
+        assert_eq!(materialize.estimated_work(), Some(2));
+        let expected_cost = expected_cost.to_string();
+        assert_eq!(explained.plan().estimated_cost(), Some(expected_cost.as_str()));
+
+        let surface = serde_json::to_value(&explained).expect("rounded closure surface");
+        assert_eq!(surface["plan"]["estimated_cost"], expected_cost);
+        assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+            node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+        }));
+    }
+}
+
+#[test]
+fn explain_keeps_per_scan_rounding_representable_at_max_byte_closure() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    let explain = |materialize| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-rounding-closure"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(u64::MAX),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:RoundingTail"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(1),
+                    estimated_bytes: Some(1),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: materialize,
+        })
+        .expect("per-scan max-byte plan")
+    };
+
+    // ORNA-PLAN leaves byte-cost units unspecified. With the existing
+    // 4-KiB-per-scan heuristic, MAX and 1 are rounded independently; their
+    // raw byte sum cannot fit u64, so join output bytes become unknown without
+    // making either scan's own work overflow.
+    let exact = explain(None);
+    let source_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:RoundingFirst")))
+        .expect("MAX-byte source scan");
+    assert_eq!(source_scan.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(source_scan.estimated_work(), Some(4_503_599_627_370_497));
+    let tail_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:RoundingTail")))
+        .expect("one-byte tail scan");
+    assert_eq!(tail_scan.estimated_bytes(), Some(1));
+    assert_eq!(tail_scan.estimated_work(), Some(2));
+    let join = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join whose output width exceeds u64");
+    assert_eq!(join.estimated_rows(), Some(1));
+    assert_eq!(join.estimated_bytes(), None);
+    assert_eq!(join.estimated_work(), Some(2));
+    assert_eq!(exact.plan().estimated_cost(), Some("4503599627370501"));
+
+    // Materialization needs a known output byte count. It makes the total
+    // unknown while preserving the known scan subtotal without a false
+    // overflow marker.
+    let with_materialization = explain(Some(obj("materialization:max-byte-tail")));
+    assert_eq!(with_materialization.plan().estimated_cost(), None);
+    assert_eq!(
+        with_materialization
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    assert_eq!(with_materialization.root().estimated_work(), None);
+    assert!(with_materialization.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+    }));
+    let surface = serde_json::to_value(&with_materialization)
+        .expect("unknown materialization tail surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_independent_half_block_remainders_across_scans() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:rounding-remainder-closure"),
+        source: obj("table:RoundingFirst"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:RoundingTail"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:rounding-remainder-closure")),
+    })
+    .expect("rounded scan remainders close through join materialization");
+
+    // ORNA-PLAN leaves byte-cost units unspecified. With the existing 4-KiB
+    // rule, each half-block scan rounds up independently, while their joined
+    // 4-KiB output is charged as one block.
+    for table in ["table:RoundingFirst", "table:RoundingTail"] {
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("fixture scan in remainder proof");
+        assert_eq!(scan.estimated_rows(), Some(1));
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), Some(2));
+    }
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("joined remainder output");
+    assert_eq!(join.estimated_rows(), Some(1));
+    assert_eq!(join.estimated_bytes(), Some(4_096));
+    assert_eq!(join.estimated_work(), Some(2));
+    let materialize = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Materialize)
+        .expect("materialization closes the rounded scans");
+    assert_eq!(materialize.estimated_bytes(), Some(4_096));
+    assert_eq!(materialize.estimated_work(), Some(2));
+    assert_eq!(explained.plan().estimated_cost(), Some("8"));
+
+    let surface = serde_json::to_value(&explained).expect("rounded remainder surface");
+    assert_eq!(surface["plan"]["estimated_cost"], "8");
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_byte_remainder_at_exact_scan_work_boundary() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX bytes have a 4095-byte remainder and charge 2^52 blocks.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:max-byte-remainder-work-boundary"),
+        source: obj("table:RoundingFirst"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(closing_rows),
+            estimated_bytes: Some(u64::MAX),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:RoundingTail"),
+            statistics: None,
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("max-byte remainder closes exactly at the scan work boundary");
+
+    let source_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:RoundingFirst"))
+        })
+        .expect("max-byte source scan");
+    assert_eq!(source_scan.estimated_rows(), Some(closing_rows));
+    assert_eq!(source_scan.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(source_scan.estimated_work(), Some(u64::MAX));
+
+    let unknown_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:RoundingTail")))
+        .expect("unknown fixture tail scan");
+    assert_eq!(unknown_scan.estimated_rows(), None);
+    assert_eq!(unknown_scan.estimated_bytes(), None);
+    assert_eq!(unknown_scan.estimated_work(), None);
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        None,
+        "the unknown tail preserves an exact MAX subtotal without false overflow"
+    );
+
+    let surface = serde_json::to_value(&explained).expect("max-byte remainder surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_byte_remainder_through_final_write_tail() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX bytes round to 2^52 blocks; these rows close the scan at MAX.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain_with_write_bytes = |write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-remainder-write-tail"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(closing_rows),
+                estimated_bytes: Some(u64::MAX),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:RoundingWrite"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(0),
+                estimated_write_bytes: Some(write_bytes),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: None,
+        })
+        .expect("max-byte scan remainder followed by a final write tail")
+    };
+
+    let exact = explain_with_write_bytes(0);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let source_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:RoundingFirst")))
+        .expect("max-byte source scan");
+    assert_eq!(source_scan.estimated_work(), Some(u64::MAX));
+    let exact_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("zero-byte final write");
+    assert_eq!(exact_write.estimated_bytes(), Some(0));
+    assert_eq!(exact_write.estimated_work(), Some(0));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    let overflow = explain_with_write_bytes(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(1));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first rounded write byte exceeds the exact MAX scan subtotal"
+    );
+    let overflow_write = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("one-byte final write");
+    assert_eq!(overflow_write.estimated_bytes(), Some(1));
+    assert_eq!(overflow_write.estimated_work(), Some(1));
+    let surface = serde_json::to_value(&overflow).expect("rounded final write surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_byte_write_remainder_at_final_cost_tail() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX write bytes round to 2^52 blocks; the scan uses the remaining
+    // work budget, so zero affected rows close exactly at MAX.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let scan_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain_with_write_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-write-cost-tail"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(scan_rows),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:RoundingWrite"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(u64::MAX),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: None,
+        })
+        .expect("max-byte write remainder at the final cost boundary")
+    };
+
+    let exact = explain_with_write_rows(0);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:RoundingFirst")))
+        .expect("fixture source scan");
+    assert_eq!(scan.estimated_rows(), Some(scan_rows));
+    assert_eq!(scan.estimated_bytes(), Some(0));
+    assert_eq!(scan.estimated_work(), Some(scan_rows));
+    let write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("max-byte final write");
+    assert_eq!(write.estimated_rows(), Some(0));
+    assert_eq!(write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(write.estimated_work(), Some(MAX_BYTE_BLOCKS));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    let overflow = explain_with_write_rows(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one affected row exceeds the exact scan plus rounded write subtotal"
+    );
+    let overflow_write = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("max-byte final write with one affected row");
+    assert_eq!(overflow_write.estimated_rows(), Some(1));
+    assert_eq!(overflow_write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(overflow_write.estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(overflow_write.details().get("estimated_work_overflow"), None);
+    let surface = serde_json::to_value(&overflow).expect("max-byte write remainder surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_byte_write_rounding_at_local_work_boundary() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX write bytes round to 2^52 blocks; this row count closes the
+    // local write work at MAX, and one more affected row crosses that edge.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain_with_affected_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-write-local-boundary"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(0),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:RoundingWrite"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(u64::MAX),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: None,
+        })
+        .expect("max-byte write rounding at its local work boundary")
+    };
+
+    let exact = explain_with_affected_rows(closing_rows);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("exact max-byte write");
+    assert_eq!(write.estimated_rows(), Some(closing_rows));
+    assert_eq!(write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(write.estimated_work(), Some(u64::MAX));
+    assert_eq!(write.details().get("estimated_work_overflow"), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    let overflow = explain_with_affected_rows(closing_rows + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one more affected row exceeds representable write work"
+    );
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&overflow).expect("max-byte local overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_aligned_and_remainder_max_byte_write_edges() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX ends with a 4095-byte remainder and rounds to 2^52 blocks;
+    // the aligned value just below it rounds to one fewer block.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let aligned_bytes = u64::MAX - 4_095;
+    let aligned_rows = u64::MAX - (MAX_BYTE_BLOCKS - 1);
+    let remainder_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    assert_eq!(aligned_bytes % 4_096, 0);
+
+    let explain_write = |affected_rows, write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:aligned-max-byte-write-edge"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(0),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:RoundingWrite"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(write_bytes),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: None,
+        })
+        .expect("aligned or remainder write closure edge")
+    };
+
+    let aligned = explain_write(aligned_rows, aligned_bytes);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(aligned.plan().estimated_cost(), Some(max_cost.as_str()));
+    let aligned_write = aligned.root();
+    assert_eq!(aligned_write.kind(), PlanNodeKind::Invoke);
+    assert_eq!(aligned_write.estimated_rows(), Some(aligned_rows));
+    assert_eq!(aligned_write.estimated_bytes(), Some(aligned_bytes));
+    assert_eq!(aligned_write.estimated_work(), Some(u64::MAX));
+
+    let remainder = explain_write(remainder_rows, u64::MAX);
+    assert_eq!(remainder.plan().estimated_cost(), Some(max_cost.as_str()));
+    let remainder_write = remainder.root();
+    assert_eq!(remainder_write.estimated_rows(), Some(remainder_rows));
+    assert_eq!(remainder_write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(remainder_write.estimated_work(), Some(u64::MAX));
+
+    let overflow = explain_write(remainder_rows + 1, u64::MAX);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&overflow).expect("write remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_byte_write_remainder_through_materialization_tail() {
+    let parsed = orna_syntax_v1::parse_module(ROUNDING_TAIL_INTERPLAY);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, MAX write bytes round to 2^52 blocks. The scan leaves room for one
+    // such write and one matching materialization at the exact MAX boundary.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let scan_rows = u64::MAX - (2 * MAX_BYTE_BLOCKS);
+    let explain_with_affected_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-write-materialize-tail"),
+            source: obj("table:RoundingFirst"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(scan_rows),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:RoundingWrite"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(u64::MAX),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:rounding-write-tail")),
+        })
+        .expect("max-byte write remainder closes through materialization")
+    };
+
+    let exact = explain_with_affected_rows(0);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:RoundingFirst"))
+        })
+        .expect("fixture source scan");
+    assert_eq!(scan.estimated_work(), Some(scan_rows));
+    let write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("max-byte write");
+    assert_eq!(write.estimated_rows(), Some(0));
+    assert_eq!(write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(write.estimated_work(), Some(MAX_BYTE_BLOCKS));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_rows(), Some(0));
+    assert_eq!(exact.root().estimated_bytes(), Some(u64::MAX));
+    assert_eq!(exact.root().estimated_work(), Some(MAX_BYTE_BLOCKS));
+
+    let overflow = explain_with_affected_rows(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the materialization tail pushes the rounded write total past MAX"
+    );
+    assert_eq!(overflow.root().details().get("estimated_work_overflow"), None);
+    let overflow_write = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("one-row max-byte write");
+    assert_eq!(overflow_write.estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    let surface = serde_json::to_value(&overflow).expect("materialized write overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_one_row_max_byte_write_at_materialization_cost_tail() {
+    let parsed = orna_syntax_v1::parse_module(WRITE_MATERIALIZATION_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // rule, the MAX-byte write and its materialization each cost 2^52 blocks.
+    // One affected row adds one unit to each, so reserve both row units in the
+    // scan estimate to close the complete plan exactly at u64::MAX.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let scan_rows = u64::MAX - (2 * MAX_BYTE_BLOCKS) - 2;
+    let explain_with_affected_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-byte-write-materialization-edge-tail"),
+            source: obj("table:MaterializedWriteSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(scan_rows),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:MaterializedWriteTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(u64::MAX),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:max-byte-write-edge-tail")),
+        })
+        .expect("max-byte write with a materialization row tail")
+    };
+
+    let exact = explain_with_affected_rows(1);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:MaterializedWriteSource"))
+        })
+        .expect("fixture source scan");
+    assert_eq!(scan.estimated_work(), Some(scan_rows));
+    let write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("one-row max-byte write");
+    assert_eq!(write.estimated_rows(), Some(1));
+    assert_eq!(write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(write.estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_rows(), Some(1));
+    assert_eq!(exact.root().estimated_bytes(), Some(u64::MAX));
+    assert_eq!(exact.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    let overflow = explain_with_affected_rows(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_rows(), Some(2));
+    assert_eq!(overflow.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 2));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the second affected row crosses the aggregate MAX boundary"
+    );
+    assert_eq!(overflow.root().details().get("estimated_work_overflow"), None);
+    let overflow_write = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("two-row max-byte write");
+    assert_eq!(overflow_write.estimated_work(), Some(MAX_BYTE_BLOCKS + 2));
+    let surface = serde_json::to_value(&overflow).expect("materialization cost-tail surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_byte_remainder_with_max_byte_write_materialization_tail() {
+    let parsed = orna_syntax_v1::parse_module(WRITE_MATERIALIZATION_ROUNDING_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Keep the established
+    // 4-KiB heuristic: the 4095-byte scan tail rounds to one work unit, while
+    // the MAX-byte write and its materialization each round to 2^52 blocks.
+    // Reserve that scan unit and both affected-row units to close the total.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const SOURCE_TAIL_BYTES: u64 = 4_095;
+    let scan_rows = u64::MAX - (2 * MAX_BYTE_BLOCKS) - 3;
+    let explain_with_affected_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-byte-max-write-materialization-tail",
+            ),
+            source: obj("table:MaterializedRoundingSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(scan_rows),
+                estimated_bytes: Some(SOURCE_TAIL_BYTES),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:MaterializedRoundingTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(u64::MAX),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:source-byte-max-write-tail")),
+        })
+        .expect("source scan byte tail plus max-byte write materialization")
+    };
+
+    let exact = explain_with_affected_rows(1);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:MaterializedRoundingSource"))
+        })
+        .expect("fixture source scan");
+    assert_eq!(scan.estimated_rows(), Some(scan_rows));
+    assert_eq!(scan.estimated_bytes(), Some(SOURCE_TAIL_BYTES));
+    assert_eq!(scan.estimated_work(), Some(scan_rows + 1));
+    let write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("one-row max-byte write");
+    assert_eq!(write.estimated_rows(), Some(1));
+    assert_eq!(write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(write.estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_rows(), Some(1));
+    assert_eq!(exact.root().estimated_bytes(), Some(u64::MAX));
+    assert_eq!(exact.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    let overflow = explain_with_affected_rows(2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 2));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the extra write row and materialization row exceed the scan-adjusted MAX"
+    );
+    assert_eq!(overflow.root().details().get("estimated_work_overflow"), None);
+    let overflow_write = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("two-row max-byte write");
+    assert_eq!(overflow_write.estimated_work(), Some(MAX_BYTE_BLOCKS + 2));
+    assert_eq!(overflow_write.details().get("estimated_work_overflow"), None);
+    let surface = serde_json::to_value(&overflow)
+        .expect("source-byte materialized write overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_source_byte_remainder_with_materialized_max_byte_write_tail() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZED_WRITE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, MAX source bytes, MAX write bytes, and MAX materialized
+    // bytes each charge 2^52 blocks. Reserve all three charges in the scan's
+    // row estimate so their combined work closes exactly at u64::MAX.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let scan_rows = u64::MAX - (3 * MAX_BYTE_BLOCKS);
+    let explain_with_affected_rows = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:max-source-materialized-max-write-tail"),
+            source: obj("table:MaxByteMaterializedSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(scan_rows),
+                estimated_bytes: Some(u64::MAX),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:MaxByteMaterializedTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(u64::MAX),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:max-source-max-write-tail")),
+        })
+        .expect("max source and write byte remainders through materialization")
+    };
+
+    let exact = explain_with_affected_rows(0);
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+    let scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:MaxByteMaterializedSource"))
+        })
+        .expect("fixture MAX-byte source scan");
+    assert_eq!(scan.estimated_rows(), Some(scan_rows));
+    assert_eq!(scan.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(scan.estimated_work(), Some(scan_rows + MAX_BYTE_BLOCKS));
+    let write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("zero-row MAX-byte write");
+    assert_eq!(write.estimated_rows(), Some(0));
+    assert_eq!(write.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(write.estimated_work(), Some(MAX_BYTE_BLOCKS));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_rows(), Some(0));
+    assert_eq!(exact.root().estimated_bytes(), Some(u64::MAX));
+    assert_eq!(exact.root().estimated_work(), Some(MAX_BYTE_BLOCKS));
+
+    let overflow = explain_with_affected_rows(1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one affected row adds work to both the write and materialization tails"
+    );
+    assert_eq!(overflow.root().details().get("estimated_work_overflow"), None);
+    let overflow_write = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("one-row MAX-byte write");
+    assert_eq!(overflow_write.estimated_work(), Some(MAX_BYTE_BLOCKS + 1));
+    assert_eq!(overflow_write.details().get("estimated_work_overflow"), None);
+    let surface = serde_json::to_value(&overflow).expect("MAX source/write overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_max_source_materialization_at_local_work_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_CLOSURE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing 4-KiB
+    // heuristic, MAX bytes charge 2^52 blocks. Choosing the remaining rows so
+    // both the source scan and materialization each end exactly at MAX proves
+    // that their aggregate overflow is reported on the plan, not on either
+    // locally representable node.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:max-source-materialization-local-boundary"),
+        source: obj("table:MaxSourceMaterialization"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(closing_rows),
+            estimated_bytes: Some(u64::MAX),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:max-source-local-boundary")),
+    })
+    .expect("MAX source bytes close through a materialization tail");
+
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:MaxSourceMaterialization"))
+        })
+        .expect("fixture MAX-byte source scan");
+    assert_eq!(scan.estimated_rows(), Some(closing_rows));
+    assert_eq!(scan.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(scan.estimated_work(), Some(u64::MAX));
+    assert_eq!(scan.details().get("estimated_work_overflow"), None);
+
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_rows(), Some(closing_rows));
+    assert_eq!(explained.root().estimated_bytes(), Some(u64::MAX));
+    assert_eq!(explained.root().estimated_work(), Some(u64::MAX));
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "two exact MAX local contributions overflow only at the aggregate"
+    );
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+
+    let surface = serde_json::to_value(&explained).expect("max-source materialization surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(
+        surface["nodes"][0]["details"]["estimated_work"],
+        serde_json::json!(u64::MAX)
+    );
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_marks_max_source_rounding_overflow_on_materialization_closure_tail() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_OVERFLOW_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, MAX bytes round to 2^52 blocks. The exact row boundary
+    // gives both scan and materialization local work of MAX; one more row
+    // makes each local sum unrepresentable. That local proof also proves the
+    // full nonnegative plan cost overflows, even though exact work is omitted.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain_with_rows = |rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-materialization-rounding-overflow-tail",
+            ),
+            source: obj("table:MaxSourceMaterializationOverflow"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(u64::MAX),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-rounding-overflow")),
+        })
+        .expect("MAX source materialization closure edge")
+    };
+
+    let exact = explain_with_rows(closing_rows);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.nodes()[0].estimated_work(), Some(u64::MAX));
+    assert_eq!(exact.nodes()[1].estimated_work(), Some(u64::MAX));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+
+    let overflow = explain_with_rows(closing_rows + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().kind(), PlanNodeKind::Materialize);
+    for node in overflow.nodes() {
+        assert_eq!(node.estimated_work(), None);
+        assert_eq!(
+            node.details().get("estimated_work_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "the extra row crosses the MAX-plus-rounded-source-bytes boundary"
+        );
+    }
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("max-source materialization local overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work_overflow"], true);
+    assert_eq!(surface["nodes"][1]["details"]["estimated_work_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("estimated_work").is_none()
+            && node.get("actual_rows").is_none()
+            && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_source_materialization_at_aggregate_rounding_edge() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_AGGREGATE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, MAX bytes charge 2^52 blocks on both scan and
+    // materialization. Half of MAX local work per node sums to MAX - 1; one
+    // more row per node crosses only the aggregate boundary.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let local_work_at_boundary = u64::MAX / 2;
+    let closing_rows = local_work_at_boundary - MAX_BYTE_BLOCKS;
+    let explain_with_rows = |rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-materialization-aggregate-rounding-edge",
+            ),
+            source: obj("table:MaxSourceMaterializationAggregate"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(u64::MAX),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-aggregate-boundary")),
+        })
+        .expect("MAX source materialization aggregate boundary")
+    };
+
+    let exact = explain_with_rows(closing_rows);
+    let exact_cost = (u64::MAX - 1).to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(exact_cost.as_str()));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let exact_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("MAX-source scan at aggregate boundary");
+    assert_eq!(exact_scan.estimated_work(), Some(local_work_at_boundary));
+    assert_eq!(exact_scan.details().get("estimated_work_overflow"), None);
+    assert_eq!(
+        exact.root().estimated_work(),
+        Some(local_work_at_boundary)
+    );
+
+    let overflow = explain_with_rows(closing_rows + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    for node in overflow.nodes() {
+        assert_eq!(node.estimated_work(), Some(local_work_at_boundary + 1));
+        assert_eq!(node.details().get("estimated_work_overflow"), None);
+    }
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("max-source materialization aggregate overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node["details"]["estimated_work"] == serde_json::json!(local_work_at_boundary + 1)
+            && node.get("estimated_work_overflow").is_none()
+            && node.get("actual_rows").is_none()
+            && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_max_source_materialization_after_terminal_byte_remainder() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_LAST_BLOCK_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, MAX bytes include a 4095-byte tail and round to 2^52
+    // blocks. Removing that tail leaves an aligned size one block lower, so
+    // one more row restores the same exact aggregate closure.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const LAST_ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    let closing_rows = u64::MAX / 2 - MAX_BYTE_BLOCKS;
+    let explain = |rows, bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-materialization-terminal-byte-remainder",
+            ),
+            source: obj("table:MaxSourceMaterializationLastBlock"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-last-block")),
+        })
+        .expect("max-source terminal byte remainder materialization boundary")
+    };
+
+    let with_terminal_remainder = explain(closing_rows, u64::MAX);
+    let max_cost_minus_one = (u64::MAX - 1).to_string();
+    assert_eq!(
+        with_terminal_remainder.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(
+        with_terminal_remainder.root().estimated_work(),
+        Some(u64::MAX / 2)
+    );
+    assert_eq!(
+        with_terminal_remainder.root().details().get("estimated_cost_overflow"),
+        None
+    );
+
+    let aligned_before_tail = explain(closing_rows, LAST_ALIGNED_SOURCE_BYTES);
+    let max_cost_minus_three = (u64::MAX - 3).to_string();
+    assert_eq!(
+        aligned_before_tail.plan().estimated_cost(),
+        Some(max_cost_minus_three.as_str())
+    );
+    let aligned_scan = aligned_before_tail
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("scan before the terminal source-byte tail");
+    assert_eq!(aligned_scan.estimated_bytes(), Some(LAST_ALIGNED_SOURCE_BYTES));
+    assert_eq!(
+        aligned_scan.estimated_work(),
+        Some(u64::MAX / 2 - 1)
+    );
+    assert_eq!(
+        aligned_before_tail.root().estimated_work(),
+        Some(u64::MAX / 2 - 1)
+    );
+
+    let aligned_closed_by_row = explain(closing_rows + 1, LAST_ALIGNED_SOURCE_BYTES);
+    assert_eq!(
+        aligned_closed_by_row.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(
+        aligned_closed_by_row.root().estimated_work(),
+        Some(u64::MAX / 2)
+    );
+    assert!(aligned_closed_by_row.nodes().iter().all(|node| {
+        node.details().get("estimated_cost_overflow").is_none()
+            && node.details().get("estimated_work_overflow").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_max_source_terminal_byte_closure() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_TERMINAL_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN specifies that plans and materialization are introspectable,
+    // but leaves cost units open. Following the established 4-KiB heuristic,
+    // MAX and MAX-1 bytes both round to 2^52 blocks because each has a
+    // nonzero terminal remainder. The raw byte estimate must still be kept.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    let local_work = u64::MAX / 2;
+    let closing_rows = local_work - MAX_BYTE_BLOCKS;
+    let explain_with_source_bytes = |source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-terminal-byte-materialization-closure",
+            ),
+            source: obj("table:MaxSourceMaterializationTerminalByte"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(closing_rows),
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-terminal-byte")),
+        })
+        .expect("adjacent max-source bytes close through materialization")
+    };
+
+    let expected_cost = (u64::MAX - 1).to_string();
+    for source_bytes in [u64::MAX - 1, u64::MAX] {
+        let explained = explain_with_source_bytes(source_bytes);
+        assert_eq!(
+            explained.plan().estimated_cost(),
+            Some(expected_cost.as_str())
+        );
+        assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+        assert_eq!(explained.root().estimated_rows(), Some(closing_rows));
+        assert_eq!(explained.root().estimated_bytes(), Some(source_bytes));
+        assert_eq!(explained.root().estimated_work(), Some(local_work));
+        assert_eq!(explained.root().details().get("estimated_cost_overflow"), None);
+
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan)
+            .expect("MAX-source terminal-byte scan");
+        assert_eq!(scan.estimated_rows(), Some(closing_rows));
+        assert_eq!(scan.estimated_bytes(), Some(source_bytes));
+        assert_eq!(scan.estimated_work(), Some(local_work));
+        assert!(explained.nodes().iter().all(|node| {
+            node.details().get("estimated_work_overflow").is_none()
+                && node.details().get("estimated_cost_overflow").is_none()
+        }));
+
+        let surface = serde_json::to_value(&explained)
+            .expect("max-source terminal-byte materialization surface");
+        assert_eq!(surface["nodes"][0]["estimated_bytes"], serde_json::json!(source_bytes));
+        assert_eq!(surface["nodes"][0]["details"]["estimated_work"], serde_json::json!(local_work));
+    }
+}
+
+#[test]
+fn explain_closes_max_source_materialization_at_first_remainder_byte() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_MATERIALIZATION_FIRST_REMAINDER_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units open. Under the established 4-KiB
+    // heuristic, the aligned MAX-4095-byte source costs one block less than
+    // the adjacent MAX-4094-byte source with its first remainder byte. Since
+    // scan and materialization each pay that cost, one more row restores the
+    // same exact aggregate closure.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let local_work = u64::MAX / 2;
+    let closing_rows = local_work - MAX_BYTE_BLOCKS;
+    let explain = |rows, source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:max-source-first-remainder-materialization-closure",
+            ),
+            source: obj("table:MaxSourceMaterializationFirstRemainder"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:max-source-first-remainder")),
+        })
+        .expect("max-source first-remainder byte materialization closure")
+    };
+
+    let first_remainder = explain(closing_rows, FIRST_REMAINDER_SOURCE_BYTES);
+    let max_cost_minus_one = (u64::MAX - 1).to_string();
+    assert_eq!(
+        first_remainder.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(first_remainder.root().estimated_work(), Some(local_work));
+    assert_eq!(first_remainder.root().estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+
+    let aligned_before = explain(closing_rows, ALIGNED_SOURCE_BYTES);
+    let max_cost_minus_three = (u64::MAX - 3).to_string();
+    assert_eq!(
+        aligned_before.plan().estimated_cost(),
+        Some(max_cost_minus_three.as_str())
+    );
+    assert_eq!(
+        aligned_before.root().estimated_work(),
+        Some(local_work - 1)
+    );
+    assert_eq!(aligned_before.root().estimated_bytes(), Some(ALIGNED_SOURCE_BYTES));
+
+    let aligned_closed_by_row = explain(closing_rows + 1, ALIGNED_SOURCE_BYTES);
+    assert_eq!(
+        aligned_closed_by_row.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(
+        aligned_closed_by_row.root().estimated_work(),
+        Some(local_work)
+    );
+
+    for explained in [first_remainder, aligned_before, aligned_closed_by_row] {
+        assert_eq!(explained.nodes().len(), 2);
+        assert!(explained.nodes().iter().all(|node| {
+            node.details().get("estimated_work_overflow").is_none()
+                && node.details().get("estimated_cost_overflow").is_none()
+                && node.actual_rows().is_none()
+                && node.actual_bytes().is_none()
+        }));
+    }
+}
+
+#[test]
+fn explain_marks_first_max_source_remainder_aggregate_closure_edge() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_FIRST_REMAINDER_OVERFLOW_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, the first byte beyond the aligned MAX-4095 size rounds
+    // to 2^52 blocks. At floor(MAX/2) local work, scan plus materialization
+    // cost MAX-1; the next row overflows only the aggregate sum.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let local_work_at_boundary = u64::MAX / 2;
+    let closing_rows = local_work_at_boundary - MAX_BYTE_BLOCKS;
+    let explain_with_rows = |rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-max-source-remainder-aggregate-closure-edge",
+            ),
+            source: obj("table:MaxSourceFirstRemainderOverflow"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:first-remainder-overflow-edge")),
+        })
+        .expect("first max-source remainder aggregate closure edge")
+    };
+
+    let exact = explain_with_rows(closing_rows);
+    let max_cost_minus_one = (u64::MAX - 1).to_string();
+    assert_eq!(
+        exact.plan().estimated_cost(),
+        Some(max_cost_minus_one.as_str())
+    );
+    assert_eq!(exact.root().estimated_work(), Some(local_work_at_boundary));
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+
+    let overflow = explain_with_rows(closing_rows + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(
+        overflow.root().estimated_rows(),
+        Some(closing_rows + 1)
+    );
+    assert_eq!(
+        overflow.root().estimated_bytes(),
+        Some(FIRST_REMAINDER_SOURCE_BYTES)
+    );
+    assert_eq!(
+        overflow.root().estimated_work(),
+        Some(local_work_at_boundary + 1)
+    );
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    for node in overflow.nodes() {
+        assert_eq!(node.estimated_work(), Some(local_work_at_boundary + 1));
+        assert_eq!(node.details().get("estimated_work_overflow"), None);
+    }
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("first max-source remainder aggregate overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node["details"]["estimated_work"]
+            == serde_json::json!(local_work_at_boundary + 1)
+            && node.get("estimated_work_overflow").is_none()
+            && node.get("actual_rows").is_none()
+            && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_first_max_source_remainder_at_local_work_boundary() {
+    let parsed = orna_syntax_v1::parse_module(MAX_SOURCE_FIRST_REMAINDER_LOCAL_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 2);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. With the established
+    // 4-KiB heuristic, the first byte after the aligned MAX-4095 source tail
+    // rounds to 2^52 blocks. The exact row boundary puts both scan and
+    // materialization at MAX; the next row makes both local sums overflow.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let closing_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain_with_rows = |rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-max-source-remainder-local-boundary",
+            ),
+            source: obj("table:MaxSourceFirstRemainderLocal"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:first-remainder-local-boundary")),
+        })
+        .expect("first max-source remainder local work boundary")
+    };
+
+    let exact = explain_with_rows(closing_rows);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_rows(), Some(closing_rows));
+    assert_eq!(
+        exact.root().estimated_bytes(),
+        Some(FIRST_REMAINDER_SOURCE_BYTES)
+    );
+    assert_eq!(exact.root().estimated_work(), Some(u64::MAX));
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(exact.root().details().get("estimated_work_overflow"), None);
+    let exact_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("first-remainder scan at local boundary");
+    assert_eq!(exact_scan.estimated_work(), Some(u64::MAX));
+    assert_eq!(exact_scan.details().get("estimated_work_overflow"), None);
+
+    let local_overflow = explain_with_rows(closing_rows + 1);
+    assert_eq!(local_overflow.plan().estimated_cost(), None);
+    assert_eq!(local_overflow.root().estimated_work(), None);
+    assert_eq!(
+        local_overflow
+            .root()
+            .details()
+            .get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(
+        local_overflow
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    for node in local_overflow.nodes() {
+        assert_eq!(node.estimated_work(), None);
+        assert_eq!(
+            node.details().get("estimated_work_overflow"),
+            Some(&PlanDetail::Boolean(true))
+        );
+    }
+
+    let surface = serde_json::to_value(&local_overflow)
+        .expect("first max-source remainder local overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_work_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("estimated_work").is_none()
+            && node.get("actual_rows").is_none()
+            && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_first_remainder_partial_bound_through_materialization() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_PARTIAL_BOUND_MATERIALIZE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. With the established
+    // 4-KiB heuristic, the aligned source contributes 2^52-1 known blocks;
+    // its first remainder byte contributes 2^52. Choose the known update and
+    // materialization work so the aligned case reaches MAX exactly, while
+    // that one additional scan block proves aggregate overflow.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let mutation_rows = (u64::MAX - 1 - MAX_BYTE_BLOCKS) / 2;
+    let explain = |affected_rows, source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-partial-bound-materialization",
+            ),
+            source: obj("table:FirstRemainderBoundSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:FirstRemainderBoundTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: Some(0),
+                estimated_table_rows_before: Some(affected_rows),
+            }],
+            materialize_into: Some(obj("materialization:first-remainder-partial-bound")),
+        })
+        .expect("partial first-remainder bound through write and materialization")
+    };
+
+    let aligned_at_max = explain(mutation_rows + 1, ALIGNED_SOURCE_BYTES);
+    assert_eq!(aligned_at_max.plan().estimated_cost(), None);
+    assert_eq!(aligned_at_max.root().details().get("estimated_cost_overflow"), None);
+    let aligned_scan = aligned_at_max
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("aligned partial-byte scan");
+    assert_eq!(aligned_scan.estimated_rows(), None);
+    assert_eq!(aligned_scan.estimated_bytes(), Some(ALIGNED_SOURCE_BYTES));
+    assert_eq!(aligned_scan.estimated_work(), None);
+    assert_eq!(aligned_at_max.root().estimated_work(), Some(mutation_rows + 1));
+
+    let first_remainder_over_max = explain(mutation_rows + 1, FIRST_REMAINDER_SOURCE_BYTES);
+    assert_eq!(first_remainder_over_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_over_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first remainder block takes the known lower bound past MAX"
+    );
+    let scan = first_remainder_over_max
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("first-remainder partial-byte scan");
+    assert_eq!(scan.estimated_rows(), None);
+    assert_eq!(scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(scan.estimated_work(), None);
+    let update = first_remainder_over_max
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("known update work after partial scan");
+    assert_eq!(update.estimated_work(), Some(mutation_rows + 1));
+    assert_eq!(first_remainder_over_max.root().estimated_work(), Some(mutation_rows + 1));
+    assert!(first_remainder_over_max.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder_over_max)
+        .expect("first-remainder partial-bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_carries_first_remainder_bound_through_partial_write_tail() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_PARTIAL_WRITE_BOUND_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, the aligned source contributes 2^52-1 to a partial
+    // lower bound and its first remainder byte contributes 2^52. Combine
+    // that scan bound with a row-only write bound and an unknown materialize
+    // tail to probe exact-MAX and one-past-MAX closure.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let mutation_rows = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |affected_rows, source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-partial-write-bound-tail",
+            ),
+            source: obj("table:FirstRemainderPartialWriteSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:FirstRemainderPartialWriteTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(affected_rows),
+            }],
+            materialize_into: Some(obj("materialization:first-remainder-partial-write-bound")),
+        })
+        .expect("first-remainder partial source and write bounds through materialization")
+    };
+
+    let aligned = explain(mutation_rows, ALIGNED_SOURCE_BYTES);
+    assert_eq!(aligned.plan().estimated_cost(), None);
+    assert_eq!(aligned.root().details().get("estimated_cost_overflow"), None);
+    let aligned_scan = aligned
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("aligned partial-source scan");
+    assert_eq!(aligned_scan.estimated_rows(), None);
+    assert_eq!(aligned_scan.estimated_bytes(), Some(ALIGNED_SOURCE_BYTES));
+    assert_eq!(aligned_scan.estimated_work(), None);
+
+    let exact = explain(mutation_rows, FIRST_REMAINDER_SOURCE_BYTES);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let first_remainder_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("first-remainder partial-source scan");
+    assert_eq!(first_remainder_scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(first_remainder_scan.estimated_work(), None);
+    let partial_update = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("row-only partial update");
+    assert_eq!(partial_update.estimated_rows(), Some(mutation_rows));
+    assert_eq!(partial_update.estimated_bytes(), None);
+    assert_eq!(partial_update.estimated_work(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().estimated_work(), None);
+
+    let overflow = explain(mutation_rows + 1, FIRST_REMAINDER_SOURCE_BYTES);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the partial scan and row-only update bounds sum past MAX despite the unknown tail"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    let overflow_scan = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("first-remainder scan across overflow boundary");
+    assert_eq!(overflow_scan.estimated_work(), None);
+    let overflow_update = overflow
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("row-only update across overflow boundary");
+    assert_eq!(overflow_update.estimated_rows(), Some(mutation_rows + 1));
+    assert_eq!(overflow_update.estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("first-remainder partial-write overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_distinguishes_exact_and_overflowing_first_remainder_bounds() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_PARTIAL_BOUND_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, the aligned source contributes 2^52-1 to the partial
+    // scan bound and its first remainder byte contributes 2^52. With this
+    // row-only write bound, the aligned lower bound reaches MAX exactly and
+    // the first remainder byte moves it one past MAX through unknown tails.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let mutation_rows = u64::MAX - MAX_BYTE_BLOCKS + 1;
+    let explain = |source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-partial-bound-edge",
+            ),
+            source: obj("table:FirstRemainderPartialBoundEdgeSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:FirstRemainderPartialBoundEdgeTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(mutation_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(mutation_rows),
+            }],
+            materialize_into: Some(obj("materialization:first-remainder-partial-bound-edge")),
+        })
+        .expect("first-remainder partial-bound overflow edge")
+    };
+
+    let aligned = explain(ALIGNED_SOURCE_BYTES);
+    assert_eq!(aligned.plan().estimated_cost(), None);
+    assert_eq!(aligned.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(aligned.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(aligned.root().estimated_work(), None);
+    let aligned_scan = aligned
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("aligned partial scan at exact MAX lower bound");
+    assert_eq!(aligned_scan.estimated_work(), None);
+    assert_eq!(aligned_scan.estimated_bytes(), Some(ALIGNED_SOURCE_BYTES));
+
+    let first_remainder = explain(FIRST_REMAINDER_SOURCE_BYTES);
+    assert_eq!(first_remainder.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first source remainder byte proves the partial bound exceeds MAX"
+    );
+    assert_eq!(first_remainder.root().estimated_work(), None);
+    let first_remainder_scan = first_remainder
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("first-remainder partial scan past MAX lower bound");
+    assert_eq!(
+        first_remainder_scan.estimated_bytes(),
+        Some(FIRST_REMAINDER_SOURCE_BYTES)
+    );
+    assert_eq!(first_remainder_scan.estimated_work(), None);
+    let partial_update = first_remainder
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("row-only write bound after first-remainder scan");
+    assert_eq!(partial_update.estimated_rows(), Some(mutation_rows));
+    assert_eq!(partial_update.estimated_work(), None);
+    assert!(first_remainder.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder)
+        .expect("first-remainder exact-versus-overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_pins_first_remainder_bound_across_unknown_mutation_tail() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_PARTIAL_BOUND_PIN_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, aligned MAX-4095 bytes contribute 2^52-1 and the first
+    // remainder byte contributes 2^52. Carry that scan bound across an
+    // unknown update and a row-only delete bound into the unknown materialize
+    // tail: the aligned case reaches MAX, while the first remainder exceeds it.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let delete_rows = u64::MAX - MAX_BYTE_BLOCKS + 1;
+    let explain = |source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-partial-bound-pin-tail",
+            ),
+            source: obj("table:FirstRemainderBoundPinSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderBoundPinTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderBoundPinTarget"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: Some(delete_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(delete_rows),
+                },
+            ],
+            materialize_into: Some(obj("materialization:first-remainder-bound-pin")),
+        })
+        .expect("partial first-remainder bound across unknown mutation tail")
+    };
+
+    let aligned = explain(ALIGNED_SOURCE_BYTES);
+    assert_eq!(aligned.plan().estimated_cost(), None);
+    assert_eq!(aligned.root().details().get("estimated_cost_overflow"), None);
+    let aligned_scan = aligned
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("aligned partial scan under unknown mutation tail");
+    assert_eq!(aligned_scan.estimated_rows(), None);
+    assert_eq!(aligned_scan.estimated_bytes(), Some(ALIGNED_SOURCE_BYTES));
+    assert_eq!(aligned_scan.estimated_work(), None);
+    let unknown_update = aligned
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("unknown update between the partial bounds");
+    assert_eq!(unknown_update.estimated_rows(), None);
+    assert_eq!(unknown_update.estimated_bytes(), None);
+    assert_eq!(unknown_update.estimated_work(), None);
+    let aligned_delete = aligned
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("row-only delete lower bound");
+    assert_eq!(aligned_delete.estimated_rows(), Some(delete_rows));
+    assert_eq!(aligned_delete.estimated_bytes(), None);
+    assert_eq!(aligned_delete.estimated_work(), None);
+
+    let first_remainder = explain(FIRST_REMAINDER_SOURCE_BYTES);
+    assert_eq!(first_remainder.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first remainder block survives the unknown update and crosses MAX"
+    );
+    assert_eq!(first_remainder.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(first_remainder.root().estimated_work(), None);
+    assert!(first_remainder.nodes().iter().all(|node| {
+        node.estimated_work().is_none()
+            && node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder)
+        .expect("first-remainder bound across unknown mutation surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_pins_first_remainder_bound_across_unknown_join() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_UNKNOWN_JOIN_BOUND_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, aligned MAX-4095 bytes contribute 2^52-1 to the
+    // partial scan bound and the first remainder byte contributes 2^52. Keep
+    // an unknown join between that scan and the row-only delete bound: the
+    // aligned lower bound reaches MAX, while the first remainder exceeds it.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let delete_rows = u64::MAX - MAX_BYTE_BLOCKS + 1;
+    let explain = |source_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-unknown-join-bound-tail",
+            ),
+            source: obj("table:FirstRemainderUnknownJoinSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:FirstRemainderUnknownJoinRight"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:FirstRemainderUnknownJoinTarget"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(delete_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(delete_rows),
+            }],
+            materialize_into: Some(obj("materialization:first-remainder-unknown-join")),
+        })
+        .expect("first-remainder partial bound across unknown join")
+    };
+
+    let aligned = explain(ALIGNED_SOURCE_BYTES);
+    assert_eq!(aligned.plan().estimated_cost(), None);
+    assert_eq!(aligned.root().details().get("estimated_cost_overflow"), None);
+    let unknown_right_scan = aligned
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderUnknownJoinRight"))
+        })
+        .expect("unknown right scan between the partial bounds");
+    assert_eq!(unknown_right_scan.estimated_work(), None);
+    let aligned_join = aligned
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join with unknown input statistics");
+    assert_eq!(aligned_join.estimated_work(), None);
+
+    let first_remainder = explain(FIRST_REMAINDER_SOURCE_BYTES);
+    assert_eq!(first_remainder.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first remainder scan bound survives the unknown join and crosses MAX"
+    );
+    let scan = first_remainder
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderUnknownJoinSource"))
+        })
+        .expect("first-remainder source scan");
+    assert_eq!(scan.estimated_rows(), None);
+    assert_eq!(scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(scan.estimated_work(), None);
+    let delete = first_remainder
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned())))
+        .expect("row-only delete lower bound after unknown join");
+    assert_eq!(delete.estimated_rows(), Some(delete_rows));
+    assert_eq!(delete.estimated_bytes(), None);
+    assert_eq!(delete.estimated_work(), None);
+    assert!(first_remainder.nodes().iter().all(|node| {
+        node.estimated_work().is_none()
+            && node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder)
+        .expect("first-remainder unknown-join overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_first_remainder_at_max_across_unknown_join_edge() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_UNKNOWN_JOIN_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, the aligned source contributes 2^52-1 and its first
+    // remainder byte raises that to 2^52. Across the unknown join, a known
+    // row-only delete then places the rounded remainder exactly on MAX; one
+    // additional row must cross MAX.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let rows_to_close_first_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |source_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-unknown-join-edge-tail",
+            ),
+            source: obj("table:FirstRemainderUnknownJoinEdgeSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:FirstRemainderUnknownJoinEdgeRight"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:FirstRemainderUnknownJoinEdgeTarget"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(delete_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(delete_rows),
+            }],
+            materialize_into: Some(obj("materialization:first-remainder-unknown-join-edge")),
+        })
+        .expect("first-remainder exact and overflow edges across unknown join")
+    };
+
+    let aligned_below_max = explain(ALIGNED_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(aligned_below_max.plan().estimated_cost(), None);
+    assert_eq!(
+        aligned_below_max.root().details().get("estimated_cost_overflow"),
+        None
+    );
+
+    let first_remainder_at_max =
+        explain(FIRST_REMAINDER_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(first_remainder_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "the first remainder closes the partial lower bound exactly at MAX"
+    );
+    assert_eq!(first_remainder_at_max.root().kind(), PlanNodeKind::Materialize);
+
+    let first_remainder_over_max = explain(
+        FIRST_REMAINDER_SOURCE_BYTES,
+        rows_to_close_first_remainder + 1,
+    );
+    assert_eq!(first_remainder_over_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_over_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one additional delete row crosses MAX after the first remainder"
+    );
+    let scan = first_remainder_over_max
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderUnknownJoinEdgeSource"))
+        })
+        .expect("first-remainder scan before unknown join closure");
+    assert_eq!(scan.estimated_rows(), None);
+    assert_eq!(scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(scan.estimated_work(), None);
+    let unknown_right_scan = first_remainder_over_max
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderUnknownJoinEdgeRight"))
+        })
+        .expect("unknown right scan between source remainder and closure");
+    assert_eq!(unknown_right_scan.estimated_work(), None);
+    let join = first_remainder_over_max
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("unknown join between source remainder and closure");
+    assert_eq!(join.estimated_work(), None);
+    let delete = first_remainder_over_max
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("one-row-over closure delete after unknown join");
+    assert_eq!(
+        delete.estimated_rows(),
+        Some(rows_to_close_first_remainder + 1)
+    );
+    assert_eq!(delete.estimated_bytes(), None);
+    assert_eq!(delete.estimated_work(), None);
+    assert!(first_remainder_over_max.nodes().iter().all(|node| {
+        node.estimated_work().is_none()
+            && node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder_over_max)
+        .expect("first-remainder one-row-over unknown-join surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_first_remainder_at_max_across_unknown_join_chain() {
+    let parsed =
+        orna_syntax_v1::parse_module(FIRST_REMAINDER_UNKNOWN_JOIN_CHAIN_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, the first source-byte remainder contributes 2^52.
+    // The row-only delete closes that partial lower bound exactly at MAX;
+    // check that two unknown joins preserve the exact edge and its one-row
+    // overflow neighbor.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let rows_to_close_first_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |source_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-unknown-join-chain-edge-tail",
+            ),
+            source: obj("table:FirstRemainderUnknownJoinChainSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderUnknownJoinChainLeft"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderUnknownJoinChainRight"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:FirstRemainderUnknownJoinChainTarget"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(delete_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(delete_rows),
+            }],
+            materialize_into: Some(obj("materialization:first-remainder-unknown-join-chain")),
+        })
+        .expect("first-remainder max edge across unknown join chain")
+    };
+
+    let aligned_below_max = explain(ALIGNED_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(aligned_below_max.plan().estimated_cost(), None);
+    assert_eq!(
+        aligned_below_max.root().details().get("estimated_cost_overflow"),
+        None
+    );
+
+    let first_remainder_at_max =
+        explain(FIRST_REMAINDER_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(first_remainder_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "the first remainder closes exactly at MAX across both unknown joins"
+    );
+
+    let first_remainder_over_max = explain(
+        FIRST_REMAINDER_SOURCE_BYTES,
+        rows_to_close_first_remainder + 1,
+    );
+    assert_eq!(first_remainder_over_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_over_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the next delete row crosses MAX after the first remainder"
+    );
+    let nodes = first_remainder_over_max.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderUnknownJoinChainSource"))
+        })
+        .expect("first-remainder source scan");
+    assert_eq!(source_scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(source_scan.estimated_work(), None);
+    let unknown_scans: Vec<_> = nodes
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object().is_some_and(|object| {
+                    object == &obj("table:FirstRemainderUnknownJoinChainLeft")
+                        || object == &obj("table:FirstRemainderUnknownJoinChainRight")
+                })
+        })
+        .collect();
+    assert_eq!(unknown_scans.len(), 2);
+    assert!(unknown_scans.iter().all(|node| node.estimated_work().is_none()));
+    let unknown_joins: Vec<_> = nodes
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect();
+    assert_eq!(unknown_joins.len(), 2);
+    assert!(unknown_joins.iter().all(|node| node.estimated_work().is_none()));
+    let delete = nodes
+        .iter()
+        .find(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("one-row-over delete closure");
+    assert_eq!(
+        delete.estimated_rows(),
+        Some(rows_to_close_first_remainder + 1)
+    );
+    assert_eq!(delete.estimated_work(), None);
+    assert!(nodes.iter().all(|node| {
+        node.estimated_work().is_none()
+            && node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder_over_max)
+        .expect("first-remainder join-chain overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_first_remainder_max_closure_across_unknown_mutation_suffix() {
+    let parsed =
+        orna_syntax_v1::parse_module(FIRST_REMAINDER_UNKNOWN_CLOSURE_SUFFIX_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, aligned source bytes contribute 2^52-1, while their
+    // first remainder contributes 2^52. A row-only delete closes the latter
+    // exactly at MAX; an unknown update after that closure must preserve both
+    // the exact boundary and the overflow caused by one additional row.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let rows_to_close_first_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |source_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-unknown-closure-suffix-tail",
+            ),
+            source: obj("table:FirstRemainderUnknownClosureSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:FirstRemainderUnknownClosureRight"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderUnknownClosureTarget"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: Some(delete_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(delete_rows),
+                },
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderUnknownClosureTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:first-remainder-unknown-closure-suffix")),
+        })
+        .expect("first-remainder closure before unknown mutation suffix")
+    };
+
+    let aligned_below_max = explain(ALIGNED_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(aligned_below_max.plan().estimated_cost(), None);
+    assert_eq!(
+        aligned_below_max.root().details().get("estimated_cost_overflow"),
+        None
+    );
+
+    let first_remainder_at_max =
+        explain(FIRST_REMAINDER_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(first_remainder_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "the first remainder and delete closure equal MAX before the unknown update"
+    );
+
+    let first_remainder_over_max = explain(
+        FIRST_REMAINDER_SOURCE_BYTES,
+        rows_to_close_first_remainder + 1,
+    );
+    assert_eq!(first_remainder_over_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_over_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first remainder crosses MAX and keeps its marker past the unknown update"
+    );
+    let nodes = first_remainder_over_max.nodes();
+    let delete_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("row-only delete closing the first remainder");
+    let unknown_update_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("unknown update after the closure boundary");
+    let delete_node = &nodes[delete_position];
+    let unknown_update = &nodes[unknown_update_position];
+    assert_eq!(
+        unknown_update.inputs().first(),
+        Some(delete_node.reference()),
+        "the unknown update wraps the delete closure in the plan tree"
+    );
+    assert_eq!(unknown_update.estimated_rows(), None);
+    assert_eq!(unknown_update.estimated_bytes(), None);
+    assert_eq!(unknown_update.estimated_work(), None);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder_over_max)
+        .expect("first-remainder unknown-suffix overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_first_remainder_closure_across_unknown_join_and_mutation_tails() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_UNKNOWN_JOIN_MUTATION_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // 4-KiB heuristic, aligned bytes contribute 2^52-1 and the first source
+    // remainder contributes 2^52. The known delete closes the first remainder
+    // at MAX across two unknown joins; its one-row-over case must retain the
+    // overflow marker through a later unknown update.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let rows_to_close_first_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |source_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-unknown-join-mutation-tail",
+            ),
+            source: obj("table:FirstRemainderUnknownJoinMutationSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderUnknownJoinMutationLeft"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderUnknownJoinMutationRight"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderUnknownJoinMutationTarget"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: Some(delete_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(delete_rows),
+                },
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderUnknownJoinMutationTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:first-remainder-unknown-join-mutation")),
+        })
+        .expect("first-remainder closure across unknown join and mutation tails")
+    };
+
+    let aligned_below_max = explain(ALIGNED_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(aligned_below_max.plan().estimated_cost(), None);
+    assert_eq!(
+        aligned_below_max.root().details().get("estimated_cost_overflow"),
+        None
+    );
+
+    let first_remainder_at_max =
+        explain(FIRST_REMAINDER_SOURCE_BYTES, rows_to_close_first_remainder);
+    assert_eq!(first_remainder_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "the first remainder plus delete closure reaches exactly MAX"
+    );
+
+    let first_remainder_over_max = explain(
+        FIRST_REMAINDER_SOURCE_BYTES,
+        rows_to_close_first_remainder + 1,
+    );
+    assert_eq!(first_remainder_over_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_over_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "overflow from the first remainder survives both unknown joins and update"
+    );
+    let nodes = first_remainder_over_max.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object()
+                    == Some(&obj("table:FirstRemainderUnknownJoinMutationSource"))
+        })
+        .expect("first-remainder source scan");
+    assert_eq!(source_scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(source_scan.estimated_work(), None);
+    let unknown_scans: Vec<_> = nodes
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object().is_some_and(|object| {
+                    object == &obj("table:FirstRemainderUnknownJoinMutationLeft")
+                        || object == &obj("table:FirstRemainderUnknownJoinMutationRight")
+                })
+        })
+        .collect();
+    assert_eq!(unknown_scans.len(), 2);
+    assert!(unknown_scans.iter().all(|node| node.estimated_work().is_none()));
+    let unknown_joins: Vec<_> = nodes
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect();
+    assert_eq!(unknown_joins.len(), 2);
+    assert!(unknown_joins.iter().all(|node| node.estimated_work().is_none()));
+    let delete_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("one-row-over delete closure");
+    let unknown_update_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("unknown update after delete closure");
+    let delete = &nodes[delete_position];
+    assert_eq!(
+        delete.estimated_rows(),
+        Some(rows_to_close_first_remainder + 1)
+    );
+    assert_eq!(delete.estimated_bytes(), None);
+    assert_eq!(delete.estimated_work(), None);
+    assert_eq!(
+        nodes[unknown_update_position].inputs().first(),
+        Some(delete.reference()),
+        "the unknown update wraps the known delete closure"
+    );
+    assert_eq!(nodes[unknown_update_position].estimated_work(), None);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder_over_max)
+        .expect("first-remainder compound tail overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_first_scan_remainder_at_max_across_unknown_join_tail() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_SCAN_CLOSURE_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // per-scan 4-KiB heuristic, the aligned near-MAX scan contributes 2^52-1;
+    // a separate first remainder byte contributes one more. A row-only
+    // delete closes that lower bound exactly at MAX, even with an unknown
+    // scan suffix; zero tail bytes stay below it and one extra row exceeds it.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    let rows_to_close_first_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |tail_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-scan-closure-edge-tail",
+            ),
+            source: obj("table:FirstRemainderScanClosureSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(ALIGNED_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderScanClosureTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderScanClosureUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:FirstRemainderScanClosureTarget"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(delete_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(delete_rows),
+            }],
+            materialize_into: Some(obj("materialization:first-remainder-scan-closure-edge")),
+        })
+        .expect("first per-scan remainder closure across unknown join tail")
+    };
+
+    let zero_tail = explain(0, rows_to_close_first_remainder);
+    assert_eq!(zero_tail.plan().estimated_cost(), None);
+    assert_eq!(zero_tail.root().details().get("estimated_cost_overflow"), None);
+
+    let first_remainder_at_max = explain(1, rows_to_close_first_remainder);
+    assert_eq!(first_remainder_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "the one-byte scan remainder closes the partial lower bound exactly at MAX"
+    );
+
+    let first_remainder_over_max = explain(1, rows_to_close_first_remainder + 1);
+    assert_eq!(first_remainder_over_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_over_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one additional delete row crosses MAX after the separate scan remainder"
+    );
+    let nodes = first_remainder_over_max.nodes();
+    let aligned_source = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderScanClosureSource"))
+        })
+        .expect("aligned near-MAX source scan");
+    assert_eq!(aligned_source.estimated_bytes(), Some(ALIGNED_SOURCE_BYTES));
+    assert_eq!(aligned_source.estimated_work(), None);
+    let first_remainder_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderScanClosureTail"))
+        })
+        .expect("separate one-byte remainder scan");
+    assert_eq!(first_remainder_scan.estimated_bytes(), Some(1));
+    assert_eq!(first_remainder_scan.estimated_work(), None);
+    let unknown_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderScanClosureUnknown"))
+        })
+        .expect("unknown scan after the first remainder");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder_over_max)
+        .expect("first per-scan remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_first_scan_remainder_closure_through_unknown_mutation_tail() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_SCAN_MUTATION_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // per-scan 4-KiB heuristic, the aligned near-MAX scan contributes 2^52-1;
+    // a separate one-byte scan contributes one more. A row-only delete closes
+    // that lower bound exactly at MAX across an unknown join and update tail.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    let rows_to_close_first_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |tail_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-scan-mutation-tail",
+            ),
+            source: obj("table:FirstRemainderScanMutationSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(ALIGNED_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderScanMutationTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderScanMutationUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderScanMutationTarget"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: Some(delete_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(delete_rows),
+                },
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderScanMutationTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:first-remainder-scan-mutation-tail")),
+        })
+        .expect("first per-scan remainder closure through unknown mutation tail")
+    };
+
+    let zero_tail = explain(0, rows_to_close_first_remainder);
+    assert_eq!(zero_tail.plan().estimated_cost(), None);
+    assert_eq!(zero_tail.root().details().get("estimated_cost_overflow"), None);
+
+    let first_remainder_at_max = explain(1, rows_to_close_first_remainder);
+    assert_eq!(first_remainder_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "the separate first remainder closes exactly at MAX before the update"
+    );
+
+    let first_remainder_over_max = explain(1, rows_to_close_first_remainder + 1);
+    assert_eq!(first_remainder_over_max.plan().estimated_cost(), None);
+    assert_eq!(
+        first_remainder_over_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the first remainder overflow survives the unknown join and update tail"
+    );
+    let nodes = first_remainder_over_max.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderScanMutationSource"))
+        })
+        .expect("aligned near-MAX scan");
+    assert_eq!(source_scan.estimated_bytes(), Some(ALIGNED_SOURCE_BYTES));
+    let remainder_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderScanMutationTail"))
+        })
+        .expect("separate one-byte first-remainder scan");
+    assert_eq!(remainder_scan.estimated_bytes(), Some(1));
+    let unknown_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderScanMutationUnknown"))
+        })
+        .expect("unknown scan suffix");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let delete_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("one-row-over delete closure");
+    let update_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("unknown update after delete closure");
+    let delete = &nodes[delete_position];
+    assert_eq!(
+        delete.estimated_rows(),
+        Some(rows_to_close_first_remainder + 1)
+    );
+    assert_eq!(delete.estimated_work(), None);
+    assert_eq!(
+        nodes[update_position].inputs().first(),
+        Some(delete.reference()),
+        "the unknown update wraps the first-remainder delete closure"
+    );
+    assert_eq!(nodes[update_position].estimated_work(), None);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&first_remainder_over_max)
+        .expect("first-remainder scan and mutation tail overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_second_scan_byte_at_max() {
+    let parsed = orna_syntax_v1::parse_module(FIRST_REMAINDER_SOURCE_SCAN_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // per-scan 4-KiB heuristic, the source itself has a one-byte remainder
+    // and contributes 2^52; a separate one-byte scan adds one more. The
+    // row-only delete closes that subtotal exactly at MAX, while zero bytes
+    // stay below it and one additional row exceeds it through unknown tails.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_both_scans = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |tail_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:first-remainder-source-scan-edge-tail",
+            ),
+            source: obj("table:FirstRemainderSourceScanEdgeSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderSourceScanEdgeTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:FirstRemainderSourceScanEdgeUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderSourceScanEdgeTarget"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: Some(delete_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(delete_rows),
+                },
+                QueryMutationDescription {
+                    table: obj("table:FirstRemainderSourceScanEdgeTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:first-remainder-source-scan-edge")),
+        })
+        .expect("source and second-scan remainder closure through unknown tails")
+    };
+
+    let zero_tail = explain(0, rows_to_close_both_scans);
+    assert_eq!(zero_tail.plan().estimated_cost(), None);
+    assert_eq!(zero_tail.root().details().get("estimated_cost_overflow"), None);
+
+    let second_scan_remainder_at_max = explain(1, rows_to_close_both_scans);
+    assert_eq!(second_scan_remainder_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        second_scan_remainder_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "the first remainder in the second scan closes exactly at MAX"
+    );
+
+    let overflow = explain(1, rows_to_close_both_scans + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one additional delete row crosses MAX after both scan remainders"
+    );
+    let nodes = overflow.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderSourceScanEdgeSource"))
+        })
+        .expect("near-MAX source scan with a byte remainder");
+    assert_eq!(source_scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    let remainder_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderSourceScanEdgeTail"))
+        })
+        .expect("separate one-byte scan remainder");
+    assert_eq!(remainder_scan.estimated_bytes(), Some(1));
+    let unknown_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:FirstRemainderSourceScanEdgeUnknown"))
+        })
+        .expect("unknown scan tail");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let delete_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("one-row-over delete closure");
+    let update_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("unknown update suffix");
+    let delete = &nodes[delete_position];
+    assert_eq!(
+        delete.estimated_rows(),
+        Some(rows_to_close_both_scans + 1)
+    );
+    assert_eq!(
+        nodes[update_position].inputs().first(),
+        Some(delete.reference()),
+        "the unknown update wraps the known delete closure"
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("source and second-scan remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_multiple_scan_tails_at_max() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_MULTISCAN_CLOSURE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // per-scan 4-KiB heuristic, the source itself has a byte remainder and
+    // costs 2^52; each separate one-byte scan adds one. The row-only delete
+    // closes the subtotal exactly at MAX, with an unknown scan and mutation
+    // suffix after the closure.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const SOURCE_REMAINDER_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_two_scan_tails = u64::MAX - MAX_BYTE_BLOCKS - 2;
+    let explain = |second_tail_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-multiscan-closure-tail",
+            ),
+            source: obj("table:SourceRemainderMultiscanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(SOURCE_REMAINDER_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMultiscanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(1),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMultiscanSecond"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(second_tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMultiscanUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:SourceRemainderMultiscanTarget"),
+                    kind: QueryMutationKind::Delete,
+                    estimated_affected_rows: Some(delete_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(delete_rows),
+                },
+                QueryMutationDescription {
+                    table: obj("table:SourceRemainderMultiscanTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:source-remainder-multiscan-closure")),
+        })
+        .expect("source remainder and separate scan tails close through unknown tails")
+    };
+
+    let zero_second_tail = explain(
+        0,
+        rows_to_close_source_and_two_scan_tails,
+    );
+    assert_eq!(zero_second_tail.plan().estimated_cost(), None);
+    assert_eq!(
+        zero_second_tail.root().details().get("estimated_cost_overflow"),
+        None
+    );
+
+    let two_scan_remainders_at_max = explain(
+        1,
+        rows_to_close_source_and_two_scan_tails,
+    );
+    assert_eq!(two_scan_remainders_at_max.plan().estimated_cost(), None);
+    assert_eq!(
+        two_scan_remainders_at_max
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None,
+        "both one-byte scan tails bring the source remainder closure to MAX"
+    );
+
+    let overflow = explain(
+        1,
+        rows_to_close_source_and_two_scan_tails + 1,
+    );
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one more delete row crosses MAX after all three scan bounds"
+    );
+    let nodes = overflow.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMultiscanSource"))
+        })
+        .expect("source scan with its own byte remainder");
+    assert_eq!(source_scan.estimated_bytes(), Some(SOURCE_REMAINDER_BYTES));
+    assert_eq!(source_scan.estimated_work(), None);
+    let first_tail_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMultiscanFirst"))
+        })
+        .expect("first separate one-byte scan");
+    assert_eq!(first_tail_scan.estimated_bytes(), Some(1));
+    assert_eq!(first_tail_scan.estimated_work(), None);
+    let second_tail_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMultiscanSecond"))
+        })
+        .expect("second separate one-byte scan");
+    assert_eq!(second_tail_scan.estimated_bytes(), Some(1));
+    assert_eq!(second_tail_scan.estimated_work(), None);
+    let unknown_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMultiscanUnknown"))
+        })
+        .expect("unknown scan after the rounded lower bounds");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let joins: Vec<_> = nodes
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect();
+    assert_eq!(joins.len(), 3);
+    assert!(joins.iter().all(|node| node.estimated_work().is_none()));
+    let delete_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("delete".to_owned()))
+        })
+        .expect("one-row-over delete closure");
+    let update_position = nodes
+        .iter()
+        .position(|node| {
+            node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+        })
+        .expect("unknown update suffix");
+    let delete = &nodes[delete_position];
+    assert_eq!(
+        delete.estimated_rows(),
+        Some(rows_to_close_source_and_two_scan_tails + 1)
+    );
+    assert_eq!(delete.estimated_work(), None);
+    assert_eq!(
+        nodes[update_position].inputs().first(),
+        Some(delete.reference()),
+        "the unknown update wraps the delete closure"
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("source remainder multi-scan overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_across_scan_rounding_boundary() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_SCAN_BOUNDARY_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN defines estimated_bytes as optional but leaves the byte-cost
+    // unit and rounding heuristic unspecified. Continue the established
+    // pragmatic 4-KiB-per-scan lower bound: the source remainder rounds to
+    // 2^52 units, the first tail scan (4095 bytes) adds one, and a second scan
+    // adds one through 4096 bytes but two at 4097. Thus the chosen row bound
+    // closes exactly at MAX through 4096 and overflows at the next byte.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const SOURCE_REMAINDER_BYTES: u64 = u64::MAX - 4_094;
+    const FIRST_TAIL_BYTES: u64 = 4_095;
+    let rows_to_close_source_and_two_scan_tails = u64::MAX - MAX_BYTE_BLOCKS - 2;
+    let explain = |second_tail_bytes, delete_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-scan-boundary-tail",
+            ),
+            source: obj("table:SourceRemainderScanBoundarySource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(SOURCE_REMAINDER_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderScanBoundaryFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(FIRST_TAIL_BYTES),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderScanBoundarySecond"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(second_tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderScanBoundaryUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:SourceRemainderScanBoundaryTarget"),
+                kind: QueryMutationKind::Delete,
+                estimated_affected_rows: Some(delete_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(delete_rows),
+            }],
+            materialize_into: Some(obj("materialization:source-remainder-scan-boundary")),
+        })
+        .expect("source remainder and scan rounding boundary closure")
+    };
+
+    let one_below = explain(0, rows_to_close_source_and_two_scan_tails);
+    assert_eq!(
+        one_below.root().details().get("estimated_cost_overflow"),
+        None,
+        "zero bytes in the second scan leave the subtotal one below MAX"
+    );
+
+    for tail_bytes in [4_095, 4_096] {
+        let closes_at_max = explain(tail_bytes, rows_to_close_source_and_two_scan_tails);
+        assert_eq!(closes_at_max.plan().estimated_cost(), None);
+        assert_eq!(
+            closes_at_max.root().details().get("estimated_cost_overflow"),
+            None,
+            "independently rounded scan tails through 4096 bytes close at MAX"
+        );
+    }
+
+    let overflow = explain(4_097, rows_to_close_source_and_two_scan_tails);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the second scan's first byte beyond one block crosses MAX"
+    );
+    let nodes = overflow.nodes();
+    let second_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderScanBoundarySecond"))
+        })
+        .expect("second independently rounded scan");
+    assert_eq!(second_scan.estimated_bytes(), Some(4_097));
+    assert!(nodes.iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:SourceRemainderScanBoundaryUnknown"))
+            && node.estimated_work().is_none()
+    }));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_partial_scan_bound() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_SCAN_BOUND_CLOSURE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Following the documented
+    // pragmatic 4-KiB-per-scan lower bound, aligned source bytes contribute
+    // 2^52-1 and the first remainder byte contributes 2^52. A separate
+    // rows-only scan bound closes the combined known lower bound at MAX; one
+    // additional row exceeds MAX even with an unknown final scan.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const ALIGNED_SOURCE_BYTES: u64 = u64::MAX - 4_095;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = ALIGNED_SOURCE_BYTES + 1;
+    let rows_to_close_source_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |source_bytes, row_bound| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-partial-scan-bound-closure",
+            ),
+            source: obj("table:SourceRemainderBoundSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderBoundRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(row_bound),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderBoundUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-partial-scan-bound")),
+        })
+        .expect("source byte remainder and separate partial scan bound")
+    };
+
+    let aligned = explain(ALIGNED_SOURCE_BYTES, rows_to_close_source_remainder);
+    assert_eq!(aligned.plan().estimated_cost(), None);
+    assert_eq!(aligned.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(FIRST_REMAINDER_SOURCE_BYTES, rows_to_close_source_remainder);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "the source's first byte remainder closes the partial scan bounds at MAX"
+    );
+
+    let overflow = explain(
+        FIRST_REMAINDER_SOURCE_BYTES,
+        rows_to_close_source_remainder + 1,
+    );
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one additional row crosses MAX after the source remainder"
+    );
+    let nodes = overflow.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderBoundSource"))
+        })
+        .expect("near-MAX source scan with its first remainder byte");
+    assert_eq!(source_scan.estimated_rows(), None);
+    assert_eq!(source_scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(source_scan.estimated_work(), None);
+    let rows_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderBoundRows"))
+        })
+        .expect("separate rows-only partial scan bound");
+    assert_eq!(
+        rows_scan.estimated_rows(),
+        Some(rows_to_close_source_remainder + 1)
+    );
+    assert_eq!(rows_scan.estimated_bytes(), None);
+    assert_eq!(rows_scan.estimated_work(), None);
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderBoundUnknown"))
+        })
+        .expect("unknown final scan after the closure bound");
+    let rows_scan_position = nodes
+        .iter()
+        .position(|node| node.reference() == rows_scan.reference())
+        .expect("rows-only scan position");
+    assert!(unknown_scan_position > rows_scan_position);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("source remainder partial-scan-bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_across_mixed_scan_bounds() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_MIXED_SCAN_BOUNDS_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Following the existing
+    // pragmatic 4-KiB-per-scan lower bound, the source's first remainder
+    // contributes 2^52; a rows-only scan and a bytes-only scan contribute
+    // independent partial bounds. Their 2^52 + rows + one-byte tail closes
+    // exactly at MAX, and 4097 bytes or one more row crosses it. The unknown
+    // fourth scan must not discard the known lower bound.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_byte_tail = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |tail_bytes, row_bound| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-mixed-scan-bounds-tail",
+            ),
+            source: obj("table:SourceRemainderMixedBoundsSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMixedBoundsRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(row_bound),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMixedBoundsBytes"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderMixedBoundsUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-mixed-scan-bounds")),
+        })
+        .expect("source remainder and mixed partial scan bounds through unknown tail")
+    };
+
+    let one_below = explain(0, rows_to_close_source_and_byte_tail);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(1, rows_to_close_source_and_byte_tail);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "the source remainder and two independent scan bounds close at MAX"
+    );
+
+    let row_overflow = explain(1, rows_to_close_source_and_byte_tail + 1);
+    let byte_overflow = explain(4_097, rows_to_close_source_and_byte_tail);
+    for overflow in [&row_overflow, &byte_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "either partial scan bound crosses MAX through the unknown suffix"
+        );
+    }
+
+    let nodes = byte_overflow.nodes();
+    let source_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMixedBoundsSource"))
+        })
+        .expect("near-MAX source remainder scan");
+    assert_eq!(source_scan.estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(source_scan.estimated_work(), None);
+    let rows_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMixedBoundsRows"))
+        })
+        .expect("rows-only scan bound");
+    assert_eq!(
+        rows_scan.estimated_rows(),
+        Some(rows_to_close_source_and_byte_tail)
+    );
+    assert_eq!(rows_scan.estimated_bytes(), None);
+    assert_eq!(rows_scan.estimated_work(), None);
+    let bytes_scan = nodes
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMixedBoundsBytes"))
+        })
+        .expect("bytes-only scan bound one byte over its block");
+    assert_eq!(bytes_scan.estimated_rows(), None);
+    assert_eq!(bytes_scan.estimated_bytes(), Some(4_097));
+    assert_eq!(bytes_scan.estimated_work(), None);
+    let unknown_scan_position = nodes
+        .iter()
+        .position(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:SourceRemainderMixedBoundsUnknown"))
+        })
+        .expect("unknown fourth scan");
+    let bytes_scan_position = nodes
+        .iter()
+        .position(|node| node.reference() == bytes_scan.reference())
+        .expect("bytes-only scan position");
+    assert!(unknown_scan_position > bytes_scan_position);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&byte_overflow)
+        .expect("mixed scan-bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_after_unknown_scan_edge() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_UNKNOWN_SCAN_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Preserve the established
+    // pragmatic 4-KiB-per-scan lower bound: the source remainder contributes
+    // 2^52, and later rows-only and bytes-only scans add their own independent
+    // bounds after an unknown scan. A one-byte tail closes exactly at MAX;
+    // 4097 bytes or one extra row crosses it without losing that evidence.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_tail = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |tail_bytes, row_bound| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-unknown-scan-edge-tail",
+            ),
+            source: obj("table:SourceRemainderUnknownEdgeSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderUnknownEdgeUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderUnknownEdgeRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(row_bound),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderUnknownEdgeBytes"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-unknown-scan-edge")),
+        })
+        .expect("source remainder closure after an unknown scan")
+    };
+
+    let one_below = explain(0, rows_to_close_source_and_tail);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(1, rows_to_close_source_and_tail);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "later known scan bounds close the source remainder at MAX"
+    );
+
+    let row_overflow = explain(1, rows_to_close_source_and_tail + 1);
+    let byte_overflow = explain(4_097, rows_to_close_source_and_tail);
+    for overflow in [&row_overflow, &byte_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a later rows-only or bytes-only bound crosses MAX"
+        );
+    }
+
+    let nodes = byte_overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in plan")
+    };
+    let source_scan_position = scan_position("table:SourceRemainderUnknownEdgeSource");
+    let unknown_scan_position = scan_position("table:SourceRemainderUnknownEdgeUnknown");
+    let rows_scan_position = scan_position("table:SourceRemainderUnknownEdgeRows");
+    let bytes_scan_position = scan_position("table:SourceRemainderUnknownEdgeBytes");
+    assert!(source_scan_position < unknown_scan_position);
+    assert!(unknown_scan_position < rows_scan_position);
+    assert!(rows_scan_position < bytes_scan_position);
+    for position in [source_scan_position, rows_scan_position, bytes_scan_position] {
+        assert_eq!(nodes[position].estimated_work(), None);
+    }
+    assert_eq!(nodes[rows_scan_position].estimated_rows(), Some(rows_to_close_source_and_tail));
+    assert_eq!(nodes[rows_scan_position].estimated_bytes(), None);
+    assert_eq!(nodes[bytes_scan_position].estimated_rows(), None);
+    assert_eq!(nodes[bytes_scan_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[unknown_scan_position].estimated_work(), None);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&byte_overflow)
+        .expect("source remainder unknown-scan edge overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_after_unknown_source_scan() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_AFTER_UNKNOWN_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the existing
+    // pragmatic 4-KiB-per-scan lower bound, the later first-remainder byte
+    // scan contributes 2^52 units. A rows-only scan after it closes that
+    // bound exactly at MAX, even though the query's initial source scan is
+    // unknown; one fewer row stays below and one more row overflows.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |row_bound| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-after-unknown-source",
+            ),
+            source: obj("table:SourceRemainderAfterUnknownSource"),
+            source_statistics: None,
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderAfterUnknownBytes"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(FIRST_REMAINDER_BYTES),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderAfterUnknownRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(row_bound),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-after-unknown")),
+        })
+        .expect("source remainder and row bound after unknown source scan")
+    };
+
+    let one_below = explain(rows_to_close_remainder - 1);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(rows_to_close_remainder);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "the later source remainder and rows-only scan close at MAX"
+    );
+
+    let overflow = explain(rows_to_close_remainder + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one additional later row crosses MAX after the remainder scan"
+    );
+    let nodes = overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let unknown_scan_position = scan_position("table:SourceRemainderAfterUnknownSource");
+    let remainder_scan_position = scan_position("table:SourceRemainderAfterUnknownBytes");
+    let rows_scan_position = scan_position("table:SourceRemainderAfterUnknownRows");
+    assert!(unknown_scan_position < remainder_scan_position);
+    assert!(remainder_scan_position < rows_scan_position);
+    assert_eq!(nodes[unknown_scan_position].estimated_work(), None);
+    assert_eq!(nodes[remainder_scan_position].estimated_bytes(), Some(FIRST_REMAINDER_BYTES));
+    assert_eq!(nodes[remainder_scan_position].estimated_work(), None);
+    assert_eq!(
+        nodes[rows_scan_position].estimated_rows(),
+        Some(rows_to_close_remainder + 1)
+    );
+    assert_eq!(nodes[rows_scan_position].estimated_bytes(), None);
+    assert_eq!(nodes[rows_scan_position].estimated_work(), None);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("source remainder after unknown scan overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_bounds_across_unknown_scan() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_SPLIT_UNKNOWN_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Under the established
+    // pragmatic 4-KiB-per-scan lower bound, the source remainder contributes
+    // 2^52 units. A one-byte scan before an unknown scan and a rows-only scan
+    // after it close exactly at MAX; a zero-byte prefix stays one below, while
+    // the next byte block or an extra row crosses the bound.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_prefix = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |prefix_bytes, suffix_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-split-unknown-edge",
+            ),
+            source: obj("table:SourceRemainderSplitUnknownSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderSplitUnknownPrefix"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(prefix_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderSplitUnknownMiddle"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderSplitUnknownRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(suffix_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-split-unknown")),
+        })
+        .expect("source remainder closure across an unknown scan")
+    };
+
+    let zero_prefix = explain(0, rows_to_close_source_and_prefix);
+    assert_eq!(zero_prefix.plan().estimated_cost(), None);
+    assert_eq!(
+        zero_prefix.root().details().get("estimated_cost_overflow"),
+        None,
+        "a zero-byte scan before the unknown scan leaves the bound one below MAX"
+    );
+
+    let exact = explain(1, rows_to_close_source_and_prefix);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "known bounds on both sides of the unknown scan close at MAX"
+    );
+
+    let row_overflow = explain(1, rows_to_close_source_and_prefix + 1);
+    let byte_overflow = explain(4_097, rows_to_close_source_and_prefix);
+    for overflow in [&row_overflow, &byte_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "either suffix rows or prefix bytes cross MAX across the unknown scan"
+        );
+    }
+
+    let nodes = byte_overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let source_position = scan_position("table:SourceRemainderSplitUnknownSource");
+    let prefix_position = scan_position("table:SourceRemainderSplitUnknownPrefix");
+    let unknown_position = scan_position("table:SourceRemainderSplitUnknownMiddle");
+    let rows_position = scan_position("table:SourceRemainderSplitUnknownRows");
+    assert!(source_position < prefix_position);
+    assert!(prefix_position < unknown_position);
+    assert!(unknown_position < rows_position);
+    assert_eq!(nodes[source_position].estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(nodes[prefix_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(
+        nodes[rows_position].estimated_rows(),
+        Some(rows_to_close_source_and_prefix)
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&byte_overflow)
+        .expect("source remainder split-unknown overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_after_unknown_join_with_row_prefix() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_ROW_PREFIX_UNKNOWN_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN does not specify byte-cost units. Under the established
+    // pragmatic 4-KiB-per-scan lower bound, a rows-only source bound can
+    // contribute MAX-2^52 before an unknown scan, and a later first-remainder
+    // byte scan supplies the remaining 2^52. The exact sum still closes at
+    // MAX; one fewer source row stays below and one more overflows.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_remainder = u64::MAX - MAX_BYTE_BLOCKS;
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-row-prefix-unknown-tail",
+            ),
+            source: obj("table:SourceRemainderRowPrefix"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderRowPrefixUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderRowPrefixRemainder"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(FIRST_REMAINDER_BYTES),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-row-prefix")),
+        })
+        .expect("rows-only source and later first-remainder scan closure")
+    };
+
+    let one_below = explain(rows_to_close_remainder - 1);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(rows_to_close_remainder);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "the source row bound and later byte remainder close at MAX"
+    );
+
+    let overflow = explain(rows_to_close_remainder + 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one additional source row crosses MAX after the unknown join"
+    );
+    let nodes = overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in the explained plan")
+    };
+    let source_position = scan_position("table:SourceRemainderRowPrefix");
+    let unknown_position = scan_position("table:SourceRemainderRowPrefixUnknown");
+    let remainder_position = scan_position("table:SourceRemainderRowPrefixRemainder");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < remainder_position);
+    assert_eq!(nodes[source_position].estimated_rows(), Some(rows_to_close_remainder + 1));
+    assert_eq!(nodes[source_position].estimated_bytes(), None);
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[remainder_position].estimated_bytes(), Some(FIRST_REMAINDER_BYTES));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("row prefix and later source remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_rows_bound_with_two_scans_after_unknown_tail() {
+    let parsed = orna_syntax_v1::parse_module(REMAINDER_AFTER_UNKNOWN_MULTI_SCAN_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Follow the established
+    // pragmatic 4-KiB-per-scan lower bound: each separate one-byte scan adds
+    // one unit. A rows-only source bound set to MAX-2 and the two later scan
+    // tails therefore close exactly at MAX across an unknown scan. A zero-byte
+    // second tail stays one below; either 4097 bytes or one extra source row
+    // crosses the closure edge.
+    let rows_to_close_two_scan_tails = u64::MAX - 2;
+    let explain = |second_tail_bytes, source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:remainder-after-unknown-multiscan-tail",
+            ),
+            source: obj("table:RemainderAfterUnknownMultiSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:RemainderAfterUnknownMultiUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:RemainderAfterUnknownMultiFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(1),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:RemainderAfterUnknownMultiSecond"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(second_tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:remainder-after-unknown-multiscan")),
+        })
+        .expect("rows bound and separate scan tails after unknown scan")
+    };
+
+    let one_below = explain(0, rows_to_close_two_scan_tails);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(1, rows_to_close_two_scan_tails);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "two independently rounded scan tails close the source row bound at MAX"
+    );
+
+    let byte_overflow = explain(4_097, rows_to_close_two_scan_tails);
+    let row_overflow = explain(1, rows_to_close_two_scan_tails + 1);
+    for overflow in [&byte_overflow, &row_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "the second scan remainder or source row crosses MAX"
+        );
+    }
+
+    let nodes = byte_overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let source_position = scan_position("table:RemainderAfterUnknownMultiSource");
+    let unknown_position = scan_position("table:RemainderAfterUnknownMultiUnknown");
+    let first_position = scan_position("table:RemainderAfterUnknownMultiFirst");
+    let second_position = scan_position("table:RemainderAfterUnknownMultiSecond");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < first_position);
+    assert!(first_position < second_position);
+    assert_eq!(
+        nodes[source_position].estimated_rows(),
+        Some(rows_to_close_two_scan_tails)
+    );
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[first_position].estimated_bytes(), Some(1));
+    assert_eq!(nodes[second_position].estimated_bytes(), Some(4_097));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&byte_overflow)
+        .expect("multiple post-unknown scan-tail overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_remainder_after_unknown_with_scan_interplay() {
+    let parsed = orna_syntax_v1::parse_module(POST_UNKNOWN_REMAINDER_SCAN_INTERPLAY_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Continue the established
+    // pragmatic 4-KiB-per-scan lower bound: the first-remainder scan after an
+    // unknown source contributes 2^52, then a rows-only scan and a separate
+    // byte tail close exactly at MAX. A zero-byte tail stays one below, while
+    // 4097 bytes adds a second unit and crosses the bound.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_remainder_and_tail = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |tail_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:post-unknown-remainder-scan-interplay",
+            ),
+            source: obj("table:PostUnknownRemainderUnknown"),
+            source_statistics: None,
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:PostUnknownRemainderScan"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(FIRST_REMAINDER_BYTES),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:PostUnknownRemainderRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(rows_to_close_remainder_and_tail),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:PostUnknownRemainderTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:post-unknown-remainder-interplay")),
+        })
+        .expect("first remainder and separate scan bounds after unknown source")
+    };
+
+    let one_below = explain(0);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "the post-unknown remainder and scan bounds close at MAX"
+    );
+
+    let overflow = explain(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the second tail block crosses MAX after the unknown source"
+    );
+    let nodes = overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let unknown_position = scan_position("table:PostUnknownRemainderUnknown");
+    let remainder_position = scan_position("table:PostUnknownRemainderScan");
+    let rows_position = scan_position("table:PostUnknownRemainderRows");
+    let tail_position = scan_position("table:PostUnknownRemainderTail");
+    assert!(unknown_position < remainder_position);
+    assert!(remainder_position < rows_position);
+    assert!(rows_position < tail_position);
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[remainder_position].estimated_bytes(), Some(FIRST_REMAINDER_BYTES));
+    assert_eq!(nodes[rows_position].estimated_rows(), Some(rows_to_close_remainder_and_tail));
+    assert_eq!(nodes[tail_position].estimated_bytes(), Some(4_097));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow)
+        .expect("post-unknown remainder interplay overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_scan_tails_across_unknown() {
+    let parsed = orna_syntax_v1::parse_module(UNKNOWN_SCAN_SPLIT_REMAINDER_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Following the established
+    // pragmatic 4-KiB-per-scan lower bound, the source's first byte remainder
+    // contributes 2^52. A separate byte scan before an unknown scan and a
+    // byte tail plus rows-only scan after it close exactly at MAX. One fewer
+    // tail byte stays below; the first byte beyond either scan's 4-KiB block
+    // or one additional row crosses the aggregate bound.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_two_tails = u64::MAX - MAX_BYTE_BLOCKS - 2;
+    let explain = |prefix_bytes, tail_bytes, closing_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:unknown-scan-split-remainder-edge",
+            ),
+            source: obj("table:UnknownScanSplitRemainderSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:UnknownScanSplitRemainderPrefix"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(prefix_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:UnknownScanSplitRemainderUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:UnknownScanSplitRemainderTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:UnknownScanSplitRemainderRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(closing_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:unknown-scan-split-remainder")),
+        })
+        .expect("source remainder closure across pre- and post-unknown scans")
+    };
+
+    let one_below = explain(4_095, 0, rows_to_close_source_and_two_tails);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    for prefix_bytes in [4_095, 4_096] {
+        let exact = explain(
+            prefix_bytes,
+            1,
+            rows_to_close_source_and_two_tails,
+        );
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "independently rounded scan bounds on both sides of unknown close at MAX"
+        );
+    }
+
+    let prefix_overflow = explain(
+        4_097,
+        1,
+        rows_to_close_source_and_two_tails,
+    );
+    let tail_overflow = explain(
+        4_096,
+        4_097,
+        rows_to_close_source_and_two_tails,
+    );
+    let row_overflow = explain(
+        4_096,
+        1,
+        rows_to_close_source_and_two_tails + 1,
+    );
+    for overflow in [&prefix_overflow, &tail_overflow, &row_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "either scan remainder edge or the closing row crosses MAX"
+        );
+    }
+
+    let nodes = tail_overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let source_position = scan_position("table:UnknownScanSplitRemainderSource");
+    let prefix_position = scan_position("table:UnknownScanSplitRemainderPrefix");
+    let unknown_position = scan_position("table:UnknownScanSplitRemainderUnknown");
+    let tail_position = scan_position("table:UnknownScanSplitRemainderTail");
+    let rows_position = scan_position("table:UnknownScanSplitRemainderRows");
+    assert!(source_position < prefix_position);
+    assert!(prefix_position < unknown_position);
+    assert!(unknown_position < tail_position);
+    assert!(tail_position < rows_position);
+    assert_eq!(nodes[source_position].estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(nodes[prefix_position].estimated_bytes(), Some(4_096));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[tail_position].estimated_bytes(), Some(4_097));
+    assert_eq!(
+        nodes[rows_position].estimated_rows(),
+        Some(rows_to_close_source_and_two_tails)
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&tail_overflow)
+        .expect("split unknown remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_known_scan_after_unknown() {
+    let parsed =
+        orna_syntax_v1::parse_module(SOURCE_REMAINDER_KNOWN_SCAN_AFTER_UNKNOWN_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 3);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Continue the established
+    // pragmatic 4-KiB-per-scan lower bound: the source first remainder adds
+    // 2^52, and a later rows-and-bytes scan contributes its own local work
+    // after the unknown join. Its rows plus a 4095- or 4096-byte tail close
+    // exactly at MAX; 4097 bytes or one extra row crosses the bound.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_remainder = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |tail_bytes, bounded_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-known-scan-after-unknown",
+            ),
+            source: obj("table:SourceRemainderKnownAfterUnknownSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderKnownAfterUnknownScan"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderKnownAfterUnknownBound"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(bounded_rows),
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-known-after-unknown")),
+        })
+        .expect("source remainder closed by a known scan after unknown join")
+    };
+
+    let one_below = explain(0, rows_to_close_source_remainder);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    for tail_bytes in [4_095, 4_096] {
+        let exact = explain(tail_bytes, rows_to_close_source_remainder);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "known local scan work after the unknown join closes at MAX"
+        );
+    }
+
+    let byte_overflow = explain(4_097, rows_to_close_source_remainder);
+    let row_overflow = explain(4_096, rows_to_close_source_remainder + 1);
+    for overflow in [&byte_overflow, &row_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "the later scan's local rows-plus-bytes work crosses MAX"
+        );
+    }
+
+    let nodes = byte_overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let source_position = scan_position("table:SourceRemainderKnownAfterUnknownSource");
+    let unknown_position = scan_position("table:SourceRemainderKnownAfterUnknownScan");
+    let bound_position = scan_position("table:SourceRemainderKnownAfterUnknownBound");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < bound_position);
+    assert_eq!(nodes[source_position].estimated_rows(), None);
+    assert_eq!(nodes[source_position].estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(nodes[source_position].estimated_work(), None);
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(
+        nodes[bound_position].estimated_rows(),
+        Some(rows_to_close_source_remainder)
+    );
+    assert_eq!(nodes[bound_position].estimated_bytes(), Some(4_097));
+    assert_eq!(
+        nodes[bound_position].estimated_work(),
+        Some(rows_to_close_source_remainder + 2)
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&byte_overflow)
+        .expect("later known scan remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_split_bounds_after_unknown() {
+    let parsed =
+        orna_syntax_v1::parse_module(SOURCE_REMAINDER_SPLIT_BOUNDS_AFTER_UNKNOWN_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN does not specify byte-cost units. Following the established
+    // pragmatic 4-KiB-per-scan lower bound, the source first remainder
+    // contributes 2^52. A rows-only scan and a separate bytes-only scan after
+    // the unknown join close that bound together; zero tail bytes stay one
+    // below, and the first byte beyond one 4-KiB block crosses MAX.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_tail = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |tail_bytes, row_bound| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-split-bounds-after-unknown",
+            ),
+            source: obj("table:SourceRemainderSplitBoundsSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderSplitBoundsUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderSplitBoundsRows"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(row_bound),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderSplitBoundsBytes"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-split-bounds")),
+        })
+        .expect("split known scan bounds close source remainder after unknown join")
+    };
+
+    let one_below = explain(0, rows_to_close_source_and_tail);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    let exact = explain(4_096, rows_to_close_source_and_tail);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(
+        exact.root().details().get("estimated_cost_overflow"),
+        None,
+        "separate row and byte bounds after the unknown join close at MAX"
+    );
+
+    let byte_overflow = explain(4_097, rows_to_close_source_and_tail);
+    let row_overflow = explain(4_096, rows_to_close_source_and_tail + 1);
+    for overflow in [&byte_overflow, &row_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "either later partial scan bound crosses MAX"
+        );
+    }
+
+    let nodes = byte_overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in explained plan")
+    };
+    let source_position = scan_position("table:SourceRemainderSplitBoundsSource");
+    let unknown_position = scan_position("table:SourceRemainderSplitBoundsUnknown");
+    let rows_position = scan_position("table:SourceRemainderSplitBoundsRows");
+    let bytes_position = scan_position("table:SourceRemainderSplitBoundsBytes");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < rows_position);
+    assert!(rows_position < bytes_position);
+    assert_eq!(nodes[source_position].estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[rows_position].estimated_rows(), Some(rows_to_close_source_and_tail));
+    assert_eq!(nodes[rows_position].estimated_bytes(), None);
+    assert_eq!(nodes[bytes_position].estimated_rows(), None);
+    assert_eq!(nodes[bytes_position].estimated_bytes(), Some(4_097));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&byte_overflow)
+        .expect("split post-unknown bounds overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_source_remainder_with_bytes_then_rows_after_unknown() {
+    let parsed = orna_syntax_v1::parse_module(
+        SOURCE_REMAINDER_BYTES_THEN_ROWS_AFTER_UNKNOWN_TAIL,
+    );
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Following the existing
+    // pragmatic 4-KiB-per-scan lower bound, the source first remainder adds
+    // 2^52, a bytes-only scan follows the unknown join, and a rows-only scan
+    // closes last. Tails of 4095 and 4096 bytes close exactly at MAX; zero
+    // stays one below, while 4097 bytes or one extra row crosses it.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let rows_to_close_source_and_byte_tail = u64::MAX - MAX_BYTE_BLOCKS - 1;
+    let explain = |tail_bytes, closing_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive(
+                "snapshot:source-remainder-bytes-then-rows-after-unknown",
+            ),
+            source: obj("table:SourceRemainderBytesRowsUnknownSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderBytesRowsUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderBytesRowsByteTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SourceRemainderBytesRowsRowTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(closing_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-remainder-bytes-then-rows")),
+        })
+        .expect("bytes-only then rows-only closure after unknown join")
+    };
+
+    let one_below = explain(0, rows_to_close_source_and_byte_tail);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    for tail_bytes in [4_095, 4_096] {
+        let exact = explain(tail_bytes, rows_to_close_source_and_byte_tail);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "the bytes-only scan and later row bound close at MAX"
+        );
+    }
+
+    let byte_overflow = explain(4_097, rows_to_close_source_and_byte_tail);
+    let row_overflow = explain(4_096, rows_to_close_source_and_byte_tail + 1);
+    for overflow in [&byte_overflow, &row_overflow] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "the reordered post-unknown scan bounds cross MAX"
+        );
+    }
+
+    let nodes = byte_overflow.nodes();
+    let scan_position = |name: &str| {
+        nodes
+            .iter()
+            .position(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(name))
+            })
+            .expect("fixture scan appears in the plan")
+    };
+    let source_position = scan_position("table:SourceRemainderBytesRowsUnknownSource");
+    let unknown_position = scan_position("table:SourceRemainderBytesRowsUnknown");
+    let bytes_position = scan_position("table:SourceRemainderBytesRowsByteTail");
+    let rows_position = scan_position("table:SourceRemainderBytesRowsRowTail");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < bytes_position);
+    assert!(bytes_position < rows_position);
+    assert_eq!(nodes[source_position].estimated_bytes(), Some(FIRST_REMAINDER_SOURCE_BYTES));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[bytes_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[bytes_position].estimated_work(), None);
+    assert_eq!(
+        nodes[rows_position].estimated_rows(),
+        Some(rows_to_close_source_and_byte_tail)
+    );
+    assert_eq!(nodes[rows_position].estimated_bytes(), None);
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&byte_overflow)
+        .expect("bytes-then-rows post-unknown overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_byte_remainder_across_mutation_cardinality_reset() {
+    let parsed = orna_syntax_v1::parse_module(SOURCE_REMAINDER_BYTES_THEN_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Continue the pragmatic
+    // 4-KiB-per-scan lower bound: the source's rows and first byte remainder
+    // establish MAX-3 work, an unknown join hides the exact total, and a
+    // later bytes-only scan plus update and materialize costs close it. The
+    // update resets current cardinality to its small result but must not
+    // discard the earlier known-work lower bound. Zero tail bytes leave the
+    // sum below MAX; 1..=4096 close exactly; 4097 crosses it.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 3;
+    let explain = |tail_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:source-remainder-bytes-then-reset"),
+            source: obj("table:BytesThenResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:BytesThenResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:BytesThenResetTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(tail_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:BytesThenResetTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(0),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:bytes-then-reset")),
+        })
+        .expect("byte remainder followed by cardinality-resetting update")
+    };
+
+    let one_below = explain(0);
+    assert_eq!(one_below.plan().estimated_cost(), None);
+    assert_eq!(one_below.root().details().get("estimated_cost_overflow"), None);
+
+    for tail_bytes in [1, 4_095, 4_096] {
+        let exact = explain(tail_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "byte tail and reset suffix close the known lower bound at MAX"
+        );
+    }
+
+    let overflow = explain(4_097);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the extra rounded byte block overflows before the small reset result"
+    );
+
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:BytesThenResetSource");
+    let unknown_position = position(PlanNodeKind::Scan, "table:BytesThenResetUnknown");
+    let bytes_position = position(PlanNodeKind::Scan, "table:BytesThenResetTail");
+    let reset_position = position(PlanNodeKind::Invoke, "table:BytesThenResetTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < bytes_position);
+    assert!(reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[bytes_position].parent(),
+        nodes[reset_position].inputs().first(),
+        "the reset consumes the join whose right input is the byte-only scan"
+    );
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 3));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[bytes_position].estimated_rows(), None);
+    assert_eq!(nodes[bytes_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[bytes_position].estimated_work(), None);
+    assert_eq!(nodes[reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[reset_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[reset_position].estimated_work(), Some(1));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(0));
+    assert_eq!(overflow.root().estimated_work(), Some(1));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("byte remainder reset overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_byte_remainders_across_reset_rounding_edges() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_REMAINDER_RESET_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 4);
+
+    // ORNA-PLAN exposes byte estimates but leaves their cost units and
+    // rounding unspecified. Continue the pragmatic 4-KiB block model for
+    // scans and writes. The source contributes MAX-4; an unknown join keeps
+    // the displayed total unknown; then a partial scan, update, and
+    // materialization close the known lower bound. Scan byte 4097 adds the
+    // second block and closes when reset-write bytes are zero. Conversely,
+    // reset-write byte 4096 closes with an empty scan tail, but byte 4097
+    // rounds up in both the update and materialize steps and overflows.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 4;
+    let explain = |scan_bytes, reset_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-remainder-reset-rounding-edges"),
+            source: obj("table:ByteResetEdgeSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteResetEdgeUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteResetEdgeScanTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:ByteResetEdgeTarget"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(reset_write_bytes),
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:byte-reset-edge")),
+        })
+        .expect("byte rounding edges across update cardinality reset")
+    };
+
+    let below = explain(4_096, 0);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for (scan_bytes, reset_write_bytes) in [(4_097, 0), (0, 4_096)] {
+        let exact = explain(scan_bytes, reset_write_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "either the scan remainder or reset write remainder closes at MAX"
+        );
+    }
+
+    for (scan_bytes, reset_write_bytes) in [(0, 4_097), (1, 4_096)] {
+        let overflow = explain(scan_bytes, reset_write_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "the rounded scan and reset-write contributions exceed MAX"
+        );
+    }
+
+    let overflow = explain(0, 4_097);
+    let nodes = overflow.nodes();
+    let node_position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = node_position(PlanNodeKind::Scan, "table:ByteResetEdgeSource");
+    let unknown_position = node_position(PlanNodeKind::Scan, "table:ByteResetEdgeUnknown");
+    let scan_tail_position =
+        node_position(PlanNodeKind::Scan, "table:ByteResetEdgeScanTail");
+    let update_position = node_position(PlanNodeKind::Invoke, "table:ByteResetEdgeTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < scan_tail_position);
+    assert!(update_position < source_position);
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 4));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[scan_tail_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[scan_tail_position].estimated_work(), None);
+    assert_eq!(nodes[update_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[update_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[update_position].estimated_work(), Some(3));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(4_097));
+    assert_eq!(overflow.root().estimated_work(), Some(3));
+    assert_eq!(
+        nodes[scan_tail_position].parent(),
+        nodes[update_position].inputs().first(),
+        "the update consumes the join containing the scan-byte remainder"
+    );
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("byte reset edge overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_rounded_byte_work_across_repeated_resets() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_REMAINDER_REPEATED_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN does not specify byte-cost units or rounding. Continue the
+    // pragmatic 4-KiB block model: the source contributes MAX-4, then an
+    // unknown join hides the total. A scan byte tail and first update write
+    // each round independently; a second update resets the output again to
+    // one row and zero bytes. That later reset must not erase work from the
+    // first update. A zero-byte first write stays one below; either 4096-byte
+    // scan or write tails close exactly; 4097 bytes on either side overflow.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 4;
+    let explain = |scan_bytes, first_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-remainder-repeated-resets"),
+            source: obj("table:RepeatedResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:RepeatedResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:RepeatedResetScanTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:RepeatedResetFirstTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:RepeatedResetLastTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(0),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:repeated-reset-tail")),
+        })
+        .expect("scan byte remainder followed by two cardinality resets")
+    };
+
+    let below = explain(0, 0);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for exact in [explain(4_096, 0), explain(0, 4_096)] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "either rounded byte source closes at MAX through the two resets"
+        );
+    }
+
+    for overflow in [explain(4_097, 0), explain(0, 4_097), explain(1, 4_096)] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "extra scan or update byte rounding survives the later reset"
+        );
+    }
+
+    let overflow = explain(0, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:RepeatedResetSource");
+    let unknown_position = position(PlanNodeKind::Scan, "table:RepeatedResetUnknown");
+    let scan_position = position(PlanNodeKind::Scan, "table:RepeatedResetScanTail");
+    let first_reset_position = position(PlanNodeKind::Invoke, "table:RepeatedResetFirstTarget");
+    let last_reset_position = position(PlanNodeKind::Invoke, "table:RepeatedResetLastTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < scan_position);
+    assert!(last_reset_position < first_reset_position);
+    assert!(first_reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[last_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[last_reset_position].inputs(),
+        &[nodes[first_reset_position].reference().clone()]
+    );
+    assert_eq!(nodes[scan_position].parent(), nodes[first_reset_position].inputs().first());
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 4));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[scan_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[scan_position].estimated_work(), None);
+    assert_eq!(nodes[first_reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[first_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[first_reset_position].estimated_work(), Some(3));
+    assert_eq!(nodes[last_reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[last_reset_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[last_reset_position].estimated_work(), Some(1));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(0));
+    assert_eq!(overflow.root().estimated_work(), Some(1));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("repeated reset byte overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_byte_work_across_two_reset_write_edges() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_REPEATED_RESET_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units and rounding unspecified. Continue the
+    // pragmatic 4-KiB block model: the source contributes MAX-6, an unknown
+    // join hides the total, then a byte-only scan and two cardinality-resetting
+    // updates add their independent lower bounds. The final reset leaves one
+    // row plus its write bytes for materialization, so 4095/4096-byte writes
+    // each round once and close exactly; 4097 rounds twice. A scan byte or an
+    // extra block on either update must remain visible after the later reset.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 6;
+    let explain = |scan_bytes, first_write_bytes, last_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-work-two-reset-edges"),
+            source: obj("table:ByteWorkResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkResetScanTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkResetFirstTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkResetLastTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:byte-work-two-reset-edges")),
+        })
+        .expect("scan remainder and byte writes across repeated resets")
+    };
+
+    let below = explain(0, 0, 4_096);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for exact in [
+        explain(0, 4_096, 4_096),
+        explain(0, 4_095, 4_096),
+        explain(0, 4_096, 4_095),
+    ] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "each reset write contributes one rounded byte block"
+        );
+    }
+
+    for overflow in [
+        explain(1, 4_096, 4_096),
+        explain(0, 4_097, 4_096),
+        explain(0, 4_096, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "scan and both update byte contributions survive the final reset"
+        );
+    }
+
+    let overflow = explain(0, 4_097, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:ByteWorkResetSource");
+    let unknown_position = position(PlanNodeKind::Scan, "table:ByteWorkResetUnknown");
+    let scan_position = position(PlanNodeKind::Scan, "table:ByteWorkResetScanTail");
+    let first_reset_position = position(PlanNodeKind::Invoke, "table:ByteWorkResetFirstTarget");
+    let last_reset_position = position(PlanNodeKind::Invoke, "table:ByteWorkResetLastTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < scan_position);
+    assert!(last_reset_position < first_reset_position);
+    assert!(first_reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[last_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[last_reset_position].inputs(),
+        &[nodes[first_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[scan_position].parent(),
+        nodes[first_reset_position].inputs().first()
+    );
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 6));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[scan_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[scan_position].estimated_work(), None);
+    assert_eq!(nodes[first_reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[first_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[first_reset_position].estimated_work(), Some(3));
+    assert_eq!(nodes[last_reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[last_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[last_reset_position].estimated_work(), Some(3));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(4_097));
+    assert_eq!(overflow.root().estimated_work(), Some(3));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("two-reset byte overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_rounds_split_byte_work_at_each_repeated_reset() {
+    let parsed =
+        orna_syntax_v1::parse_module(SPLIT_BYTE_REMAINDER_REPEATED_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 5);
+
+    // ORNA-PLAN leaves byte-cost units and cross-stage rounding unspecified.
+    // Continue the pragmatic 4-KiB local-work model: each update rounds its
+    // own write bytes, and the final reset output is rounded again by
+    // materialization. With source work at MAX-6, two sub-block reset writes
+    // each add a block and close exactly even when their combined bytes equal
+    // one block. A later reset must preserve the earlier write contribution;
+    // 4097 bytes on either reset crosses the boundary.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 6;
+    let explain = |scan_bytes, first_write_bytes, last_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:split-byte-repeated-resets"),
+            source: obj("table:SplitByteResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SplitByteResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SplitByteResetScanTail"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:SplitByteResetFirstTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:SplitByteResetLastTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:split-byte-repeated-resets")),
+        })
+        .expect("split byte remainders across sequential reset stages")
+    };
+
+    let below = explain(0, 0, 2_048);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for (first_write_bytes, last_write_bytes) in [(2_047, 2_049), (1, 4_095), (4_095, 1)] {
+        let exact = explain(0, first_write_bytes, last_write_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "the two independently rounded writes close at MAX"
+        );
+    }
+
+    for (scan_bytes, first_write_bytes, last_write_bytes) in [
+        (1, 2_047, 2_049),
+        (0, 4_097, 2_048),
+        (0, 2_048, 4_097),
+    ] {
+        let overflow = explain(scan_bytes, first_write_bytes, last_write_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "scan or reset byte work beyond the exact remainder overflows"
+        );
+    }
+
+    let overflow = explain(0, 2_048, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:SplitByteResetSource");
+    let unknown_position = position(PlanNodeKind::Scan, "table:SplitByteResetUnknown");
+    let scan_position = position(PlanNodeKind::Scan, "table:SplitByteResetScanTail");
+    let first_reset_position = position(PlanNodeKind::Invoke, "table:SplitByteResetFirstTarget");
+    let last_reset_position = position(PlanNodeKind::Invoke, "table:SplitByteResetLastTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < scan_position);
+    assert!(last_reset_position < first_reset_position);
+    assert!(first_reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[last_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[last_reset_position].inputs(),
+        &[nodes[first_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[scan_position].parent(),
+        nodes[first_reset_position].inputs().first()
+    );
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 6));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[scan_position].estimated_bytes(), Some(0));
+    assert_eq!(nodes[scan_position].estimated_work(), None);
+    assert_eq!(nodes[first_reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[first_reset_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[first_reset_position].estimated_work(), Some(2));
+    assert_eq!(nodes[last_reset_position].estimated_rows(), Some(1));
+    assert_eq!(nodes[last_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[last_reset_position].estimated_work(), Some(3));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(4_097));
+    assert_eq!(overflow.root().estimated_work(), Some(3));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("split reset byte overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_rounds_split_bytes_per_scan_and_reset_after_unknown() {
+    let parsed = orna_syntax_v1::parse_module(MULTISCAN_SPLIT_BYTE_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN leaves byte-cost units and accumulation details unspecified.
+    // Continue the pragmatic local 4-KiB block model: after an unknown join,
+    // each byte-only scan and each update write rounds independently, then
+    // materialization prices the last reset's output again. The source starts
+    // at MAX-8. Two scan remainders and two one-block writes plus the final
+    // materialization close exactly; splitting a block across stages cannot
+    // collapse their lower bounds. A 4097-byte estimate on any one stage adds
+    // a block and overflows, even if a later update resets cardinality.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 8;
+    let explain = |first_scan_bytes, second_scan_bytes, first_write_bytes, last_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:multiscan-split-byte-reset"),
+            source: obj("table:MultiScanResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:MultiScanResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:MultiScanResetFirstByteScan"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(first_scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:MultiScanResetSecondByteScan"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(second_scan_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:MultiScanResetFirstTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:MultiScanResetLastTarget"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:multiscan-split-byte-reset")),
+        })
+        .expect("multiple scan byte remainders and repeated reset writes")
+    };
+
+    let below = explain(0, 2_048, 2_048, 2_048);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for exact in [
+        explain(2_047, 2_049, 2_047, 2_049),
+        explain(2_048, 2_048, 2_048, 2_048),
+    ] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "each sub-block scan and reset write closes independently at MAX"
+        );
+    }
+
+    for overflow in [
+        explain(4_097, 2_048, 2_048, 2_048),
+        explain(2_048, 4_097, 2_048, 2_048),
+        explain(2_048, 2_048, 4_097, 2_048),
+        explain(2_048, 2_048, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a later rounded stage crosses MAX without clearing prior work"
+        );
+    }
+
+    let overflow = explain(2_048, 2_048, 2_048, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:MultiScanResetSource");
+    let unknown_position = position(PlanNodeKind::Scan, "table:MultiScanResetUnknown");
+    let first_scan_position =
+        position(PlanNodeKind::Scan, "table:MultiScanResetFirstByteScan");
+    let second_scan_position =
+        position(PlanNodeKind::Scan, "table:MultiScanResetSecondByteScan");
+    let first_reset_position =
+        position(PlanNodeKind::Invoke, "table:MultiScanResetFirstTarget");
+    let last_reset_position =
+        position(PlanNodeKind::Invoke, "table:MultiScanResetLastTarget");
+    assert!(source_position < unknown_position);
+    assert!(unknown_position < first_scan_position);
+    assert!(first_scan_position < second_scan_position);
+    assert!(last_reset_position < first_reset_position);
+    assert!(first_reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[last_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[last_reset_position].inputs(),
+        &[nodes[first_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[second_scan_position].parent(),
+        nodes[first_reset_position].inputs().first()
+    );
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 8));
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[first_scan_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[first_scan_position].estimated_work(), None);
+    assert_eq!(nodes[second_scan_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[second_scan_position].estimated_work(), None);
+    assert_eq!(nodes[first_reset_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[first_reset_position].estimated_work(), Some(2));
+    assert_eq!(nodes[last_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[last_reset_position].estimated_work(), Some(3));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(4_097));
+    assert_eq!(overflow.root().estimated_work(), Some(3));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("multi-scan reset overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_split_byte_work_on_both_sides_of_unknown_scan() {
+    let parsed = orna_syntax_v1::parse_module(SPLIT_BYTE_WORK_UNKNOWN_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN leaves byte-cost units and cross-stage accumulation details
+    // unspecified. Continue the pragmatic local 4-KiB block model: one
+    // byte-only scan precedes an unknown scan and another follows it; two
+    // update resets and materialization close the MAX-8 source remainder.
+    // Both scan estimates and each update write round locally. A later
+    // unknown scan cannot erase the known lower bound before it, and a later
+    // reset cannot erase the split scan or write work that follows.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 8;
+    let explain = |before_unknown_bytes, after_unknown_bytes, first_write_bytes, last_write_bytes| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:split-byte-work-unknown-edge"),
+            source: obj("table:SplitByteUnknownEdgeSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:SplitByteUnknownEdgeBefore"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(before_unknown_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SplitByteUnknownEdgeUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:SplitByteUnknownEdgeAfter"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(after_unknown_bytes),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:SplitByteUnknownEdgeFirstReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:SplitByteUnknownEdgeLastReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:split-byte-work-unknown-edge")),
+        })
+        .expect("split scans around unknown input and repeated reset writes")
+    };
+
+    let below = explain(4_096, 0, 2_048, 2_048);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for (before_unknown_bytes, after_unknown_bytes) in [(4_095, 4_096), (4_096, 4_095)] {
+        let exact = explain(before_unknown_bytes, after_unknown_bytes, 2_048, 2_048);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "the pre- and post-unknown scan bounds combine with both reset writes"
+        );
+    }
+
+    for overflow in [
+        explain(4_097, 4_096, 2_048, 2_048),
+        explain(4_096, 4_097, 2_048, 2_048),
+        explain(4_096, 4_096, 4_097, 2_048),
+        explain(4_096, 4_096, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "crossing one local rounding edge survives unknown and reset tails"
+        );
+    }
+
+    let overflow = explain(4_096, 4_096, 2_048, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:SplitByteUnknownEdgeSource");
+    let before_position = position(PlanNodeKind::Scan, "table:SplitByteUnknownEdgeBefore");
+    let unknown_position = position(PlanNodeKind::Scan, "table:SplitByteUnknownEdgeUnknown");
+    let after_position = position(PlanNodeKind::Scan, "table:SplitByteUnknownEdgeAfter");
+    let first_reset_position = position(PlanNodeKind::Invoke, "table:SplitByteUnknownEdgeFirstReset");
+    let last_reset_position = position(PlanNodeKind::Invoke, "table:SplitByteUnknownEdgeLastReset");
+    assert!(source_position < before_position);
+    assert!(before_position < unknown_position);
+    assert!(unknown_position < after_position);
+    assert!(last_reset_position < first_reset_position);
+    assert!(first_reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[last_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[last_reset_position].inputs(),
+        &[nodes[first_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[after_position].parent(),
+        nodes[first_reset_position].inputs().first()
+    );
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 8));
+    for (scan_position, bytes) in [(before_position, 4_096), (after_position, 4_096)] {
+        assert_eq!(nodes[scan_position].estimated_bytes(), Some(bytes));
+        assert_eq!(nodes[scan_position].estimated_work(), None);
+    }
+    assert_eq!(nodes[unknown_position].estimated_work(), None);
+    assert_eq!(nodes[first_reset_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[first_reset_position].estimated_work(), Some(2));
+    assert_eq!(nodes[last_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[last_reset_position].estimated_work(), Some(3));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(4_097));
+    assert_eq!(overflow.root().estimated_work(), Some(3));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("unknown split-byte overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_retains_split_byte_work_across_unknown_scan_gaps() {
+    let parsed = orna_syntax_v1::parse_module(MULTI_UNKNOWN_BYTE_WORK_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 8);
+
+    // ORNA-PLAN leaves byte-cost units and unknown-edge accumulation details
+    // unspecified. Continue the pragmatic local 4-KiB model: three byte-only
+    // scan bounds are separated by two unknown scans, then two updates reset
+    // cardinality before materialization. Each known scan/write contribution
+    // is retained across both unknown gaps and the later resets. Three scan
+    // blocks plus three write/materialize blocks close MAX-9 exactly; 4097
+    // bytes on any one stage adds a block beyond that boundary.
+    const MAX_BYTE_BLOCKS: u64 = 4_503_599_627_370_496;
+    const FIRST_REMAINDER_SOURCE_BYTES: u64 = u64::MAX - 4_094;
+    let source_rows = u64::MAX - MAX_BYTE_BLOCKS - 9;
+    let explain = |before_unknown_bytes,
+                   between_unknown_bytes,
+                   after_unknown_bytes,
+                   first_write_bytes,
+                   last_write_bytes| {
+        let byte_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:multi-unknown-byte-work-edge"),
+            source: obj("table:MultiUnknownByteSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(FIRST_REMAINDER_SOURCE_BYTES),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:MultiUnknownByteBefore"),
+                    statistics: byte_stats(before_unknown_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:MultiUnknownByteUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:MultiUnknownByteBetween"),
+                    statistics: byte_stats(between_unknown_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:MultiUnknownByteUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:MultiUnknownByteAfter"),
+                    statistics: byte_stats(after_unknown_bytes),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:MultiUnknownByteFirstReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:MultiUnknownByteLastReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:multi-unknown-byte-work-edge")),
+        })
+        .expect("split byte work across unknown scan gaps and resets")
+    };
+
+    let below = explain(4_096, 4_096, 0, 2_048, 2_048);
+    assert_eq!(below.plan().estimated_cost(), None);
+    assert_eq!(below.root().details().get("estimated_cost_overflow"), None);
+
+    for exact in [
+        explain(4_095, 4_096, 2_047, 2_047, 2_049),
+        explain(4_096, 4_096, 4_096, 2_048, 2_048),
+    ] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(
+            exact.root().details().get("estimated_cost_overflow"),
+            None,
+            "the split bounds across both unknown scans close at MAX"
+        );
+    }
+
+    for overflow in [
+        explain(4_097, 4_096, 4_096, 2_048, 2_048),
+        explain(4_096, 4_097, 4_096, 2_048, 2_048),
+        explain(4_096, 4_096, 4_097, 2_048, 2_048),
+        explain(4_096, 4_096, 4_096, 4_097, 2_048),
+        explain(4_096, 4_096, 4_096, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a rounded scan or reset contribution survives unknown gaps"
+        );
+    }
+
+    let overflow = explain(4_096, 4_096, 4_096, 2_048, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let source_position = position(PlanNodeKind::Scan, "table:MultiUnknownByteSource");
+    let before_position = position(PlanNodeKind::Scan, "table:MultiUnknownByteBefore");
+    let unknown_first_position =
+        position(PlanNodeKind::Scan, "table:MultiUnknownByteUnknownFirst");
+    let between_position = position(PlanNodeKind::Scan, "table:MultiUnknownByteBetween");
+    let unknown_second_position =
+        position(PlanNodeKind::Scan, "table:MultiUnknownByteUnknownSecond");
+    let after_position = position(PlanNodeKind::Scan, "table:MultiUnknownByteAfter");
+    let first_reset_position =
+        position(PlanNodeKind::Invoke, "table:MultiUnknownByteFirstReset");
+    let last_reset_position =
+        position(PlanNodeKind::Invoke, "table:MultiUnknownByteLastReset");
+    assert!(source_position < before_position);
+    assert!(before_position < unknown_first_position);
+    assert!(unknown_first_position < between_position);
+    assert!(between_position < unknown_second_position);
+    assert!(unknown_second_position < after_position);
+    assert!(last_reset_position < first_reset_position);
+    assert!(first_reset_position < source_position);
+    assert_eq!(
+        overflow.root().inputs(),
+        &[nodes[last_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[last_reset_position].inputs(),
+        &[nodes[first_reset_position].reference().clone()]
+    );
+    assert_eq!(
+        nodes[after_position].parent(),
+        nodes[first_reset_position].inputs().first()
+    );
+    assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 9));
+    for (scan_position, bytes) in [
+        (before_position, 4_096),
+        (between_position, 4_096),
+        (after_position, 4_096),
+    ] {
+        assert_eq!(nodes[scan_position].estimated_bytes(), Some(bytes));
+        assert_eq!(nodes[scan_position].estimated_work(), None);
+    }
+    assert_eq!(nodes[unknown_first_position].estimated_work(), None);
+    assert_eq!(nodes[unknown_second_position].estimated_work(), None);
+    assert_eq!(nodes[first_reset_position].estimated_bytes(), Some(2_048));
+    assert_eq!(nodes[first_reset_position].estimated_work(), Some(2));
+    assert_eq!(nodes[last_reset_position].estimated_bytes(), Some(4_097));
+    assert_eq!(nodes[last_reset_position].estimated_work(), Some(3));
+    assert_eq!(overflow.root().estimated_rows(), Some(1));
+    assert_eq!(overflow.root().estimated_bytes(), Some(4_097));
+    assert_eq!(overflow.root().estimated_work(), Some(3));
+    assert!(nodes.iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+
+    let surface = serde_json::to_value(&overflow).expect("multi-unknown byte overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_rounds_byte_work_per_scan_across_unknown_gaps_at_max() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_UNKNOWN_GAP_ROUNDING_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN does not define byte-work rounding across unknown joins.
+    // Continue the pragmatic local 4-KiB model: each partial byte-only scan
+    // rounds independently, even when two unknown scans separate the three
+    // known scans. Three half-block scans therefore contribute three units;
+    // aggregating their bytes first would contribute only two. The known
+    // source work leaves exactly those three units before u64::MAX.
+    let explain = |source_rows, before_bytes, between_bytes, after_bytes| {
+        let byte_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-work-unknown-gap-rounding-edge"),
+            source: obj("table:ByteWorkUnknownGapSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(4_096),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapBefore"),
+                    statistics: byte_stats(before_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapFirstUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapBetween"),
+                    statistics: byte_stats(between_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapLastUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkUnknownGapAfter"),
+                    statistics: byte_stats(after_bytes),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("byte work with partial estimates split across unknown joins")
+    };
+
+    for (exact, byte_sizes) in [
+        (
+            explain(u64::MAX - 4, 2_048, 2_048, 2_048),
+            [2_048, 2_048, 2_048],
+        ),
+        (
+            explain(u64::MAX - 4, 4_095, 4_096, 1),
+            [4_095, 4_096, 1],
+        ),
+    ] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let nodes = exact.nodes();
+        let source_position = nodes
+            .iter()
+            .position(|node| node.object() == Some(&obj("table:ByteWorkUnknownGapSource")))
+            .unwrap();
+        assert_eq!(nodes[source_position].estimated_work(), Some(u64::MAX - 3));
+        for (name, bytes) in [
+            "table:ByteWorkUnknownGapBefore",
+            "table:ByteWorkUnknownGapBetween",
+            "table:ByteWorkUnknownGapAfter",
+        ]
+        .into_iter()
+        .zip(byte_sizes)
+        {
+            let scan = nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), None);
+            assert_eq!(scan.details().get("estimated_work_overflow"), None);
+        }
+    }
+
+    for overflow in [
+        explain(u64::MAX - 4, 4_097, 2_048, 2_048),
+        explain(u64::MAX - 4, 2_048, 4_097, 2_048),
+        explain(u64::MAX - 4, 2_048, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "one scan crossing a 4-KiB boundary overflows the exact known-work tail"
+        );
+        let nodes = overflow.nodes();
+        let named_position = |name: &str| {
+            nodes
+                .iter()
+                .position(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+        };
+        let source = named_position("table:ByteWorkUnknownGapSource");
+        let before = named_position("table:ByteWorkUnknownGapBefore");
+        let unknown_first = named_position("table:ByteWorkUnknownGapFirstUnknown");
+        let between = named_position("table:ByteWorkUnknownGapBetween");
+        let unknown_last = named_position("table:ByteWorkUnknownGapLastUnknown");
+        let after = named_position("table:ByteWorkUnknownGapAfter");
+        assert!(source < before);
+        assert!(before < unknown_first);
+        assert!(unknown_first < between);
+        assert!(between < unknown_last);
+        assert!(unknown_last < after);
+        assert_eq!(nodes[unknown_first].estimated_work(), None);
+        assert_eq!(nodes[unknown_last].estimated_work(), None);
+        assert!(nodes.iter().all(|node| {
+            node.actual_rows().is_none() && node.actual_bytes().is_none()
+        }));
+    }
+
+    // At a source remainder one unit closer to MAX, independent rounding of
+    // each half-block scan proves overflow. Aggregating the 6-KiB scan bytes
+    // before rounding would contribute only two units and fit exactly.
+    let split_rounding_overflow = explain(u64::MAX - 3, 2_048, 2_048, 2_048);
+    assert_eq!(split_rounding_overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        split_rounding_overflow
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+}
+
+#[test]
+fn explain_keeps_full_byte_scan_rounding_across_unknown_gap_edges() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_ROUNDING_UNKNOWN_GAP_EDGE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not specify how byte work is rounded across unknown
+    // joins. Keep the documented local 4-KiB model: every scan with complete
+    // row and byte estimates charges its own rounded blocks. The first
+    // unknown join makes the cumulative join cost unavailable, while the
+    // known scan costs remain available across both later unknown gaps.
+    let explain = |source_rows, before_bytes, between_bytes, after_bytes| {
+        let known_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-rounding-unknown-gap-edge"),
+            source: obj("table:ByteRoundingGapSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(4_096),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteRoundingGapFirstUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteRoundingGapBefore"),
+                    statistics: known_stats(before_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteRoundingGapSecondUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteRoundingGapBetween"),
+                    statistics: known_stats(between_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteRoundingGapThirdUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteRoundingGapAfter"),
+                    statistics: known_stats(after_bytes),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("complete per-scan byte estimates through unknown joins")
+    };
+
+    for (exact, byte_sizes) in [
+        (
+            explain(u64::MAX - 7, 2_048, 2_048, 2_048),
+            [2_048, 2_048, 2_048],
+        ),
+        (
+            explain(u64::MAX - 7, 4_095, 4_096, 1),
+            [4_095, 4_096, 1],
+        ),
+    ] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let nodes = exact.nodes();
+        let source = nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteRoundingGapSource")))
+            .unwrap();
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 6));
+        for (name, bytes) in [
+            "table:ByteRoundingGapBefore",
+            "table:ByteRoundingGapBetween",
+            "table:ByteRoundingGapAfter",
+        ]
+        .into_iter()
+        .zip(byte_sizes)
+        {
+            let scan = nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_rows(), Some(1));
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(2));
+            assert_eq!(scan.details().get("estimated_work_overflow"), None);
+        }
+    }
+
+    for overflow in [
+        explain(u64::MAX - 7, 4_097, 2_048, 2_048),
+        explain(u64::MAX - 7, 2_048, 4_097, 2_048),
+        explain(u64::MAX - 7, 2_048, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a local block edge proves overflow across the unknown gaps"
+        );
+        let nodes = overflow.nodes();
+        let named_position = |name: &str| {
+            nodes
+                .iter()
+                .position(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+        };
+        let source = named_position("table:ByteRoundingGapSource");
+        let first_unknown = named_position("table:ByteRoundingGapFirstUnknown");
+        let before = named_position("table:ByteRoundingGapBefore");
+        let second_unknown = named_position("table:ByteRoundingGapSecondUnknown");
+        let between = named_position("table:ByteRoundingGapBetween");
+        let third_unknown = named_position("table:ByteRoundingGapThirdUnknown");
+        let after = named_position("table:ByteRoundingGapAfter");
+        assert!(source < first_unknown);
+        assert!(first_unknown < before);
+        assert!(before < second_unknown);
+        assert!(second_unknown < between);
+        assert!(between < third_unknown);
+        assert!(third_unknown < after);
+        for unknown in [first_unknown, second_unknown, third_unknown] {
+            assert_eq!(nodes[unknown].estimated_work(), None);
+        }
+        assert!(nodes.iter().all(|node| {
+            node.actual_rows().is_none() && node.actual_bytes().is_none()
+        }));
+    }
+
+    // With the source one unit nearer to MAX, separate half-block scans
+    // overflow; rounding their combined bytes would add just two blocks and
+    // fit exactly after the three known row contributions.
+    let per_scan_overflow = explain(u64::MAX - 6, 2_048, 2_048, 2_048);
+    assert_eq!(per_scan_overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        per_scan_overflow
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+}
+
+#[test]
+fn explain_closes_known_scan_rounding_with_reset_materialization_after_unknowns() {
+    let parsed = orna_syntax_v1::parse_module(KNOWN_BYTE_ROUNDING_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 9);
+
+    // ORNA-PLAN does not prescribe how known byte work composes across
+    // unknown joins and later writes. Continue the pragmatic per-operator
+    // 4-KiB ceiling: three complete scan estimates, two update writes, and
+    // materialization each keep their local rounded byte contribution. The
+    // unknown joins leave the total unavailable but cannot erase this known
+    // lower bound. The source remainder closes it exactly at MAX.
+    let explain = |source_rows,
+                   first_scan_bytes,
+                   middle_scan_bytes,
+                   last_scan_bytes,
+                   first_write_bytes,
+                   last_write_bytes| {
+        let scan_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:known-byte-rounding-reset-tail"),
+            source: obj("table:KnownByteRoundingSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(4_096),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingFirstUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingFirstScan"),
+                    statistics: scan_stats(first_scan_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingSecondUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingMiddleScan"),
+                    statistics: scan_stats(middle_scan_bytes),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingThirdUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingLastScan"),
+                    statistics: scan_stats(last_scan_bytes),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:KnownByteRoundingFirstReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(first_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:KnownByteRoundingLastReset"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(last_write_bytes),
+                    estimated_table_rows_before: Some(1),
+                },
+            ],
+            materialize_into: Some(obj("materialization:known-byte-rounding-reset-tail")),
+        })
+        .expect("known scan byte rounding through unknowns and reset writes")
+    };
+
+    for exact in [
+        explain(u64::MAX - 13, 2_048, 2_048, 2_048, 2_048, 2_048),
+        explain(u64::MAX - 13, 4_095, 4_096, 1, 4_095, 4_096),
+    ] {
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let nodes = exact.nodes();
+        let named_node = |name: &str| {
+            nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+        };
+        assert_eq!(
+            named_node("table:KnownByteRoundingSource").estimated_work(),
+            Some(u64::MAX - 12)
+        );
+        for name in [
+            "table:KnownByteRoundingFirstScan",
+            "table:KnownByteRoundingMiddleScan",
+            "table:KnownByteRoundingLastScan",
+        ] {
+            assert_eq!(named_node(name).estimated_work(), Some(2));
+        }
+        assert_eq!(
+            named_node("table:KnownByteRoundingFirstReset").estimated_work(),
+            Some(2)
+        );
+        assert_eq!(
+            named_node("table:KnownByteRoundingLastReset").estimated_work(),
+            Some(2)
+        );
+        assert_eq!(exact.root().estimated_work(), Some(2));
+    }
+
+    for overflow in [
+        explain(u64::MAX - 13, 4_097, 2_048, 2_048, 2_048, 2_048),
+        explain(u64::MAX - 13, 2_048, 4_097, 2_048, 2_048, 2_048),
+        explain(u64::MAX - 13, 2_048, 2_048, 4_097, 2_048, 2_048),
+        explain(u64::MAX - 13, 2_048, 2_048, 2_048, 4_097, 2_048),
+        explain(u64::MAX - 13, 2_048, 2_048, 2_048, 2_048, 4_097),
+    ] {
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a scan, reset, or materialization byte edge exceeds the exact tail"
+        );
+        let nodes = overflow.nodes();
+        assert!(nodes.iter().all(|node| {
+            node.actual_rows().is_none() && node.actual_bytes().is_none()
+        }));
+    }
+
+    let overflow = explain(u64::MAX - 13, 2_048, 2_048, 2_048, 2_048, 4_097);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let root = position(PlanNodeKind::Materialize, "materialization:known-byte-rounding-reset-tail");
+    let last_reset = position(PlanNodeKind::Invoke, "table:KnownByteRoundingLastReset");
+    let first_reset = position(PlanNodeKind::Invoke, "table:KnownByteRoundingFirstReset");
+    let source = position(PlanNodeKind::Scan, "table:KnownByteRoundingSource");
+    let first_unknown = position(PlanNodeKind::Scan, "table:KnownByteRoundingFirstUnknown");
+    let first_scan = position(PlanNodeKind::Scan, "table:KnownByteRoundingFirstScan");
+    let second_unknown = position(PlanNodeKind::Scan, "table:KnownByteRoundingSecondUnknown");
+    let middle_scan = position(PlanNodeKind::Scan, "table:KnownByteRoundingMiddleScan");
+    let third_unknown = position(PlanNodeKind::Scan, "table:KnownByteRoundingThirdUnknown");
+    let last_scan = position(PlanNodeKind::Scan, "table:KnownByteRoundingLastScan");
+    assert!(root < last_reset);
+    assert!(last_reset < first_reset);
+    assert!(first_reset < source);
+    assert!(source < first_unknown);
+    assert!(first_unknown < first_scan);
+    assert!(first_scan < second_unknown);
+    assert!(second_unknown < middle_scan);
+    assert!(middle_scan < third_unknown);
+    assert!(third_unknown < last_scan);
+    assert_eq!(nodes[root].estimated_work(), Some(3));
+    assert_eq!(nodes[last_reset].estimated_work(), Some(3));
+    assert_eq!(nodes[first_reset].estimated_work(), Some(2));
+    assert_eq!(nodes[last_scan].parent(), nodes[first_reset].inputs().first());
+}
+
+#[test]
+fn explain_closes_known_byte_work_across_three_resets_after_unknown() {
+    let parsed = orna_syntax_v1::parse_module(KNOWN_BYTE_ROUNDING_THREE_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 6);
+
+    // ORNA-PLAN is silent on byte rounding across successive cardinality
+    // resets. Keep the pragmatic local 4-KiB ceiling: each known write adds
+    // its own block contribution, prior reset work stays in the known lower
+    // bound, and materialization prices only the last reset's output. The
+    // one unknown join makes the displayed total unavailable; a chosen source
+    // remainder still lets the local scan/write/materialization tail close
+    // exactly at MAX.
+    let explain = |scan_bytes, write_bytes: [u64; 3]| {
+        let scan_stats = Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(scan_bytes),
+            mutable_branch: None,
+        });
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:known-byte-rounding-three-reset-tail"),
+            source: obj("table:KnownByteRoundingThreeResetSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 11),
+                estimated_bytes: Some(4_096),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingThreeResetUnknown"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteRoundingThreeResetScan"),
+                    statistics: scan_stats,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: [
+                (
+                    "table:KnownByteRoundingThreeResetFirst",
+                    write_bytes[0],
+                ),
+                (
+                    "table:KnownByteRoundingThreeResetMiddle",
+                    write_bytes[1],
+                ),
+                (
+                    "table:KnownByteRoundingThreeResetLast",
+                    write_bytes[2],
+                ),
+            ]
+            .into_iter()
+            .map(|(table, bytes)| QueryMutationDescription {
+                table: obj(table),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(bytes),
+                estimated_table_rows_before: Some(1),
+            })
+            .collect(),
+            materialize_into: Some(obj("materialization:known-byte-rounding-three-reset-tail")),
+        })
+        .expect("known scan and repeated reset byte work after unknown join")
+    };
+
+    for write_bytes in [[2_048; 3], [4_095, 4_096, 1]] {
+        let exact = explain(4_095, write_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let nodes = exact.nodes();
+        let named_node = |name: &str| {
+            nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+        };
+        assert_eq!(
+            named_node("table:KnownByteRoundingThreeResetSource").estimated_work(),
+            Some(u64::MAX - 10)
+        );
+        assert_eq!(
+            named_node("table:KnownByteRoundingThreeResetUnknown").estimated_work(),
+            None
+        );
+        assert_eq!(
+            named_node("table:KnownByteRoundingThreeResetScan").estimated_work(),
+            Some(2)
+        );
+        for name in [
+            "table:KnownByteRoundingThreeResetFirst",
+            "table:KnownByteRoundingThreeResetMiddle",
+            "table:KnownByteRoundingThreeResetLast",
+        ] {
+            assert_eq!(named_node(name).estimated_work(), Some(2));
+        }
+        assert_eq!(exact.root().estimated_work(), Some(2));
+    }
+
+    let cleared_output = explain(4_095, [2_048, 2_048, 0]);
+    assert_eq!(cleared_output.plan().estimated_cost(), None);
+    assert_eq!(cleared_output.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(cleared_output.root().estimated_bytes(), Some(0));
+    assert_eq!(cleared_output.root().estimated_work(), Some(1));
+    assert_eq!(
+        cleared_output.nodes().iter().find(|node| {
+            node.object() == Some(&obj("table:KnownByteRoundingThreeResetLast"))
+        }).unwrap().estimated_work(),
+        Some(1)
+    );
+
+    for write_bytes in [
+        [4_097, 2_048, 2_048],
+        [2_048, 4_097, 2_048],
+        [2_048, 2_048, 4_097],
+    ] {
+        let overflow = explain(4_095, write_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "each write rounding edge survives a later cardinality reset"
+        );
+    }
+
+    let overflow = explain(4_095, [2_048, 2_048, 4_097]);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let root = position(
+        PlanNodeKind::Materialize,
+        "materialization:known-byte-rounding-three-reset-tail",
+    );
+    let last_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteRoundingThreeResetLast",
+    );
+    let middle_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteRoundingThreeResetMiddle",
+    );
+    let first_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteRoundingThreeResetFirst",
+    );
+    let source = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteRoundingThreeResetSource",
+    );
+    assert!(root < last_reset);
+    assert!(last_reset < middle_reset);
+    assert!(middle_reset < first_reset);
+    assert!(first_reset < source);
+    assert_eq!(nodes[root].estimated_work(), Some(3));
+    assert_eq!(nodes[last_reset].estimated_work(), Some(3));
+    assert_eq!(nodes[middle_reset].estimated_work(), Some(2));
+    assert_eq!(nodes[first_reset].estimated_work(), Some(2));
+}
+
+#[test]
+fn explain_closes_known_byte_work_over_three_scans_and_resets() {
+    let parsed = orna_syntax_v1::parse_module(KNOWN_BYTE_WORK_THREE_SCAN_RESET_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 10);
+
+    // ORNA-PLAN is silent on accumulating known byte work across unknown
+    // gaps and repeated resets. Follow the pragmatic local 4-KiB ceiling:
+    // three complete scans, three update writes, and the final materialize
+    // each round their own bytes. Unknown joins hide the exact total but do
+    // not erase these known contributions. The chosen source remainder closes
+    // all seven local scan/write stages at MAX.
+    let explain = |scan_bytes: [u64; 3], write_bytes: [u64; 3]| {
+        let scan_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: Some(1),
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:known-byte-work-three-scan-reset"),
+            source: obj("table:KnownByteWorkThreeTailSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX - 15),
+                estimated_bytes: Some(4_096),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailScanFirst"),
+                    statistics: scan_stats(scan_bytes[0]),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailScanMiddle"),
+                    statistics: scan_stats(scan_bytes[1]),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:KnownByteWorkThreeTailScanLast"),
+                    statistics: scan_stats(scan_bytes[2]),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: [
+                "table:KnownByteWorkThreeTailResetFirst",
+                "table:KnownByteWorkThreeTailResetMiddle",
+                "table:KnownByteWorkThreeTailResetLast",
+            ]
+            .into_iter()
+            .zip(write_bytes)
+            .map(|(table, bytes)| QueryMutationDescription {
+                table: obj(table),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(1),
+                estimated_write_bytes: Some(bytes),
+                estimated_table_rows_before: Some(1),
+            })
+            .collect(),
+            materialize_into: Some(obj("materialization:known-byte-work-three-scan-reset")),
+        })
+        .expect("three known byte scans and three reset writes over unknown gaps")
+    };
+
+    for (scan_bytes, write_bytes) in [
+        ([2_048; 3], [2_048; 3]),
+        ([4_095, 4_096, 1], [4_095, 4_096, 1]),
+    ] {
+        let exact = explain(scan_bytes, write_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let nodes = exact.nodes();
+        let named_node = |name: &str| {
+            nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+        };
+        assert_eq!(
+            named_node("table:KnownByteWorkThreeTailSource").estimated_work(),
+            Some(u64::MAX - 14)
+        );
+        for name in [
+            "table:KnownByteWorkThreeTailScanFirst",
+            "table:KnownByteWorkThreeTailScanMiddle",
+            "table:KnownByteWorkThreeTailScanLast",
+            "table:KnownByteWorkThreeTailResetFirst",
+            "table:KnownByteWorkThreeTailResetMiddle",
+            "table:KnownByteWorkThreeTailResetLast",
+        ] {
+            assert_eq!(named_node(name).estimated_work(), Some(2));
+        }
+        assert_eq!(exact.root().estimated_work(), Some(2));
+        for name in [
+            "table:KnownByteWorkThreeTailUnknownFirst",
+            "table:KnownByteWorkThreeTailUnknownSecond",
+            "table:KnownByteWorkThreeTailUnknownThird",
+        ] {
+            assert_eq!(named_node(name).estimated_work(), None);
+        }
+    }
+
+    for index in 0..3 {
+        let mut scan_bytes = [2_048; 3];
+        scan_bytes[index] = 4_097;
+        let overflow = explain(scan_bytes, [2_048; 3]);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "each rounded scan edge remains visible through all resets"
+        );
+    }
+
+    for index in 0..3 {
+        let mut write_bytes = [2_048; 3];
+        write_bytes[index] = 4_097;
+        let overflow = explain([2_048; 3], write_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "each rounded reset edge remains visible through later resets"
+        );
+    }
+
+    let overflow = explain([2_048; 3], [2_048, 2_048, 4_097]);
+    let nodes = overflow.nodes();
+    let position = |kind, name: &str| {
+        nodes
+            .iter()
+            .position(|node| node.kind() == kind && node.object() == Some(&obj(name)))
+            .expect("fixture-backed plan node appears")
+    };
+    let root = position(
+        PlanNodeKind::Materialize,
+        "materialization:known-byte-work-three-scan-reset",
+    );
+    let last_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteWorkThreeTailResetLast",
+    );
+    let middle_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteWorkThreeTailResetMiddle",
+    );
+    let first_reset = position(
+        PlanNodeKind::Invoke,
+        "table:KnownByteWorkThreeTailResetFirst",
+    );
+    let source = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailSource",
+    );
+    let first_unknown = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailUnknownFirst",
+    );
+    let first_scan = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailScanFirst",
+    );
+    let second_unknown = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailUnknownSecond",
+    );
+    let middle_scan = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailScanMiddle",
+    );
+    let third_unknown = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailUnknownThird",
+    );
+    let last_scan = position(
+        PlanNodeKind::Scan,
+        "table:KnownByteWorkThreeTailScanLast",
+    );
+    assert!(root < last_reset);
+    assert!(last_reset < middle_reset);
+    assert!(middle_reset < first_reset);
+    assert!(first_reset < source);
+    assert!(source < first_unknown);
+    assert!(first_unknown < first_scan);
+    assert!(first_scan < second_unknown);
+    assert!(second_unknown < middle_scan);
+    assert!(middle_scan < third_unknown);
+    assert!(third_unknown < last_scan);
+    assert_eq!(nodes[root].estimated_work(), Some(3));
+    assert_eq!(nodes[last_reset].estimated_work(), Some(3));
+    assert_eq!(nodes[middle_reset].estimated_work(), Some(2));
+    assert_eq!(nodes[first_reset].estimated_work(), Some(2));
+}
+
+#[test]
+fn explain_closes_first_byte_work_across_three_scans_at_max() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not define how byte costs combine across scan gaps.
+    // Keep per-scan 4-KiB rounding explicit: a known zero-byte scan contributes
+    // zero, while either one-byte scan contributes one full local unit. Three
+    // known scan costs must remain visible across the three unknown joins.
+    let explain = |source_rows, source_bytes, scan_bytes: [u64; 3]| {
+        let scan_stats = |bytes| {
+            Some(QuerySourceStatistics {
+                estimated_rows: Some(0),
+                estimated_bytes: Some(bytes),
+                mutable_branch: None,
+            })
+        };
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:byte-work-three-scan-first-byte"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(source_bytes),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: scan_stats(scan_bytes[0]),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanMiddle"),
+                    statistics: scan_stats(scan_bytes[1]),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: scan_stats(scan_bytes[2]),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("known zero- and one-byte scans separated by unknown joins")
+    };
+
+    let exact = explain(u64::MAX - 2, 0, [0, 1, 1]);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    let nodes = exact.nodes();
+    let named_node = |name: &str| {
+        nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj(name)))
+            .unwrap()
+    };
+    assert_eq!(
+        named_node("table:ByteWorkThreeScanSource").estimated_work(),
+        Some(u64::MAX - 2)
+    );
+    for (name, bytes, work) in [
+        ("table:ByteWorkThreeScanFirst", 0, 0),
+        ("table:ByteWorkThreeScanMiddle", 1, 1),
+        ("table:ByteWorkThreeScanLast", 1, 1),
+    ] {
+        let scan = named_node(name);
+        assert_eq!(scan.estimated_rows(), Some(0));
+        assert_eq!(scan.estimated_bytes(), Some(bytes));
+        assert_eq!(scan.estimated_work(), Some(work));
+    }
+    for name in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+        "table:ByteWorkThreeScanUnknownThird",
+    ] {
+        assert_eq!(named_node(name).estimated_work(), None);
+    }
+
+    // Close all three scan-local first-byte contributions at MAX. Aggregating
+    // their three raw bytes first would charge one block rather than three.
+    let all_first_bytes = explain(u64::MAX - 3, 0, [1, 1, 1]);
+    assert_eq!(all_first_bytes.plan().estimated_cost(), None);
+    assert_eq!(
+        all_first_bytes
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    let all_first_nodes = all_first_bytes.nodes();
+    assert_eq!(
+        all_first_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap()
+            .estimated_work(),
+        Some(u64::MAX - 3)
+    );
+    for name in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = all_first_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj(name)))
+            .unwrap();
+        assert_eq!(scan.estimated_bytes(), Some(1));
+        assert_eq!(scan.estimated_work(), Some(1));
+    }
+
+    let all_first_overflow = explain(u64::MAX - 2, 0, [1, 1, 1]);
+    assert_eq!(all_first_overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        all_first_overflow
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+
+    // Two one-byte scans are only two raw bytes and would round to one unit
+    // if combined. Each scan rounds locally: two source row units left closes
+    // at MAX, and one row closer overflows, wherever those scans occur.
+    for scan_bytes in [[1, 1, 0], [1, 0, 1], [0, 1, 1]] {
+        let exact = explain(u64::MAX - 2, 0, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        assert_eq!(
+            exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+                .unwrap()
+                .estimated_work(),
+            Some(u64::MAX - 2)
+        );
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(bytes));
+        }
+
+        let overflow = explain(u64::MAX - 1, 0, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "each one-byte scan contributes its own block across unknown gaps"
+        );
+    }
+
+    // A 4095-byte scan paired with a one-byte scan totals exactly one raw
+    // block, but local rounding charges both scans. Exercise all placements
+    // and assignments to keep that below-boundary decision explicit.
+    for scan_bytes in [
+        [4_095, 1, 0],
+        [1, 4_095, 0],
+        [4_095, 0, 1],
+        [1, 0, 4_095],
+        [0, 4_095, 1],
+        [0, 1, 4_095],
+    ] {
+        let exact = explain(u64::MAX - 2, 0, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(if bytes == 0 { 0 } else { 1 }));
+        }
+
+        let overflow = explain(u64::MAX - 1, 0, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "sub-block scans round independently across unknown gaps"
+        );
+    }
+
+    // Two half-block scans also total exactly one raw block. Keep their two
+    // local work units visible at every pair of scan positions.
+    for scan_bytes in [[2_048, 2_048, 0], [2_048, 0, 2_048], [0, 2_048, 2_048]] {
+        let exact = explain(u64::MAX - 2, 0, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(if bytes == 0 { 0 } else { 1 }));
+        }
+
+        let overflow = explain(u64::MAX - 1, 0, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "half-block scans round independently across unknown gaps"
+        );
+    }
+
+    // Include a half-block source with the paired half-block scans. Their
+    // three local units close at MAX even though the three raw halves round
+    // to only two units if combined.
+    for scan_bytes in [[2_048, 2_048, 0], [2_048, 0, 2_048], [0, 2_048, 2_048]] {
+        let exact = explain(u64::MAX - 3, 2_048, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_bytes(), Some(2_048));
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(if bytes == 0 { 0 } else { 1 }));
+        }
+
+        let overflow = explain(u64::MAX - 2, 2_048, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "the half-block source and scans round independently"
+        );
+    }
+
+    // A half-block source and one half-block scan total one raw block, while
+    // their separate rounding contributes two units at each scan position.
+    for scan_bytes in [[2_048, 0, 0], [0, 2_048, 0], [0, 0, 2_048]] {
+        let exact = explain(u64::MAX - 2, 2_048, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_bytes(), Some(2_048));
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 1));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(if bytes == 0 { 0 } else { 1 }));
+        }
+
+        let overflow = explain(u64::MAX - 1, 2_048, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "source and scan half-blocks round separately"
+        );
+    }
+
+    // Pair the half-block source remainder with a one-byte scan. Their raw
+    // total stays below a block, while their independent rounding closes two
+    // work units at each scan position.
+    for scan_bytes in [[1, 0, 0], [0, 1, 0], [0, 0, 1]] {
+        let exact = explain(u64::MAX - 2, 2_048, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_bytes(), Some(2_048));
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 1));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(bytes));
+        }
+
+        let overflow = explain(u64::MAX - 1, 2_048, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "source half-block and scan first byte round separately"
+        );
+    }
+
+    // A one-byte source remainder plus one half-block scan is less than one
+    // raw block, but the source and scan each contribute a local work unit.
+    for scan_bytes in [[2_048, 0, 0], [0, 2_048, 0], [0, 0, 2_048]] {
+        let exact = explain(u64::MAX - 2, 1, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_bytes(), Some(1));
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 1));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(if bytes == 0 { 0 } else { 1 }));
+        }
+
+        let overflow = explain(u64::MAX - 1, 1, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "source remainder and half-block scan round separately"
+        );
+    }
+
+    // Include the source's own first byte in the same closure. Four separate
+    // one-byte scans each round to one unit, so MAX-4 source rows close exactly;
+    // combining their raw bytes before rounding would charge a single unit.
+    let source_and_scans_exact = explain(u64::MAX - 4, 1, [1, 1, 1]);
+    assert_eq!(source_and_scans_exact.plan().estimated_cost(), None);
+    assert_eq!(
+        source_and_scans_exact
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    let source_and_scans_nodes = source_and_scans_exact.nodes();
+    let source = source_and_scans_nodes
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+        .unwrap();
+    assert_eq!(source.estimated_bytes(), Some(1));
+    assert_eq!(source.estimated_work(), Some(u64::MAX - 3));
+    for name in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        assert_eq!(
+            source_and_scans_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap()
+                .estimated_work(),
+            Some(1)
+        );
+    }
+
+    let source_and_scans_overflow = explain(u64::MAX - 3, 1, [1, 1, 1]);
+    assert_eq!(source_and_scans_overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        source_and_scans_overflow
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+
+    // Pair the source's first-byte unit with two scan-local first-byte units.
+    // Each pair of scan positions must close at MAX, then overflow one row
+    // earlier, regardless of which scan carries the zero-byte remainder.
+    for scan_bytes in [[1, 1, 0], [1, 0, 1], [0, 1, 1]] {
+        let exact = explain(u64::MAX - 3, 1, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(bytes));
+        }
+
+        let overflow = explain(u64::MAX - 2, 1, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "two scan-local first-byte units cross the source remainder"
+        );
+    }
+
+    // ORNA-PLAN leaves byte aggregation across unknown scan gaps unspecified;
+    // preserve source-local 4-KiB rounding as the source crosses that boundary.
+    // The paired scan first bytes then close at MAX in every scan placement.
+    for (source_bytes, exact_source_rows) in [
+        (4_095, u64::MAX - 3),
+        (4_096, u64::MAX - 3),
+        (4_097, u64::MAX - 4),
+    ] {
+        for scan_bytes in [[1, 1, 0], [1, 0, 1], [0, 1, 1]] {
+            let exact = explain(exact_source_rows, source_bytes, scan_bytes);
+            assert_eq!(exact.plan().estimated_cost(), None);
+            assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+            let exact_nodes = exact.nodes();
+            let source = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+                .unwrap();
+            assert_eq!(source.estimated_bytes(), Some(source_bytes));
+            assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+            for (name, bytes) in [
+                "table:ByteWorkThreeScanFirst",
+                "table:ByteWorkThreeScanMiddle",
+                "table:ByteWorkThreeScanLast",
+            ]
+            .into_iter()
+            .zip(scan_bytes)
+            {
+                let scan = exact_nodes
+                    .iter()
+                    .find(|node| node.object() == Some(&obj(name)))
+                    .unwrap();
+                assert_eq!(scan.estimated_bytes(), Some(bytes));
+                assert_eq!(scan.estimated_work(), Some(bytes));
+            }
+
+            let overflow = explain(exact_source_rows + 1, source_bytes, scan_bytes);
+            assert_eq!(overflow.plan().estimated_cost(), None);
+            assert_eq!(
+                overflow.root().details().get("estimated_cost_overflow"),
+                Some(&PlanDetail::Boolean(true)),
+                "source-local byte rounding and paired scan units overflow together"
+            );
+        }
+    }
+
+    // Pin the source-only remainder, then move one scan's first byte across
+    // each of the three unknown-gap positions. Each placement closes at MAX
+    // with one row unit left; moving the source one row nearer overflows.
+    let source_only_first_byte = explain(u64::MAX - 1, 1, [0, 0, 0]);
+    assert_eq!(source_only_first_byte.plan().estimated_cost(), None);
+    assert_eq!(
+        source_only_first_byte
+            .root()
+            .details()
+            .get("estimated_cost_overflow"),
+        None
+    );
+    assert_eq!(
+        source_only_first_byte
+            .nodes()
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap()
+            .estimated_work(),
+        Some(u64::MAX)
+    );
+
+    // With no source byte remainder, a single scan-local first byte fills the
+    // final work unit in any position; one additional source row overflows.
+    for scan_bytes in [[1, 0, 0], [0, 1, 0], [0, 0, 1]] {
+        let exact = explain(u64::MAX - 1, 0, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        let source = exact_nodes
+            .iter()
+            .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+            .unwrap();
+        assert_eq!(source.estimated_work(), Some(u64::MAX - 1));
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(bytes));
+        }
+
+        let overflow = explain(u64::MAX, 0, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a scan-local first byte overflows the source work at MAX rows"
+        );
+    }
+
+    for scan_bytes in [[1, 0, 0], [0, 1, 0], [0, 0, 1]] {
+        let exact = explain(u64::MAX - 2, 1, scan_bytes);
+        assert_eq!(exact.plan().estimated_cost(), None);
+        assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+        let exact_nodes = exact.nodes();
+        for (name, bytes) in [
+            "table:ByteWorkThreeScanFirst",
+            "table:ByteWorkThreeScanMiddle",
+            "table:ByteWorkThreeScanLast",
+        ]
+        .into_iter()
+        .zip(scan_bytes)
+        {
+            let scan = exact_nodes
+                .iter()
+                .find(|node| node.object() == Some(&obj(name)))
+                .unwrap();
+            assert_eq!(scan.estimated_bytes(), Some(bytes));
+            assert_eq!(scan.estimated_work(), Some(bytes));
+        }
+        let overflow = explain(u64::MAX - 1, 1, scan_bytes);
+        assert_eq!(overflow.plan().estimated_cost(), None);
+        assert_eq!(
+            overflow.root().details().get("estimated_cost_overflow"),
+            Some(&PlanDetail::Boolean(true)),
+            "a first byte in each scan position crosses the source remainder"
+        );
+    }
+}
+
+#[test]
+fn explain_keeps_half_block_source_on_scan_fallback_at_max() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN-003 requires a scan/reference fallback but does not prescribe
+    // its cost estimate. Keep the fallback as one scan with source-local
+    // 4-KiB rounding for the half-block source.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:half-block-source-scan-fallback"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("scan fallback with half-block source statistics")
+    };
+
+    let exact = explain(u64::MAX - 1);
+    assert_eq!(exact.nodes().len(), 1);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Scan);
+    assert_eq!(
+        exact.root().object(),
+        Some(&obj("table:ByteWorkThreeScanSource"))
+    );
+    assert_eq!(exact.root().estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(exact.root().estimated_bytes(), Some(2_048));
+    assert_eq!(exact.root().estimated_work(), Some(u64::MAX));
+    let max_cost = u64::MAX.to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(max_cost.as_str()));
+
+    let overflow = explain(u64::MAX);
+    assert_eq!(overflow.root().kind(), PlanNodeKind::Scan);
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert_eq!(
+        overflow
+            .root()
+            .details()
+            .get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(overflow.plan().estimated_cost(), None);
+}
+
+#[test]
+fn explain_keeps_half_block_source_scan_fallback_partial() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN-003 specifies the scan fallback, not an exact price for
+    // incomplete statistics. The known half-block rounds to a one-unit lower
+    // bound, but unknown rows keep both local work and the plan total absent.
+    let explain = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-source-fallback"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("scan fallback with partial half-block source statistics");
+
+    assert_eq!(explain.nodes().len(), 1);
+    assert_eq!(explain.root().kind(), PlanNodeKind::Scan);
+    assert_eq!(
+        explain.root().object(),
+        Some(&obj("table:ByteWorkThreeScanSource"))
+    );
+    assert_eq!(explain.root().estimated_rows(), None);
+    assert_eq!(explain.root().estimated_bytes(), Some(2_048));
+    assert_eq!(explain.root().estimated_work(), None);
+    assert_eq!(
+        explain.root().details().get("estimated_work_overflow"),
+        None,
+        "a partial lower bound is neither an exact cost nor an overflow"
+    );
+    assert_eq!(explain.plan().estimated_cost(), None);
+    let surface = serde_json::to_value(&explain).expect("partial scan fallback surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"][0].get("actual_rows").is_none());
+    assert!(surface["nodes"][0].get("actual_bytes").is_none());
+}
+
+#[test]
+fn explain_keeps_partial_half_block_scan_fallback_through_filter() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // The reference fixes the scan fallback but is silent on partial byte
+    // estimates through a filter. Keep the scan's 2-KiB lower bound partial;
+    // filtering it must not turn that bound into exact work or total cost.
+    let explain = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-filter-fallback"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+            "expr:ByteWorkThreeScanSource.value > 0",
+        )),
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("partial half-block source fallback through filter");
+
+    assert_eq!(explain.nodes().len(), 2);
+    assert_eq!(explain.root().kind(), PlanNodeKind::Filter);
+    assert_eq!(explain.root().inputs().len(), 1);
+    assert_eq!(explain.root().estimated_rows(), None);
+    assert_eq!(explain.root().estimated_bytes(), Some(1_024));
+    assert_eq!(explain.root().estimated_work(), None);
+    assert_eq!(
+        explain.root().details().get("selectivity_assumption"),
+        Some(&PlanDetail::Text("0.5_no_histogram".to_owned()))
+    );
+
+    let scan = explain
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("fallback source scan");
+    assert_eq!(scan.object(), Some(&obj("table:ByteWorkThreeScanSource")));
+    assert_eq!(scan.estimated_rows(), None);
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(explain.plan().estimated_cost(), None);
+
+    let surface = serde_json::to_value(&explain).expect("partial filter fallback surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_partial_half_block_source_on_materialization_fallback() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN requires the source scan fallback and exposes materialization
+    // only when requested. The half-block is a known byte component, but
+    // unknown rows leave the write-through work partial; preserve that bound
+    // without inventing local or aggregate exact work.
+    let explain = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-source-materialize"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:partial-half-block-source")),
+    })
+    .expect("partial half-block source fallback through materialization");
+
+    assert_eq!(explain.nodes().len(), 2);
+    assert_eq!(explain.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(
+        explain.root().object(),
+        Some(&obj("materialization:partial-half-block-source"))
+    );
+    assert_eq!(explain.root().estimated_rows(), None);
+    assert_eq!(explain.root().estimated_bytes(), Some(2_048));
+    assert_eq!(explain.root().estimated_work(), None);
+    assert_eq!(
+        explain.root().details().get("fallback"),
+        Some(&PlanDetail::Text("evaluate_query".to_owned()))
+    );
+    assert_eq!(
+        explain.root().details().get("mode"),
+        Some(&PlanDetail::Text("write_through".to_owned()))
+    );
+
+    let scan = explain
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("fallback source scan");
+    assert_eq!(scan.object(), Some(&obj("table:ByteWorkThreeScanSource")));
+    assert_eq!(scan.estimated_rows(), None);
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(explain.plan().estimated_cost(), None);
+
+    let surface = serde_json::to_value(&explain).expect("partial source materialization surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_partial_half_block_bound_before_materialization_fallback() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // The reference is silent on combining a scan's partial 4-KiB byte bound
+    // with a row-only write estimate. Preserve the established one-unit
+    // half-block lower bound: together they reach MAX exactly, then overflow
+    // one row later. An explicitly requested materialization remains an
+    // unknown tail when its byte estimate is missing.
+    let explain = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-write-materialize"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:ByteWorkThreeScanLast"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(affected_rows),
+            }],
+            materialize_into: Some(obj("materialization:partial-half-block-write")),
+        })
+        .expect("partial half-block source, row-only write, and materialization fallback")
+    };
+
+    let exact = explain(u64::MAX - 1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let exact_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("partial half-block source scan");
+    assert_eq!(exact_scan.estimated_rows(), None);
+    assert_eq!(exact_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(exact_scan.estimated_work(), None);
+    let exact_update = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("row-only update lower bound");
+    assert_eq!(exact_update.estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(exact_update.estimated_bytes(), None);
+    assert_eq!(exact_update.estimated_work(), None);
+
+    let overflow = explain(u64::MAX);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the source's one-unit partial byte bound takes the row-only write past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow).expect("partial materialization overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_two_partial_half_block_bounds_across_unknown_join_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // The reference is silent on summing partial scan costs across an unknown
+    // join. Keep each half-block as its own one-unit lower bound. Two such
+    // scans plus a row-only write reach MAX exactly at MAX-2; one more write
+    // row proves overflow, and materialization remains an unknown tail.
+    let explain = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:two-partial-half-block-join-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanFirst"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: None,
+                    estimated_bytes: Some(2_048),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:ByteWorkThreeScanLast"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: Some(affected_rows),
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(affected_rows),
+            }],
+            materialize_into: Some(obj("materialization:two-partial-half-block-tail")),
+        })
+        .expect("two partial half-block scans, unknown join, and materialization tail")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let scans = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Scan)
+        .collect::<Vec<_>>();
+    assert_eq!(scans.len(), 2);
+    for table in ["table:ByteWorkThreeScanSource", "table:ByteWorkThreeScanFirst"] {
+        let scan = scans
+            .iter()
+            .find(|node| node.object() == Some(&obj(table)))
+            .expect("partial scan in exact-boundary plan");
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+    }
+    let join = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join between partial scans");
+    assert_eq!(join.estimated_rows(), None);
+    assert_eq!(join.estimated_bytes(), None);
+    assert_eq!(join.estimated_work(), None);
+    let update = exact
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("row-only update lower bound");
+    assert_eq!(update.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(update.estimated_bytes(), None);
+    assert_eq!(update.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the second source half-block takes the row-only write bound one past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow).expect("two partial half-block overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_three_partial_half_block_scan_and_write_bounds() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // The reference is silent on summing partial scan and write costs across
+    // an unknown join. Under the established 4-KiB rounding, two half-block
+    // scans and one half-block write contribute three lower-bound units.
+    // MAX-3 row-only write units close at MAX; one more proves overflow, with
+    // the explicit materialization still unknown because its bytes are absent.
+    let explain = |affected_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:three-partial-half-block-scan-write"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanLast"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(2_048),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanMiddle"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(affected_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(affected_rows),
+                },
+            ],
+            materialize_into: Some(obj("materialization:three-partial-half-block-scan-write")),
+        })
+        .expect("three partial half-block scan and write bounds across an unknown join")
+    };
+
+    let exact = explain(u64::MAX - 3);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    for table in ["table:ByteWorkThreeScanSource", "table:ByteWorkThreeScanFirst"] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("partial half-block scan");
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+    }
+    let partial_write = exact
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanLast")))
+        .expect("byte-only half-block write");
+    assert_eq!(partial_write.estimated_rows(), None);
+    assert_eq!(partial_write.estimated_bytes(), Some(2_048));
+    assert_eq!(partial_write.estimated_work(), None);
+    let row_write = exact
+        .nodes()
+        .iter()
+        .find(|node| node.object() == Some(&obj("table:ByteWorkThreeScanMiddle")))
+        .expect("row-only closing write");
+    assert_eq!(row_write.estimated_rows(), Some(u64::MAX - 3));
+    assert_eq!(row_write.estimated_bytes(), None);
+    assert_eq!(row_write.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "two partial scan blocks and one partial write block take the row bound past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow).expect("partial half-block scan/write overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_three_partial_half_block_writes_across_unknown_mutations() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // The reference is silent on carrying byte-only write lower bounds across
+    // unknown mutation resets. Keep each 2-KiB write at one 4-KiB unit: three
+    // such writes close the MAX-3 row scan exactly at MAX and overflow it one
+    // row later. The final materialization has no exact cardinality estimate.
+    let mutation = |table: &str, rows: Option<u64>, bytes: Option<u64>| QueryMutationDescription {
+        table: obj(table),
+        kind: QueryMutationKind::Update,
+        estimated_affected_rows: rows,
+        estimated_write_bytes: bytes,
+        estimated_table_rows_before: Some(1),
+    };
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:three-partial-half-block-writes"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownThird"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                mutation("table:ByteWorkThreeScanFirst", None, Some(2_048)),
+                mutation("table:ByteWorkThreeScanUnknownFirst", None, None),
+                mutation("table:ByteWorkThreeScanMiddle", None, Some(2_048)),
+                mutation("table:ByteWorkThreeScanUnknownSecond", None, None),
+                mutation("table:ByteWorkThreeScanLast", None, Some(2_048)),
+            ],
+            materialize_into: Some(obj("materialization:three-partial-half-block-writes")),
+        })
+        .expect("three half-block write bounds across unknown mutation resets")
+    };
+
+    let exact = explain(u64::MAX - 3);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj("table:ByteWorkThreeScanSource")))
+        .expect("row-bounded source scan");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 3));
+    assert_eq!(source.estimated_bytes(), Some(0));
+    assert_eq!(source.estimated_work(), Some(u64::MAX - 3));
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let write = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Invoke && node.object() == Some(&obj(table)))
+            .expect("partial half-block write");
+        assert_eq!(write.estimated_rows(), None);
+        assert_eq!(write.estimated_bytes(), Some(2_048));
+        assert_eq!(write.estimated_work(), None);
+    }
+    let unknown_updates = exact
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+                && node.estimated_bytes().is_none()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(unknown_updates.len(), 2);
+    assert!(unknown_updates.iter().all(|node| node.estimated_work().is_none()));
+
+    let overflow = explain(u64::MAX - 2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "three partial write blocks carry the row scan one unit past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow).expect("three partial half-block write surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_three_partial_half_block_writes_from_partial_scan_bound() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on carrying partial row/byte lower bounds across
+    // unknown mutation resets. Keep each 2-KiB write at one 4-KiB unit. The
+    // rows-only source bound and three such writes reach MAX exactly at
+    // MAX-3; one additional source row overflows. Materialization stays an
+    // unknown tail because the source has no byte estimate.
+    let mutation = |table: &str, bytes: Option<u64>| QueryMutationDescription {
+        table: obj(table),
+        kind: QueryMutationKind::Update,
+        estimated_affected_rows: None,
+        estimated_write_bytes: bytes,
+        estimated_table_rows_before: Some(1),
+    };
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:three-partial-half-block-partial-source"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownThird"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                mutation("table:ByteWorkThreeScanFirst", Some(2_048)),
+                mutation("table:ByteWorkThreeScanUnknownFirst", None),
+                mutation("table:ByteWorkThreeScanMiddle", Some(2_048)),
+                mutation("table:ByteWorkThreeScanUnknownSecond", None),
+                mutation("table:ByteWorkThreeScanLast", Some(2_048)),
+            ],
+            materialize_into: Some(obj("materialization:three-partial-half-block-partial-source")),
+        })
+        .expect("partial row source and three half-block writes across unknown resets")
+    };
+
+    let exact = explain(u64::MAX - 3);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("rows-only partial source scan");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 3));
+    assert_eq!(source.estimated_bytes(), None);
+    assert_eq!(source.estimated_work(), None);
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let write = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Invoke && node.object() == Some(&obj(table)))
+            .expect("partial half-block write");
+        assert_eq!(write.estimated_rows(), None);
+        assert_eq!(write.estimated_bytes(), Some(2_048));
+        assert_eq!(write.estimated_work(), None);
+    }
+    let unknown_updates = exact
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned()))
+                && node.estimated_bytes().is_none()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(unknown_updates.len(), 2);
+    assert!(unknown_updates.iter().all(|node| node.estimated_work().is_none()));
+
+    let overflow = explain(u64::MAX - 2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "three partial writes carry the rows-only source bound one unit past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial-source three-half-block overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_three_partial_half_block_scans_across_unknown_joins() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on totaling partial scans across unknown joins.
+    // Preserve each 2-KiB scan as its own one-unit 4-KiB lower bound. Three
+    // scans close a rows-only source bound at MAX-3 exactly; one more source
+    // row crosses MAX. Unknown joins and explicit materialization keep the
+    // reported exact work unknown.
+    let scan_statistics = || {
+        Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        })
+    };
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:three-partial-half-block-scans-join-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanMiddle"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:three-partial-half-block-scans")),
+        })
+        .expect("three partial half-block scans across unknown joins")
+    };
+
+    let exact = explain(u64::MAX - 3);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("rows-only source lower bound");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 3));
+    assert_eq!(source.estimated_bytes(), None);
+    assert_eq!(source.estimated_work(), None);
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("partial half-block scan");
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+    }
+    for table in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+        "table:ByteWorkThreeScanUnknownThird",
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("unknown scan gap");
+        assert_eq!(scan.estimated_work(), None);
+    }
+    let joins = exact
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect::<Vec<_>>();
+    assert_eq!(joins.len(), 6);
+    assert!(joins.iter().all(|node| node.estimated_work().is_none()));
+
+    let overflow = explain(u64::MAX - 2);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "three independently rounded scan bounds take the source past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial half-block scan overflow through unknown joins");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_three_partial_half_block_scans_and_writes_across_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on combining partial scan and write bounds through
+    // unknown join gaps and mutation resets. Keep each 2-KiB operation as a
+    // one-unit 4-KiB lower bound. Three scans and three writes close a
+    // rows-only source bound at MAX-6 exactly; one extra source row signals
+    // overflow. Materialization remains an unknown tail.
+    let scan_statistics = || {
+        Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        })
+    };
+    let write = |table: &str, bytes: Option<u64>| QueryMutationDescription {
+        table: obj(table),
+        kind: QueryMutationKind::Update,
+        estimated_affected_rows: None,
+        estimated_write_bytes: bytes,
+        estimated_table_rows_before: Some(1),
+    };
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:three-partial-half-block-scan-write-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanMiddle"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                write("table:ByteWorkThreeScanFirst", Some(2_048)),
+                write("table:ByteWorkThreeScanUnknownFirst", None),
+                write("table:ByteWorkThreeScanMiddle", Some(2_048)),
+                write("table:ByteWorkThreeScanUnknownSecond", None),
+                write("table:ByteWorkThreeScanLast", Some(2_048)),
+            ],
+            materialize_into: Some(obj("materialization:three-partial-half-block-scan-write")),
+        })
+        .expect("three partial half-block scans and writes across unknown tails")
+    };
+
+    let exact = explain(u64::MAX - 6);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("rows-only source lower bound");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 6));
+    assert_eq!(source.estimated_bytes(), None);
+    assert_eq!(source.estimated_work(), None);
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("partial half-block scan");
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+
+        let write = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Invoke && node.object() == Some(&obj(table)))
+            .expect("partial half-block write");
+        assert_eq!(write.estimated_rows(), None);
+        assert_eq!(write.estimated_bytes(), Some(2_048));
+        assert_eq!(write.estimated_work(), None);
+    }
+    for table in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+    ] {
+        let unknown_write = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Invoke && node.object() == Some(&obj(table)))
+            .expect("unknown mutation reset");
+        assert_eq!(unknown_write.estimated_work(), None);
+    }
+
+    let overflow = explain(u64::MAX - 5);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the three scan and three write lower bounds take the source past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial scan and write overflow through unknown tails");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_three_partial_half_block_scans_and_writes_with_source_remainder() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on carrying a partial source remainder together
+    // with three independently rounded partial scans and writes. Preserve
+    // one 4-KiB lower-bound unit for each 2-KiB operation. Seven such units
+    // plus the row-only closing write reach MAX exactly at MAX-7; one more
+    // row overflows through the unknown gaps and materialization tail.
+    let scan_statistics = || {
+        Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        })
+    };
+    let partial_write = |table: &str| QueryMutationDescription {
+        table: obj(table),
+        kind: QueryMutationKind::Update,
+        estimated_affected_rows: None,
+        estimated_write_bytes: Some(2_048),
+        estimated_table_rows_before: Some(1),
+    };
+    let unknown_write = |table: &str| QueryMutationDescription {
+        table: obj(table),
+        kind: QueryMutationKind::Update,
+        estimated_affected_rows: None,
+        estimated_write_bytes: None,
+        estimated_table_rows_before: None,
+    };
+    let explain = |closing_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:three-partial-half-block-source-remainder"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanMiddle"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                partial_write("table:ByteWorkThreeScanFirst"),
+                unknown_write("table:ByteWorkThreeScanUnknownFirst"),
+                partial_write("table:ByteWorkThreeScanMiddle"),
+                unknown_write("table:ByteWorkThreeScanUnknownSecond"),
+                partial_write("table:ByteWorkThreeScanLast"),
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanLast"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(closing_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(closing_rows),
+                },
+            ],
+            materialize_into: Some(obj("materialization:three-partial-half-block-source-remainder")),
+        })
+        .expect("source remainder, three partial scans, and three partial writes")
+    };
+
+    let exact = explain(u64::MAX - 7);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("partial source remainder");
+    assert_eq!(source.estimated_rows(), None);
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), None);
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanMiddle",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("partial half-block scan");
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+    }
+    let partial_writes = exact
+        .nodes()
+        .iter()
+        .filter(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.estimated_bytes() == Some(2_048)
+                && [
+                    "table:ByteWorkThreeScanFirst",
+                    "table:ByteWorkThreeScanMiddle",
+                    "table:ByteWorkThreeScanLast",
+                ]
+                .iter()
+                .any(|table| node.object() == Some(&obj(table)))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(partial_writes.len(), 3);
+    assert!(partial_writes.iter().all(|node| {
+        node.estimated_rows().is_none() && node.estimated_work().is_none()
+    }));
+    let closing_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+                && node.estimated_rows() == Some(u64::MAX - 7)
+        })
+        .expect("row-only write closes the seven partial-byte lower bounds");
+    assert_eq!(closing_write.estimated_bytes(), None);
+    assert_eq!(closing_write.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 6);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one extra closing row carries the source and six operation bounds past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("three partial scan and write source-remainder overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_half_block_scan_and_write_through_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on carrying a partial scan bound through an
+    // unknown join and a partial write across an unknown mutation reset.
+    // Keep the source and write half-blocks as independent one-unit 4-KiB
+    // lower bounds. A row-only closing write at MAX-2 reaches MAX exactly;
+    // one more row proves overflow through the materialization tail.
+    let explain = |closing_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:half-block-scan-write-unknown-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownThird"),
+                statistics: None,
+                predicate: None,
+            }],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanFirst"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: Some(2_048),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanLast"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(closing_rows),
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: Some(closing_rows),
+                },
+            ],
+            materialize_into: Some(obj("materialization:half-block-scan-write-tail")),
+        })
+        .expect("partial half-block scan and write across unknown tails")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("partial half-block source scan");
+    assert_eq!(source.estimated_rows(), None);
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), None);
+    let unknown_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownThird"))
+        })
+        .expect("unknown join tail");
+    assert_eq!(unknown_scan.estimated_work(), None);
+    let partial_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("partial half-block write");
+    assert_eq!(partial_write.estimated_rows(), None);
+    assert_eq!(partial_write.estimated_bytes(), Some(2_048));
+    assert_eq!(partial_write.estimated_work(), None);
+    let unknown_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownFirst"))
+        })
+        .expect("unknown mutation reset");
+    assert_eq!(unknown_write.estimated_work(), None);
+    let closing_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("row-only closing write");
+    assert_eq!(closing_write.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(closing_write.estimated_bytes(), None);
+    assert_eq!(closing_write.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one extra closing row takes the independent scan and write bounds past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("half-block scan and write overflow through unknown tails");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_complete_half_block_scan_and_write_work_after_unknowns() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves the cost unit pragmatic. Preserve the existing
+    // rows-plus-rounded-blocks model for complete estimates: the near-MAX
+    // source costs rows+1, and a one-row half-block scan and write each cost
+    // two. Those three known operators close at MAX despite unknown join and
+    // mutation tails; one additional source row marks aggregate overflow.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:complete-half-block-scan-write-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(1),
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanLast"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: Some(1),
+                    estimated_write_bytes: Some(2_048),
+                    estimated_table_rows_before: Some(1),
+                },
+                QueryMutationDescription {
+                    table: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    kind: QueryMutationKind::Update,
+                    estimated_affected_rows: None,
+                    estimated_write_bytes: None,
+                    estimated_table_rows_before: None,
+                },
+            ],
+            materialize_into: Some(obj("materialization:complete-half-block-scan-write")),
+        })
+        .expect("complete half-block scan and write across unknown tails")
+    };
+
+    let exact = explain(u64::MAX - 5);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("near-MAX complete source scan");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 5));
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), Some(u64::MAX - 4));
+    let half_block_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("complete one-row half-block scan");
+    assert_eq!(half_block_scan.estimated_rows(), Some(1));
+    assert_eq!(half_block_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(half_block_scan.estimated_work(), Some(2));
+    let half_block_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("complete one-row half-block write");
+    assert_eq!(half_block_write.estimated_rows(), Some(1));
+    assert_eq!(half_block_write.estimated_bytes(), Some(2_048));
+    assert_eq!(half_block_write.estimated_work(), Some(2));
+    for table in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+    ] {
+        let unknown_scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("unknown join gap");
+        assert_eq!(unknown_scan.estimated_work(), None);
+    }
+    let unknown_write = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownFirst"))
+        })
+        .expect("unknown mutation tail");
+    assert_eq!(unknown_write.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 4);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one extra source row crosses MAX after scan and write rounding"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("complete half-block scan/write overflow through unknowns");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_complete_half_block_scan_through_unknown_join_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Use the established
+    // rows-plus-rounded-4-KiB-blocks estimate: the one-row half-block scan
+    // costs two. It closes a MAX-2 row source exactly at MAX after an unknown
+    // join gap; one more source row overflows despite a later unknown scan.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:complete-half-block-scan-join-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(1),
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:complete-half-block-scan-join-tail")),
+        })
+        .expect("complete half-block scan between unknown join tails")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("near-MAX source scan");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(source.estimated_bytes(), Some(0));
+    assert_eq!(source.estimated_work(), Some(u64::MAX - 2));
+    let half_block_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("complete one-row half-block scan");
+    assert_eq!(half_block_scan.estimated_rows(), Some(1));
+    assert_eq!(half_block_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(half_block_scan.estimated_work(), Some(2));
+    for table in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+    ] {
+        let unknown_scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("unknown scan tail");
+        assert_eq!(unknown_scan.estimated_work(), None);
+    }
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the complete half-block scan carries one extra source row past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("complete half-block scan overflow through unknown joins");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_complete_half_block_scan_at_materialization_cost_edge() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Preserve the existing
+    // 4-KiB model for a complete scan and its materialization independently:
+    // each charges rows plus one block for 2 KiB. Their equal local costs
+    // close the aggregate at MAX-1; adding one source row leaves both local
+    // costs representable but overflows their total.
+    const HALF_COST: u64 = (u64::MAX - 1) / 2;
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:complete-half-block-scan-materialize-edge"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: Vec::new(),
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:complete-half-block-scan-edge")),
+        })
+        .expect("complete half-block source scan with output materialization")
+    };
+
+    let exact = explain(HALF_COST - 1);
+    let exact_cost = (u64::MAX - 1).to_string();
+    assert_eq!(exact.plan().estimated_cost(), Some(exact_cost.as_str()));
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_rows(), Some(HALF_COST - 1));
+    assert_eq!(exact.root().estimated_bytes(), Some(2_048));
+    assert_eq!(exact.root().estimated_work(), Some(HALF_COST));
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Scan)
+        .expect("complete half-block source scan");
+    assert_eq!(source.estimated_rows(), Some(HALF_COST - 1));
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), Some(HALF_COST));
+
+    let overflow = explain(HALF_COST);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the scan and materialization each remain representable while their sum exceeds MAX"
+    );
+    assert_eq!(overflow.root().estimated_rows(), Some(HALF_COST));
+    assert_eq!(overflow.root().estimated_bytes(), Some(2_048));
+    assert_eq!(overflow.root().estimated_work(), Some(HALF_COST + 1));
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("complete half-block materialization aggregate overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_complete_join_scan_work_at_max_across_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves byte-cost units unspecified. Keep the established
+    // rows-plus-rounded-4-KiB-blocks scan work: a half-block adds one unit to
+    // the row count. A complete scan contributes MAX while a second scan's
+    // known one-row lower bound takes the aggregate past MAX. The reference
+    // is silent on combining that partial estimate with complete work; retain
+    // the planner's nonnegative lower-bound rule across unknown scan gaps.
+    let explain = |scan_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:complete-join-scan-work-max-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(0),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(scan_rows),
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanMiddle"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(1),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:complete-join-scan-work-max")),
+        })
+        .expect("complete joined half-block scan across unknown tails")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let exact_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("complete joined half-block scan");
+    assert_eq!(exact_scan.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(exact_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(exact_scan.estimated_work(), Some(u64::MAX - 1));
+    assert_eq!(exact_scan.details().get("estimated_work_overflow"), None);
+    let partial_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanMiddle"))
+        })
+        .expect("partial one-row scan lower bound");
+    assert_eq!(partial_scan.estimated_rows(), Some(1));
+    assert_eq!(partial_scan.estimated_bytes(), None);
+    assert_eq!(partial_scan.estimated_work(), None);
+    assert_eq!(partial_scan.details().get("estimated_work_overflow"), None);
+    for table in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+        "table:ByteWorkThreeScanUnknownThird",
+    ] {
+        let unknown_scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("unknown join tail");
+        assert_eq!(unknown_scan.estimated_work(), None);
+    }
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the partial one-row scan pushes the complete scan's MAX work past MAX"
+    );
+    let overflow_scan = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("complete joined half-block scan");
+    assert_eq!(overflow_scan.estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(overflow_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(overflow_scan.estimated_work(), Some(u64::MAX));
+    assert_eq!(overflow_scan.details().get("estimated_work_overflow"), None);
+    let partial_scan = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanMiddle"))
+        })
+        .expect("partial one-row scan lower bound");
+    assert_eq!(partial_scan.estimated_rows(), Some(1));
+    assert_eq!(partial_scan.estimated_bytes(), None);
+    assert_eq!(partial_scan.estimated_work(), None);
+    assert_eq!(partial_scan.details().get("estimated_work_overflow"), None);
+    let surface = serde_json::to_value(&overflow)
+        .expect("complete joined half-block scan overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node["details"].get("estimated_work_overflow").is_none()
+            && node.get("actual_rows").is_none()
+            && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_closes_partial_half_block_scan_bound_across_unknown_tails() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN specifies scan fallback behavior but is silent on combining
+    // incomplete statistics across unknown joins. Preserve the existing
+    // rows-plus-rounded-4-KiB lower bounds: MAX-1 known source rows plus one
+    // half-block on a byte-only scan reaches MAX; one more row proves overflow.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-scan-bound-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: None,
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-half-block-scan-bound-tail")),
+        })
+        .expect("partial half-block scan bound between unknown joins")
+    };
+
+    let exact = explain(u64::MAX - 1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("row-only source scan bound");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(source.estimated_bytes(), None);
+    assert_eq!(source.estimated_work(), None);
+    let half_block_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("byte-only half-block scan bound");
+    assert_eq!(half_block_scan.estimated_rows(), None);
+    assert_eq!(half_block_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(half_block_scan.estimated_work(), None);
+
+    let overflow = explain(u64::MAX);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the source row bound plus the half-block scan bound exceeds MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial half-block scan bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_source_half_block_bound_across_unknown_scan_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN specifies scan fallback behavior but is silent on combining
+    // incomplete statistics across unknown joins. Keep the established
+    // nonnegative lower bounds: a byte-only half-block source contributes one
+    // unit, then a row-only joined scan closes at MAX or exceeds it by one.
+    let explain = |tail_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:source-half-block-scan-tail-bound"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(tail_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-half-block-scan-tail-bound")),
+        })
+        .expect("source half-block lower bound across unknown scan tails")
+    };
+
+    let exact = explain(u64::MAX - 1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("byte-only half-block source scan bound");
+    assert_eq!(source.estimated_rows(), None);
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), None);
+    let tail_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("row-only joined scan bound");
+    assert_eq!(tail_scan.estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(tail_scan.estimated_bytes(), None);
+    assert_eq!(tail_scan.estimated_work(), None);
+
+    let overflow = explain(u64::MAX);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the source half-block plus the joined scan row bound exceeds MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("source half-block scan bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_source_half_block_bound_through_filter_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on carrying an incomplete source scan bound through
+    // filtering and unknown joins. Keep the source's byte-only half-block as
+    // one lower-bound unit: it and a later row-only scan reach MAX together.
+    let explain = |tail_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:source-half-block-filter-tail-bound"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: None,
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(tail_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+                "expr:ByteWorkThreeScanSource.value > 0",
+            )),
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:source-half-block-filter-tail-bound")),
+        })
+        .expect("source half-block bound carried through filter and unknown scan tails")
+    };
+
+    let exact = explain(u64::MAX - 1);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("byte-only half-block source scan bound");
+    assert_eq!(source.estimated_rows(), None);
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), None);
+    let filter = exact
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Filter)
+        .expect("filter over partially estimated scans");
+    assert_eq!(filter.estimated_rows(), None);
+    assert_eq!(filter.estimated_work(), None);
+
+    let overflow = explain(u64::MAX);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "filtering and unknown joins do not discard the source half-block bound"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("source half-block filter-bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_paired_source_half_block_bounds_before_row_scan_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on summing partial scan estimates across unknown
+    // joins. Preserve each scan's one-unit lower bound independently: the
+    // source and first joined scan contribute two half-block units, followed
+    // by a row-only tail that closes at MAX or exceeds it by one.
+    let scan_statistics = || {
+        Some(QuerySourceStatistics {
+            estimated_rows: None,
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        })
+    };
+    let explain = |tail_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:paired-source-half-block-row-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: scan_statistics(),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: scan_statistics(),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: Some(tail_rows),
+                        estimated_bytes: None,
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:paired-source-half-block-row-tail")),
+        })
+        .expect("two partial half-block scans and row-only tail across unknown joins")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    for table in ["table:ByteWorkThreeScanSource", "table:ByteWorkThreeScanFirst"] {
+        let scan = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("byte-only half-block scan bound");
+        assert_eq!(scan.estimated_rows(), None);
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+    }
+    let tail_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("row-only tail scan bound");
+    assert_eq!(tail_scan.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(tail_scan.estimated_bytes(), None);
+    assert_eq!(tail_scan.estimated_work(), None);
+    for table in [
+        "table:ByteWorkThreeScanUnknownFirst",
+        "table:ByteWorkThreeScanUnknownSecond",
+        "table:ByteWorkThreeScanUnknownThird",
+    ] {
+        let unknown = exact
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table)))
+            .expect("unknown join scan");
+        assert_eq!(unknown.estimated_work(), None);
+    }
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the two source half-block bounds plus the row-only tail exceed MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("paired half-block scan bound overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_complete_source_half_block_with_partial_scan_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN specifies scan fallback behavior but is silent on adding a
+    // partial joined-scan estimate to complete source work. Retain the known
+    // one-unit lower bound for its 2-KiB half-block: the complete source is
+    // MAX-1, then the scan closes at MAX or proves overflow by one.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:complete-source-partial-scan-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:complete-source-partial-scan-tail")),
+        })
+        .expect("complete half-block source and partial scan across unknown joins")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("complete source half-block scan");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), Some(u64::MAX - 1));
+    let partial_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("byte-only joined half-block scan bound");
+    assert_eq!(partial_scan.estimated_rows(), None);
+    assert_eq!(partial_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(partial_scan.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the partial scan's one-unit bound takes complete source work past MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    let source = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("complete source half-block scan at MAX");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 1));
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), Some(u64::MAX));
+    assert_eq!(source.details().get("estimated_work_overflow"), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("complete-source partial-scan overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_closes_partial_half_block_scan_after_unknown_prefix() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN specifies scan fallback behavior but is silent on carrying a
+    // partial scan bound after unknown join prefixes. Keep the byte-only
+    // 2-KiB scan at one lower-bound unit: it closes complete source work at
+    // MAX, and source work one unit larger proves aggregate overflow.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-after-unknown-prefix"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanLast"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: Some(obj("materialization:partial-half-block-after-unknown-prefix")),
+        })
+        .expect("complete source and trailing partial scan after unknown joins")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let source = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("complete source half-block scan");
+    assert_eq!(source.estimated_rows(), Some(u64::MAX - 2));
+    assert_eq!(source.estimated_bytes(), Some(2_048));
+    assert_eq!(source.estimated_work(), Some(u64::MAX - 1));
+    let tail_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("byte-only partial scan after unknown joins");
+    assert_eq!(tail_scan.estimated_rows(), None);
+    assert_eq!(tail_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(tail_scan.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the trailing scan's lower bound exceeds complete source work at MAX"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial scan after unknown prefix overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_preserves_partial_half_block_scan_overflow_through_unknown_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN is silent on combining partial scan work with later unknown
+    // join and mutation tails. Keep the byte-only half-block's one-unit lower
+    // bound; once it takes complete source work past MAX, unknown tails must
+    // preserve the proven aggregate overflow.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-preserve-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: vec![QueryMutationDescription {
+                table: obj("table:ByteWorkThreeScanLast"),
+                kind: QueryMutationKind::Update,
+                estimated_affected_rows: None,
+                estimated_write_bytes: None,
+                estimated_table_rows_before: Some(1),
+            }],
+            materialize_into: Some(obj("materialization:partial-half-block-preserve-tail")),
+        })
+        .expect("partial half-block scan with unknown join and mutation tails")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let partial_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("byte-only partial half-block scan");
+    assert_eq!(partial_scan.estimated_rows(), None);
+    assert_eq!(partial_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(partial_scan.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the scan lower bound proves overflow before the unknown tails"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    let unknown_join = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownThird"))
+        })
+        .expect("unknown join after the partial scan");
+    assert_eq!(unknown_join.estimated_work(), None);
+    let unknown_update = overflow
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Invoke
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("unknown mutation after the join tail");
+    assert_eq!(unknown_update.estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial half-block scan overflow preserved through unknown tails");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_preserves_partial_half_block_scan_overflow_through_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not specify whether a downstream limit changes an
+    // overflow proven by a partial scan lower bound. Preserve the established
+    // nonnegative aggregation rule: complete source work plus the scan's
+    // one-unit 2-KiB bound reaches MAX, then exceeds it by one.
+    let explain = |source_rows| {
+        explain_query(&QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:partial-half-block-limit-tail"),
+            source: obj("table:ByteWorkThreeScanSource"),
+            source_statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(source_rows),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            joins: vec![
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownFirst"),
+                    statistics: None,
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanFirst"),
+                    statistics: Some(QuerySourceStatistics {
+                        estimated_rows: None,
+                        estimated_bytes: Some(2_048),
+                        mutable_branch: None,
+                    }),
+                    predicate: None,
+                },
+                QueryJoinDescription {
+                    source: obj("table:ByteWorkThreeScanUnknownThird"),
+                    statistics: None,
+                    predicate: None,
+                },
+            ],
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: Some(10),
+            mutations: Vec::new(),
+            materialize_into: None,
+        })
+        .expect("partial half-block scan and unknown joins before a limit")
+    };
+
+    let exact = explain(u64::MAX - 2);
+    assert_eq!(exact.plan().estimated_cost(), None);
+    assert_eq!(exact.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(exact.root().details().get("estimated_cost_overflow"), None);
+    assert_eq!(exact.root().estimated_work(), None);
+    let partial_scan = exact
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanFirst"))
+        })
+        .expect("byte-only partial half-block scan");
+    assert_eq!(partial_scan.estimated_rows(), None);
+    assert_eq!(partial_scan.estimated_bytes(), Some(2_048));
+    assert_eq!(partial_scan.estimated_work(), None);
+
+    let overflow = explain(u64::MAX - 1);
+    assert_eq!(overflow.plan().estimated_cost(), None);
+    assert_eq!(overflow.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(
+        overflow.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "the limit preserves overflow established by the partial scan bound"
+    );
+    assert_eq!(overflow.root().estimated_work(), None);
+    assert!(overflow.nodes().iter().all(|node| {
+        node.details().get("estimated_work_overflow").is_none()
+            && node.actual_rows().is_none()
+            && node.actual_bytes().is_none()
+    }));
+    let surface = serde_json::to_value(&overflow)
+        .expect("partial half-block scan overflow through limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+}
+
+#[test]
+fn explain_keeps_local_scan_overflow_visible_through_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not define this local-overflow/limit interaction. A
+    // scan that already exceeds MAX proves the plan cost overflows regardless
+    // of the smaller output row bound.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:local-scan-overflow-limit-tail"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(u64::MAX),
+            estimated_bytes: Some(2_048),
+            mutable_branch: None,
+        }),
+        joins: Vec::new(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("locally overflowing half-block scan followed by a limit");
+
+    assert_eq!(explained.nodes().len(), 2);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), Some(10));
+    assert_eq!(explained.root().estimated_work(), Some(u64::MAX));
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(explained.plan().estimated_cost(), None);
+
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanSource"))
+        })
+        .expect("source scan with local overflow");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&explained).expect("local scan overflow limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"][0].get("estimated_work_overflow").is_none());
+    assert_eq!(surface["nodes"][1]["details"]["estimated_work_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_join_scan_overflow_visible_through_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not define local overflow on a joined scan beneath a
+    // limit. Preserve the scan marker and promote it to plan overflow because
+    // this nonnegative scan contribution alone exceeds MAX.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-limit-tail"),
+        source: obj("table:ByteWorkThreeScanUnknownFirst"),
+        source_statistics: None,
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("joined scan with local overflow and a limit tail");
+
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan with local overflow");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&explained).expect("joined local overflow limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"][0].get("estimated_work_overflow").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_late_join_scan_overflow_through_unknown_join_and_limit() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not define local scan overflow across an unknown join
+    // prefix and limit. Preserve the known joined table's half-block-rounded
+    // overflow locally; the unknown inputs keep total and limit work unknown.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:late-join-scan-overflow-limit-tail"),
+        source: obj("table:ByteWorkThreeScanUnknownFirst"),
+        source_statistics: None,
+        joins: vec![
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                statistics: None,
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanLast"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(2_048),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+        ],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("late joined scan overflow beneath unknown join and limit");
+
+    assert_eq!(explained.nodes().len(), 6);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownSecond"))
+    }));
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("late joined scan with local overflow");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&explained).expect("late joined overflow limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"][0].get("estimated_work_overflow").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_join_scan_overflow_through_unknown_suffix_and_limit() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local scan overflow across later unknown joins and a
+    // limit unspecified. Keep the joined scan's byte-rounding overflow local
+    // when its unknown suffix makes final cardinality and limit work unknown.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-unknown-suffix-limit"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(0),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanLast"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(2_048),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownThird"),
+                statistics: None,
+                predicate: None,
+            },
+        ],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("joined scan overflow before unknown join and limit tail");
+
+    assert_eq!(explained.nodes().len(), 6);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan before the unknown suffix");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let empty_join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join && node.estimated_rows() == Some(0))
+        .expect("empty source keeps the first join work at MAX");
+    assert_eq!(empty_join.estimated_work(), Some(u64::MAX));
+    assert_eq!(empty_join.details().get("estimated_work_overflow"), None);
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownThird"))
+    }));
+    let surface = serde_json::to_value(&explained).expect("joined overflow preserved through tail");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_join_scan_overflow_across_materialization_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local scan overflow through an unknown join, limit,
+    // and materialization unspecified. Preserve the joined scan's rounded
+    // overflow marker while the unknown join keeps downstream costs unknown.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-materialize-tail"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(0),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanLast"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(2_048),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownThird"),
+                statistics: None,
+                predicate: None,
+            },
+        ],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:join-scan-overflow-tail")),
+    })
+    .expect("joined scan overflow across unknown, limit, and materialization tails");
+
+    assert_eq!(explained.nodes().len(), 7);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_rows(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("overflowing joined scan before downstream tails");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let limit = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Limit)
+        .expect("limit before materialization tail");
+    assert_eq!(limit.estimated_rows(), None);
+    assert_eq!(limit.estimated_work(), None);
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownThird"))
+    }));
+    let surface = serde_json::to_value(&explained)
+        .expect("joined overflow remains visible in materialized plan");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(
+        surface["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["details"]["estimated_work_overflow"] == true)
+            .count(),
+        1,
+        "only the joined scan carries its local overflow marker"
+    );
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_preserves_two_join_scan_overflows_across_unknown_materialized_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not specify whether independent scan-local overflows on
+    // both sides of an unknown join survive later operators. Keep each
+    // half-block-rounded marker on its scan through the limit/write tail.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:two-join-scan-overflows-unknown-tail"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(0),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanFirst"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(2_048),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanUnknownSecond"),
+                statistics: None,
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanLast"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(2_048),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+        ],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:two-join-scan-overflows")),
+    })
+    .expect("two joined scan overflows across unknown, limit, and write tails");
+
+    assert_eq!(explained.nodes().len(), 9);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_rows(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(explained.plan().estimated_cost(), None);
+    for table in [
+        "table:ByteWorkThreeScanFirst",
+        "table:ByteWorkThreeScanLast",
+    ] {
+        let scan = explained
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == PlanNodeKind::Scan && node.object() == Some(&obj(table))
+            })
+            .expect("joined scan with a local overflow");
+        assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+        assert_eq!(scan.estimated_bytes(), Some(2_048));
+        assert_eq!(scan.estimated_work(), None);
+        assert_eq!(
+            scan.details().get("estimated_work_overflow"),
+            Some(&PlanDetail::Boolean(true))
+        );
+    }
+    assert!(explained.nodes().iter().any(|node| {
+        node.kind() == PlanNodeKind::Scan
+            && node.object() == Some(&obj("table:ByteWorkThreeScanUnknownSecond"))
+    }));
+    let limit = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Limit)
+        .expect("limit before materialization");
+    assert_eq!(limit.estimated_rows(), None);
+    assert_eq!(limit.estimated_work(), None);
+    let surface = serde_json::to_value(&explained)
+        .expect("both joined scan overflows remain visible in materialized surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(
+        surface["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["details"]["estimated_work_overflow"] == true)
+            .count(),
+        2,
+        "both joined scans retain their independent local overflow markers"
+    );
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_join_scan_overflow_through_bounded_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves the interaction between a joined scan's local byte
+    // overflow and a bounded limit unspecified. Preserve scan-local overflow;
+    // the limit caps output rows but still accounts for reading MAX input rows.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:joined-scan-overflow-bounded-limit"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:joined-scan-overflow-limit")),
+    })
+    .expect("joined scan overflow with bounded limit and materialization tail");
+
+    assert_eq!(explained.nodes().len(), 5);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_rows(), Some(10));
+    assert_eq!(explained.root().estimated_bytes(), Some(10));
+    assert_eq!(explained.root().estimated_work(), Some(11));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "source and bounded-tail work prove aggregate overflow despite unknown scan work"
+    );
+
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan with local byte-work overflow");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let limit = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Limit)
+        .expect("bounded limit after the join");
+    assert_eq!(limit.estimated_rows(), Some(10));
+    assert_eq!(limit.estimated_bytes(), Some(10));
+    assert_eq!(limit.estimated_work(), Some(u64::MAX));
+    let surface = serde_json::to_value(&explained)
+        .expect("joined overflow and bounded limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_join_scan_overflow_visible_through_sort_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local scan overflow through ordering and limit tails
+    // unspecified. Keep the joined table's half-block overflow marker visible
+    // even though unknown source rows leave both tail work estimates unknown.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-sort-limit-tail"),
+        source: obj("table:ByteWorkThreeScanUnknownFirst"),
+        source_statistics: None,
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: vec![PlanOrdering {
+            expression: orna_sys_v1::ExpressionRef::descriptive("expr:ByteWorkThreeScanLast.value"),
+            direction: PlanSortDirection::Ascending,
+            null_order: PlanNullOrder::Last,
+        }],
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("joined scan overflow through sort and limit tails");
+
+    assert_eq!(explained.nodes().len(), 5);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), None);
+    assert_eq!(explained.root().estimated_work(), None);
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    assert_eq!(explained.plan().estimated_cost(), None);
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan beneath sort and limit");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let sort = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Sort)
+        .expect("sort before limit");
+    assert_eq!(sort.estimated_rows(), None);
+    assert_eq!(sort.estimated_work(), None);
+    let surface = serde_json::to_value(&explained).expect("joined overflow sort-limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(
+        surface["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["details"]["estimated_work_overflow"] == true)
+            .count(),
+        1,
+        "the joined scan retains its single local overflow marker"
+    );
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_join_scan_overflow_through_zero_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN does not define whether a zero limit masks scan overflow.
+    // Keep the joined scan's half-block overflow and input-read lower bound:
+    // the limit returns no rows, so materialization itself costs zero work.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-zero-limit"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(0),
+        mutations: Vec::new(),
+        materialize_into: Some(obj("materialization:join-scan-overflow-zero-limit")),
+    })
+    .expect("joined scan overflow beneath a zero limit and materialization");
+
+    assert_eq!(explained.nodes().len(), 5);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_rows(), Some(0));
+    assert_eq!(explained.root().estimated_bytes(), Some(0));
+    assert_eq!(explained.root().estimated_work(), Some(0));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one known source unit plus MAX input rows read proves aggregate overflow"
+    );
+
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan with local overflow under zero limit");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join carrying the MAX-row cardinality");
+    assert_eq!(join.estimated_rows(), Some(u64::MAX));
+    assert_eq!(join.estimated_bytes(), Some(u64::MAX));
+    assert_eq!(join.estimated_work(), None);
+    let limit = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Limit)
+        .expect("zero limit before materialization");
+    assert_eq!(limit.estimated_rows(), Some(0));
+    assert_eq!(limit.estimated_bytes(), Some(0));
+    assert_eq!(limit.estimated_work(), Some(u64::MAX));
+    let surface = serde_json::to_value(&explained)
+        .expect("zero-limit joined scan overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_join_scan_overflow_at_max_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local byte-work overflow at an inclusive MAX limit
+    // unspecified. Preserve the joined scan marker when the limit retains all
+    // MAX estimated rows and its input-read work closes aggregate overflow.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-max-limit"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(u64::MAX),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("joined scan overflow at the inclusive MAX limit");
+
+    assert_eq!(explained.nodes().len(), 4);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), Some(u64::MAX));
+    assert_eq!(explained.root().estimated_bytes(), Some(u64::MAX));
+    assert_eq!(explained.root().estimated_work(), Some(u64::MAX));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "one source row plus the MAX input rows read proves aggregate overflow"
+    );
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan beneath the MAX limit");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&explained).expect("MAX-limit joined overflow surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_join_scan_overflow_through_predicate_max_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local joined-scan overflow through predicate selectivity
+    // and a MAX limit unspecified. Keep its proof on the scan and plan while
+    // the established 10% fallback lowers output estimates.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-predicate-max-limit-tail"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: Some(orna_sys_v1::ExpressionRef::descriptive(
+                "expr:ByteWorkThreeScanSource.id=ByteWorkThreeScanLast.id",
+            )),
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(u64::MAX),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("joined scan overflow through selective join and MAX limit");
+
+    let selected_rows = u64::try_from(u128::from(u64::MAX).div_ceil(10))
+        .expect("10% selectivity fits the row estimate");
+    assert_eq!(explained.nodes().len(), 4);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), Some(selected_rows));
+    assert_eq!(explained.root().estimated_bytes(), Some(selected_rows));
+    assert_eq!(explained.root().estimated_work(), Some(selected_rows));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan with a local overflow marker");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("predicate join with reduced output cardinality");
+    assert_eq!(join.estimated_rows(), Some(selected_rows));
+    assert_eq!(join.estimated_bytes(), Some(selected_rows));
+    assert_eq!(
+        join.details().get("selectivity_assumption"),
+        Some(&PlanDetail::Text("0.1_no_histogram".to_owned()))
+    );
+    let surface = serde_json::to_value(&explained)
+        .expect("predicate joined-scan overflow at MAX limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_join_scan_overflow_through_limit_mutation_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves local scan overflow through a bounded limit and known
+    // write suffix unspecified. Keep the joined scan marker while the limit
+    // retains its MAX input-read cost and mutation/materialization remain priced.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-scan-overflow-limit-mutation"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(2_048),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: vec![QueryMutationDescription {
+            table: obj("table:ByteWorkThreeScanSource"),
+            kind: QueryMutationKind::Update,
+            estimated_affected_rows: Some(2),
+            estimated_write_bytes: Some(2_048),
+            estimated_table_rows_before: Some(1),
+        }],
+        materialize_into: Some(obj("materialization:join-scan-overflow-limit-mutation")),
+    })
+    .expect("joined scan overflow through limit, write, and materialization tails");
+
+    assert_eq!(explained.nodes().len(), 6);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Materialize);
+    assert_eq!(explained.root().estimated_rows(), Some(2));
+    assert_eq!(explained.root().estimated_bytes(), Some(2_048));
+    assert_eq!(explained.root().estimated_work(), Some(3));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "known source and MAX input-read work cross the aggregate bound before the write suffix"
+    );
+
+    let scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined scan with local byte-work overflow");
+    assert_eq!(scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(scan.estimated_bytes(), Some(2_048));
+    assert_eq!(scan.estimated_work(), None);
+    assert_eq!(
+        scan.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let limit = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Limit)
+        .expect("bounded limit before the write suffix");
+    assert_eq!(limit.estimated_rows(), Some(10));
+    assert_eq!(limit.estimated_bytes(), Some(10));
+    assert_eq!(limit.estimated_work(), Some(u64::MAX));
+    let mutation = explained
+        .nodes()
+        .iter()
+        .find(|node| node.details().get("mutation") == Some(&PlanDetail::Text("update".to_owned())))
+        .expect("known update following the limit");
+    assert_eq!(mutation.estimated_rows(), Some(2));
+    assert_eq!(mutation.estimated_bytes(), Some(2_048));
+    assert_eq!(mutation.estimated_work(), Some(3));
+    let surface = serde_json::to_value(&explained)
+        .expect("joined scan overflow limit-write surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_join_work_overflow_visible_through_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves join-work overflow through a bounded limit unspecified.
+    // Keep the overflow on the join when one source row plus MAX joined rows
+    // exceeds MAX; both scan costs remain representable and the limit caps output.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:join-work-overflow-limit-tail"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![QueryJoinDescription {
+            source: obj("table:ByteWorkThreeScanLast"),
+            statistics: Some(QuerySourceStatistics {
+                estimated_rows: Some(u64::MAX),
+                estimated_bytes: Some(0),
+                mutable_branch: None,
+            }),
+            predicate: None,
+        }],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("join work overflow beneath bounded limit");
+
+    assert_eq!(explained.nodes().len(), 4);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), Some(10));
+    assert_eq!(explained.root().estimated_bytes(), Some(0));
+    assert_eq!(explained.root().estimated_work(), Some(u64::MAX));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "representable source and scan work still prove aggregate overflow"
+    );
+    assert_eq!(explained.root().details().get("estimated_work_overflow"), None);
+
+    let joined_scan = explained
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.kind() == PlanNodeKind::Scan
+                && node.object() == Some(&obj("table:ByteWorkThreeScanLast"))
+        })
+        .expect("joined table scan with exact MAX work");
+    assert_eq!(joined_scan.estimated_rows(), Some(u64::MAX));
+    assert_eq!(joined_scan.estimated_bytes(), Some(0));
+    assert_eq!(joined_scan.estimated_work(), Some(u64::MAX));
+    assert_eq!(joined_scan.details().get("estimated_work_overflow"), None);
+    let join = explained
+        .nodes()
+        .iter()
+        .find(|node| node.kind() == PlanNodeKind::Join)
+        .expect("join with overflowing sum of input rows");
+    assert_eq!(join.estimated_rows(), Some(u64::MAX));
+    assert_eq!(join.estimated_bytes(), Some(0));
+    assert_eq!(join.estimated_work(), None);
+    assert_eq!(
+        join.details().get("estimated_work_overflow"),
+        Some(&PlanDetail::Boolean(true))
+    );
+    let surface = serde_json::to_value(&explained).expect("join overflow limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert!(surface["nodes"].as_array().unwrap().iter().any(|node| {
+        node["details"]["estimated_work_overflow"] == true
+    }));
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}
+
+#[test]
+fn explain_keeps_chained_join_work_overflows_through_limit_tail() {
+    let parsed = orna_syntax_v1::parse_module(BYTE_WORK_THREE_SCAN_FIRST_BYTE_TAIL);
+    assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
+    assert_eq!(parsed.value.items.len(), 7);
+
+    // ORNA-PLAN leaves multiple join-work overflows across a later join and
+    // limit unspecified. Preserve each join's local marker when the first
+    // MAX-row product makes both successive input-row sums exceed MAX.
+    let explained = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:chained-join-work-overflow-limit-tail"),
+        source: obj("table:ByteWorkThreeScanSource"),
+        source_statistics: Some(QuerySourceStatistics {
+            estimated_rows: Some(1),
+            estimated_bytes: Some(0),
+            mutable_branch: None,
+        }),
+        joins: vec![
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanFirst"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(u64::MAX),
+                    estimated_bytes: Some(0),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+            QueryJoinDescription {
+                source: obj("table:ByteWorkThreeScanMiddle"),
+                statistics: Some(QuerySourceStatistics {
+                    estimated_rows: Some(1),
+                    estimated_bytes: Some(0),
+                    mutable_branch: None,
+                }),
+                predicate: None,
+            },
+        ],
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: Some(10),
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("two overflowing joins beneath a bounded limit");
+
+    assert_eq!(explained.nodes().len(), 6);
+    assert_eq!(explained.root().kind(), PlanNodeKind::Limit);
+    assert_eq!(explained.root().estimated_rows(), Some(10));
+    assert_eq!(explained.root().estimated_bytes(), Some(0));
+    assert_eq!(explained.root().estimated_work(), Some(u64::MAX));
+    assert_eq!(explained.plan().estimated_cost(), None);
+    assert_eq!(
+        explained.root().details().get("estimated_cost_overflow"),
+        Some(&PlanDetail::Boolean(true)),
+        "representable scan and limit work prove aggregate overflow"
+    );
+
+    let scans: Vec<_> = explained
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Scan)
+        .collect();
+    assert_eq!(scans.len(), 3);
+    assert!(scans.iter().all(|node| node.details().get("estimated_work_overflow").is_none()));
+    let joins: Vec<_> = explained
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Join)
+        .collect();
+    assert_eq!(joins.len(), 2);
+    assert!(joins.iter().all(|node| {
+        node.estimated_rows() == Some(u64::MAX)
+            && node.estimated_bytes() == Some(0)
+            && node.estimated_work().is_none()
+            && node.details().get("estimated_work_overflow")
+                == Some(&PlanDetail::Boolean(true))
+    }));
+    let surface = serde_json::to_value(&explained).expect("chained join overflow limit surface");
+    assert!(surface["plan"].get("estimated_cost").is_none());
+    assert_eq!(surface["nodes"][0]["details"]["estimated_cost_overflow"], true);
+    assert_eq!(
+        surface["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["details"]["estimated_work_overflow"] == true)
+            .count(),
+        2,
+        "both joins retain a local overflow marker through the limit"
+    );
+    assert!(surface["nodes"].as_array().unwrap().iter().all(|node| {
+        node.get("actual_rows").is_none() && node.get("actual_bytes").is_none()
+    }));
+}

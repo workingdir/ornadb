@@ -1,0 +1,9 @@
+pub table User(id: Uuid) { name: Str, }
+pub table Account(id: Uuid) { user_id: Uuid, }
+
+pub fn related(): Bool =
+    every(User, user =>
+        exists(Account, account => account.user_id == user.id)
+    );
+
+assert related();

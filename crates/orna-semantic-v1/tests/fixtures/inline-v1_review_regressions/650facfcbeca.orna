@@ -1,0 +1,10 @@
+
+            pub fn integer(): Int {
+                let x: Int = 1;
+                x
+            }
+            pub fn text(): Str {
+                let x: Str = "text";
+                x
+            }
+        

@@ -1,0 +1,1 @@
+fn update() { let value = { count: 0 }; value.count = 1; }

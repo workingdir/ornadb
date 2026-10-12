@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::{fs, path::Path, process::Command};
 
 use orna_compiler::{check, materialize_resolved_source_catalogue};
@@ -31,16 +34,13 @@ fn git(root: &Path, args: &[&str]) {
 fn repository() -> (TempDir, Repository) {
     let temp = TempDir::new_in("/var/tmp").unwrap();
     git(temp.path(), &["init", "--quiet"]);
-    git(
-        temp.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(
-        temp.path(),
-        &["config", "user.name", "source admission test"],
-    );
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+    fs::write(
+        temp.path().join("main.orna"),
+        include_str!("fixtures/source-admission-bootstrap.orna"),
+    )
+    .unwrap();
     git(temp.path(), &["add", "main.orna"]);
     git(temp.path(), &["commit", "--quiet", "-m", "initial"]);
     let repository = Repository::discover(temp.path()).unwrap();
@@ -115,7 +115,7 @@ async fn real_source_candidate_projects_and_admits_at_runtime_capture() {
     .await
     .unwrap();
     let active = empty_active();
-    let source = "CREATE SCHEMA app; CREATE TYPE app.item AS OBJECT (value INTEGER);";
+    let source = include_str!("fixtures/source-candidate-app-item.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
     let report = check(&bundle, active.catalogue());
     assert!(

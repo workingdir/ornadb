@@ -1,0 +1,6 @@
+pub fn formats(duration: Duration) = {
+    compact: std.time.duration.compact.format(duration),
+    clock: std.time.duration.clock.format(duration),
+    words: std.time.duration.words.format(duration),
+    iso: std.time.duration.iso.format(duration),
+};

@@ -26,17 +26,26 @@ use std::{
 };
 
 use orna_foundation_v1::{
-    CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value,
+    CanonicalSnapshot, CanonicalValue, Diagnostic as FoundationDiagnostic, DiagnosticSeverity,
+    OvbRaw, SafeText, Value,
 };
 use orna_protocol_v1::{
     Envelope, Limits as ProtocolLimits, Message, RequestState, ResultBody, ResultStatus,
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
+<<<<<<< HEAD
     Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
     RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
     StagedTableActivation, TableMutation, TerminalOutcome, WriterLease,
+=======
+    admin_invocation_id, with_terminal_admin_effect, Component, ConsumerIdentity, FaultInjector,
+    RecoveryDisposition, RequestIdentity, RequestOwner, RequestState as DurableRequestState,
+    RequestStatus as DurableRequestStatus, RunObservationRegistration,
+    RuntimeActivationContext, RuntimeError, RuntimeState, StagedTableActivation, TableMutation,
+    TerminalOutcome, WriterLease,
+>>>>>>> origin/w90zi-imp_merge
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -94,6 +103,7 @@ pub enum Error {
     UnsupportedOperation,
     RequestMismatch,
     ApplicationRejected,
+    AdminBusy,
     /// The application deliberately left an admitted request nonterminal.
     ///
     /// The host must not replace this outcome with its generic retained
@@ -119,6 +129,7 @@ impl Error {
             Self::UnsupportedOperation => "live.unsupported_operation",
             Self::RequestMismatch => "wire.request_mismatch",
             Self::ApplicationRejected => "live.application_rejected",
+            Self::AdminBusy => "sys.admin.busy",
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
         }
@@ -724,6 +735,7 @@ pub struct LiveEvalTransaction {
     pub mutations: Vec<TableMutation>,
     pub next_digest: [u8; 32],
     pub faults: Arc<dyn FaultInjector>,
+    after_commit: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl LiveEvalTransaction {
@@ -737,7 +749,16 @@ impl LiveEvalTransaction {
             mutations,
             next_digest,
             faults,
+            after_commit: None,
         }
+    }
+
+    /// Registers application-owned ephemeral state to publish after the host
+    /// commits this activation's durable writes and terminal request outcome.
+    #[must_use]
+    pub fn after_commit(mut self, callback: impl FnOnce() + Send + 'static) -> Self {
+        self.after_commit = Some(Box::new(callback));
+        self
     }
 }
 
@@ -1068,6 +1089,21 @@ pub trait LiveApplication {
         })
     }
 
+    /// Dispatches an Eval with the host's trusted stream-administration
+    /// capability. The default preserves applications that do not implement
+    /// runtime-backed source effects.
+    fn dispatch_eval_with_effects<'a>(
+        &'a mut self,
+        session: [u8; 16],
+        request: [u8; 16],
+        message: &'a Message,
+        context: Option<&'a RuntimeActivationContext>,
+        work: &'a mut LiveApplicationWorkLease,
+        _effects: Option<&'a dyn LiveAdminEffectDispatcher>,
+    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse>> + 'a>> {
+        self.dispatch_eval_with_work(session, request, message, context, work)
+    }
+
     /// Dispatches an admitted page action under the same host-owned runtime
     /// transaction seam as Eval. Existing applications inherit a pure result;
     /// action-capable adapters may return staged table mutations.
@@ -1127,6 +1163,183 @@ pub trait LiveApplication {
     }
 }
 
+/// Host capability for one admitted source-level stream pause. Implementors
+/// must validate the portable reference against the current writer owner and
+/// the activation's pinned capture before changing runtime state.
+pub trait LiveAdminEffectDispatcher: Send + Sync {
+    /// Returns the durable snapshot projected into the two publication
+    /// metadata system relations. The host owns the runtime read authority;
+    /// the application consumes only canonical rows through its normal
+    /// relation-page effect boundary.
+    fn publication_metadata_rows<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<
+                        Option<orna_runtime_v1::RuntimePublicationMetadataRows>,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn pause_stream<'a>(
+        &'a self,
+        stream: CanonicalValue,
+        reason: Option<String>,
+        context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>;
+
+    fn resume_stream<'a>(
+        &'a self,
+        _stream: CanonicalValue,
+        _context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+        Box::pin(async { Err("sys.admin.unavailable".to_owned()) })
+    }
+
+    fn reject_staged_admin_effect<'a>(
+        &'a self,
+        _stream: CanonicalValue,
+        _reason: Option<String>,
+        _resume: bool,
+        _context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+        Box::pin(async { Err("sys.admin.busy".to_owned()) })
+    }
+}
+
+struct RuntimeAdminEffectDispatcher {
+    runtime: Arc<RuntimeState>,
+    lease: WriterLease,
+    request: RequestIdentity,
+}
+
+impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
+    fn publication_metadata_rows<'a>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<
+                        Option<orna_runtime_v1::RuntimePublicationMetadataRows>,
+                        String,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.runtime
+                .publication_metadata_rows()
+                .await
+                .map(Some)
+                .map_err(|_| "sys.storage.metadata_unavailable".to_owned())
+        })
+    }
+
+    fn pause_stream<'a>(
+        &'a self,
+        stream: CanonicalValue,
+        reason: Option<String>,
+        context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let invocation_id = admin_invocation_id(self.request);
+            let outcome = with_terminal_admin_effect(&self.runtime, self.lease, || async {
+                self.runtime
+                    .pause_stream_reference_at_capture_with_invocation_id(
+                        self.lease,
+                        stream,
+                        reason,
+                        context.capture(),
+                        invocation_id,
+                    )
+                    .await
+            })
+                .await
+                .map_err(|error| match error {
+                    RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
+                    _ => "sys.admin.unavailable".to_owned(),
+                })?;
+            let changed = matches!(
+                outcome,
+                orna_runtime_v1::StreamAdministrationOutcome::Paused { changed: true }
+                    | orna_runtime_v1::StreamAdministrationOutcome::PausePending { changed: true }
+            );
+            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+        })
+    }
+
+    fn resume_stream<'a>(
+        &'a self,
+        stream: CanonicalValue,
+        context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let invocation_id = admin_invocation_id(self.request);
+            let outcome = with_terminal_admin_effect(&self.runtime, self.lease, || async {
+                self.runtime
+                    .resume_stream_reference_at_capture_with_invocation_id(
+                        self.lease,
+                        stream,
+                        context.capture(),
+                        invocation_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|error| match error {
+                RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
+                _ => "sys.admin.unavailable".to_owned(),
+            })?;
+            let changed = matches!(
+                outcome,
+                orna_runtime_v1::StreamAdministrationOutcome::Running { changed: true }
+            );
+            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+        })
+    }
+
+    fn reject_staged_admin_effect<'a>(
+        &'a self,
+        stream: CanonicalValue,
+        reason: Option<String>,
+        resume: bool,
+        _context: &'a RuntimeActivationContext,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let function = if resume {
+                "sys.admin.resume_stream"
+            } else if reason.is_some() {
+                "sys.admin.pause_stream_with_reason"
+            } else {
+                "sys.admin.pause_stream"
+            };
+            let invocation_id = admin_invocation_id(self.request);
+            self.runtime
+                .reject_admin_stream_effect_as_busy(
+                    self.lease,
+                    function,
+                    stream,
+                    reason,
+                    invocation_id,
+                )
+                .await
+                .map_err(|error| match error {
+                    RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
+                    _ => "sys.admin.unavailable".to_owned(),
+                })?;
+            Err("sys.admin.busy".to_owned())
+        })
+    }
+}
+
 impl LiveSessionChildren for LiveApplicationWorkSupervisor {
     fn cancel_and_join_session<'a>(
         &'a mut self,
@@ -1144,13 +1357,15 @@ impl LiveSessionChildren for LiveApplicationWorkSupervisor {
 /// owns the application lease and is therefore not complete until the
 /// application task explicitly acknowledges its terminal boundary.
 pub struct LiveApplicationTicket {
-    attachment: [u8; 16],
     session: [u8; 16],
     request: [u8; 16],
     message: Message,
     watch: Option<[u8; 16]>,
     fingerprint: [u8; 32],
     eval_context: Option<RuntimeActivationContext>,
+    admin_effects: Option<Arc<dyn LiveAdminEffectDispatcher>>,
+    activation_runtime: Option<Arc<RuntimeState>>,
+    activation_lease: Option<WriterLease>,
     work: LiveApplicationWorkLease,
     invoke_callback: bool,
     resync_revisions: usize,
@@ -1227,15 +1442,29 @@ impl LiveApplicationTicket {
     ) -> LiveApplicationCompletion {
         let response = if self.invoke_callback {
             if matches!(self.message, Message::Eval { .. }) {
+                let session = self.session;
+                let request = self.request;
+                let message = &self.message;
+                let context = self.eval_context.as_ref();
+                let work = &mut self.work;
+                let effects = self.admin_effects.as_deref();
+                let execute = move || async move {
                 application
-                    .dispatch_eval_with_work(
-                        self.session,
-                        self.request,
-                        &self.message,
-                        self.eval_context.as_ref(),
-                        &mut self.work,
+                        .dispatch_eval_with_effects(
+                            session, request, message, context, work, effects,
                     )
                     .await
+                };
+                if let (Some(runtime), Some(lease)) =
+                    (self.activation_runtime.as_ref(), self.activation_lease)
+                {
+                    match orna_runtime_v1::with_activation_scope(runtime, lease, execute).await {
+                        Ok(result) => result,
+                        Err(error) => Err(map_runtime(&error)),
+                    }
+                } else {
+                    execute().await
+                }
             } else if matches!(self.message, Message::Event { .. }) {
                 application
                     .dispatch_event_with_work(
@@ -1411,7 +1640,8 @@ impl HttpResponse {
                 | Error::ReplayRequired
                 | Error::UnsupportedOperation
                 | Error::RequestMismatch
-                | Error::ApplicationRejected => 400,
+                | Error::ApplicationRejected
+                | Error::AdminBusy => 400,
                 Error::ApplicationDeferred | Error::RuntimeUnavailable => 503,
             },
             headers: Vec::new(),
@@ -1433,14 +1663,47 @@ pub struct LiveHost {
     attachments: BTreeMap<[u8; 16], [u8; 16]>,
     requests: BTreeMap<([u8; 16], [u8; 16]), RequestRecord>,
     watches: BTreeSet<([u8; 16], [u8; 16])>,
+    watch_snapshots: BTreeMap<([u8; 16], [u8; 16]), AcceptedWatchSnapshot>,
     application_sessions: BTreeSet<[u8; 16]>,
     deleted_sessions: BTreeMap<[u8; 16], DeletedSession>,
-    runtime: Option<RuntimeState>,
+    session_runtime_contexts: BTreeMap<[u8; 16], SessionRuntimeContext>,
+    runtime: Option<Arc<RuntimeState>>,
     runtime_owner: Option<[u8; 16]>,
     writer_lease: Option<WriterLease>,
     recovered_owner: Option<RequestOwner>,
     takeover_recovery_complete: bool,
     application_work: LiveApplicationWorkSupervisor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionRuntimeContext {
+    database: [u8; 16],
+    runtime: [u8; 16],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AcceptedWatchSnapshot {
+    revision: u64,
+    present: orna_protocol_v1::PresentNode,
+    snapshot: CanonicalSnapshot,
+}
+
+impl AcceptedWatchSnapshot {
+    fn from_response(response: &Envelope) -> Result<Option<Self>> {
+        match &response.message {
+            Message::Snapshot {
+                revision,
+                present,
+                snapshot,
+            } => Ok(Some(Self {
+                revision: *revision,
+                present: present.clone(),
+                snapshot: snapshot.clone(),
+            })),
+            Message::Diagnostic { .. } => Ok(None),
+            _ => Err(Error::ApplicationRejected),
+        }
+    }
 }
 
 enum DurableAdmission {
@@ -1564,9 +1827,11 @@ impl LiveHost {
             attachments: BTreeMap::new(),
             requests: BTreeMap::new(),
             watches: BTreeSet::new(),
+            watch_snapshots: BTreeMap::new(),
             application_sessions: BTreeSet::new(),
             deleted_sessions: BTreeMap::new(),
-            runtime,
+            session_runtime_contexts: BTreeMap::new(),
+            runtime: runtime.map(Arc::new),
             runtime_owner,
             writer_lease: None,
             recovered_owner,
@@ -1607,7 +1872,19 @@ impl LiveHost {
         request: CreateRequest<'_>,
         issuer: &mut impl LiveCredentialIssuer,
     ) -> Result<SessionCredential> {
+        self.create_with_runtime_context(request, None, issuer).await
+    }
+
+    async fn create_with_runtime_context(
+        &mut self,
+        request: CreateRequest<'_>,
+        runtime_context: Option<SessionRuntimeContext>,
+        issuer: &mut impl LiveCredentialIssuer,
+    ) -> Result<SessionCredential> {
         let subscribe = self.decode(request.subscribe)?;
+        if runtime_context.is_some() && self.session_runtime_contexts.contains_key(&request.id) {
+            return Err(Error::Denied);
+        }
         let security = self
             .security
             .create(
@@ -1632,6 +1909,10 @@ impl LiveHost {
         ) {
             let _ = self.security.revoke(session_id(request.id));
             return Err(map_serving(error));
+        }
+        if let Some(runtime_context) = runtime_context {
+            self.session_runtime_contexts
+                .insert(request.id, runtime_context);
         }
         Ok(SessionCredential { security, serving })
     }
@@ -2093,6 +2374,9 @@ impl LiveHost {
     fn finish_delete(&mut self, request: &DeleteRequest<'_>, deleted: bool) -> Result<()> {
         self.requests.retain(|(owner, _), _| *owner != request.id);
         self.watches.retain(|(owner, _)| *owner != request.id);
+        self.watch_snapshots
+            .retain(|(owner, _), _| *owner != request.id);
+        self.session_runtime_contexts.remove(&request.id);
         self.serving
             .credential_deleted(request.id, deleted)
             .map_err(|_| Error::DeletionFailed)?;
@@ -2220,6 +2504,7 @@ impl LiveHost {
             return Err(Error::InvalidFrame);
         };
         let envelope = self.decode(&bytes)?;
+        self.validate_session_runtime_context(session, &envelope.message)?;
         let request = envelope.request.ok_or(Error::InvalidMessage)?;
         if matches!(
             envelope.message,
@@ -2243,11 +2528,28 @@ impl LiveHost {
         {
             return Err(Error::RequestMismatch);
         }
-        if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
-            let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
-            if !self.watches.contains(&(session, watch)) {
-                return Err(Error::Denied);
+        // A matching local terminal result is authoritative even if the
+        // operational watch was closed after the original response.
+        if self.runtime.is_none()
+            && let Some(record) = self.requests.get(&(session, request))
+        {
+            if record.fingerprint != fingerprint {
+                if matches!(envelope.message, Message::RequestStatus { .. }) {
+                    return Ok(ApplicationPreparation::Completed(
+                        request_mismatch_outcome(request)?,
+                    ));
+                }
+                return Err(Error::RequestMismatch);
             }
+            return Ok(ApplicationPreparation::Completed(
+                record.terminal.clone().unwrap_or(DispatchOutcome {
+                    outcome: FrameOutcome::Accepted,
+                    response: None,
+                }),
+            ));
+        }
+        if self.runtime.is_none() {
+            self.validate_live_watch_reference(session, &envelope)?;
         }
         if self.runtime.is_some() {
             match self
@@ -2287,21 +2589,6 @@ impl LiveHost {
                 }
                 Err(error) => return Err(error),
             }
-        } else if let Some(record) = self.requests.get(&(session, request)) {
-            if record.fingerprint != fingerprint {
-                if matches!(envelope.message, Message::RequestStatus { .. }) {
-                    return Ok(ApplicationPreparation::Completed(request_mismatch_outcome(
-                        request,
-                    )?));
-                }
-                return Err(Error::RequestMismatch);
-            }
-            return Ok(ApplicationPreparation::Completed(
-                record.terminal.clone().unwrap_or(DispatchOutcome {
-                    outcome: FrameOutcome::Accepted,
-                    response: None,
-                }),
-            ));
         }
 
         if let Message::RequestStatus {
@@ -2372,6 +2659,15 @@ impl LiveHost {
             self.retain_failure(session, request, fingerprint).await?;
             return Err(error);
         }
+        let activation_lease = if self.runtime.is_some()
+            && matches!(
+                envelope.message,
+                Message::Eval { .. } | Message::Event { .. }
+            ) {
+            Some(self.writer_lease().await?)
+        } else {
+            None
+        };
         let eval_context = if self.runtime.is_some()
             && matches!(
                 envelope.message,
@@ -2387,6 +2683,18 @@ impl LiveHost {
             )
         } else {
             None
+        };
+        let admin_effects = match (self.runtime.as_ref(), activation_lease) {
+            (Some(runtime), Some(lease)) => Some(Arc::new(RuntimeAdminEffectDispatcher {
+                runtime: Arc::clone(runtime),
+                lease,
+                request: RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                },
+            })
+                as Arc<dyn LiveAdminEffectDispatcher>),
+            _ => None,
         };
         if let Some((target, target_kind, target_active, durable_request)) = cancel_target
             && target_active
@@ -2421,13 +2729,15 @@ impl LiveHost {
         }
         self.application_sessions.insert(session);
         Ok(ApplicationPreparation::Work(LiveApplicationTicket {
-            attachment,
             session,
             request,
             message: envelope.message,
             watch: envelope.watch,
             fingerprint,
             eval_context,
+            admin_effects,
+            activation_runtime: self.runtime.clone(),
+            activation_lease,
             work,
             invoke_callback,
             resync_revisions,
@@ -2455,6 +2765,9 @@ impl LiveHost {
             watch,
             fingerprint,
             eval_context,
+            admin_effects: _,
+            activation_runtime: _,
+            activation_lease: _,
             work,
             resync_revisions,
             cancel_target,
@@ -2465,9 +2778,32 @@ impl LiveHost {
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                if !matches!(error, Error::ApplicationDeferred)
-                    && !self.deleted_sessions.contains_key(&session)
-                {
+                // An async callback can reject after the session has been
+                // deleted or its request has already reached a terminal
+                // state. Apply the same session/request fence as successful
+                // results before turning this error into a wire diagnostic;
+                // stale work must not speak for a retired session.
+                self.validate_application_completion_parts(session, request, fingerprint)
+                    .await?;
+                if !matches!(error, Error::ApplicationDeferred) {
+                    let envelope = Envelope {
+                        request: Some(request),
+                        watch,
+                        message: message.clone(),
+                        extensions: BTreeMap::new(),
+                    };
+                    // Retain mapped rejections at the host boundary so a
+                    // retry on a resumed attachment replays the same
+                    // correlated diagnostic instead of a generic failure.
+                    if let Some(outcome) = self.operational_error_outcome(
+                        Some(session),
+                        &envelope,
+                        error,
+                        true,
+                    )?
+                    {
+                        return self.complete(session, request, &envelope, outcome).await;
+                    }
                     self.retain_failure(session, request, fingerprint).await?;
                 }
                 return Err(error);
@@ -2526,6 +2862,7 @@ impl LiveHost {
         };
         let mut open_watch = None;
         let mut close_watch = None;
+        let mut watch_snapshot_replacement = None;
         let outcome = match &message {
             Message::Subscribe { .. } => {
                 let outcome =
@@ -2542,6 +2879,12 @@ impl LiveHost {
                 let watch = watch.ok_or(Error::InvalidMessage)?;
                 let outcome =
                     validate_watch_response(request, Some(watch), response, self.limits.protocol)?;
+                let response = outcome
+                    .response
+                    .as_ref()
+                    .ok_or(Error::ApplicationRejected)?;
+                watch_snapshot_replacement =
+                    self.prepare_watch_snapshot_replacement(session, watch, response)?;
                 DispatchOutcome {
                     outcome: FrameOutcome::Resync {
                         revisions: resync_revisions,
@@ -2611,6 +2954,13 @@ impl LiveHost {
             })
         );
         if !cancelled_winner {
+            if let Some(watch) = watch {
+                self.commit_watch_snapshot_replacement(
+                    session,
+                    watch,
+                    watch_snapshot_replacement,
+                );
+            }
             if let Some(watch) = open_watch {
                 self.open_watch(session, watch, &outcome)?;
             }
@@ -2657,6 +3007,73 @@ impl LiveHost {
             }
         }
         Ok(())
+    }
+
+    /// Converts an admitted operation's portable rejection into its retained
+    /// diagnostic response. Session identity comes from the admission ticket,
+    /// so a socket retired by resume cannot erase a still-live watch's
+    /// correlation from the terminal outcome.
+    fn operational_error_outcome(
+        &self,
+        session: Option<[u8; 16]>,
+        envelope: &Envelope,
+        error: Error,
+        admitted_application_work: bool,
+    ) -> Result<Option<DispatchOutcome>> {
+        let Some(request) = envelope.request else {
+            return Ok(None);
+        };
+        let known_watch = if admitted_application_work
+            && matches!(envelope.message, Message::Event { .. })
+        {
+            // Admission already proved this ID belongs to the originating
+            // session; a later unsubscribe must not erase rejection context.
+            envelope.watch
+        } else {
+            session.and_then(|session| {
+                envelope
+                    .watch
+                    .filter(|watch| self.watches.contains(&(session, *watch)))
+            })
+        };
+        // Event diagnostics stay scoped to their source watch for every
+        // portable rejection code. Admitted work can rely on its ticket after
+        // closure; admission failures can correlate only a currently owned
+        // watch, avoiding a foreign-handle leak.
+        let event_watch = matches!(envelope.message, Message::Event { .. })
+            .then_some(known_watch)
+            .flatten();
+        let (code, watch) = match error {
+            Error::RequestMismatch => (Error::RequestMismatch.code(), event_watch),
+            Error::UnsupportedOperation => ("wire.unsupported", event_watch),
+            Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
+            // A denied event admitted on a live watch is an action-handle
+            // rejection; a pre-admission event without a live watch
+            // (including resync) is an unknown handle. Attachment-boundary
+            // denials stay outside this protocol diagnostic path.
+            Error::Denied if matches!(envelope.message, Message::Event { .. }) => {
+                if let Some(watch) = event_watch {
+                    ("wire.stale_action", Some(watch))
+                } else {
+                    ("wire.unknown_handle", None)
+                }
+            }
+            Error::Denied if matches!(envelope.message, Message::Resync) => {
+                ("wire.unknown_handle", None)
+            }
+            Error::Denied
+                if matches!(envelope.message, Message::Eval { .. } | Message::Watch { .. }) =>
+            {
+                // DatabaseContext is client supplied; keep the session's
+                // trusted database/runtime selection authoritative.
+                ("wire.database_context_mismatch", None)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(DispatchOutcome {
+            outcome: FrameOutcome::Accepted,
+            response: Some(portable_diagnostic(request, watch, code)?),
+        }))
     }
 
     /// Dispatches one complete client frame through the full client registry.
@@ -2756,6 +3173,7 @@ impl LiveHost {
             }
             Frame::Binary(bytes) => {
                 let envelope = self.decode(&bytes)?;
+                self.validate_session_runtime_context(session, &envelope.message)?;
                 let request = envelope.request.ok_or(Error::InvalidMessage)?;
                 if matches!(
                     envelope.message,
@@ -2778,17 +3196,12 @@ impl LiveHost {
                 } = &envelope.message
                     && *sent != fingerprint
                 {
+                    // A stale redundant fingerprint is a pre-admission
+                    // rejection: it must not claim the durable request ID.
+                    // The protocol requires a correlated diagnostic but does
+                    // not specify whether such a rejected frame reserves the
+                    // ID, so a corrected canonical retry remains admissible.
                     return Err(Error::RequestMismatch);
-                }
-                // Validate every existing watch target before durable request
-                // admission. A rejected Event or Resync must not create a
-                // reservation that could later be mistaken for executable
-                // work after a restart.
-                if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
-                    let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
-                    if !self.watches.contains(&(session, watch)) {
-                        return Err(Error::Denied);
-                    }
                 }
                 if self.runtime.is_some()
                     && matches!(
@@ -2801,6 +3214,25 @@ impl LiveHost {
                     )
                 {
                     self.ensure_takeover_recovery().await?;
+                }
+                // Return a known local outcome before checking live handles:
+                // exact retries stay exact after a watch has been closed.
+                if self.runtime.is_none()
+                    && let Some(record) = self.requests.get(&(session, request))
+                {
+                    if record.fingerprint != fingerprint {
+                        if matches!(envelope.message, Message::RequestStatus { .. }) {
+                            return request_mismatch_outcome(request);
+                        }
+                        return Err(Error::RequestMismatch);
+                    }
+                    return Ok(record.terminal.clone().unwrap_or(DispatchOutcome {
+                        outcome: FrameOutcome::Accepted,
+                        response: None,
+                    }));
+                }
+                if self.runtime.is_none() {
+                    self.validate_live_watch_reference(session, &envelope)?;
                 }
                 if self.runtime.is_some() {
                     match self
@@ -2838,17 +3270,6 @@ impl LiveHost {
                         }
                         Err(error) => return Err(error),
                     }
-                } else if let Some(record) = self.requests.get(&(session, request)) {
-                    if record.fingerprint != fingerprint {
-                        if matches!(envelope.message, Message::RequestStatus { .. }) {
-                            return request_mismatch_outcome(request);
-                        }
-                        return Err(Error::RequestMismatch);
-                    }
-                    return Ok(record.terminal.clone().unwrap_or(DispatchOutcome {
-                        outcome: FrameOutcome::Accepted,
-                        response: None,
-                    }));
                 }
                 if let Err(error) = self.reserve_and_start(session, request, fingerprint) {
                     self.retain_failure(session, request, fingerprint).await?;
@@ -2916,7 +3337,14 @@ impl LiveHost {
                                 response,
                                 self.limits.protocol,
                             )?;
-                            self.complete(
+                            let response = outcome
+                                .response
+                                .as_ref()
+                                .ok_or(Error::ApplicationRejected)?;
+                            let replacement = self.prepare_watch_snapshot_replacement(
+                                session, watch, response,
+                            )?;
+                            let completed = self.complete(
                                 session,
                                 request,
                                 &envelope,
@@ -2925,7 +3353,9 @@ impl LiveHost {
                                     response: outcome.response,
                                 },
                             )
-                            .await
+                            .await?;
+                            self.commit_watch_snapshot_replacement(session, watch, replacement);
+                            Ok(completed)
                         }
                         Message::Unsubscribe => {
                             let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
@@ -3107,10 +3537,27 @@ impl LiveHost {
                     }
                 }
                 .await;
-                if dispatched.is_err() && !matches!(&dispatched, Err(Error::ApplicationDeferred)) {
-                    self.retain_failure(session, request, fingerprint).await?;
+                match dispatched {
+                    Err(error) if !matches!(error, Error::ApplicationDeferred) => {
+                        // Synchronous dispatch and supervised completions use
+                        // the same replay contract: retain a portable rejection
+                        // before returning it to the transport, so a retry does
+                        // not replace its event/watch context with a generic
+                        // failure result.
+                        if let Some(outcome) = self.operational_error_outcome(
+                            Some(session),
+                            &envelope,
+                            error,
+                            true,
+                        )? {
+                            self.complete(session, request, &envelope, outcome).await
+                        } else {
+                            self.retain_failure(session, request, fingerprint).await?;
+                            Err(error)
+                        }
+                    }
+                    result => result,
                 }
-                dispatched
             }
         }
     }
@@ -3123,6 +3570,12 @@ impl LiveHost {
         message: &Message,
         fingerprint: [u8; 32],
     ) -> Result<Envelope> {
+        let activation_runtime = self.runtime.clone();
+        let activation_lease = if activation_runtime.is_some() {
+            Some(self.writer_lease().await?)
+        } else {
+            None
+        };
         let context = if self.runtime.is_some() {
             Some(
                 self.runtime
@@ -3135,10 +3588,52 @@ impl LiveHost {
         } else {
             None
         };
+        let admin_effects = match (&activation_runtime, activation_lease) {
+            (Some(runtime), Some(lease)) => Some(RuntimeAdminEffectDispatcher {
+                runtime: Arc::clone(runtime),
+                lease,
+                request: RequestIdentity {
+                    session_id: session,
+                    request_id: request,
+                },
+            }),
+            _ => None,
+        };
         let mut work = self.application_work.admit(session, request)?;
+<<<<<<< HEAD
         let result = application
             .dispatch_eval_with_work(session, request, message, context.as_ref(), &mut work)
             .await;
+=======
+        let context_ref = context.as_ref();
+        let work_ref = &mut work;
+        let effects_ref = admin_effects
+            .as_ref()
+            .map(|dispatcher| dispatcher as &dyn LiveAdminEffectDispatcher);
+        let session_id = session;
+        let request_id = request;
+        let execute = move || async move {
+            application
+                .dispatch_eval_with_effects(
+                    session_id,
+                    request_id,
+                message,
+                    context_ref,
+                    work_ref,
+                    effects_ref,
+            )
+                .await
+        };
+        let result = match (&activation_runtime, activation_lease) {
+            (Some(runtime), Some(lease)) => {
+                match orna_runtime_v1::with_activation_scope(runtime, lease, execute).await {
+                    Ok(result) => result,
+                    Err(error) => Err(map_runtime(&error)),
+                }
+            }
+            _ => execute().await,
+        };
+>>>>>>> origin/w90zi-imp_merge
         work.complete();
         let result = result?;
         match result {
@@ -3278,6 +3773,11 @@ impl LiveHost {
                 }
             }
         }
+        // The terminal/active request identity above wins over current watch
+        // liveness. Only a genuinely new operation requires a live watch;
+        // this preserves exact diagnostics when the client retries after
+        // unsubscribe, cancellation, or watch expiry.
+        self.validate_live_watch_reference(session, envelope)?;
         let lease = self.writer_lease().await?;
         let runtime = self.runtime.as_ref().ok_or(Error::RuntimeUnavailable)?;
         let (reserved, capability) = runtime
@@ -3338,6 +3838,16 @@ impl LiveHost {
             }
             Err(error) => Err(map_runtime(&error)),
         }
+    }
+
+    fn validate_live_watch_reference(&self, session: [u8; 16], envelope: &Envelope) -> Result<()> {
+        if matches!(envelope.message, Message::Event { .. } | Message::Resync) {
+            let watch = envelope.watch.ok_or(Error::InvalidMessage)?;
+            if !self.watches.contains(&(session, watch)) {
+                return Err(Error::Denied);
+            }
+        }
+        Ok(())
     }
 
     /// Complete the recovery barrier established by a proven lease takeover
@@ -3576,6 +4086,11 @@ impl LiveHost {
         target: [u8; 16],
         expected: [u8; 32],
     ) -> Result<DispatchOutcome> {
+        // RequestStatus has no separate wire state for a fingerprint
+        // collision. Withhold terminal details and return RequestMismatch for
+        // both retained and recovered requests instead of exposing stale data.
+        // Retain that diagnostic against this query's own request ID; a
+        // corrected query changes its payload and therefore needs a fresh ID.
         let retained = self.requests.get(&(session, target));
         if retained.is_some_and(|record| record.fingerprint != expected) {
             return Err(Error::RequestMismatch);
@@ -3638,6 +4153,9 @@ impl LiveHost {
             },
             Err(error) => return Err(map_serving(error)),
         };
+        // Bind this observation to the query request ID: after the target
+        // advances, an exact retry replays this status snapshot instead of
+        // silently becoming a new read.
         Ok(DispatchOutcome {
             outcome: FrameOutcome::Accepted,
             response: Some(Envelope {
@@ -3706,13 +4224,16 @@ impl LiveHost {
                 self.limits.protocol,
             )
             .is_ok(),
-            Message::Event { .. } | Message::Eval { .. } => validate_result_response(
-                request,
-                fingerprint,
-                response.clone(),
-                self.limits.protocol,
-            )
-            .is_ok(),
+            Message::Event { .. } | Message::Eval { .. } => {
+                validate_application_result_response(
+                    request,
+                    fingerprint,
+                    envelope.watch,
+                    response.clone(),
+                    self.limits.protocol,
+                )
+                .is_ok()
+            }
             Message::RequestStatus { target, .. } => {
                 validate_status_response(request, *target, response, self.limits.protocol).is_ok()
                     || validate_request_mismatch_response(request, response, self.limits.protocol)
@@ -3783,6 +4304,12 @@ impl LiveHost {
             return Err(Error::ApplicationRejected);
         }
         let mutating = !transaction.mutations.is_empty();
+        let LiveEvalTransaction {
+            mutations,
+            next_digest,
+            faults,
+            after_commit,
+        } = transaction;
         let lease = self.writer_lease().await?;
         let runtime = self.runtime.as_ref().ok_or(Error::UnsupportedOperation)?;
         let identity = RequestIdentity {
@@ -3793,17 +4320,16 @@ impl LiveHost {
             outcome: FrameOutcome::Accepted,
             response: Some(response),
         })?;
-        let staged = StagedTableActivation::from_source(
-            context.clone(),
-            transaction.mutations,
-            transaction.next_digest,
-            transaction.faults,
-        )
+        let staged =
+            StagedTableActivation::from_source(context.clone(), mutations, next_digest, faults)
         .map_err(|error| map_runtime(&error))?;
         let committed = runtime
             .commit_staged_table_request_activation(lease, identity, fingerprint, &staged, terminal)
             .await
             .map_err(|error| map_runtime(&error))?;
+        if let Some(after_commit) = after_commit {
+            after_commit();
+        }
         let retained = committed
             .request
             .terminal_outcome
@@ -3814,8 +4340,13 @@ impl LiveHost {
             .await?;
         let response =
             validate_result_response(request, fingerprint, response, self.limits.protocol)?
+<<<<<<< HEAD
                 .response
                 .ok_or(Error::ApplicationRejected)?;
+=======
+            .response
+            .ok_or(Error::ApplicationRejected)?;
+>>>>>>> origin/w90zi-imp_merge
         if mutating {
             if let Some(watch) = watch {
                 self.close_watch(session, watch)?;
@@ -4101,6 +4632,7 @@ impl LiveHost {
             .close_watch(session, watch)
             .map_err(map_serving)?;
         self.watches.remove(&(session, watch));
+        self.watch_snapshots.remove(&(session, watch));
         Ok(())
     }
 
@@ -4110,18 +4642,55 @@ impl LiveHost {
         watch: [u8; 16],
         outcome: &DispatchOutcome,
     ) -> Result<()> {
-        let Some(Envelope {
-            message: Message::Snapshot { revision, .. },
-            ..
-        }) = outcome.response.as_ref()
-        else {
+        let response = outcome
+            .response
+            .as_ref()
+            .ok_or(Error::ApplicationRejected)?;
+        let Some(snapshot) = AcceptedWatchSnapshot::from_response(response)? else {
             return Err(Error::ApplicationRejected);
         };
         self.serving
-            .open_watch(session, watch, *revision)
+            .open_watch(session, watch, snapshot.revision)
             .map_err(map_serving)?;
         self.watches.insert((session, watch));
+        self.watch_snapshots.insert((session, watch), snapshot);
         Ok(())
+    }
+
+    /// A resync is a complete-root replacement fallback. Keep the server
+    /// watch identity stable, reject revision regressions, and permit same-
+    /// revision replay only when the complete visible tree and pinned snapshot
+    /// are unchanged.
+    fn prepare_watch_snapshot_replacement(
+        &self,
+        session: [u8; 16],
+        watch: [u8; 16],
+        response: &Envelope,
+    ) -> Result<Option<AcceptedWatchSnapshot>> {
+        let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
+            return Ok(None);
+        };
+        let current = self
+            .watch_snapshots
+            .get(&(session, watch))
+            .ok_or(Error::ApplicationRejected)?;
+        if candidate.revision < current.revision
+            || candidate.revision == current.revision && candidate != *current
+        {
+            return Err(Error::ApplicationRejected);
+        }
+        Ok(Some(candidate))
+    }
+
+    fn commit_watch_snapshot_replacement(
+        &mut self,
+        session: [u8; 16],
+        watch: [u8; 16],
+        candidate: Option<AcceptedWatchSnapshot>,
+    ) {
+        if let Some(candidate) = candidate {
+            self.watch_snapshots.insert((session, watch), candidate);
+        }
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Envelope> {
@@ -4132,6 +4701,40 @@ impl LiveHost {
             orna_protocol_v1::Error::Limit => Error::Limit,
             _ => Error::InvalidMessage,
         })
+    }
+
+    fn validate_session_runtime_context(
+        &self,
+        session: [u8; 16],
+        message: &Message,
+    ) -> Result<()> {
+        let database_context = match message {
+            Message::Eval { database, .. } | Message::Watch { database, .. } => database,
+            _ => return Ok(()),
+        };
+        let Some(bound) = self.session_runtime_contexts.get(&session) else {
+            // Direct LiveHost users can supply their own application authority
+            // without a transport-created database session. The executable
+            // transport path always installs this binding during session create.
+            return Ok(());
+        };
+        if database_context.database != bound.database {
+            return Err(Error::Denied);
+        }
+        if let Some(snapshot) = &database_context.snapshot {
+            let (snapshot_database, snapshot_runtime) = match snapshot {
+                CanonicalSnapshot::Cwd {
+                    database, runtime, ..
+                } => (*database, Some(*runtime)),
+                CanonicalSnapshot::Commit { database, .. } => (*database, None),
+            };
+            if snapshot_database != bound.database
+                || snapshot_runtime.is_some_and(|runtime| runtime != bound.runtime)
+            {
+                return Err(Error::Denied);
+            }
+        }
+        Ok(())
     }
 
     /// The execution host calls these around work it has accepted from a
@@ -4282,6 +4885,16 @@ fn durable_result_body(
         return Ok(None);
     };
     let response = Envelope::decode(bytes, limits).map_err(|_| Error::RuntimeUnavailable)?;
+    // A terminal protocol Diagnostic is a retained outcome, not a ResultBody.
+    // REQUEST-1 permits status to expose the terminal state while omitting
+    // rich result data, so keep that distinction instead of treating a valid
+    // rejection as corrupt durable state.
+    if matches!(response.message, Message::Diagnostic { .. }) {
+        if response.request != Some(request) {
+            return Err(Error::RuntimeUnavailable);
+        }
+        return Ok(None);
+    }
     validate_result_response(request, fingerprint, response.clone(), limits)
         .map_err(|_| Error::RuntimeUnavailable)?;
     ResultBody::from_result(&response, limits)
@@ -4371,6 +4984,35 @@ fn validate_result_response(
     };
     if returned != fingerprint {
         return Err(Error::RequestMismatch);
+    }
+    Ok(DispatchOutcome {
+        outcome: FrameOutcome::Accepted,
+        response: Some(response),
+    })
+}
+
+/// Host-generated diagnostics are terminal outcomes for a small set of
+/// operational rejections even though normal Eval/Event completions are
+/// Results. Retain only a request-matched diagnostic, and only let an Event
+/// correlate it to the watch carried by that same request.
+fn validate_application_result_response(
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    request_watch: Option<[u8; 16]>,
+    response: Envelope,
+    limits: ProtocolLimits,
+) -> Result<DispatchOutcome> {
+    if matches!(response.message, Message::Result { .. }) {
+        return validate_result_response(request, fingerprint, response, limits);
+    }
+    response
+        .encode(limits)
+        .map_err(|_| Error::ApplicationRejected)?;
+    if response.request != Some(request)
+        || response.watch.is_some_and(|watch| Some(watch) != request_watch)
+        || !matches!(response.message, Message::Diagnostic { .. })
+    {
+        return Err(Error::ApplicationRejected);
     }
     Ok(DispatchOutcome {
         outcome: FrameOutcome::Accepted,
@@ -5330,6 +5972,7 @@ struct UpgradeAdmission {
 struct PendingUpgrade {
     reservation: u128,
     deadline: u64,
+    delivered: bool,
     admission: UpgradeAdmission,
 }
 
@@ -5644,6 +6287,7 @@ impl LiveTransport {
         };
         match event {
             SocketEvent::Binary(message) => {
+                let decoded = Envelope::decode(&message, self.host.limits.protocol).ok();
                 match self
                     .host
                     .prepare_application_frame(socket.attachment, now, Frame::Binary(message))
@@ -5659,7 +6303,27 @@ impl LiveTransport {
                     Err(Error::InvalidMessage) => {
                         self.close_prepared_socket(socket, now, 1002).await
                     }
-                    Err(error) => Err(error),
+                    Err(error) => {
+                        // Keep the actor-preparation path's rejection contract
+                        // aligned with synchronous socket dispatch: a decoded
+                        // operational failure is a correlated wire diagnostic,
+                        // while framing and attachment failures stay transport
+                        // errors owned by the caller.
+                        if let Some(envelope) = decoded.as_ref()
+                            && let Some(outcome) = self.host.operational_error_outcome(
+                                self.host.attachments.get(&socket.attachment).copied(),
+                                envelope,
+                                error,
+                                false,
+                            )?
+                        {
+                            Ok(WebSocketApplicationPreparation::Output(
+                                self.websocket_output(outcome)?,
+                            ))
+                        } else {
+                            Err(error)
+                        }
+                    }
                 }
             }
             SocketEvent::Ping(payload) => Ok(WebSocketApplicationPreparation::Output(
@@ -5710,7 +6374,7 @@ impl LiveTransport {
         &mut self,
         completion: LiveApplicationCompletion,
     ) -> Result<WebSocketOutput> {
-        let attachment = completion.ticket.attachment;
+        let session = completion.ticket.session;
         let envelope = Envelope {
             request: Some(completion.ticket.request),
             watch: completion.ticket.watch,
@@ -5727,7 +6391,8 @@ impl LiveTransport {
                 // while framing, attachment, and stale-completion failures
                 // remain transport errors owned by the caller.
                 if let Some(outcome) =
-                    self.operational_error_outcome(attachment, &envelope, error)?
+                    self.host
+                        .operational_error_outcome(Some(session), &envelope, error, false)?
                 {
                     self.websocket_output(outcome)
                 } else {
@@ -5855,7 +6520,7 @@ impl LiveTransport {
                 }
                 let credential = match self
                     .host
-                    .create(
+                    .create_with_runtime_context(
                         CreateRequest {
                             id: metadata.session,
                             origin: origin.clone(),
@@ -5863,6 +6528,10 @@ impl LiveTransport {
                             now,
                             subscribe: &metadata.subscribe,
                         },
+                        Some(SessionRuntimeContext {
+                            database: metadata.database,
+                            runtime: metadata.runtime,
+                        }),
                         issuer,
                     )
                     .await
@@ -6453,6 +7122,12 @@ impl LiveTransport {
             self.abort_websocket_upgrade(&upgrade);
             return Ok(());
         }
+        if !self.finish_websocket_upgrade_delivery(&upgrade) {
+            self.abort_websocket_upgrade(&upgrade);
+            return Err(HttpIoError::Transport(HttpConnectionError::Protocol(
+                Error::Closed,
+            )));
+        }
         self.commit_websocket_upgrade(upgrade, clock())
             .await
             .map_err(HttpConnectionError::Protocol)
@@ -6555,6 +7230,15 @@ impl LiveTransport {
             Ok(upgrade) => upgrade,
             Err(response) => return response,
         };
+        // This API returns the complete response directly instead of writing a
+        // socket. Treat its in-process response handoff as delivery; the live
+        // socket driver records delivery only after write_all and flush.
+        if !self.begin_websocket_upgrade_delivery(&upgrade, now)
+            || !self.finish_websocket_upgrade_delivery(&upgrade)
+        {
+            self.abort_websocket_upgrade(&upgrade);
+            return host_error(Error::Closed);
+        }
         match self.commit_websocket_upgrade(upgrade, now).await {
             Ok(response) => response,
             Err(error) => host_error(error),
@@ -6612,6 +7296,7 @@ impl LiveTransport {
             PendingUpgrade {
                 reservation,
                 deadline,
+                delivered: false,
                 admission,
             },
         );
@@ -6644,6 +7329,7 @@ impl LiveTransport {
         if now >= pending.deadline
             || pending.reservation != upgrade.reservation
             || pending.deadline != upgrade.deadline
+            || pending.delivered
         {
             return false;
         }
@@ -6662,6 +7348,13 @@ impl LiveTransport {
         if self.delivering_upgrades.get(&upgrade.session) != Some(&upgrade.reservation) {
             return false;
         }
+        let Some(pending) = self.pending_upgrades.get_mut(&upgrade.session) else {
+            return false;
+        };
+        if pending.reservation != upgrade.reservation || pending.delivered {
+            return false;
+        }
+        pending.delivered = true;
         self.delivering_upgrades.remove(&upgrade.session);
         true
     }
@@ -6722,6 +7415,15 @@ impl LiveTransport {
             .values()
             .any(|pending| pending.reservation == upgrade.reservation)
         {
+            return Err(Error::Closed);
+        }
+        let delivered = self
+            .pending_upgrades
+            .values()
+            .find(|pending| pending.reservation == upgrade.reservation)
+            .is_some_and(|pending| pending.delivered);
+        if !delivered {
+            self.abort_websocket_upgrade(&upgrade);
             return Err(Error::Closed);
         }
         // A delivery barrier deliberately defers the periodic expiry sweep so
@@ -6990,7 +7692,12 @@ impl LiveTransport {
                     Err(error) => {
                         if let Some(envelope) = decoded.as_ref()
                             && let Some(outcome) =
-                                self.operational_error_outcome(socket.attachment, envelope, error)?
+                                self.host.operational_error_outcome(
+                                    self.host.attachments.get(&socket.attachment).copied(),
+                                    envelope,
+                                    error,
+                                    false,
+                                )?
                         {
                             return Ok(Some(self.websocket_output(outcome)?));
                         }
@@ -7011,50 +7718,6 @@ impl LiveTransport {
                 Ok(Some(WebSocketOutput::Close { code, reason }))
             }
         }
-    }
-
-    /// Converts decoded operational rejections into their portable diagnostic
-    /// form. This is intentionally narrower than the generic error mapping:
-    /// transport/framing failures must still close the socket, and attachment
-    /// boundary failures must not be misrepresented as a handle rejection.
-    fn operational_error_outcome(
-        &self,
-        attachment: [u8; 16],
-        envelope: &Envelope,
-        error: Error,
-    ) -> Result<Option<DispatchOutcome>> {
-        let Some(request) = envelope.request else {
-            return Ok(None);
-        };
-        let known_watch = self.host.attachments.get(&attachment).and_then(|session| {
-            envelope
-                .watch
-                .filter(|watch| self.host.watches.contains(&(*session, *watch)))
-        });
-        let (code, watch) = match error {
-            Error::RequestMismatch => (Error::RequestMismatch.code(), None),
-            Error::UnsupportedOperation => ("wire.unsupported", None),
-            // A denied event on a live watch is an action-handle rejection;
-            // one without a live watch (including resync) is an unknown
-            // operational handle. Only these request shapes use Denied for
-            // handle validation, keeping attachment-boundary denials outside
-            // the protocol diagnostic path.
-            Error::Denied if matches!(envelope.message, Message::Event { .. }) => {
-                if let Some(watch) = known_watch {
-                    ("wire.stale_action", Some(watch))
-                } else {
-                    ("wire.unknown_handle", None)
-                }
-            }
-            Error::Denied if matches!(envelope.message, Message::Resync) => {
-                ("wire.unknown_handle", None)
-            }
-            _ => return Ok(None),
-        };
-        Ok(Some(DispatchOutcome {
-            outcome: FrameOutcome::Accepted,
-            response: Some(portable_diagnostic(request, watch, code)?),
-        }))
     }
 
     async fn close_socket(
@@ -7839,7 +8502,7 @@ mod tests {
         Diagnostic as FoundationDiagnostic, DiagnosticSeverity, SafeText, Value,
     };
     use orna_repository_v1::Repository;
-    use orna_runtime_v1::RuntimeIdentity;
+    use orna_runtime_v1::{FaultPoint, NoFault, RuntimeIdentity};
     use std::{
         fs,
         process::Command,
@@ -7884,6 +8547,18 @@ mod tests {
 
         fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
             Err(Error::UnsupportedOperation)
+        }
+    }
+
+    struct FailBeforeTableWrite;
+
+    impl FaultInjector for FailBeforeTableWrite {
+        fn check(&self, point: FaultPoint) -> std::result::Result<(), RuntimeError> {
+            if point == FaultPoint::BeforeTableWrite {
+                Err(RuntimeError::FaultInjected(point))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -8227,6 +8902,12 @@ mod tests {
     }
 
     fn subscribed_host(runtime: Option<RuntimeState>) -> LiveHost {
+        subscribed_host_with_credential(runtime).0
+    }
+
+    fn subscribed_host_with_credential(
+        runtime: Option<RuntimeState>,
+    ) -> (LiveHost, Origin, SessionCredential) {
         let origin = Origin::parse("https://app.example").unwrap();
         let mut host = match runtime {
             Some(runtime) => LiveHost::with_runtime_state_and_owner(
@@ -8287,13 +8968,15 @@ mod tests {
             now: 1,
         }))
         .unwrap();
-        host
+        (host, origin, credential)
     }
 
     #[test]
     fn resync_reaches_the_snapshot_application_after_replay_history_expires() {
         let mut host = subscribed_host(None);
-        for revision in 1..=257 {
+        for revision in 1_u64..=257 {
+            let mut fingerprint = [0; 32];
+            fingerprint[..8].copy_from_slice(&revision.to_be_bytes());
             host.serving
                 .apply_patch(
                     [1; 16],
@@ -8302,7 +8985,7 @@ mod tests {
                     &[],
                     orna_serving_v1::RetainedPin {
                         revision,
-                        fingerprint: [u8::try_from(revision).expect("test revision fits"); 32],
+                        fingerprint,
                     },
                 )
                 .unwrap();
@@ -8395,11 +9078,15 @@ mod tests {
     }
 
     fn eval_frame(request: [u8; 16]) -> Vec<u8> {
+        eval_source_frame(request, "1")
+    }
+
+    fn eval_source_frame(request: [u8; 16], source: &str) -> Vec<u8> {
         let mut envelope = Envelope {
             request: Some(request),
             watch: None,
             message: Message::Eval {
-                source: "1".into(),
+                source: source.into(),
                 database: orna_protocol_v1::DatabaseContext {
                     database: [2; 16],
                     snapshot: None,
@@ -8600,6 +9287,253 @@ mod tests {
             portable_diagnostic([14; 16], None, "wire.unsupported").unwrap()
         );
         assert!(!socket.closed);
+    }
+
+    #[test]
+    fn async_rejection_replays_watch_diagnostic_after_session_resume() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/live-runtime-boundary.orna");
+
+        let (mut host, origin, credential) = subscribed_host_with_credential(None);
+        let watch = [11; 16];
+        host.watches.insert(([1; 16], watch));
+
+        // Keep a real crate-local source request in this session before the
+        // event is admitted; application scheduling remains explicit.
+        let fixture = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(eval_source_frame([40; 16], FIXTURE)),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Work(fixture_ticket) = fixture else {
+            panic!("fixture evaluation must be admitted as application work");
+        };
+        assert!(matches!(
+            fixture_ticket.message(),
+            Message::Eval { source, .. } if source == FIXTURE
+        ));
+        let fixture_completion = fixture_ticket.reject(Error::ApplicationDeferred);
+        assert_eq!(
+            futures::executor::block_on(host.complete_application(fixture_completion)),
+            Err(Error::ApplicationDeferred)
+        );
+
+        let event = event_frame([41; 16], watch);
+        let prepared = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(event.clone()),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Work(ticket) = prepared else {
+            panic!("the live watched event should be admitted as application work");
+        };
+        let completion = ticket.reject(Error::Denied);
+        // The outstanding ticket owns the admission-time watch identity even
+        // after an unsubscribe removes the live handle.
+        host.watches.remove(&([1; 16], watch));
+
+        let mut issuer = FixedIssuer(None);
+        let (replacement, retired) = futures::executor::block_on(host.rotate_and_retire(
+            [1; 16],
+            &origin,
+            &credential,
+            3,
+            &mut issuer,
+        ))
+        .unwrap();
+        assert_eq!(retired, Some([4; 16]));
+        assert_eq!(
+            futures::executor::block_on(host.resume(ResumeRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &replacement,
+                attachment: [6; 16],
+                now: 4,
+            })),
+            Ok(orna_security_v1::AttachOutcome::Reconnected)
+        );
+
+        let first = futures::executor::block_on(host.complete_application(completion)).unwrap();
+        let response = first
+            .response
+            .as_ref()
+            .expect("a denied live event retains a diagnostic");
+        assert_eq!(response.request, Some([41; 16]));
+        assert_eq!(response.watch, Some(watch));
+        assert!(matches!(response.message, Message::Diagnostic { .. }));
+
+        let replay = futures::executor::block_on(host.prepare_application_frame(
+            [6; 16],
+            5,
+            Frame::Binary(event),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Completed(replayed) = replay else {
+            panic!("a resumed retry must replay the retained diagnostic");
+        };
+        assert_eq!(replayed, first);
+    }
+
+    #[test]
+    fn durable_async_rejections_replay_after_session_resume() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/live-runtime-boundary.orna");
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("orna-live-rejection-resume-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [31; 16],
+                repository_id: [32; 16],
+            },
+            [33; 32],
+        ))
+        .unwrap();
+        let (mut host, origin, credential) = subscribed_host_with_credential(Some(runtime));
+        let watch = [11; 16];
+        host.watches.insert(([1; 16], watch));
+
+        let fixture_eval = eval_source_frame([40; 16], FIXTURE);
+        let fixture_work = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(fixture_eval.clone()),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Work(fixture_ticket) = fixture_work else {
+            panic!("the fixture Eval must be admitted as application work");
+        };
+        assert!(matches!(
+            fixture_ticket.message(),
+            Message::Eval { source, .. } if source == FIXTURE
+        ));
+        let fixture_first = futures::executor::block_on(host.complete_application(
+            fixture_ticket.reject(Error::UnsupportedOperation),
+        ))
+        .unwrap();
+        assert!(matches!(
+            fixture_first.response.as_ref().map(|response| &response.message),
+            Some(Message::Diagnostic { .. })
+        ));
+
+        let event = event_frame([41; 16], watch);
+        let event_work = futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(event.clone()),
+        ))
+        .unwrap();
+        let ApplicationPreparation::Work(event_ticket) = event_work else {
+            panic!("the watched Event must be admitted as application work");
+        };
+        let event_completion = event_ticket.reject(Error::UnsupportedOperation);
+        host.watches.remove(&([1; 16], watch));
+
+        let mut issuer = FixedIssuer(None);
+        let (replacement, retired) = futures::executor::block_on(host.rotate_and_retire(
+            [1; 16],
+            &origin,
+            &credential,
+            3,
+            &mut issuer,
+        ))
+        .unwrap();
+        assert_eq!(retired, Some([4; 16]));
+        assert_eq!(
+            futures::executor::block_on(host.resume(ResumeRequest {
+                id: [1; 16],
+                origin: &origin,
+                credential: &replacement,
+                attachment: [6; 16],
+                now: 4,
+            })),
+            Ok(orna_security_v1::AttachOutcome::Reconnected)
+        );
+
+        let event_first =
+            futures::executor::block_on(host.complete_application(event_completion)).unwrap();
+        let event_response = event_first
+            .response
+            .as_ref()
+            .expect("rejected Event is retained as a diagnostic");
+        assert_eq!(event_response.request, Some([41; 16]));
+        assert_eq!(event_response.watch, Some(watch));
+        assert_eq!(
+            event_response,
+            &portable_diagnostic([41; 16], Some(watch), "wire.unsupported").unwrap()
+        );
+
+        // Durable terminal replay likewise preserves the admission-time watch
+        // after the live handle has been closed.
+        for (frame, expected) in [(&fixture_eval, &fixture_first), (&event, &event_first)] {
+            let replay = futures::executor::block_on(host.prepare_application_frame(
+                [6; 16],
+                5,
+                Frame::Binary(frame.clone()),
+            ))
+            .unwrap();
+            let ApplicationPreparation::Completed(replayed) = replay else {
+                panic!("a terminal durable request must replay without application work");
+            };
+            assert_eq!(&replayed, expected);
+        }
+
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejection_does_not_correlate_a_watch_owned_by_another_session() {
+        let mut host = subscribed_host(None);
+        let reused_watch = [11; 16];
+        host.watches.insert(([2; 16], reused_watch));
+        let envelope = Envelope::decode(
+            &event_frame([42; 16], reused_watch),
+            Limits::default().protocol,
+        )
+        .unwrap();
+
+        assert_eq!(
+            host.operational_error_outcome(Some([1; 16]), &envelope, Error::Denied, false)
+                .unwrap(),
+            Some(DispatchOutcome {
+                outcome: FrameOutcome::Accepted,
+                response: Some(
+                    portable_diagnostic([42; 16], None, "wire.unknown_handle").unwrap()
+                ),
+            })
+        );
+        assert_eq!(
+            host.operational_error_outcome(
+                Some([1; 16]),
+                &envelope,
+                Error::UnsupportedOperation,
+                false,
+            )
+            .unwrap(),
+            Some(DispatchOutcome {
+                outcome: FrameOutcome::Accepted,
+                response: Some(
+                    portable_diagnostic([42; 16], None, "wire.unsupported").unwrap()
+                ),
+            })
+        );
     }
 
     fn request_status_frame(request: [u8; 16], target: [u8; 16], fingerprint: [u8; 32]) -> Vec<u8> {
@@ -8821,6 +9755,191 @@ mod tests {
                 .get(&([1; 16], request))
                 .is_some_and(|record| record.terminal.is_some())
         );
+    }
+
+    #[test]
+    fn request_status_snapshots_retain_reserved_and_running_targets_after_completion() {
+        const FIXTURE: &str = include_str!("../tests/fixtures/live-runtime-boundary.orna");
+
+        let mut host = subscribed_host(None);
+        let session = [1; 16];
+        let attachment = [4; 16];
+        let reserved_target = [40; 16];
+        let reserved_fingerprint = [41; 32];
+        host.serving.reserve_request(session, reserved_target).unwrap();
+        host.requests.insert(
+            (session, reserved_target),
+            RequestRecord {
+                fingerprint: reserved_fingerprint,
+                terminal: None,
+            },
+        );
+
+        let running_target = [42; 16];
+        let eval = eval_source_frame(running_target, FIXTURE);
+        let target_fingerprint = match Envelope::decode(&eval, Limits::default().protocol)
+            .unwrap()
+            .message
+        {
+            Message::Eval { fingerprint, .. } => fingerprint,
+            _ => unreachable!("the fixture is admitted through Eval"),
+        };
+        let ticket = match futures::executor::block_on(host.prepare_application_frame(
+            attachment,
+            2,
+            Frame::Binary(eval),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("Eval should be running work"),
+        };
+        assert!(matches!(
+            host.serving.request_state(session, running_target),
+            Ok(orna_serving_v1::RequestState::Running)
+        ));
+
+        let reserved_query = request_status_frame([43; 16], reserved_target, reserved_fingerprint);
+        let running_query = request_status_frame([44; 16], running_target, target_fingerprint);
+        let snapshot = |host: &mut LiveHost,
+                        query: Vec<u8>,
+                        expected: ([u8; 16], RequestState)| {
+            let preparation = futures::executor::block_on(host.prepare_application_frame(
+                attachment,
+                3,
+                Frame::Binary(query),
+            ))
+            .unwrap();
+            let ApplicationPreparation::Completed(outcome) = preparation else {
+                panic!("RequestStatus is a read-only query");
+            };
+            let response = outcome.response.unwrap();
+            assert!(matches!(
+                &response.message,
+                Message::RequestStatusResult { target, state, .. }
+                    if *target == expected.0 && *state == expected.1
+            ));
+            response
+        };
+        let reserved_snapshot = snapshot(
+            &mut host,
+            reserved_query.clone(),
+            (reserved_target, RequestState::Reserved),
+        );
+        let running_snapshot = snapshot(
+            &mut host,
+            running_query.clone(),
+            (running_target, RequestState::Running),
+        );
+
+        host.serving
+            .complete_request(session, reserved_target)
+            .unwrap();
+        let completion = futures::executor::block_on(ticket.execute(&mut RejectApplication));
+        futures::executor::block_on(host.complete_application(completion)).unwrap();
+
+        for (query, expected) in [
+            (reserved_query, reserved_snapshot),
+            (running_query, running_snapshot),
+        ] {
+            let preparation = futures::executor::block_on(host.prepare_application_frame(
+                attachment,
+                4,
+                Frame::Binary(query),
+            ))
+            .unwrap();
+            let ApplicationPreparation::Completed(outcome) = preparation else {
+                panic!("an exact status retry replays its retained response");
+            };
+            assert_eq!(outcome.response, Some(expected));
+        }
+
+        for (request, target, fingerprint) in [
+            ([45; 16], reserved_target, reserved_fingerprint),
+            ([46; 16], running_target, target_fingerprint),
+        ] {
+            let preparation = futures::executor::block_on(host.prepare_application_frame(
+                attachment,
+                5,
+                Frame::Binary(request_status_frame(request, target, fingerprint)),
+            ))
+            .unwrap();
+            let ApplicationPreparation::Completed(outcome) = preparation else {
+                panic!("a fresh status query completes without application work");
+            };
+            assert!(matches!(
+                outcome.response.unwrap().message,
+                Message::RequestStatusResult {
+                    target: returned_target,
+                    state: RequestState::Terminal,
+                    fingerprint: Some(returned_fingerprint),
+                    result: None,
+                } if returned_target == target && returned_fingerprint == fingerprint
+            ));
+        }
+    }
+
+    #[test]
+    fn admitted_eval_ticket_carries_runtime_publication_rows() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+            || std::path::PathBuf::from("target"),
+            std::path::PathBuf::from,
+        );
+        fs::create_dir_all(&target).unwrap();
+        let root = target.join(format!("orna-live-publication-read-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [31; 16],
+                repository_id: [32; 16],
+            },
+            [33; 32],
+        ))
+        .unwrap();
+        let mut host = subscribed_host(Some(runtime));
+        let ticket = match futures::executor::block_on(host.prepare_application_frame(
+            [4; 16],
+            2,
+            Frame::Binary(eval_frame([34; 16])),
+        ))
+        .unwrap()
+        {
+            ApplicationPreparation::Work(ticket) => ticket,
+            ApplicationPreparation::Completed(_) => panic!("Eval must admit application work"),
+        };
+        let runtime_rows = futures::executor::block_on(
+            host.runtime
+                .as_ref()
+                .expect("the durable host retains its runtime")
+                .publication_metadata_rows(),
+        )
+        .unwrap();
+        let dispatched_rows = futures::executor::block_on(
+            ticket
+                .admin_effects
+                .as_ref()
+                .expect("durable Eval installs the runtime admin dispatcher")
+                .publication_metadata_rows(),
+        )
+        .unwrap()
+        .expect("runtime dispatcher supplies publication rows");
+        assert_eq!(dispatched_rows, runtime_rows);
+        drop(ticket);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -9076,7 +10195,7 @@ mod tests {
     }
 
     #[test]
-    fn request_status_rejects_a_durable_non_result_payload() {
+    fn request_status_surfaces_terminal_rejection_without_a_result_body() {
         let response = watch_diagnostic_response([1; 16], None);
         let terminal =
             TerminalOutcome::new(response.encode(ProtocolLimits::default()).unwrap()).unwrap();
@@ -9092,7 +10211,7 @@ mod tests {
 
         assert_eq!(
             durable_result_body([1; 16], [2; 32], &durable, ProtocolLimits::default()),
-            Err(Error::RuntimeUnavailable)
+            Ok(None)
         );
     }
 
@@ -9329,6 +10448,97 @@ mod tests {
 
         drop(host);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transaction_completion_hook_runs_only_after_durable_commit() {
+        for fail in [false, true] {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("orna-live-commit-hook-{nonce}"));
+            fs::create_dir(&root).unwrap();
+            assert!(
+                Command::new("git")
+                    .args(["init", "-b", "main"])
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let repository = Repository::discover(&root).unwrap();
+            let runtime = futures::executor::block_on(RuntimeState::open(
+                &repository,
+                RuntimeIdentity {
+                    database_id: [26; 16],
+                    repository_id: [27; 16],
+                },
+                [28; 32],
+            ))
+            .unwrap();
+            let owner = futures::executor::block_on(runtime.acquire_lease([9; 16])).unwrap();
+            let identity = RequestIdentity {
+                session_id: [1; 16],
+                request_id: [29; 16],
+            };
+            let fingerprint = [30; 32];
+            let (_, capability) = futures::executor::block_on(
+                runtime.reserve_request_with_admission(identity, fingerprint),
+            )
+            .unwrap();
+            futures::executor::block_on(runtime.start_request_with_owner_and_admission(
+                identity,
+                fingerprint,
+                owner,
+                capability.expect("reservation should have an owner capability"),
+            ))
+            .unwrap();
+            let context = futures::executor::block_on(runtime.begin_activation()).unwrap();
+            let mut host = subscribed_host(Some(runtime));
+            let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let value = CanonicalValue::unit().encode().unwrap();
+            let mutation =
+                TableMutation::new([23; 16], "Hook", value.clone(), Some(value)).unwrap();
+            let response = Envelope {
+                request: Some(identity.request_id),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint,
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            };
+            let committed_on_success = Arc::clone(&committed);
+            let transaction = LiveEvalTransaction::new(
+                vec![mutation],
+                [24; 32],
+                if fail {
+                    Arc::new(FailBeforeTableWrite)
+                } else {
+                    Arc::new(NoFault)
+                },
+            )
+            .after_commit(move || {
+                committed_on_success.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            let result = futures::executor::block_on(host.commit_eval_transaction(
+                identity.session_id,
+                identity.request_id,
+                fingerprint,
+                None,
+                &context,
+                response,
+                transaction,
+            ));
+            assert_eq!(result.is_ok(), !fail, "dispatch result: {result:?}");
+            assert_eq!(committed.load(std::sync::atomic::Ordering::SeqCst), !fail);
+
+            drop(host);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -9621,6 +10831,7 @@ mod tests {
             PendingUpgrade {
                 reservation: 41,
                 deadline: 10,
+                delivered: false,
                 admission: UpgradeAdmission {
                     id: [12; 16],
                     origin: Origin::parse("https://app.example").unwrap(),
@@ -9640,6 +10851,7 @@ mod tests {
         assert!(transport.begin_websocket_upgrade_delivery(&upgrade, 9));
         transport.expire_pending_websocket_upgrades(10);
         assert!(transport.pending_upgrades.contains_key(&[12; 16]));
+        assert!(transport.finish_websocket_upgrade_delivery(&upgrade));
 
         // This models a Commit queued after its deadline but before the
         // executor's periodic expiry ticker. The protected reservation must

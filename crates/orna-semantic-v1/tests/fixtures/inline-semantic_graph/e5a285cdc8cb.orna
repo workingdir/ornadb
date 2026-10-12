@@ -1,0 +1,1 @@
+fn bad(values: [Int]) = values | sort_by((left, right) => left);

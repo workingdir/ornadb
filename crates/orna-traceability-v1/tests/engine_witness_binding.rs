@@ -16,9 +16,13 @@ const TEST_REF: &str = "crates/orna-traceability-v1/tests/engine_witness_binding
 fn reference_root() -> PathBuf {
     std::env::var_os("ORNA_REFERENCE_DIR")
         .map(PathBuf::from)
+<<<<<<< HEAD
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0")
         })
+=======
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference"))
+>>>>>>> origin/w90zi-imp_merge
 }
 
 fn copied_reference(label: &str) -> PathBuf {

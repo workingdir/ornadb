@@ -1,0 +1,8 @@
+
+            use people;
+            table Person(id: Int) { age: Int, }
+            fn write() {
+                people.Person.insert({ name: "Alice" });
+                Person.insert({ id: 1, age: 40 });
+            }
+        

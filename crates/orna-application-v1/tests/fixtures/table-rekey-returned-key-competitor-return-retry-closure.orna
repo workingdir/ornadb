@@ -1,0 +1,41 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn main() {
+    Note.rekey(1, 2) |? (failure => {
+        Note.rekey(2, 4);
+        Note.rekey(1, 2);
+        Note.insert({ id: 1, text: "replacement", quantity: 30 });
+        Note.update(2, { quantity: 11 });
+        Note.update(1, { quantity: 31 })
+    });
+    Note.rekey(3, 2) |? (failure => {
+        Note.update(2, { quantity: 12 });
+        Note.delete(1);
+        Note.rekey(2, 1);
+        Note.update(1, { quantity: 13 });
+        Note.rekey(3, 2);
+        Note.update(2, { quantity: 31 })
+    });
+    Note.rekey(4, 1) |? (failure => {
+        Note.update(1, { quantity: 14 });
+        Note.delete(1);
+        Note.rekey(2, 1);
+        Note.update(1, { quantity: 32 })
+    });
+    Note.rekey(4, 1) |? (failure => {
+        Note.update(1, { quantity: 33 });
+        Note.rekey(1, 2);
+        Note.update(2, { quantity: 34 });
+        Note.rekey(4, 1)
+    });
+    Note.update(1, { quantity: 21 });
+    Note.rekey(2, 1) |? (failure => {
+        Note.update(1, { quantity: 22 });
+        Note.delete(1);
+        Note.rekey(2, 1);
+        Note.update(1, { quantity: 35 })
+    });
+}

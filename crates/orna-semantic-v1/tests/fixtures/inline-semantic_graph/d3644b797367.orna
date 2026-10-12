@@ -1,0 +1,1 @@
+pub fn counts() = { cwd: contacts.Contact.as_of(CWD) | count, head: contacts.Contact.as_of(HEAD) | count, };

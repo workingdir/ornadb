@@ -1,0 +1,1 @@
+pub table User(id: Uuid) { name: Str, assert std.io.fs.read_text("private-input") == "ok"; }

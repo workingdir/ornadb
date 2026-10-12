@@ -1,0 +1,3 @@
+pub table MaxByteMaterializedSource(id: Int) { value: Int, }
+pub table MaxByteMaterializedTarget(id: Int) { value: Int, }
+pub fn update_max_byte_materialized_tail() = MaxByteMaterializedTarget.update(1, { value: 2 });

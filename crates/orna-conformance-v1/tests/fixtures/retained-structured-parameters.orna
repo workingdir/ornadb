@@ -1,0 +1,4 @@
+fn add((a, b) = (1, 2)) = a + b;
+fn ignore(_, _) = 7;
+fn verify() = if add((10, 20)) == 30 && ignore(1, 2) == 7 { 1 } else { 1 / 0 };
+fn reject() = add(1);

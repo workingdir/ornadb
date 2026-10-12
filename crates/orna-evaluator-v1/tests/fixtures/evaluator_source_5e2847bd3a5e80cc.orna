@@ -1,0 +1,1 @@
+flat_map([3, 1, 2], value => [value, value + 10])

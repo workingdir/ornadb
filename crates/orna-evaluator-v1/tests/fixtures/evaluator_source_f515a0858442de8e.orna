@@ -1,0 +1,1 @@
+if true { let point = (std.math.increment(1), 2.5, 3.0f); { label: "ok", values: [point, null, true] } }

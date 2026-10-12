@@ -1,0 +1,9 @@
+fn answer(): Int = 42;
+fn needs_input(value: Int): Int = value;
+
+pub fn completed() = std.concurrent.timeout(answer, 5.s);
+pub fn named() = std.concurrent.timeout(callback: answer, duration: 5.s);
+pub fn bad_callback() = std.concurrent.timeout(42, 5.s);
+pub fn parameterized_callback() = std.concurrent.timeout(needs_input, 5.s);
+pub fn bad_duration() = std.concurrent.timeout(answer, "soon");
+pub fn bad_shape() = std.concurrent.timeout(answer);

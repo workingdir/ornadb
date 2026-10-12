@@ -1,0 +1,16 @@
+
+            table Reading(id: Int) { value: Int, }
+            table Other(id: Int) { value: Int, }
+            pub fn direct(rows: [Int]): Int = sum(rows);
+            pub fn direct_literal(): Int = sum([1, 2, 3]);
+            pub fn direct_empty(): Int = sum([]);
+            pub fn named(rows: [Int]): Int = sum(rows: rows);
+            pub fn pipeline(rows: [Int]): Int = rows | sum();
+            pub fn pipeline_empty(): Int = [] | sum();
+            pub fn qualified(rows: [Int]): Int = std.collection.sum(rows: rows);
+            pub fn qualified_pipeline(rows: [Int]): Int = rows | std.collection.sum();
+            pub fn reads(rows: [Int]): Int =
+                rows | map(transform: value => Reading.count() + value) | sum();
+            assert every(Reading, reading =>
+                exists(Other, other => sum([reading.value]) >= 0));
+        

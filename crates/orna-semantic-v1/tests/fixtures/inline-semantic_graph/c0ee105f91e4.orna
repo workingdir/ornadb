@@ -1,0 +1,6 @@
+
+            pub fn wrong_arity() {
+                let old = sys.database.as_of(sys.snapshot("HEAD~10"));
+                old.energy.daily(1)
+            }
+        

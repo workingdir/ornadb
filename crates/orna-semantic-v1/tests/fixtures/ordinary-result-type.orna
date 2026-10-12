@@ -1,0 +1,5 @@
+pub type Result {
+    pub value: Int,
+}
+
+pub fn result(value: Int): Result = Result { value: value };

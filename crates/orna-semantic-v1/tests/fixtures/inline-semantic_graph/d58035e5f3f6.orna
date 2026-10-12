@@ -1,0 +1,1 @@
+fn bad(values: [Int]) = std.collection.sort_by(values, value => value);

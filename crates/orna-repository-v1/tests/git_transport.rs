@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -106,11 +109,7 @@ impl Fixture {
 
         git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
         git(&source, &["init", "-b", "main"]);
-        git(
-            &source,
-            &["config", "user.email", "transport@example.invalid"],
-        );
-        git(&source, &["config", "user.name", "Transport test"]);
+        test_support::configure_fixture_git_identity(&source);
         git(&source, &["config", "commit.gpgsign", "false"]);
         fs::write(source.join("main.orna"), "module main;\n").unwrap();
         git(&source, &["add", "main.orna"]);
@@ -137,11 +136,7 @@ impl Fixture {
             root.path(),
             &["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
         );
-        git(
-            &local,
-            &["config", "user.email", "transport@example.invalid"],
-        );
-        git(&local, &["config", "user.name", "Transport test"]);
+        test_support::configure_fixture_git_identity(&local);
         git(&local, &["config", "commit.gpgsign", "false"]);
 
         Self {
@@ -1082,11 +1077,7 @@ fn filtered_clone() -> Option<(TempDir, PathBuf, String)> {
     let clone = fixture.path().join("partial");
     git(fixture.path(), &["init", "--bare", origin.to_str()?]);
     git(fixture.path(), &["clone", origin.to_str()?, seed.to_str()?]);
-    git(
-        &seed,
-        &["config", "user.email", "transport@example.invalid"],
-    );
-    git(&seed, &["config", "user.name", "Transport test"]);
+    test_support::configure_fixture_git_identity(&seed);
     git(&seed, &["config", "commit.gpgsign", "false"]);
     git(&seed, &["branch", "-M", "main"]);
     fs::write(seed.join("visible.txt"), "visible\n").ok()?;

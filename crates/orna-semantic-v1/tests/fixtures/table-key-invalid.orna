@@ -1,0 +1,19 @@
+pub table BadKey(values: [Str]) {
+    label: Str,
+}
+
+pub table BadDefault(id: Int = "wrong") {
+    label: Str,
+}
+
+pub table AutoConflict {
+    id: Int,
+}
+
+pub table MissingKeyType(id) {
+    label: Str,
+}
+
+pub table KeyFieldConflict(id: Int) {
+    id: Int,
+}

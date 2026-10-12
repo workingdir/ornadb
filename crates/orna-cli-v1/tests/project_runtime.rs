@@ -6,22 +6,22 @@ use std::{
 
 use orna_foundation_v1::{OvbRaw, Value};
 use orna_repository_v1::{Repository, inspect_metadata};
-use orna_runtime_v1::{CheckpointKey, Component, ConsumerIdentity, RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{
+    CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RuntimeIdentity, RuntimeState,
+};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 fn reference_project() -> TempDir {
     let directory = tempfile::tempdir().expect("reference project");
-    let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../reference/Orna-1.0.0/examples/reference");
-    for name in [
-        "main.orna",
-        "library.orna",
-        "warehouse.orna",
-        "sensors.orna",
-        "values.orna",
+    for (name, source) in [
+        ("main.orna", include_str!("fixtures/reference-project/main.orna")),
+        ("library.orna", include_str!("fixtures/reference-project/library.orna")),
+        ("warehouse.orna", include_str!("fixtures/reference-project/warehouse.orna")),
+        ("sensors.orna", include_str!("fixtures/reference-project/sensors.orna")),
+        ("values.orna", include_str!("fixtures/reference-project/values.orna")),
     ] {
-        std::fs::copy(reference.join(name), directory.path().join(name)).expect("reference source");
+        std::fs::write(directory.path().join(name), source).expect("reference source");
     }
     directory
 }
@@ -53,6 +53,32 @@ fn initialize_project(directory: &std::path::Path) {
     assert!(output.status.success(), "init stderr: {:?}", output.stderr);
     assert_eq!(output.stdout, b"initialized Orna repository\n");
     assert!(output.stderr.is_empty());
+}
+
+fn git_output_at(directory: &std::path::Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(arguments)
+        .current_dir(directory)
+        .output()
+        .expect("Git process");
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 Git output")
+        .trim()
+        .to_owned()
+}
+
+fn commit_directory(directory: &std::path::Path, message: &str) {
+    git_output_at(directory, &["config", "user.email", "kieran@drewett.dev"]);
+    git_output_at(directory, &["config", "user.name", "kierandrewett"]);
+    git_output_at(directory, &["config", "commit.gpgsign", "false"]);
+    git_output_at(directory, &["add", "-A"]);
+    git_output_at(directory, &["commit", "--quiet", "-m", message]);
 }
 
 fn function_fixture_project() -> TempDir {
@@ -270,10 +296,11 @@ fn binary_explain_returns_extended_orna_diagnostic_guidance() {
 #[test]
 fn binary_repl_executes_a_pure_expression_at_the_cli_boundary() {
     let directory = tempfile::tempdir().expect("REPL working directory");
+    let submission = include_str!("fixtures/repl-arithmetic.orna").trim_end();
     let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
-        .args(["repl", "1 + 2"])
+        .args(["repl", submission])
         .output()
         .expect("CLI process");
 
@@ -306,7 +333,13 @@ fn binary_reference_repl_respects_color_mode() {
             .stdin
             .take()
             .expect("REPL stdin")
-            .write_all(b"1 + 2\n:quit\n")
+            .write_all(
+                format!(
+                    "{}\n:quit\n",
+                    include_str!("fixtures/repl-arithmetic.orna").trim_end()
+                )
+                .as_bytes(),
+            )
             .expect("REPL input");
         child.wait_with_output().expect("CLI process output")
     };
@@ -384,17 +417,23 @@ fn binary_repl_recovers_from_malformed_terminal_input() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("CLI process");
+    let mut submissions = include_str!("fixtures/repl-retained-result.orna").lines();
+    let first_submission = submissions.next().expect("first Orna submission");
+    let retained_result_submission = submissions.next().expect("retained result submission");
+    let mut input = format!("{first_submission}\n").into_bytes();
+    input.extend_from_slice(b"\xff\n");
+    input.extend_from_slice(format!("{retained_result_submission}\n:quit\n").as_bytes());
     child
         .stdin
         .take()
         .expect("REPL stdin")
-        .write_all(b"2\n\xff\n$_\n:quit\n")
+        .write_all(&input)
         .expect("REPL input");
     let output = child.wait_with_output().expect("CLI process output");
 
     assert!(output.status.success());
     assert_eq!(
-        output.stdout, b"> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]\n> 2 : Int\n> ",
+        output.stdout, b"> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]: submission is not valid UTF-8 text\nhelp: re-enter the submission using valid UTF-8\n> 2 : Int\n> ",
         "malformed terminal input must not consume the retained last result"
     );
     assert!(output.stderr.is_empty());
@@ -402,9 +441,10 @@ fn binary_repl_recovers_from_malformed_terminal_input() {
 
 #[test]
 fn binary_repl_rejects_remote_endpoints_before_local_evaluation() {
+    let submission = include_str!("fixtures/repl-arithmetic.orna").trim_end();
     let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .args(["--db", "orna://host/reference", "repl", "1 + 2"])
+        .args(["--db", "orna://host/reference", "repl", submission])
         .output()
         .expect("CLI process");
 
@@ -421,7 +461,7 @@ fn binary_check_accepts_a_core_only_project_without_std() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "pub fn main(): Int = 42;",
+        include_str!("fixtures/project-core-main.orna").trim_end(),
     )
     .expect("project source");
     initialize_project(directory.path());
@@ -450,7 +490,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "use std.math; pub fn main(): Int = std.math.increment(41);",
+        include_str!("fixtures/project-uncaptured-std-main.orna").trim_end(),
     )
     .expect("project source");
     initialize_project(directory.path());
@@ -529,7 +569,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     let repl_directory = tempfile::tempdir().expect("standard-free REPL project directory");
     std::fs::write(
         repl_directory.path().join("main.orna"),
-        "pub fn main(): Int = 42;",
+        include_str!("fixtures/project-core-main.orna").trim_end(),
     )
     .expect("standard-free project source");
     initialize_project(repl_directory.path());
@@ -550,21 +590,30 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
         .stdin
         .take()
         .expect("unlisted REPL stdin")
-        .write_all(b"use std.collection;\n:quit\n")
+        .write_all(
+            format!(
+                "{}\n:quit\n",
+                include_str!("fixtures/repl-unlisted-std-import.orna").trim_end()
+            )
+            .as_bytes(),
+        )
         .expect("unlisted REPL input");
     let unlisted_repl = unlisted_repl
         .wait_with_output()
         .expect("unlisted REPL process output");
     assert!(unlisted_repl.status.success());
-    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]\n> ");
+    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: imported module is unavailable\nhelp: use a captured standard dependency or remove the import\n> ");
     assert!(unlisted_repl.stderr.is_empty());
 }
 
 #[test]
 fn binary_managed_local_repl_executes_integer_list_aggregates() {
     let directory = tempfile::tempdir().expect("REPL working directory");
-    std::fs::write(directory.path().join("main.orna"), "pub fn run(): Int = 0;")
-        .expect("project source");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/project-run-zero.orna").trim_end(),
+    )
+    .expect("project source");
     assert!(
         Command::new("git")
             .args(["init", "--quiet"])
@@ -588,7 +637,11 @@ fn binary_managed_local_repl_executes_integer_list_aggregates() {
         .take()
         .expect("CLI stdin")
         .write_all(
-            b"sum([3, 1, 2])\nmin([3, 1, 2]) ?? 0\nmax([3, 1, 2]) ?? 0\nsum([])\nmin([])\nmax([])\n:quit\n",
+            format!(
+                "{}\n:quit\n",
+                include_str!("fixtures/repl-list-aggregates.orna").trim_end()
+            )
+            .as_bytes(),
         )
         .expect("REPL input");
     let output = child.wait_with_output().expect("CLI process output");
@@ -607,12 +660,12 @@ fn binary_run_executes_a_named_public_project_function() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "use library; pub fn main(): Int = library.answer();",
+        include_str!("fixtures/run/main.orna"),
     )
     .expect("root source");
     std::fs::write(
         directory.path().join("library.orna"),
-        "pub fn answer(): Int = 42;",
+        include_str!("fixtures/run/library.orna"),
     )
     .expect("library source");
     initialize_project(directory.path());
@@ -629,7 +682,7 @@ fn binary_run_without_a_target_executes_root_main() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "pub fn main(): Int = 42;",
+        include_str!("fixtures/run/private-main.orna"),
     )
     .expect("root source");
     initialize_project(directory.path());
@@ -649,12 +702,83 @@ fn binary_run_without_a_target_executes_root_main() {
     assert!(output.stderr.is_empty());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn binary_run_reads_both_publication_relations_from_runtime_state() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("../../orna-runtime-v1/tests/fixtures/publication_metadata.orna"),
+    )
+        .expect("publication metadata fixture");
+    initialize_project(directory.path());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let check = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "check",
+        ])
+        .output()
+        .expect("CLI check");
+    assert!(
+        check.status.success(),
+        "check stderr: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let context = state.begin_activation().await.expect("capture activation");
+    let lease = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .expect("writer lease");
+    let payload = b"fixture".to_vec();
+    let mutation = Mutation {
+        id: [10; 16],
+        digest: Sha256::digest(&payload).into(),
+        payload,
+    };
+    state
+        .commit_activation(
+            lease,
+            &context,
+            &[mutation],
+            Sha256::digest(b"publication metadata CLI proof").into(),
+            &NoFault,
+        )
+        .await
+        .expect("seed durable pending mutation");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+            "main.main",
+        ])
+        .output()
+        .expect("CLI process");
+
+    assert!(
+        output.status.success(),
+        "run stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
 #[test]
 fn binary_run_without_a_target_reports_a_missing_root_main() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "pub fn helper(): Int = 42;",
+        include_str!("fixtures/run/no-main.orna"),
     )
     .expect("root source");
     initialize_project(directory.path());
@@ -682,9 +806,14 @@ fn binary_run_rejects_private_function_targets_before_runtime_admission() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "fn hidden(): Int = 42; pub fn main(): Int = hidden();",
+        include_str!("fixtures/run/main.orna"),
     )
     .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/library.orna"),
+    )
+    .expect("library source");
     initialize_project(directory.path());
 
     let output = invoke(directory.path(), "run", "main.hidden");
@@ -703,14 +832,19 @@ fn binary_run_treats_a_path_like_target_as_an_ordinary_function_name() {
     std::fs::create_dir(directory.path().join("ingest")).expect("ingest directory");
     std::fs::write(
         directory.path().join("main.orna"),
-        "pub fn main(): Int = 42;",
+        include_str!("fixtures/run/main.orna"),
     )
     .expect("root source");
     std::fs::write(
         directory.path().join("ingest/main.orna"),
-        "pub fn main(): Int = 99;",
+        include_str!("fixtures/run/main.orna"),
     )
     .expect("nested source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/library.orna"),
+    )
+    .expect("library source");
     initialize_project(directory.path());
 
     let output = invoke(directory.path(), "run", "ingest/main.orna");
@@ -759,9 +893,12 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
             .success()
     );
 
-    let original_source = std::fs::read_to_string(&source_path).expect("fixture source");
-    let staged_source = original_source.replace("value * value", "value + value");
-    assert_ne!(staged_source, original_source, "fixture expression must match");
+    let original_source = include_str!("fixtures/function-expression.orna");
+    let staged_source = include_str!("fixtures/function-expression-staged.orna");
+    assert_ne!(
+        staged_source, original_source,
+        "fixture expression must match"
+    );
     std::fs::write(&source_path, &staged_source).expect("staged fixture change");
     std::fs::write(repository.path().join("staged.orna"), &original_source)
         .expect("staged Orna source");
@@ -774,8 +911,11 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
             .expect("stage fixture changes")
             .success()
     );
-    let modified_source = staged_source.replace("value + value", "value - value");
-    assert_ne!(modified_source, staged_source, "staged expression must match");
+    let modified_source = include_str!("fixtures/function-expression-unstaged.orna");
+    assert_ne!(
+        modified_source, staged_source,
+        "staged expression must match"
+    );
     std::fs::write(&source_path, modified_source).expect("unstaged fixture change");
     std::fs::write(repository.path().join("untracked.orna"), &original_source)
         .expect("untracked Orna source");
@@ -853,6 +993,8 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
         .current_dir(repository.path().join("nested"))
         .output()
         .expect("git short status");
+    let mut expected_short_with_runtime_summary = expected_short.stdout.clone();
+    expected_short_with_runtime_summary.extend_from_slice(b"RM 0 runtime mutations\n");
     let actual_short = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(repository.path().join("nested"))
@@ -860,7 +1002,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
         .output()
         .expect("CLI short status");
     assert!(actual_short.status.success());
-    assert_eq!(actual_short.stdout, expected_short.stdout);
+    assert_eq!(actual_short.stdout, expected_short_with_runtime_summary);
     assert!(actual_short.stderr.is_empty());
 
     let actual_explicit_short = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
@@ -875,7 +1017,10 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
         .output()
         .expect("CLI explicit short status");
     assert!(actual_explicit_short.status.success());
-    assert_eq!(actual_explicit_short.stdout, expected_short.stdout);
+    assert_eq!(
+        actual_explicit_short.stdout,
+        expected_short_with_runtime_summary
+    );
     assert!(actual_explicit_short.stderr.is_empty());
 
     let outside = tempfile::tempdir().expect("non-repository directory");
@@ -1209,8 +1354,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
 async fn binary_generic_run_executes_a_renamed_finite_list_stream_root() {
     let directory = reference_project();
     let sensors_path = directory.path().join("sensors.orna");
-    let sensors = std::fs::read_to_string(&sensors_path).expect("read sensors source");
-    std::fs::write(&sensors_path, sensors.replace("ingest", "deliver"))
+    std::fs::write(&sensors_path, include_str!("fixtures/sensors-deliver.orna"))
         .expect("rename stream root");
 
     let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
@@ -1244,6 +1388,121 @@ async fn binary_generic_run_executes_a_renamed_finite_list_stream_root() {
             .len(),
         3
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn core_transactions_and_assertions_work_without_std() {
+    let directory = tempfile::tempdir().expect("core-only project");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/lib002-core-only.orna"),
+    )
+    .expect("core-only source");
+    initialize_project(directory.path());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
+        .expect("load without a standard module");
+    assert!(!project.has_standard_imports());
+    assert!(project.standard_profile().is_none());
+
+    let seed = invoke(directory.path(), "run", "main.seed");
+    assert!(seed.status.success(), "seed stderr: {:?}", seed.stderr);
+    assert_eq!(seed.stdout, b"invocation completed\n");
+    assert!(seed.stderr.is_empty());
+
+    let violation = invoke(directory.path(), "run", "main.violate");
+    assert!(!violation.status.success());
+    assert!(violation.stdout.is_empty());
+
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open core-only runtime");
+    let committed = state
+        .committed_table_rows("Note")
+        .await
+        .expect("read committed row");
+    assert_eq!(committed.len(), 1);
+}
+
+#[test]
+fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
+    let directory = tempfile::tempdir().expect("project");
+    let module_path = directory.path().join("stdlib/std");
+    std::fs::create_dir_all(&module_path).expect("standard module path");
+    initialize_project(&module_path);
+    std::fs::write(
+        module_path.join("main.orna"),
+        include_str!("fixtures/captured-standard-main.orna"),
+    )
+    .expect("standard database root");
+    std::fs::write(
+        module_path.join("math.orna"),
+        include_str!("fixtures/captured-standard-math.orna"),
+    )
+    .expect("standard source module");
+    commit_directory(&module_path, "standard module snapshot");
+    let module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
+
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/captured-standard-parent.orna"),
+    )
+    .expect("importing project root");
+    std::fs::write(
+        directory.path().join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://github.com/workingdir/ornadb-std.git\n",
+    )
+    .expect("pinned module declaration");
+    initialize_project(directory.path());
+    git_output_at(directory.path(), &["config", "user.email", "kieran@drewett.dev"]);
+    git_output_at(directory.path(), &["config", "user.name", "kierandrewett"]);
+    git_output_at(directory.path(), &["add", "main.orna", ".gitmodules", ".orna"]);
+    let link = format!("160000,{module_commit},stdlib/std");
+    git_output_at(
+        directory.path(),
+        &["update-index", "--add", "--cacheinfo", &link],
+    );
+    git_output_at(directory.path(), &["commit", "--quiet", "-m", "capture std snapshot"]);
+
+    let repository = Repository::discover(directory.path()).expect("project repository");
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
+        .expect("load pinned module");
+    assert_eq!(project.standard_profile().unwrap().snapshot(), module_commit);
+    assert!(
+        project
+            .standard_runtime_modules()
+            .contains("std/math.orna")
+    );
+    orna_semantic_v1::Catalogue::authoritative_core()
+        .with_standard_sources(
+            project.standard_profile().unwrap(),
+            project.standard_sources().iter().cloned(),
+        )
+        .expect("build captured standard catalogue");
+
+    let check = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["check"])
+        .output()
+        .expect("CLI check");
+    assert!(check.status.success(), "check stderr: {:?}", check.stderr);
+    assert_eq!(check.stdout, b"project valid\n");
+    assert!(check.stderr.is_empty());
+
+    let run = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["--debug", "run", "main.answer"])
+        .output()
+        .expect("CLI invocation");
+    assert!(run.status.success(), "run stderr: {:?}", run.stderr);
+    assert_eq!(run.stdout, b"invocation completed\n");
+    assert!(run.stderr.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

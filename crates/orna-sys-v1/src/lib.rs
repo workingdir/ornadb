@@ -1,8 +1,11 @@
+#![recursion_limit = "512"]
+
 //! Bounded, pre-effect admission for Orna 1.0 reflective invocation.
 //!
-//! Resolution, durable transaction ownership, and schema generation stay with
-//! the evaluator/runtime that owns those concerns. The local supervisor below
-//! only provides a bounded execution and await seam for admitted work.
+//! Resolution and durable transaction ownership stay with the evaluator and
+//! runtime that own those concerns. The portable `sys` declaration schema is
+//! collected from annotated descriptor methods in [`system_api`]. The local supervisor below only
+//! provides a bounded execution and await seam for admitted work.
 
 use std::{
     collections::BTreeMap,
@@ -21,6 +24,24 @@ use serde::{
     ser::{SerializeSeq, SerializeStruct},
 };
 use sha2::{Digest, Sha256};
+use orna_security_v1::{SecretMetadata, SecretRef};
+
+mod introspection;
+pub use introspection::{
+    Dependency, DependencyConfidence, DependencyGraph, DependencyGraphError, DependencyInput,
+    DependencyKind,
+    DefinitionRef, ExplainedPlan, ExplainError, ExpressionRef, FileRef, FunctionPlanDescription,
+    FunctionRef, MutableBranchSnapshot, QueryJoinDescription, QueryMutationDescription,
+    QueryMutationKind, QuerySourceStatistics,
+    MAX_DEPENDENCY_EDGES, MAX_DEPENDENCY_OBJECTS, MAX_PLAN_EXPRESSIONS,
+    MAX_PLAN_NODES, MAX_REFERENCE_BYTES, Plan, PlanDetail, PlanNode, PlanNodeKind, PlanNodeRef,
+    PlanNullOrder,
+    PlanOrdering, PlanSortDirection, QueryPlanDescription, SnapshotRef, SourceSpan, explain_function,
+    explain_query,
+};
+
+mod provider;
+pub use provider::*;
 
 pub const CANONICAL_VALUE_CODEC_V1: &str = "OVB-1";
 
@@ -88,6 +109,163 @@ impl TypeRef {
     }
 }
 
+/// Safe metadata for one typed value.
+///
+/// These references are descriptive identities only. They do not prove that a
+/// catalogue row exists or grant authority to read it; a trusted metadata
+/// resolver must supply the nominal/protocol/codec facts for the exact static
+/// type before this projection is produced.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ValueMetadata {
+    static_type: TypeRef,
+    nominal_type: Option<TypeRef>,
+    protocols: Vec<TypeRef>,
+    codecs: Vec<String>,
+    redacted: bool,
+}
+
+impl ValueMetadata {
+    pub fn static_type(&self) -> &TypeRef {
+        &self.static_type
+    }
+
+    pub fn nominal_type(&self) -> Option<&TypeRef> {
+        self.nominal_type.as_ref()
+    }
+
+    pub fn protocols(&self) -> &[TypeRef] {
+        &self.protocols
+    }
+
+    pub fn codecs(&self) -> &[String] {
+        &self.codecs
+    }
+
+    pub const fn is_redacted(&self) -> bool {
+        self.redacted
+    }
+}
+
+/// Catalogue supplied facts used to project metadata for one static type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValueMetadataFacts {
+    nominal_type: Option<TypeId>,
+    protocols: Vec<TypeId>,
+    codecs: Vec<String>,
+}
+
+impl ValueMetadataFacts {
+    /// Creates metadata facts from the authoritative type catalogue.
+    ///
+    /// The Orna reference defines these as safe metadata but does not prescribe
+    /// collection order, so protocol and codec names use sorted unique order.
+    pub fn new(
+        nominal_type: Option<TypeId>,
+        protocols: impl IntoIterator<Item = TypeId>,
+        codecs: impl IntoIterator<Item = String>,
+    ) -> Result<Self, ValueMetadataError> {
+        let protocols = protocols.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let codecs = codecs.into_iter().collect::<std::collections::BTreeSet<_>>();
+        if nominal_type
+            .iter()
+            .chain(protocols.iter())
+            .any(|name| name.as_str().trim().is_empty())
+            || codecs.iter().any(|name| name.trim().is_empty())
+        {
+            return Err(ValueMetadataError::InvalidCatalogueMetadata);
+        }
+        Ok(Self {
+            nominal_type,
+            protocols: protocols.into_iter().collect(),
+            codecs: codecs.into_iter().collect(),
+        })
+    }
+}
+
+/// Resolves metadata through the catalogue that owns the type identities.
+pub trait ValueMetadataResolver {
+    /// Returns metadata for an exact static type, or `None` when that type is
+    /// not present in the resolver's admitted catalogue.
+    fn value_metadata_facts(&self, static_type: &TypeId) -> Option<ValueMetadataFacts>;
+}
+
+/// Failure to produce safe metadata from an authoritative catalogue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueMetadataError {
+    TypeUnavailable,
+    InvalidCatalogueMetadata,
+}
+
+impl ValueMetadataError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::TypeUnavailable => "sys.meta.type_unavailable",
+            Self::InvalidCatalogueMetadata => "sys.meta.invalid_metadata",
+        }
+    }
+}
+
+/// Projects safe type metadata without exposing or re-encoding the value.
+///
+/// Protected canonical bytes remain inside `TypedValue`; this operation only
+/// observes its static type and redaction bit. It never derives catalogue or
+/// protocol identities from payload bytes or type-name guesses.
+pub fn system_value_metadata(
+    value: &TypedValue,
+    resolver: &impl ValueMetadataResolver,
+) -> Result<ValueMetadata, ValueMetadataError> {
+    if value.static_type().as_str().trim().is_empty() {
+        return Err(ValueMetadataError::InvalidCatalogueMetadata);
+    }
+    let facts = resolver
+        .value_metadata_facts(value.static_type())
+        .ok_or(ValueMetadataError::TypeUnavailable)?;
+    Ok(ValueMetadata {
+        static_type: TypeRef::from_id(value.static_type().clone()),
+        nominal_type: facts.nominal_type.map(TypeRef::from_id),
+        protocols: facts.protocols.into_iter().map(TypeRef::from_id).collect(),
+        codecs: facts.codecs,
+        redacted: value.is_redacted(),
+    })
+}
+
+/// Safe fields projected from a secret provider's non-sensitive metadata.
+///
+/// ORNA-SECRET-004 requires the stable name, provider, and availability while
+/// forbidding secret contents. `SecretMetadata` does not carry enough evidence
+/// to build the rest of a durable `sys.Secret` catalogue row, so this
+/// projection does not invent row authority, paths, recipients, dependencies,
+/// or diagnostics. Secret contents are not accepted by this API.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SecretProjection {
+    name: String,
+    provider: String,
+    available: bool,
+}
+
+impl SecretProjection {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub const fn is_available(&self) -> bool {
+        self.available
+    }
+}
+
+/// Projects the safe `name`, `provider`, and `available` fields for `sys.Secret`.
+pub fn system_secret_projection(metadata: &SecretMetadata) -> SecretProjection {
+    SecretProjection {
+        name: metadata.reference().as_str().to_owned(),
+        provider: metadata.provider().to_owned(),
+        available: metadata.available(),
+    }
+}
+
 /// Opaque identity for one immutable semantic revision.
 ///
 /// Its 32 bytes are supplied by the authoritative revision producer. This
@@ -127,6 +305,7 @@ pub struct TypedValue {
     static_type: TypeId,
     canonical: Vec<u8>,
     redacted: bool,
+    protected_identity: Option<Vec<u8>>,
 }
 impl fmt::Debug for TypedValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -144,6 +323,7 @@ impl TypedValue {
             static_type,
             canonical: canonical.into(),
             redacted: false,
+            protected_identity: None,
         }
     }
     pub fn protected(static_type: TypeId, canonical: impl Into<Vec<u8>>) -> Self {
@@ -151,6 +331,22 @@ impl TypedValue {
             static_type,
             canonical: canonical.into(),
             redacted: true,
+            protected_identity: None,
+        }
+    }
+    /// Creates a protected value with its stable `SecretRef` identity. The
+    /// reference name may participate in idempotency matching; protected
+    /// canonical bytes never do.
+    pub fn protected_with_secret_ref(
+        static_type: TypeId,
+        canonical: impl Into<Vec<u8>>,
+        reference: &SecretRef,
+    ) -> Self {
+        Self {
+            static_type,
+            canonical: canonical.into(),
+            redacted: true,
+            protected_identity: Some(reference.as_str().as_bytes().to_vec()),
         }
     }
     pub fn static_type(&self) -> &TypeId {
@@ -165,10 +361,20 @@ impl TypedValue {
     pub fn canonical(&self) -> Option<&[u8]> {
         (!self.redacted).then_some(self.canonical.as_slice())
     }
+    fn has_protected_identity(&self) -> bool {
+        self.protected_identity.is_some()
+    }
     fn append_identity(&self, out: &mut Vec<u8>) {
         append(out, self.static_type.as_str().as_bytes());
         out.push(u8::from(self.redacted));
-        append(out, &self.canonical);
+        // Hash only a caller-supplied stable identity for protected values:
+        // a digest of low-entropy plaintext remains dictionary-testable.
+        let identity = if self.redacted {
+            self.protected_identity.as_deref().unwrap_or_default()
+        } else {
+            &self.canonical
+        };
+        append(out, identity);
     }
 }
 
@@ -382,13 +588,14 @@ pub struct SystemFunctionDescriptor {
     pub purpose: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
 pub enum SystemEffect {
     Read,
     Invoke,
     Admin,
 }
 
+<<<<<<< HEAD
 /// Exact `api/sys.json` descriptor for `sys.explain(Diagnostic)`.
 pub const SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
     name: "sys.explain(Diagnostic)",
@@ -396,336 +603,19 @@ pub const SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR: SystemFunctionDescriptor = SystemFu
     signature: "fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation",
     purpose: "Return structured causal explanation.",
 };
+=======
+mod system_api;
+pub use system_api::*;
+>>>>>>> origin/w90zi-imp_merge
 
-/// Exact system-reference descriptor for `sys.admin.flush`.
-pub const SYS_ADMIN_FLUSH_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.admin.flush",
-    effect: SystemEffect::Admin,
-    signature: "fn sys.admin.flush(table: sys.TableRef? = null): sys.FlushResult",
-    purpose: "Durably seal pending rows without changing logical contents.",
-};
-
-/// Exact system-reference descriptor for `sys.admin.compact`.
-pub const SYS_ADMIN_COMPACT_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.admin.compact",
-    effect: SystemEffect::Admin,
-    signature: "fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult",
-    purpose: "Rewrite physical segments atomically.",
-};
-
-/// Exact system-reference descriptor for `sys.admin.set_storage_preference`.
-pub const SYS_ADMIN_SET_STORAGE_PREFERENCE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.set_storage_preference",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage",
-        purpose: "Set future automatic placement preference without rewriting existing rows.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.rewrite_storage`.
-pub const SYS_ADMIN_REWRITE_STORAGE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.rewrite_storage",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult",
-        purpose: "Atomically rewrite physical placement while preserving logical rows.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.verify`.
-pub const SYS_ADMIN_VERIFY_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.verify",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.verify(scope: sys.VerifyScope = sys.VerifyScope.database): sys.VerificationReport",
-        purpose: "Verify repository, metadata, storage and checkpoint invariants.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.cancel_run`.
-pub const SYS_ADMIN_CANCEL_RUN_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.cancel_run",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.cancel_run(run: sys.RunRef, reason: Str? = null): Bool",
-        purpose: "Cancel a durable program run.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.pause_stream`.
-pub const SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.pause_stream",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
-        purpose: "Pause at an item/batch transaction boundary.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.resume_stream`.
-pub const SYS_ADMIN_RESUME_STREAM_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.resume_stream",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.resume_stream(stream: sys.StreamRef): Bool",
-        purpose: "Resume a paused stream.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.reset_checkpoint`.
-pub const SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.reset_checkpoint",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
-        purpose: "Compare-and-set checkpoint reset.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.retry_failure`.
-pub const SYS_ADMIN_RETRY_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.retry_failure",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.retry_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.open): sys.InvocationHandle<sys.Value>",
-        purpose: "Lease and retry the same blocked delivery; keep identity stable across failed attempts.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.skip_failure`.
-pub const SYS_ADMIN_SKIP_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.skip_failure",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.skip_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Checkpoint",
-        purpose: "Atomically skip a supported failed position and move progress.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.replay_failure`.
-pub const SYS_ADMIN_REPLAY_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.replay_failure",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.replay_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.skipped): sys.InvocationHandle<sys.Value>",
-        purpose: "Reprocess a preserved skipped delivery without rewinding the live checkpoint.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.resolve_failure`.
-pub const SYS_ADMIN_RESOLVE_FAILURE_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.resolve_failure",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure",
-        purpose: "Resolve a preserved failure without marking its processing as successful.",
-    };
-/// Exact system-reference descriptor for `sys.admin.commit`.
-pub const SYS_ADMIN_COMMIT_DESCRIPTOR: SystemFunctionDescriptor = SystemFunctionDescriptor {
-    name: "sys.admin.commit",
-    effect: SystemEffect::Admin,
-    signature: "fn sys.admin.commit(message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
-    purpose: "Commit the validated staged state, preserving unstaged CWD changes and unpublished tail.",
-};
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(SnapshotRef)`.
-pub const SYS_ADMIN_CREATE_BRANCH_SNAPSHOT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(SnapshotRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.SnapshotRef? = null): sys.BranchRef",
-        purpose: "Create a branch at the supplied committed snapshot or current HEAD; do not switch or commit pending changes.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(CommitRef)`.
-pub const SYS_ADMIN_CREATE_BRANCH_COMMIT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(CommitRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.CommitRef): sys.BranchRef",
-        purpose: "Create a Git branch at a commit.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(BranchRef)`.
-pub const SYS_ADMIN_CREATE_BRANCH_BRANCH_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(BranchRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.BranchRef): sys.BranchRef",
-        purpose: "Create a Git branch at another branch target.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(TagRef)`.
-pub const SYS_ADMIN_CREATE_BRANCH_TAG_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(TagRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.TagRef): sys.BranchRef",
-        purpose: "Create a Git branch at a peeled tag target.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(GitOid)`.
-pub const SYS_ADMIN_CREATE_BRANCH_GIT_OID_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(GitOid)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: sys.GitOid): sys.BranchRef",
-        purpose: "Create a Git branch at an exact Git object.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.create_branch(Str)`.
-pub const SYS_ADMIN_CREATE_BRANCH_STR_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.create_branch(Str)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.create_branch(name: Str, at: Str): sys.BranchRef",
-        purpose: "Resolve a Git revision expression and create a branch there.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(SnapshotRef)`.
-pub const SYS_ADMIN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(SnapshotRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select an already resolved snapshot.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(CommitRef)`.
-pub const SYS_ADMIN_CHECKOUT_COMMIT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(CommitRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.CommitRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select a commit snapshot.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(BranchRef)`.
-pub const SYS_ADMIN_CHECKOUT_BRANCH_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(BranchRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.BranchRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select a branch target.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(TagRef)`.
-pub const SYS_ADMIN_CHECKOUT_TAG_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(TagRef)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.TagRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select a peeled tag target.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(GitOid)`.
-pub const SYS_ADMIN_CHECKOUT_GIT_OID_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(GitOid)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: sys.GitOid, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Validate and select an exact Git object.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.checkout(Str)`.
-pub const SYS_ADMIN_CHECKOUT_STR_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.checkout(Str)",
-        effect: SystemEffect::Admin,
-        signature: "fn sys.admin.checkout(target: Str, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-        purpose: "Resolve, validate and select a Git revision expression.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(SnapshotRef)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(SnapshotRef)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(CommitRef)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_COMMIT_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(CommitRef)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.CommitRef): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(BranchRef)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_BRANCH_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(BranchRef)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.BranchRef): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(TagRef)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_TAG_REF_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(TagRef)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.TagRef): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(GitOid)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_GIT_OID_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(GitOid)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: sys.GitOid): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Exact system-reference descriptor for `sys.admin.plan_checkout(Str)`.
-pub const SYS_ADMIN_PLAN_CHECKOUT_STR_DESCRIPTOR: SystemFunctionDescriptor =
-    SystemFunctionDescriptor {
-        name: "sys.admin.plan_checkout(Str)",
-        effect: SystemEffect::Read,
-        signature: "fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan",
-        purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-    };
-
-/// Returns the authoritative descriptor for a portable system function.
+/// Returns the generated descriptor for a portable system function.
 ///
-/// The returned descriptor is static catalogue data.  It does not grant
+/// The descriptor is static declaration metadata. It does not grant
 /// invocation or administrative authority.
 pub fn system_function_descriptor(name: &str) -> Option<&'static SystemFunctionDescriptor> {
-    match name {
-        "sys.explain(Diagnostic)" => Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR),
-        "sys.admin.flush" => Some(&SYS_ADMIN_FLUSH_DESCRIPTOR),
-        "sys.admin.compact" => Some(&SYS_ADMIN_COMPACT_DESCRIPTOR),
-        "sys.admin.set_storage_preference" => Some(&SYS_ADMIN_SET_STORAGE_PREFERENCE_DESCRIPTOR),
-        "sys.admin.rewrite_storage" => Some(&SYS_ADMIN_REWRITE_STORAGE_DESCRIPTOR),
-        "sys.admin.verify" => Some(&SYS_ADMIN_VERIFY_DESCRIPTOR),
-        "sys.admin.cancel_run" => Some(&SYS_ADMIN_CANCEL_RUN_DESCRIPTOR),
-        "sys.admin.pause_stream" => Some(&SYS_ADMIN_PAUSE_STREAM_DESCRIPTOR),
-        "sys.admin.reset_checkpoint" => Some(&SYS_ADMIN_RESET_CHECKPOINT_DESCRIPTOR),
-        "sys.admin.resume_stream" => Some(&SYS_ADMIN_RESUME_STREAM_DESCRIPTOR),
-        "sys.admin.retry_failure" => Some(&SYS_ADMIN_RETRY_FAILURE_DESCRIPTOR),
-        "sys.admin.skip_failure" => Some(&SYS_ADMIN_SKIP_FAILURE_DESCRIPTOR),
-        "sys.admin.replay_failure" => Some(&SYS_ADMIN_REPLAY_FAILURE_DESCRIPTOR),
-        "sys.admin.resolve_failure" => Some(&SYS_ADMIN_RESOLVE_FAILURE_DESCRIPTOR),
-        "sys.admin.commit" => Some(&SYS_ADMIN_COMMIT_DESCRIPTOR),
-        "sys.admin.create_branch(SnapshotRef)" => {
-            Some(&SYS_ADMIN_CREATE_BRANCH_SNAPSHOT_REF_DESCRIPTOR)
-        }
-        "sys.admin.create_branch(CommitRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_COMMIT_REF_DESCRIPTOR),
-        "sys.admin.create_branch(BranchRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_BRANCH_REF_DESCRIPTOR),
-        "sys.admin.create_branch(TagRef)" => Some(&SYS_ADMIN_CREATE_BRANCH_TAG_REF_DESCRIPTOR),
-        "sys.admin.create_branch(GitOid)" => Some(&SYS_ADMIN_CREATE_BRANCH_GIT_OID_DESCRIPTOR),
-        "sys.admin.create_branch(Str)" => Some(&SYS_ADMIN_CREATE_BRANCH_STR_DESCRIPTOR),
-        "sys.admin.checkout(SnapshotRef)" => Some(&SYS_ADMIN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR),
-        "sys.admin.checkout(CommitRef)" => Some(&SYS_ADMIN_CHECKOUT_COMMIT_REF_DESCRIPTOR),
-        "sys.admin.checkout(BranchRef)" => Some(&SYS_ADMIN_CHECKOUT_BRANCH_REF_DESCRIPTOR),
-        "sys.admin.checkout(TagRef)" => Some(&SYS_ADMIN_CHECKOUT_TAG_REF_DESCRIPTOR),
-        "sys.admin.checkout(GitOid)" => Some(&SYS_ADMIN_CHECKOUT_GIT_OID_DESCRIPTOR),
-        "sys.admin.checkout(Str)" => Some(&SYS_ADMIN_CHECKOUT_STR_DESCRIPTOR),
-        "sys.admin.plan_checkout(SnapshotRef)" => {
-            Some(&SYS_ADMIN_PLAN_CHECKOUT_SNAPSHOT_REF_DESCRIPTOR)
-        }
-        "sys.admin.plan_checkout(CommitRef)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_COMMIT_REF_DESCRIPTOR),
-        "sys.admin.plan_checkout(BranchRef)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_BRANCH_REF_DESCRIPTOR),
-        "sys.admin.plan_checkout(TagRef)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_TAG_REF_DESCRIPTOR),
-        "sys.admin.plan_checkout(GitOid)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_GIT_OID_DESCRIPTOR),
-        "sys.admin.plan_checkout(Str)" => Some(&SYS_ADMIN_PLAN_CHECKOUT_STR_DESCRIPTOR),
-        _ => None,
-    }
+    SYSTEM_FUNCTION_DESCRIPTORS
+        .iter()
+        .find(|descriptor| descriptor.name == name)
 }
 
 /// A descriptive object reference in an explanation.
@@ -1059,6 +949,7 @@ impl RetainedValue {
             static_type,
             canonical,
             redacted,
+            ..
         } = value;
         Self {
             static_type,
@@ -1177,6 +1068,16 @@ impl Runtime {
         validate_target(&request)?;
         let bound = bind(&request.function, &request.arguments)?;
         validate_execution(&request)?;
+        if request.idempotency_key.is_some()
+            && let Some((name, _)) = bound
+                .entries()
+                .find(|(_, value)| value.is_redacted() && !value.has_protected_identity())
+        {
+            return Err(AdmissionError::ArgumentType {
+                name: name.to_owned(),
+                detail: ArgumentTypeDetail::ProtectedValueNeedsIdentity,
+            });
+        }
         let identity = identity(&request, &bound);
         if let Some(key) = &request.idempotency_key
             && let Some(entry) = self.idempotency.get(key)
@@ -2425,6 +2326,7 @@ fn malformed_completion_failure() -> RetainedInvocationResult {
 pub enum ArgumentTypeDetail {
     Duplicate,
     Mismatch,
+    ProtectedValueNeedsIdentity,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdmissionError {
@@ -2767,280 +2669,67 @@ mod tests {
         }
     }
     #[test]
-    fn admin_system_function_descriptors_match_the_reference() {
-        assert_eq!(
-            system_function_descriptor("sys.admin.flush"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.flush",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.flush(table: sys.TableRef? = null): sys.FlushResult",
-                purpose: "Durably seal pending rows without changing logical contents.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.compact"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.compact",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult",
-                purpose: "Rewrite physical segments atomically.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.set_storage_preference"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.set_storage_preference",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage",
-                purpose: "Set future automatic placement preference without rewriting existing rows.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.rewrite_storage"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.rewrite_storage",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult",
-                purpose: "Atomically rewrite physical placement while preserving logical rows.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.verify"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.verify",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.verify(scope: sys.VerifyScope = sys.VerifyScope.database): sys.VerificationReport",
-                purpose: "Verify repository, metadata, storage and checkpoint invariants.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.cancel_run"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.cancel_run",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.cancel_run(run: sys.RunRef, reason: Str? = null): Bool",
-                purpose: "Cancel a durable program run.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.pause_stream"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.pause_stream",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
-                purpose: "Pause at an item/batch transaction boundary.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.resume_stream"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.resume_stream",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.resume_stream(stream: sys.StreamRef): Bool",
-                purpose: "Resume a paused stream.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.retry_failure"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.retry_failure",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.retry_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.open): sys.InvocationHandle<sys.Value>",
-                purpose: "Lease and retry the same blocked delivery; keep identity stable across failed attempts.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.skip_failure"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.skip_failure",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.skip_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Checkpoint",
-                purpose: "Atomically skip a supported failed position and move progress.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.replay_failure"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.replay_failure",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.replay_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.skipped): sys.InvocationHandle<sys.Value>",
-                purpose: "Reprocess a preserved skipped delivery without rewinding the live checkpoint.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.resolve_failure"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.resolve_failure",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure",
-                purpose: "Resolve a preserved failure without marking its processing as successful.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.reset_checkpoint"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.reset_checkpoint",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
-                purpose: "Compare-and-set checkpoint reset.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.commit"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.commit",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.commit(message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
-                purpose: "Commit the validated staged state, preserving unstaged CWD changes and unpublished tail.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.create_branch(SnapshotRef)"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.create_branch(SnapshotRef)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.create_branch(name: Str, at: sys.SnapshotRef? = null): sys.BranchRef",
-                purpose: "Create a branch at the supplied committed snapshot or current HEAD; do not switch or commit pending changes.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.create_branch(CommitRef)"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.create_branch(CommitRef)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.create_branch(name: Str, at: sys.CommitRef): sys.BranchRef",
-                purpose: "Create a Git branch at a commit.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.create_branch(BranchRef)"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.create_branch(BranchRef)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.create_branch(name: Str, at: sys.BranchRef): sys.BranchRef",
-                purpose: "Create a Git branch at another branch target.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.create_branch(TagRef)"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.create_branch(TagRef)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.create_branch(name: Str, at: sys.TagRef): sys.BranchRef",
-                purpose: "Create a Git branch at a peeled tag target.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.create_branch(GitOid)"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.create_branch(GitOid)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.create_branch(name: Str, at: sys.GitOid): sys.BranchRef",
-                purpose: "Create a Git branch at an exact Git object.",
-            })
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.create_branch(Str)"),
-            Some(&SystemFunctionDescriptor {
-                name: "sys.admin.create_branch(Str)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.create_branch(name: Str, at: Str): sys.BranchRef",
-                purpose: "Resolve a Git revision expression and create a branch there.",
-            })
-        );
-        for expected in [
-            SystemFunctionDescriptor {
-                name: "sys.admin.checkout(SnapshotRef)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-                purpose: "Validate and select an already resolved snapshot.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.checkout(CommitRef)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.checkout(target: sys.CommitRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-                purpose: "Validate and select a commit snapshot.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.checkout(BranchRef)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.checkout(target: sys.BranchRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-                purpose: "Validate and select a branch target.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.checkout(TagRef)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.checkout(target: sys.TagRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-                purpose: "Validate and select a peeled tag target.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.checkout(GitOid)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.checkout(target: sys.GitOid, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-                purpose: "Validate and select an exact Git object.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.checkout(Str)",
-                effect: SystemEffect::Admin,
-                signature: "fn sys.admin.checkout(target: Str, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
-                purpose: "Resolve, validate and select a Git revision expression.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.plan_checkout(SnapshotRef)",
-                effect: SystemEffect::Read,
-                signature: "fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan",
-                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.plan_checkout(CommitRef)",
-                effect: SystemEffect::Read,
-                signature: "fn sys.admin.plan_checkout(target: sys.CommitRef): sys.CheckoutPlan",
-                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.plan_checkout(BranchRef)",
-                effect: SystemEffect::Read,
-                signature: "fn sys.admin.plan_checkout(target: sys.BranchRef): sys.CheckoutPlan",
-                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.plan_checkout(TagRef)",
-                effect: SystemEffect::Read,
-                signature: "fn sys.admin.plan_checkout(target: sys.TagRef): sys.CheckoutPlan",
-                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.plan_checkout(GitOid)",
-                effect: SystemEffect::Read,
-                signature: "fn sys.admin.plan_checkout(target: sys.GitOid): sys.CheckoutPlan",
-                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-            },
-            SystemFunctionDescriptor {
-                name: "sys.admin.plan_checkout(Str)",
-                effect: SystemEffect::Read,
-                signature: "fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan",
-                purpose: "Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.",
-            },
-        ] {
-            assert_eq!(
-                system_function_descriptor(expected.name),
-                Some(&expected)
-            );
+    fn sys_meta_returns_catalogue_facts_and_redacts_protected_payloads() {
+        struct Resolver(BTreeMap<String, ValueMetadataFacts>);
+        impl ValueMetadataResolver for Resolver {
+            fn value_metadata_facts(&self, static_type: &TypeId) -> Option<ValueMetadataFacts> {
+                self.0.get(static_type.as_str()).cloned()
+            }
         }
-        assert_eq!(
-            system_function_descriptor("sys.admin.checkout(UnknownRef)"),
-            None
-        );
-        assert_eq!(
-            system_function_descriptor("sys.admin.plan_checkout(UnknownRef)"),
-            None
-        );
 
+        let type_id = ty("app.Credential");
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let value = TypedValue::protected(type_id.clone(), fixture.as_bytes().to_vec());
+        let facts = ValueMetadataFacts::new(
+            Some(ty("app.Credential")),
+            [ty("protocol.Z"), ty("protocol.A")],
+            ["z-orna-codec".to_owned(), "a-orna-codec".to_owned()],
+        )
+        .unwrap();
+        let resolver = Resolver(BTreeMap::from([(type_id.as_str().to_owned(), facts)]));
+
+        let metadata = system_value_metadata(&value, &resolver).unwrap();
+        assert_eq!(metadata.static_type().as_str(), "app.Credential");
         assert_eq!(
-            system_function_descriptor("sys.explain(Diagnostic)"),
-            Some(&SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR)
+            metadata.nominal_type().map(TypeRef::as_str),
+            Some("app.Credential")
         );
-        assert_eq!(system_function_descriptor("sys.admin.unknown"), None);
+        assert_eq!(
+            metadata
+                .protocols()
+                .iter()
+                .map(TypeRef::as_str)
+                .collect::<Vec<_>>(),
+            ["protocol.A", "protocol.Z"]
+        );
+        assert_eq!(metadata.codecs(), ["a-orna-codec", "z-orna-codec"]);
+        assert!(metadata.is_redacted());
+        assert_eq!(value.canonical(), None);
+
+        let projection = serde_json::to_vec(&metadata).unwrap();
+        assert!(!String::from_utf8_lossy(&projection).contains(fixture));
+
+        let public_value = TypedValue::public(type_id, b"canonical-ovb-bytes".to_vec());
+        let canonical_before = public_value.canonical().unwrap().to_vec();
+        let public_metadata = system_value_metadata(&public_value, &resolver).unwrap();
+        assert!(!public_metadata.is_redacted());
+        assert_eq!(public_value.canonical(), Some(canonical_before.as_slice()));
+    }
+
+    #[test]
+    fn sys_meta_fails_closed_without_catalogue_type_facts() {
+        struct EmptyResolver;
+        impl ValueMetadataResolver for EmptyResolver {
+            fn value_metadata_facts(&self, _: &TypeId) -> Option<ValueMetadataFacts> {
+                None
+            }
+        }
+
+        let value = value("Int", "42");
+        assert_eq!(
+            system_value_metadata(&value, &EmptyResolver),
+            Err(ValueMetadataError::TypeUnavailable)
+        );
     }
 
     #[test]
@@ -3256,13 +2945,14 @@ mod tests {
         assert!(runtime.invocations.is_empty());
     }
     #[test]
-    fn protected_argument_identities_remain_private_but_enforce_idempotency() {
+    fn protected_argument_identity_uses_only_explicit_stable_nonsecret_metadata() {
         let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let reference = SecretRef::new("account").unwrap();
         let mut first = request(
             None,
             args(vec![Argument {
                 name: "a".into(),
-                value: TypedValue::protected(ty("Int"), "1234"),
+                value: TypedValue::protected_with_secret_ref(ty("Int"), "secret-one", &reference),
             }]),
         );
         first.idempotency_key = Some("key".into());
@@ -3273,18 +2963,44 @@ mod tests {
         };
         let rendered = format!("{boundary:?}");
         assert!(rendered.contains("InvocationIdentity(<withheld>)"));
-        assert!(!rendered.contains("1234"));
+        assert!(!rendered.contains("secret-one"));
         assert!(!rendered.contains(boundary.identity.0.as_str()));
 
-        let mut different_secret = first;
-        different_secret.arguments = args(vec![Argument {
+        let mut rotated_secret = first;
+        rotated_secret.arguments = args(vec![Argument {
             name: "a".into(),
-            value: TypedValue::protected(ty("Int"), "5678"),
+            value: TypedValue::protected_with_secret_ref(
+                ty("Int"),
+                "rotated-secret",
+                &reference,
+            ),
         }]);
+        assert!(matches!(runtime.admit(rotated_secret), Ok(Admission::Active { .. })));
+    }
+
+    #[test]
+    fn protected_argument_without_safe_identity_is_rejected_for_idempotency() {
+        let mut runtime = Runtime::new(RuntimeId::new("r"));
+        let mut request = request(
+            None,
+            args(vec![Argument {
+                name: "a".into(),
+                value: TypedValue::protected(
+                    ty("Int"),
+                    include_str!("../tests/fixtures/secret-surface.orna").as_bytes(),
+                ),
+            }]),
+        );
+        request.idempotency_key = Some("key".into());
+
         assert!(matches!(
-            runtime.admit(different_secret),
-            Err(AdmissionError::IdempotencyMismatch)
+            runtime.admit(request),
+            Err(AdmissionError::ArgumentType {
+                detail: ArgumentTypeDetail::ProtectedValueNeedsIdentity,
+                ..
+            })
         ));
+        assert!(runtime.invocations.is_empty());
     }
 
     #[test]
@@ -3295,7 +3011,10 @@ mod tests {
             args(vec![
                 Argument {
                     name: "b".into(),
-                    value: TypedValue::protected(ty("Str"), "super-secret"),
+                    value: TypedValue::protected(
+                        ty("Str"),
+                        include_str!("../tests/fixtures/secret-surface.orna").trim().as_bytes(),
+                    ),
                 },
                 Argument {
                     name: "a".into(),
@@ -3341,7 +3060,11 @@ mod tests {
         assert!(metadata[1].redacted);
 
         let rendered = format!("{metadata:?}");
-        assert!(!rendered.contains("super-secret"));
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        assert!(!rendered.contains(fixture));
+        let serialized = serde_json::to_string(&metadata).unwrap();
+        assert!(serialized.contains("\"redacted\":true"));
+        assert!(!serialized.contains(fixture));
         assert!(!format!("{runtime:?}").contains("digest:"));
 
         let projection = runtime
@@ -3358,7 +3081,41 @@ mod tests {
         assert_eq!(projection.arguments()[1].name(), "b");
         assert_eq!(projection.arguments()[1].canonical(), None);
         assert!(projection.arguments()[1].is_redacted());
-        assert!(!format!("{projection:?}").contains("super-secret"));
+        assert!(!format!("{projection:?}").contains(fixture));
+    }
+
+    #[test]
+    fn secret_surface_fixture_stays_redacted_across_sys_value_projections() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let protected = TypedValue::protected(ty("app.Credential"), fixture.as_bytes());
+
+        let arguments = args(vec![Argument {
+            name: "credential".into(),
+            value: protected.clone(),
+        }]);
+        let metadata = arguments.metadata();
+        assert_eq!(metadata[0].canonical(), None);
+        assert!(metadata[0].is_redacted());
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(json.contains("\"redacted\":true"));
+        assert!(!json.contains(fixture));
+
+        let retained = RetainedValue::new(protected);
+        assert!(retained.is_redacted());
+        assert_eq!(retained.canonical(), None);
+        assert!(!format!("{retained:?}").contains(fixture));
+
+        let metadata = SecretMetadata::new(
+            orna_security_v1::SecretRef::new("fixture.credential").unwrap(),
+            "sops",
+            true,
+        );
+        let secret_projection = system_secret_projection(&metadata);
+        let json = serde_json::to_string(&secret_projection).unwrap();
+        assert!(json.contains("fixture.credential"));
+        assert!(json.contains("sops"));
+        assert!(json.contains("true"));
+        assert!(!json.contains(fixture));
     }
 
     #[test]
@@ -5259,7 +5016,10 @@ mod tests {
         runtime
             .retain_terminal(
                 &handle,
-                InvocationResult::Success(TypedValue::protected(ty("Str"), "super-secret")),
+                InvocationResult::Success(TypedValue::protected(
+                    ty("Str"),
+                    include_str!("../tests/fixtures/secret-surface.orna").as_bytes(),
+                )),
             )
             .unwrap();
         let state = runtime.invocation_state(&handle).unwrap();
@@ -5268,7 +5028,9 @@ mod tests {
         };
         assert!(value.is_redacted());
         assert_eq!(value.canonical(), None);
-        assert!(!format!("{state:?}").contains("super-secret"));
+        assert!(!format!("{state:?}").contains(include_str!(
+            "../tests/fixtures/secret-surface.orna"
+        )));
     }
     #[test]
     fn serialized_diagnostics_redact_secrets() {

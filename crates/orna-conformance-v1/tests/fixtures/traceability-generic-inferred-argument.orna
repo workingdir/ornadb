@@ -1,0 +1,22 @@
+protocol Display {
+    fn display(self): Str;
+}
+
+protocol Order {
+    fn compare(self, other: Self): Int;
+}
+
+type Ranked {
+    value: Int,
+
+    impl Display {
+        fn display(self): Str = "ranked";
+    }
+
+    impl Order {
+        fn compare(self, other: Self): Int = self.value - other.value;
+    }
+}
+
+fn keep<T impl Display + Order>(value: T): T = value;
+pub fn answer() = keep(Ranked { value: 42 });

@@ -1,0 +1,7 @@
+sys.Storage
+    | project(storage => sys.Storage.lookup(storage.target).title)
+    | take(1)
+    | union(sys.Storage | project(storage => sys.Storage.lookup(storage.id).title))
+    | take(3)
+    | count()
+    |? (failure => failure.code)

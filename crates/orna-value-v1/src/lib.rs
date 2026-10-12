@@ -52,7 +52,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Canonical CBOR's supported data model. `Tag` is public for schema and
 /// protocol adapters, but both construction and decoding validate the closed
 /// Orna tag registry before bytes may be emitted.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum Raw {
     Null,
     Bool(bool),
@@ -65,9 +65,66 @@ pub enum Raw {
     Tag(u64, Box<Raw>),
 }
 
+enum RawDebugValue {
+    Null,
+    Bool(bool),
+    Int(BigInt),
+    Float(u64),
+    Bytes(Vec<u8>),
+    Text(String),
+    Array(Vec<RawDebugValue>),
+    Map(Vec<(RawDebugValue, RawDebugValue)>),
+    Tag(u64, Box<RawDebugValue>),
+}
+
+impl fmt::Debug for RawDebugValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => formatter.write_str("Null"),
+            Self::Bool(value) => formatter.debug_tuple("Bool").field(value).finish(),
+            Self::Int(value) => formatter.debug_tuple("Int").field(value).finish(),
+            Self::Float(value) => formatter.debug_tuple("Float").field(value).finish(),
+            Self::Bytes(value) => formatter.debug_tuple("Bytes").field(value).finish(),
+            Self::Text(value) => formatter.debug_tuple("Text").field(value).finish(),
+            Self::Array(values) => formatter.debug_tuple("Array").field(values).finish(),
+            Self::Map(entries) => formatter.debug_tuple("Map").field(entries).finish(),
+            Self::Tag(tag, value) => formatter
+                .debug_tuple("Tag")
+                .field(tag)
+                .field(value)
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for Raw {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match raw_debug_value(self, 0, false) {
+            Ok(value) => fmt::Debug::fmt(&value, formatter),
+            // Raw is also used before canonical validation. If a malformed
+            // intermediate cannot be safely projected, traces fail closed.
+            Err(_) => formatter.write_str("\"<redacted>\""),
+        }
+    }
+}
+
 /// A validated OVB-1 value.  The inner raw value is never exposed mutably.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Value(Raw);
+
+impl fmt::Debug for Value {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match raw_debug_value(&self.0, 0, false) {
+            Ok(raw) => formatter.debug_tuple("Value").field(&raw).finish(),
+            // Invalid internal markers are never printed with their payload.
+            Err(_) => formatter
+                .debug_tuple("Value")
+                .field(&"<redacted>")
+                .finish(),
+        }
+    }
+}
+
 impl Value {
     pub fn new(raw: Raw) -> Result<Self> {
         validate_raw(&raw, 0)?;
@@ -78,6 +135,21 @@ impl Value {
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode_raw(&self.0)
+    }
+    /// Returns a transport/trace-safe projection with every nested Error
+    /// payload redacted and generic protected wrappers hidden. Canonical values
+    /// remain lossless for local recovery; callers crossing an unprivileged
+    /// observability boundary must opt into this projection because OVB has no
+    /// field-level secrecy classifier for those wrappers.
+    pub fn redacted_for_trace(&self) -> Result<Self> {
+        Self::new(redact_trace_values(&self.0, 0, true)?)
+    }
+    /// Redacts Error values while retaining surrounding registered wrappers.
+    /// Typed protocol decoders use this only before they apply their own
+    /// wrapper-aware projection; generic trace output must use
+    /// [`Self::redacted_for_trace`] instead.
+    pub fn redacted_error_values_for_trace(&self) -> Result<Self> {
+        Self::new(redact_trace_values(&self.0, 0, false)?)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         let mut r = Reader::new(bytes);
@@ -122,6 +194,235 @@ impl Value {
     pub fn protected() -> Self {
         Self(Raw::Tag(0, Box::new(Raw::Null)))
     } // unencodable marker
+}
+
+/// Compares canonical table keys by their logical values, not by OVB bytes.
+///
+/// The input must be one permitted primary-key value or a non-empty OVB tuple
+/// of key components. Schema admission remains responsible for proving that
+/// every component belongs to its declared key type; this boundary rejects
+/// malformed and non-key values rather than assigning them an incidental
+/// host order.
+pub fn compare_primary_keys(left: &Value, right: &Value) -> Result<Ordering> {
+    let left = primary_key_components(left.raw())?;
+    let right = primary_key_components(right.raw())?;
+    if left.len() != right.len() {
+        return Err(Error::InvalidValue);
+    }
+    for (left, right) in left.iter().zip(right) {
+        let ordering = compare_key_component(left, right)?;
+        if ordering != Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+fn primary_key_components(raw: &Raw) -> Result<Vec<&Raw>> {
+    match raw {
+        Raw::Tag(60015, payload) => {
+            let values = array(payload)?;
+            if values.is_empty() {
+                return Err(Error::InvalidValue);
+            }
+            Ok(values.iter().collect())
+        }
+        Raw::Array(values) if !values.is_empty() => Ok(values.iter().collect()),
+        _ if is_primary_key_component(raw) => Ok(vec![raw]),
+        _ => Err(Error::InvalidValue),
+    }
+}
+
+fn is_primary_key_component(raw: &Raw) -> bool {
+    matches!(
+        raw,
+        Raw::Bool(_)
+            | Raw::Int(_)
+            | Raw::Text(_)
+            | Raw::Tag(37, _)
+            | Raw::Tag(60000, _)
+            | Raw::Tag(60001, _)
+            | Raw::Tag(60002, _)
+            | Raw::Tag(60008, _)
+            | Raw::Tag(60010, _)
+            | Raw::Tag(60015, _)
+            | Raw::Tag(60021, _)
+    )
+}
+
+fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
+    let ordering = match (left, right) {
+        (Raw::Bool(left), Raw::Bool(right)) => left.cmp(right),
+        (Raw::Int(left), Raw::Int(right)) => left.cmp(right),
+        (Raw::Text(left), Raw::Text(right)) => left.cmp(right),
+        (Raw::Tag(37, left), Raw::Tag(37, right)) => bytes(left)?.cmp(bytes(right)?),
+        (Raw::Tag(60000, _), Raw::Tag(60000, _)) => compare_decimal_raw(left, right)?,
+        (Raw::Tag(60001, left), Raw::Tag(60001, right)) => text(left)?.cmp(text(right)?),
+        (Raw::Tag(60002, left), Raw::Tag(60002, right)) => {
+            let left = array(left)?;
+            let right = array(right)?;
+            let [Raw::Int(left_seconds), Raw::Int(left_nanos)] = left.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            let [Raw::Int(right_seconds), Raw::Int(right_nanos)] = right.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            left_seconds
+                .cmp(right_seconds)
+                .then(left_nanos.cmp(right_nanos))
+        }
+        (Raw::Tag(60008, left), Raw::Tag(60008, right)) => {
+            let left = array(left)?;
+            let right = array(right)?;
+            let [left_type, left_variant, Raw::Null] = left.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            let [right_type, right_variant, Raw::Null] = right.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            uuid_array(left_type)?
+                .cmp(&uuid_array(right_type)?)
+                .then(uuid_array(left_variant)?.cmp(&uuid_array(right_variant)?))
+        }
+        (Raw::Tag(60010, left), Raw::Tag(60010, right)) => {
+            let left = array(left)?;
+            let right = array(right)?;
+            let [left_db, left_table, left_key, left_snapshot] = left.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            let [right_db, right_table, right_key, right_snapshot] = right.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            uuid_array(left_db)?
+                .cmp(&uuid_array(right_db)?)
+                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?))
+                .then(compare_key_component(left_key, right_key)?)
+                .then(compare_raw_order(left_snapshot, right_snapshot)?)
+        }
+        (Raw::Tag(60015, left), Raw::Tag(60015, right)) => {
+            compare_key_components(array(left)?, array(right)?)?
+        }
+        (Raw::Tag(60021, left), Raw::Tag(60021, right)) => {
+            let left = array(left)?;
+            let right = array(right)?;
+            let [left_db, left_table, left_key] = left.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            let [right_db, right_table, right_key] = right.as_slice() else {
+                return Err(Error::InvalidValue);
+            };
+            uuid_array(left_db)?
+                .cmp(&uuid_array(right_db)?)
+                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?))
+                .then(compare_key_component(left_key, right_key)?)
+        }
+        _ => return Err(Error::InvalidValue),
+    };
+    Ok(ordering)
+}
+
+fn compare_key_components(left: &[Raw], right: &[Raw]) -> Result<Ordering> {
+    for (left, right) in left.iter().zip(right) {
+        let ordering = compare_key_component(left, right)?;
+        if ordering != Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(left.len().cmp(&right.len()))
+}
+
+fn compare_decimal_raw(left: &Raw, right: &Raw) -> Result<Ordering> {
+    let left = Decimal::from_raw(left)?;
+    let right = Decimal::from_raw(right)?;
+    let left_zero = left.coefficient.is_zero();
+    let right_zero = right.coefficient.is_zero();
+    if left_zero || right_zero {
+        return Ok(match (left_zero, right_zero) {
+            (true, true) => Ordering::Equal,
+            (true, false) => {
+                if right.coefficient.sign() == Sign::Minus {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (false, true) => {
+                if left.coefficient.sign() == Sign::Minus {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (false, false) => unreachable!(),
+        });
+    }
+    let left_negative = left.coefficient.sign() == Sign::Minus;
+    let right_negative = right.coefficient.sign() == Sign::Minus;
+    if left_negative != right_negative {
+        return Ok(if left_negative {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        });
+    }
+    let left_digits = left
+        .coefficient
+        .to_str_radix(10)
+        .trim_start_matches('-')
+        .to_owned();
+    let right_digits = right
+        .coefficient
+        .to_str_radix(10)
+        .trim_start_matches('-')
+        .to_owned();
+    let left_position = &left.exponent10 + BigInt::from(left_digits.len());
+    let right_position = &right.exponent10 + BigInt::from(right_digits.len());
+    let mut ordering = left_position.cmp(&right_position);
+    if ordering == Ordering::Equal {
+        for offset in 0..left_digits.len().max(right_digits.len()) {
+            let left_digit = left_digits.as_bytes().get(offset).copied().unwrap_or(b'0');
+            let right_digit = right_digits.as_bytes().get(offset).copied().unwrap_or(b'0');
+            ordering = left_digit.cmp(&right_digit);
+            if ordering != Ordering::Equal {
+                break;
+            }
+        }
+    }
+    Ok(if left_negative {
+        ordering.reverse()
+    } else {
+        ordering
+    })
+}
+
+fn compare_raw_order(left: &Raw, right: &Raw) -> Result<Ordering> {
+    match (left, right) {
+        (Raw::Null, Raw::Null) => Ok(Ordering::Equal),
+        (Raw::Bool(left), Raw::Bool(right)) => Ok(left.cmp(right)),
+        (Raw::Int(left), Raw::Int(right)) => Ok(left.cmp(right)),
+        (Raw::Bytes(left), Raw::Bytes(right)) => Ok(left.cmp(right)),
+        (Raw::Text(left), Raw::Text(right)) => Ok(left.cmp(right)),
+        (Raw::Array(left), Raw::Array(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                let ordering = compare_raw_order(left, right)?;
+                if ordering != Ordering::Equal {
+                    return Ok(ordering);
+                }
+            }
+            Ok(left.len().cmp(&right.len()))
+        }
+        (Raw::Tag(left_tag, left), Raw::Tag(right_tag, right)) if left_tag == right_tag => {
+            match left_tag {
+                60000 => compare_decimal_raw(
+                    &Raw::Tag(*left_tag, left.clone()),
+                    &Raw::Tag(*right_tag, right.clone()),
+                ),
+                60015 => compare_key_components(array(left)?, array(right)?),
+                _ => compare_raw_order(left, right),
+            }
+        }
+        _ => Err(Error::InvalidValue),
+    }
 }
 
 /// A type-directed failure from a canonical value decoder.
@@ -526,6 +827,94 @@ impl<T: OvbCodec> OvbCodec for Option<T> {
     }
 }
 
+/// A typed ordered range with inclusive lower and configurable upper bounds.
+///
+/// `None` represents an unbounded endpoint. The endpoint type parameter keeps
+/// both present bounds in the same type; this codec preserves empty ranges
+/// without trying to impose ordering on `T`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RangeValue<T> {
+    lower: Option<T>,
+    upper: Option<T>,
+    upper_inclusive: bool,
+}
+
+impl<T> RangeValue<T> {
+    /// Creates a range with an inclusive lower bound and the supplied upper
+    /// bound semantics.
+    pub const fn new(lower: Option<T>, upper: Option<T>, upper_inclusive: bool) -> Self {
+        Self {
+            lower,
+            upper,
+            upper_inclusive,
+        }
+    }
+
+    /// Returns the inclusive lower bound, or `None` for an unbounded start.
+    pub const fn lower(&self) -> Option<&T> {
+        self.lower.as_ref()
+    }
+
+    /// Returns the upper bound, or `None` for an unbounded end.
+    pub const fn upper(&self) -> Option<&T> {
+        self.upper.as_ref()
+    }
+
+    /// Reports whether a present upper bound is inclusive.
+    pub const fn upper_inclusive(&self) -> bool {
+        self.upper_inclusive
+    }
+}
+
+impl<T: OvbCodec> OvbCodec for RangeValue<T> {
+    fn type_label() -> &'static str {
+        "Range"
+    }
+
+    fn encode_value(&self) -> Result<Value> {
+        let lower = self.lower.encode_value()?;
+        let upper = self.upper.encode_value()?;
+        Value::new(tag(
+            60019,
+            Raw::Array(vec![lower.0, upper.0, Raw::Bool(self.upper_inclusive)]),
+        ))
+    }
+
+    fn decode_value(
+        value: &Value,
+        path: &mut Vec<String>,
+    ) -> std::result::Result<Self, DecodeError> {
+        let Raw::Tag(60019, payload) = value.raw() else {
+            return Err(decode_type_mismatch(path));
+        };
+        let Raw::Array(fields) = payload.as_ref() else {
+            return Err(decode_type_mismatch(path));
+        };
+        let [lower, upper, Raw::Bool(upper_inclusive)] = fields.as_slice() else {
+            return Err(decode_type_mismatch(path));
+        };
+
+        Ok(Self {
+            lower: decode_range_endpoint::<T>(lower, "lower", path)?,
+            upper: decode_range_endpoint::<T>(upper, "upper", path)?,
+            upper_inclusive: *upper_inclusive,
+        })
+    }
+}
+
+fn decode_range_endpoint<T: OvbCodec>(
+    raw: &Raw,
+    endpoint: &str,
+    path: &mut Vec<String>,
+) -> std::result::Result<Option<T>, DecodeError> {
+    path.push(endpoint.to_owned());
+    let result = Value::new(raw.clone())
+        .map_err(|error| DecodeError::new(error, path.clone()))
+        .and_then(|value| <Option<T> as OvbCodec>::decode_value(&value, path));
+    path.pop();
+    result
+}
+
 fn tuple_components<'a>(
     value: &'a Value,
     path: &[String],
@@ -633,8 +1022,20 @@ impl_tuple_codec!(
 /// This wrapper carries no execution or language-level error semantics.  It
 /// only provides a typed construction and inspection boundary for the
 /// canonical representation already accepted by [`Value`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ErrorValue(Value);
+
+impl fmt::Debug for ErrorValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ErrorValue")
+            .field("code", &"<redacted>")
+            .field("message", &"<redacted>")
+            .field("causes", &"<redacted>")
+            .field("safe_details", &"<redacted>")
+            .finish()
+    }
+}
 
 impl ErrorValue {
     /// Constructs a canonical Error value from its portable fields.
@@ -733,6 +1134,25 @@ impl ErrorValue {
             .collect()
     }
 
+    /// Builds the fail-closed projection used by traces and wire-visible
+    /// values. Error codes and `safe_details` are caller supplied here, so
+    /// neither is treated as a disclosure grant without a classifier.
+    pub fn redacted_for_trace(&self) -> Self {
+        Self::new(
+            "<redacted>",
+            "<redacted>",
+            self.causes().iter().map(Self::redacted_for_trace),
+            BTreeMap::new(),
+        )
+        .expect("redacted Error remains canonical")
+    }
+
+    /// Encodes the redacted trace projection while `encode` continues to
+    /// preserve this Error's local recovery identity.
+    pub fn encode_for_trace(&self) -> Result<Vec<u8>> {
+        self.redacted_for_trace().encode()
+    }
+
     fn fields(&self) -> BTreeMap<u64, &Raw> {
         integer_map(self.inner(), &[0, 1, 2, 3], &[]).expect("ErrorValue invariant was violated")
     }
@@ -743,6 +1163,110 @@ impl ErrorValue {
         };
         inner
     }
+}
+
+fn redact_trace_values(raw: &Raw, depth: usize, hide_wrappers: bool) -> Result<Raw> {
+    if depth > MAX_DEPTH {
+        return Err(Error::Limit);
+    }
+    if hide_wrappers && matches!(raw, Raw::Tag(0 | 60011 | 60012 | 60026, _)) {
+        // ORNA-SECRET-002 requires these values to stay opaque in traces. The
+        // generic OVB layer has no per-field disclosure classifier, so replace
+        // the entire wrapper with ordinary text instead of forging a typed
+        // wrapper whose redacted bit or shape could imply privileged approval.
+        return Ok(Raw::Text("<redacted>".into()));
+    }
+    Ok(match raw {
+        Raw::Tag(60016, _) => ErrorValue::from_value(Value::new(raw.clone())?)?
+            .redacted_for_trace()
+            .0
+            .0,
+        Raw::Array(values) => Raw::Array(
+            values
+                .iter()
+                .map(|value| redact_trace_values(value, depth + 1, hide_wrappers))
+                .collect::<Result<_>>()?,
+        ),
+        Raw::Map(entries) => {
+            let mut redacted = entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        redact_trace_values(key, depth + 1, hide_wrappers)?,
+                        redact_trace_values(value, depth + 1, hide_wrappers)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if entries
+                .iter()
+                .zip(&redacted)
+                .any(|((key, _), (safe_key, _))| key != safe_key)
+            {
+                // Hiding a typed map key can collapse distinct keys and make
+                // the projected map non-canonical. Hide the containing map
+                // as a whole rather than emit an invalid or ambiguous trace.
+                return Ok(Raw::Text("<redacted>".into()));
+            }
+            redacted.sort_by(|(left, _), (right, _)| {
+                encode_raw(left)
+                    .expect("validated map keys remain encodable")
+                    .cmp(&encode_raw(right).expect("validated map keys remain encodable"))
+            });
+            Raw::Map(redacted)
+        }
+        Raw::Tag(tag, value) => Raw::Tag(
+            *tag,
+            Box::new(redact_trace_values(value, depth + 1, hide_wrappers)?),
+        ),
+        value => value.clone(),
+    })
+}
+
+fn raw_debug_value(raw: &Raw, depth: usize, errors_redacted: bool) -> Result<RawDebugValue> {
+    if depth > MAX_DEPTH {
+        return Err(Error::Limit);
+    }
+    if matches!(raw, Raw::Tag(0 | 60011 | 60012 | 60026, _)) {
+        // Debug has no disclosure grant. Protected markers can carry plaintext
+        // before wire validation, and generic Diagnostic, Present, and sys.Value
+        // wrappers have no field classifier here, so hide their whole payload.
+        // The closed wrappers are redacted as a pragmatic fail-closed projection.
+        return Ok(RawDebugValue::Text("<redacted>".into()));
+    }
+    if !errors_redacted && matches!(raw, Raw::Tag(60016, _)) {
+        let safe = redact_trace_values(raw, depth, true)?;
+        return raw_debug_value(&safe, depth, true);
+    }
+
+    Ok(match raw {
+        Raw::Null => RawDebugValue::Null,
+        Raw::Bool(value) => RawDebugValue::Bool(*value),
+        Raw::Int(value) => RawDebugValue::Int(value.clone()),
+        Raw::Float(value) => RawDebugValue::Float(*value),
+        Raw::Bytes(value) => RawDebugValue::Bytes(value.clone()),
+        Raw::Text(value) => RawDebugValue::Text(value.clone()),
+        Raw::Array(values) => RawDebugValue::Array(
+            values
+                .iter()
+                .map(|value| raw_debug_value(value, depth + 1, errors_redacted))
+                .collect::<Result<_>>()?,
+        ),
+        Raw::Map(entries) => RawDebugValue::Map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        raw_debug_value(key, depth + 1, errors_redacted)?,
+                        raw_debug_value(value, depth + 1, errors_redacted)?,
+                    ))
+                })
+                .collect::<Result<_>>()?,
+        ),
+        Raw::Tag(tag, value) => RawDebugValue::Tag(
+            *tag,
+            Box::new(raw_debug_value(value, depth + 1, errors_redacted)?),
+        ),
+    })
 }
 
 fn tag(n: u64, raw: Raw) -> Raw {
@@ -1160,6 +1684,24 @@ impl Snapshot {
             ]),
         }
     }
+
+    /// Encodes this pin as its canonical OVB-1 value.
+    ///
+    /// Snapshot variants are publicly constructible for compatibility, so an
+    /// encoder must revalidate the generation-derived CWD identity instead of
+    /// serializing a forged `id` supplied through the enum fields.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let canonical = Self::decode(&self.raw())?;
+        Value::new(canonical.raw())?.encode()
+    }
+
+    /// Decodes a snapshot pin from canonical OVB-1 bytes. The inner decoder
+    /// verifies the CWD id against its database, runtime, and full generation.
+    pub fn decode_bytes(bytes: &[u8]) -> Result<Self> {
+        let value = Value::decode(bytes)?;
+        Self::decode(value.raw())
+    }
+
     pub fn decode(raw: &Raw) -> Result<Self> {
         let a = array(raw)?;
         match int_u64(a.first().ok_or(Error::InvalidValue)?)? {
@@ -1400,6 +1942,10 @@ pub fn argument_identity(arguments: Vec<(String, Raw, Raw)>) -> Result<[u8; 32]>
     if a.windows(2).any(|x| x[0].0 == x[1].0) {
         return Err(Error::InvalidValue);
     };
+    for (_, ty, value) in &a {
+        validate_type(ty)?;
+        validate_value_as_type(value, ty)?;
+    }
     domain_digest(
         "orna.arguments.v1",
         &Raw::Array(
@@ -1797,6 +2343,9 @@ fn validate_raw(v: &Raw, depth: usize) -> Result<()> {
         return Err(Error::Limit);
     }
     match v {
+        // Resolved secrets are not portable values. Reject this marker at
+        // every depth before values can enter snapshots, digests, or wire
+        // bytes; schema and typed wrappers do not grant disclosure authority.
         Raw::Tag(0, _) => return Err(Error::ProtectedValue),
         Raw::Float(bits) if is_nan_bits(*bits) && *bits != CANONICAL_NAN_BITS => {
             return Err(Error::NonCanonical);
@@ -2556,12 +3105,7 @@ fn validate_schema_constructibility(
 ) -> Result<()> {
     let mut dependents = vec![Vec::new(); definitions.len()];
     for (index, definition) in definitions.iter().enumerate() {
-        collect_constructibility_dependencies(
-            definition,
-            index,
-            definition_ids,
-            &mut dependents,
-        )?;
+        collect_constructibility_dependencies(definition, index, definition_ids, &mut dependents)?;
     }
 
     let mut constructible = vec![false; definitions.len()];
@@ -2600,11 +3144,8 @@ fn definition_is_constructible(
         0 => constructible_fields(array(body)?, definition_ids, constructible),
         1 => {
             for variant in array(body)? {
-                if constructible_fields(
-                    array(&array(variant)?[2])?,
-                    definition_ids,
-                    constructible,
-                )? {
+                if constructible_fields(array(&array(variant)?[2])?, definition_ids, constructible)?
+                {
                     return Ok(true);
                 }
             }
@@ -2647,12 +3188,7 @@ fn collect_constructibility_dependencies(
                 }
             }
         }
-        2 => collect_type_dependencies(
-            &array(body)?[0],
-            dependent,
-            definition_ids,
-            dependents,
-        )?,
+        2 => collect_type_dependencies(&array(body)?[0], dependent, definition_ids, dependents)?,
         3 | 4 => {}
         _ => return Err(Error::InvalidSchema),
     }
@@ -3100,11 +3636,7 @@ mod tests {
     }
 
     fn nominal_definition(id: u8, kind: u64, body: Raw) -> Raw {
-        Raw::Array(vec![
-            uuid_raw([id; 16]),
-            Raw::Int(kind.into()),
-            body,
-        ])
+        Raw::Array(vec![uuid_raw([id; 16]), Raw::Int(kind.into()), body])
     }
 
     fn record_definition(id: u8, fields: Vec<Raw>) -> Raw {
@@ -3127,7 +3659,6 @@ mod tests {
             (Raw::Int(4.into()), Raw::Array(definitions)),
         ])
     }
-
 
     #[test]
     fn canonical_uuid_text_is_lowercase_and_round_trips() {
@@ -3154,21 +3685,21 @@ mod tests {
 
     #[test]
     fn argument_identity_normalizes_names_before_sorting_and_collision_check() {
+        let bool_type = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Bool".into())]);
         let composed = "é".to_owned();
         let decomposed = "e\u{301}".to_owned();
-        let left =
-            argument_identity(vec![(composed, Raw::Int(0.into()), Raw::Int(1.into()))]).unwrap();
+        let left = argument_identity(vec![(composed, bool_type.clone(), Raw::Bool(true))]).unwrap();
         let right = argument_identity(vec![(
             decomposed.clone(),
-            Raw::Int(0.into()),
-            Raw::Int(1.into()),
+            bool_type.clone(),
+            Raw::Bool(true),
         )])
         .unwrap();
         assert_eq!(left, right);
         assert!(
             argument_identity(vec![
-                ("é".to_owned(), Raw::Int(0.into()), Raw::Int(1.into())),
-                (decomposed, Raw::Int(0.into()), Raw::Int(2.into())),
+                ("é".to_owned(), bool_type.clone(), Raw::Bool(true)),
+                (decomposed, bool_type, Raw::Bool(false)),
             ])
             .is_err()
         );
@@ -3207,14 +3738,20 @@ mod tests {
     #[test]
     fn values_match_supplied_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/value-vectors.json"
+            "fixtures/reference/tests/value-vectors.json"
         ))
         .unwrap();
         for vector in fixture.as_array().unwrap() {
             let x = vector["hex"].as_str().unwrap();
             let b = h(x);
-            let decoded = Value::decode(&b).unwrap_or_else(|e| panic!("{x}: {e}"));
-            assert_eq!(decoded.encode().unwrap(), b, "{x}")
+            let canonical_roundtrip = Value::decode(&b)
+                .and_then(|decoded| decoded.encode())
+                .is_ok_and(|encoded| encoded == b);
+            assert_eq!(
+                canonical_roundtrip,
+                vector["canonical_roundtrip"].as_bool().unwrap(),
+                "{x}"
+            );
         }
     }
     #[test]
@@ -3341,7 +3878,7 @@ mod tests {
     #[test]
     fn float_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/float-vectors.json"
+            "fixtures/reference/tests/float-vectors.json"
         ))
         .unwrap();
         let parse = |text: &str| u64::from_str_radix(text, 16).unwrap();
@@ -3563,6 +4100,151 @@ mod tests {
     }
 
     #[test]
+    fn protected_payloads_cannot_enter_snapshot_key_serialization() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap();
+        let row_reference = tag(
+            60010,
+            Raw::Array(vec![
+                uuid_raw([3; 16]),
+                uuid_raw([4; 16]),
+                tag(0, Raw::Text(fixture.to_owned())),
+                snapshot.raw(),
+            ]),
+        );
+
+        assert_eq!(Value::new(row_reference.clone()), Err(Error::ProtectedValue));
+        let mut unvalidated_bytes = Vec::new();
+        write_raw(&row_reference, &mut unvalidated_bytes).unwrap();
+        assert_eq!(Value::decode(&unvalidated_bytes), Err(Error::ProtectedValue));
+        assert!(!Error::ProtectedValue.to_string().contains(fixture));
+    }
+
+    #[test]
+    fn raw_debug_redacts_protected_payloads_before_wire_validation() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let raw = Raw::Map(vec![(
+            Raw::Text("credential".into()),
+            Raw::Array(vec![Raw::Tag(
+                0,
+                Box::new(Raw::Text(fixture.to_owned())),
+            )]),
+        )]);
+
+        let debug = format!("{raw:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(fixture));
+        assert_eq!(Value::new(raw), Err(Error::ProtectedValue));
+    }
+
+    #[test]
+    fn raw_debug_redacts_diagnostic_present_and_sys_value_payloads() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let diagnostic = tag(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(4.into()),
+                    Raw::Array(vec![Raw::Text(fixture.into())]),
+                ),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let present = tag(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("credential".into()),
+                    Raw::Text(fixture.into()),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let sys_value = tag(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+
+        for raw in [diagnostic, present, sys_value] {
+            let value = Value::new(raw.clone()).expect("fixture wrapper is canonical");
+            let debug = format!("{raw:?} {:?}", value);
+            assert!(debug.contains("<redacted>"));
+            assert!(!debug.contains(fixture));
+        }
+    }
+
+    #[test]
+    fn generic_trace_projection_hides_nested_wrappers_and_protected_map_keys() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let diagnostic = tag(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (Raw::Int(4.into()), Raw::Array(vec![Raw::Text(fixture.into())])),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let present = tag(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("credential".into()),
+                    Raw::Text(fixture.into()),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let sys_value = tag(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+        let value = Value::new(Raw::Array(vec![diagnostic.clone(), present, sys_value]))
+            .expect("generic wrapper fixture is canonical");
+
+        let trace_bytes = value.redacted_for_trace().unwrap().encode().unwrap();
+        assert!(!trace_bytes
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        assert_eq!(
+            Value::decode(&trace_bytes).unwrap().raw(),
+            &Raw::Array(vec![
+                Raw::Text("<redacted>".into()),
+                Raw::Text("<redacted>".into()),
+                Raw::Text("<redacted>".into()),
+            ])
+        );
+
+        let keyed = Value::new(Raw::Map(vec![(
+            diagnostic,
+            Raw::Text(fixture.into()),
+        )]))
+        .expect("a typed wrapper can be a canonical map key");
+        assert_eq!(
+            keyed.redacted_for_trace().unwrap().raw(),
+            &Raw::Text("<redacted>".into())
+        );
+    }
+
+    #[test]
     fn quantity_requires_a_numeric_amount() {
         let raw = tag(
             60006,
@@ -3604,6 +4286,54 @@ mod tests {
         let decoded = ErrorValue::decode(&encoded).unwrap();
         assert_eq!(decoded, error);
         assert_eq!(decoded.value().raw(), error.value().raw());
+    }
+
+    #[test]
+    fn error_trace_projection_redacts_nested_payloads_and_debug() {
+        let fixture = include_str!("../tests/fixtures/error-trace-secret.orna").trim();
+        let detail = Value::new(Raw::Text(fixture.into())).unwrap();
+        let cause = ErrorValue::new(
+            fixture,
+            fixture,
+            [],
+            BTreeMap::from([("credential".into(), detail.clone())]),
+        )
+        .unwrap();
+        let error = ErrorValue::new(
+            fixture,
+            fixture,
+            [cause],
+            BTreeMap::from([("credential".into(), detail)]),
+        )
+        .unwrap();
+
+        // Local recovery remains lossless; trace serialization has its own
+        // fail-closed projection because OVB cannot classify caller text.
+        assert!(error
+            .encode()
+            .unwrap()
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        let trace_bytes = error.encode_for_trace().unwrap();
+        assert!(!trace_bytes
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        let traced = ErrorValue::decode(&trace_bytes).unwrap();
+        assert_eq!(traced.code(), "<redacted>");
+        assert_eq!(traced.message(), "<redacted>");
+        assert!(traced.safe_details().is_empty());
+        assert_eq!(traced.causes()[0].code(), "<redacted>");
+        assert!(traced.causes()[0].safe_details().is_empty());
+        assert!(!format!("{error:?}").contains(fixture));
+        assert!(!format!("{:?}", error.value()).contains(fixture));
+        assert!(!format!("{:?}", error.value().raw()).contains(fixture));
+
+        let nested = Value::new(Raw::Array(vec![error.value().raw().clone()])).unwrap();
+        let nested_bytes = nested.redacted_for_trace().unwrap().encode().unwrap();
+        assert!(!nested_bytes
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        assert!(!format!("{nested:?}").contains(fixture));
     }
 
     #[test]
@@ -3755,10 +4485,7 @@ mod tests {
                     names
                         .iter()
                         .map(|name| {
-                            Raw::Array(vec![
-                                Raw::Text((*name).into()),
-                                inner_record.clone(),
-                            ])
+                            Raw::Array(vec![Raw::Text((*name).into()), inner_record.clone()])
                         })
                         .collect(),
                 ),
@@ -3775,12 +4502,7 @@ mod tests {
         let unused_id = [13; 16];
         let unconstructible = record_definition(
             13,
-            vec![schema_field(
-                23,
-                "self",
-                nominal_type(unused_id),
-                1,
-            )],
+            vec![schema_field(23, "self", nominal_type(unused_id), 1)],
         );
         let valid_root_field = schema_type(0, Raw::Text("Int".into()));
         assert!(
@@ -3800,9 +4522,7 @@ mod tests {
                 1,
             )],
         );
-        assert!(
-            SchemaDescriptor::new(schema_for_type(valid_root_field, vec![guarded])).is_ok()
-        );
+        assert!(SchemaDescriptor::new(schema_for_type(valid_root_field, vec![guarded])).is_ok());
     }
 
     #[test]
@@ -3810,14 +4530,11 @@ mod tests {
         let direct_id = [10; 16];
         let direct = record_definition(
             10,
-            vec![schema_field(
-                20,
-                "self",
-                nominal_type(direct_id),
-                1,
-            )],
+            vec![schema_field(20, "self", nominal_type(direct_id), 1)],
         );
-        assert!(SchemaDescriptor::new(schema_for_type(nominal_type(direct_id), vec![direct])).is_err());
+        assert!(
+            SchemaDescriptor::new(schema_for_type(nominal_type(direct_id), vec![direct])).is_err()
+        );
 
         let a = [10; 16];
         let b = [11; 16];
@@ -3831,12 +4548,7 @@ mod tests {
         let recursive_variant = Raw::Array(vec![
             uuid_raw([30; 16]),
             Raw::Text("recursive".into()),
-            Raw::Array(vec![schema_field(
-                31,
-                "next",
-                nominal_type(enum_id),
-                1,
-            )]),
+            Raw::Array(vec![schema_field(31, "next", nominal_type(enum_id), 1)]),
         ]);
         let recursive_enum = nominal_definition(12, 1, Raw::Array(vec![recursive_variant]));
         assert!(
@@ -3872,12 +4584,7 @@ mod tests {
                 Raw::Array(vec![
                     uuid_raw([31; 16]),
                     Raw::Text("next".into()),
-                    Raw::Array(vec![schema_field(
-                        32,
-                        "previous",
-                        nominal_type(enum_id),
-                        1,
-                    )]),
+                    Raw::Array(vec![schema_field(32, "previous", nominal_type(enum_id), 1)]),
                 ]),
             ]),
         );
@@ -3895,19 +4602,15 @@ mod tests {
             uuid_raw([9; 16]),
             Raw::Array(vec![schema_type(0, Raw::Text("Int".into()))]),
         ]);
-        assert!(
-            SchemaDescriptor::new(schema_for_type(stored_reference, vec![])).is_ok()
-        );
+        assert!(SchemaDescriptor::new(schema_for_type(stored_reference, vec![])).is_ok());
     }
 
     #[test]
     fn schema_rejects_unconstructible_nominals_across_type_compositions() {
         let bad_id = [10; 16];
         let bad_type = nominal_type(bad_id);
-        let bad_definition = record_definition(
-            10,
-            vec![schema_field(20, "self", bad_type.clone(), 1)],
-        );
+        let bad_definition =
+            record_definition(10, vec![schema_field(20, "self", bad_type.clone(), 1)]);
         let tuple = Raw::Array(vec![Raw::Int(3.into()), Raw::Array(vec![bad_type.clone()])]);
         let structural = Raw::Array(vec![
             Raw::Int(4.into()),
@@ -3918,11 +4621,8 @@ mod tests {
         ]);
         for required in [tuple, structural] {
             assert!(
-                SchemaDescriptor::new(schema_for_type(
-                    required,
-                    vec![bad_definition.clone()]
-                ))
-                .is_err()
+                SchemaDescriptor::new(schema_for_type(required, vec![bad_definition.clone()]))
+                    .is_err()
             );
         }
 
@@ -3945,11 +4645,7 @@ mod tests {
             uuid_raw([30; 16]),
         ]);
         assert!(
-            SchemaDescriptor::new(schema_for_type(
-                quantity,
-                vec![bad_definition.clone()]
-            ))
-            .is_err()
+            SchemaDescriptor::new(schema_for_type(quantity, vec![bad_definition.clone()])).is_err()
         );
 
         let reference_with_unconstructible_key = Raw::Array(vec![
@@ -3972,11 +4668,8 @@ mod tests {
             schema_type(9, bad_type),
         ] {
             assert!(
-                SchemaDescriptor::new(schema_for_type(
-                    guarded,
-                    vec![bad_definition.clone()]
-                ))
-                .is_err()
+                SchemaDescriptor::new(schema_for_type(guarded, vec![bad_definition.clone()]))
+                    .is_err()
             );
         }
     }
@@ -4221,7 +4914,7 @@ mod tests {
     #[test]
     fn snapshot_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/snapshot-vectors.json"
+            "fixtures/reference/tests/snapshot-vectors.json"
         ))
         .unwrap();
         let db = h("000102030405060708090a0b0c0d0e0f").try_into().unwrap();
@@ -4275,10 +4968,50 @@ mod tests {
         ]);
         assert!(Snapshot::decode(&noncanonical).is_err());
     }
+
+    #[test]
+    fn snapshot_byte_codec_preserves_full_generation_identity() {
+        let db = h("000102030405060708090a0b0c0d0e0f").try_into().unwrap();
+        let rt = h("101112131415161718191a1b1c1d1e1f").try_into().unwrap();
+        let generation = (BigInt::from(1_u8) << 130_usize) + BigInt::from(42_u8);
+        let snapshot = Snapshot::cwd(db, rt, generation.clone()).unwrap();
+
+        let encoded = snapshot.encode().unwrap();
+        let decoded = Snapshot::decode_bytes(&encoded).unwrap();
+        assert_eq!(decoded, snapshot);
+        assert_eq!(decoded.encode().unwrap(), encoded);
+
+        let Snapshot::Cwd {
+            id,
+            generation: pinned,
+            ..
+        } = &decoded
+        else {
+            unreachable!();
+        };
+        assert_eq!(pinned, &generation);
+        let next = Snapshot::cwd(db, rt, &generation + 1).unwrap();
+        let Snapshot::Cwd { id: next_id, .. } = next else {
+            unreachable!();
+        };
+        assert_ne!(*id, next_id, "each logical generation has its own id");
+
+        let mut forged = snapshot;
+        let Snapshot::Cwd { id, .. } = &mut forged else {
+            unreachable!();
+        };
+        *id = [0xa5; 32];
+        assert!(forged.encode().is_err());
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(Snapshot::decode_bytes(&trailing), Err(Error::TrailingBytes));
+    }
+
     #[test]
     fn fixture_path_vectors() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/path-vectors.json"
+            "fixtures/reference/tests/path-vectors.json"
         ))
         .unwrap();
         for vector in fixture["round_trip"].as_array().unwrap() {
@@ -4290,6 +5023,22 @@ mod tests {
                 path_decode_key_components(&[format!("{encoded}.orna")]).unwrap(),
                 vec![source]
             );
+        }
+        for vector in fixture["composite"].as_array().unwrap() {
+            let values: Vec<String> = vector["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect();
+            let components: Vec<String> = vector["components"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|component| component.as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(path_encode_key_components(&values).unwrap(), components);
+            assert_eq!(path_decode_key_components(&components).unwrap(), values);
         }
         for vector in fixture["reject_encoded"].as_array().unwrap() {
             assert!(path_decode_component(vector["encoded"].as_str().unwrap()).is_err());
@@ -4335,7 +5084,7 @@ mod tests {
     #[test]
     fn fixture_numeric_vectors_are_exact() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../reference/Orna-1.0.0/tests/numeric-vectors.json"
+            "fixtures/reference/tests/numeric-vectors.json"
         ))
         .unwrap();
         assert_eq!(fixture["money_add"]["a"], "0.1");
@@ -4352,5 +5101,136 @@ mod tests {
             mile.divide_exact(&seconds).unwrap(),
             Decimal::new(44_704.into(), (-5).into())
         );
+    }
+}
+
+#[cfg(test)]
+mod logical_primary_key_order_tests {
+    use super::*;
+
+    fn value(raw: Raw) -> Value {
+        Value::new(raw).expect("valid key value")
+    }
+
+    fn uuid_value(byte: u8) -> Raw {
+        uuid_raw([byte; 16])
+    }
+
+    fn decimal(coefficient: i64, exponent: i64) -> Value {
+        Value::decimal(coefficient.into(), exponent.into()).expect("valid decimal")
+    }
+
+    #[test]
+    fn compares_scalar_key_families_by_logical_value() {
+        assert_eq!(
+            compare_primary_keys(&Value::int((-12).into()), &Value::int((-2).into())).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(&decimal(-12, -1), &decimal(-11, -1)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(&decimal(119, -2), &decimal(12, -1)).unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(
+                &value(Raw::Tag(60001, Box::new(Raw::Text("2024-01-01".into())))),
+                &value(Raw::Tag(60001, Box::new(Raw::Text("2024-02-01".into())))),
+            )
+            .unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(
+                &value(Raw::Tag(
+                    60002,
+                    Box::new(Raw::Array(vec![Raw::Int(7.into()), Raw::Int(99.into())])),
+                )),
+                &value(Raw::Tag(
+                    60002,
+                    Box::new(Raw::Array(vec![Raw::Int(8.into()), Raw::Int(0.into())])),
+                )),
+            )
+            .unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_primary_keys(&Value::uuid([1; 16]), &Value::uuid([2; 16])).unwrap(),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn compares_payload_free_enums_references_and_tuples_recursively() {
+        let enum_key = |variant| {
+            value(Raw::Tag(
+                60008,
+                Box::new(Raw::Array(vec![
+                    uuid_value(1),
+                    uuid_value(variant),
+                    Raw::Null,
+                ])),
+            ))
+        };
+        assert_eq!(
+            compare_primary_keys(&enum_key(2), &enum_key(3)).unwrap(),
+            Ordering::Less
+        );
+
+        let reference_key = |key: i64| {
+            value(Raw::Tag(
+                60021,
+                Box::new(Raw::Array(vec![
+                    uuid_value(4),
+                    uuid_value(5),
+                    Raw::Int(key.into()),
+                ])),
+            ))
+        };
+        assert_eq!(
+            compare_primary_keys(&reference_key(-2), &reference_key(0)).unwrap(),
+            Ordering::Less
+        );
+
+        let tuple = |first: i64, second: &str| {
+            value(Raw::Tag(
+                60015,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(first.into()),
+                    Raw::Text(second.into()),
+                ])),
+            ))
+        };
+        assert_eq!(
+            compare_primary_keys(&tuple(-3, "z"), &tuple(-2, "a")).unwrap(),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn rejects_non_key_and_malformed_components() {
+        assert!(
+            compare_primary_keys(&Value::float_bits(1.0f64.to_bits()), &Value::int(1.into()))
+                .is_err()
+        );
+        assert!(compare_primary_keys(&Value::unit(), &Value::unit()).is_err());
+        let malformed_enum = value(Raw::Tag(
+            60008,
+            Box::new(Raw::Array(vec![uuid_value(1), uuid_value(2), Raw::Null])),
+        ));
+        let payload_enum = value(Raw::Tag(
+            60008,
+            Box::new(Raw::Array(vec![
+                uuid_value(1),
+                uuid_value(2),
+                Raw::Tag(
+                    60009,
+                    Box::new(Raw::Array(vec![Raw::Null, Raw::Array(vec![])])),
+                ),
+            ])),
+        ));
+        assert!(compare_primary_keys(&malformed_enum, &payload_enum).is_err());
     }
 }

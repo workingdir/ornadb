@@ -1,4 +1,4 @@
-//! The checked-in `api/sys.json` contract, decoded without a second schema.
+//! The generated `sys` contract, decoded without a second schema.
 //!
 //! This module is deliberately a descriptor boundary: it validates portable
 //! names and type references before the semantic layer uses them, but it does
@@ -9,8 +9,14 @@ use std::{
     sync::OnceLock,
 };
 
-const EMBEDDED_SYSTEM_API: &str = include_str!("../../../api/sys.json");
 const MAX_JSON_NESTING_DEPTH: usize = 128;
+
+fn generated_system_api_json() -> &'static str {
+    static GENERATED: OnceLock<String> = OnceLock::new();
+    GENERATED
+        .get_or_init(orna_sys_v1::system_api_json)
+        .as_str()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SystemApi {
@@ -76,6 +82,7 @@ pub(crate) struct RelationDescriptor {
 pub(crate) struct FunctionDescriptor {
     /// The exact JSON overload label, including any disambiguating type.
     pub label: String,
+    pub signature: String,
     pub name: String,
     pub type_parameters: BTreeSet<String>,
     pub parameters: Vec<ParameterDescriptor>,
@@ -148,11 +155,82 @@ pub(crate) enum SystemApiError {
     InvalidRelationMetadata,
     InvalidValueTypeMetadata,
     InvalidFunctionMetadata,
+    ProviderAbiMismatch,
 }
 
 impl SystemApi {
     pub(crate) fn embedded() -> Result<Self, SystemApiError> {
-        Self::from_json(EMBEDDED_SYSTEM_API)
+        let api = Self::from_json(generated_system_api_json())?;
+        api.validate_dispatch_table(orna_sys_v1::system_dispatch_table())?;
+        Ok(api)
+    }
+
+    fn validate_dispatch_table(
+        &self,
+        table: &orna_sys_v1::SystemDispatchTable,
+    ) -> Result<(), SystemApiError> {
+        table
+            .validate()
+            .map_err(|_| SystemApiError::ProviderAbiMismatch)?;
+        if table.operations().count() != self.inventory.functions {
+            return Err(SystemApiError::ProviderAbiMismatch);
+        }
+        let mut linked = 0usize;
+        for descriptor in self.functions.values().flatten() {
+            let contract = table
+                .operation(&descriptor.label)
+                .ok_or(SystemApiError::ProviderAbiMismatch)?;
+            let expected_effect = match contract.effects.iter().next() {
+                Some(orna_sys_v1::SystemEffect::Read) => SystemEffect::Read,
+                Some(orna_sys_v1::SystemEffect::Invoke) => SystemEffect::Invoke,
+                Some(orna_sys_v1::SystemEffect::Admin) => SystemEffect::Admin,
+                None => return Err(SystemApiError::ProviderAbiMismatch),
+            };
+            let expected_preconditions = descriptor
+                .preconditions
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let registered_preconditions = contract
+                .preconditions
+                .iter()
+                .map(|precondition| precondition.declaration.as_str())
+                .collect::<Vec<_>>();
+            let namespace = descriptor
+                .label
+                .find(['(', '<'])
+                .map_or(descriptor.label.as_str(), |end| &descriptor.label[..end]);
+            let expected_failures = self
+                .failure_codes
+                .iter()
+                .filter(|code| {
+                    code.as_str() == namespace
+                        || code
+                            .strip_prefix(namespace)
+                            .is_some_and(|tail| tail.starts_with('.'))
+                })
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            let registered_failures = contract
+                .failures
+                .iter()
+                .map(orna_sys_v1::FailureCode::as_str)
+                .filter(|code| !code.starts_with("sys.abi."))
+                .collect::<BTreeSet<_>>();
+            if contract.signature.source != descriptor.signature
+                || contract.effects.iter().count() != 1
+                || expected_effect != descriptor.effect
+                || registered_preconditions != expected_preconditions
+                || registered_failures != expected_failures
+            {
+                return Err(SystemApiError::ProviderAbiMismatch);
+            }
+            linked += 1;
+        }
+        if linked != table.operations().count() {
+            return Err(SystemApiError::ProviderAbiMismatch);
+        }
+        Ok(())
     }
 
     pub(crate) fn from_json(source: &str) -> Result<Self, SystemApiError> {
@@ -177,6 +255,18 @@ impl SystemApi {
             || inventory.failure_codes != raw.failure_codes.len()
         {
             return Err(SystemApiError::InvalidInventory);
+        }
+
+        let mut relation_row_types = raw
+            .relations
+            .iter()
+            .map(|relation| relation.name.clone())
+            .collect::<BTreeSet<_>>();
+        for value in &raw.value_types {
+            if matches!(value.kind.as_str(), "record" | "record-generic") {
+                let (name, _) = value_type_declaration(&value.name, &value.type_parameters)?;
+                relation_row_types.insert(name);
+            }
         }
 
         let mut type_arities = language_type_arities();
@@ -243,7 +333,7 @@ impl SystemApi {
                 value_type_declaration(&value.name, &value.type_parameters)?;
             validate_value_type_metadata(&value)?;
             let parameters = type_parameters.iter().cloned().collect();
-            let fields = fields(value.fields, &type_arities, &parameters)?;
+            let fields = fields(value.fields, &type_arities, &parameters, &relation_row_types)?;
             insert_descriptor(
                 &mut types,
                 name.clone(),
@@ -275,7 +365,12 @@ impl SystemApi {
             .map(|relation| {
                 Ok((
                     relation.name.clone(),
-                    fields(relation.fields.clone(), &type_arities, &BTreeSet::new())?,
+                    fields(
+                        relation.fields.clone(),
+                        &type_arities,
+                        &BTreeSet::new(),
+                        &relation_row_types,
+                    )?,
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, SystemApiError>>()?;
@@ -294,6 +389,7 @@ impl SystemApi {
                 || relation.key.trim().is_empty()
                 || relation.purpose.trim().is_empty()
                 || relation.key_fields.is_empty()
+                || relation.key != relation.key_fields.join(" + ")
                 || relation
                     .key_fields
                     .iter()
@@ -366,6 +462,7 @@ impl SystemApi {
         for singleton in raw.singletons {
             validate_path(&singleton.name)?;
             let ty = parse_and_validate_type(&singleton.ty, &type_arities, &BTreeSet::new())?;
+            validate_relation_rows(&ty, &relation_row_types, &BTreeSet::new())?;
             insert_descriptor(
                 &mut singletons,
                 singleton.name.clone(),
@@ -383,6 +480,21 @@ impl SystemApi {
         for raw_function in raw.functions {
             let descriptor =
                 parse_function(&raw_function, &type_arities, &singletons, &types, &enums)?;
+            validate_relation_rows(
+                &descriptor.result,
+                &relation_row_types,
+                &descriptor.type_parameters,
+            )?;
+            for parameter in &descriptor.parameters {
+                validate_relation_rows(
+                    &parameter.ty,
+                    &relation_row_types,
+                    &descriptor.type_parameters,
+                )?;
+            }
+            if singletons.contains_key(&descriptor.name) {
+                return Err(SystemApiError::DuplicateName);
+            }
             let identity = function_identity(&descriptor);
             if !function_signatures.insert(identity) {
                 return Err(SystemApiError::DuplicateName);
@@ -429,6 +541,11 @@ impl SystemApi {
                 || grouped_relations.contains_key(&name)
                 || types.contains_key(&name)
                 || enums.contains_key(&name)
+                || name.rsplit_once('.').is_some_and(|(enum_name, variant)| {
+                    enums
+                        .get(enum_name)
+                        .is_some_and(|variants| variants.contains(variant))
+                })
                 || removed
                     .insert(
                         name,
@@ -468,6 +585,11 @@ impl SystemApi {
 
     pub(crate) fn function(&self, name: &str) -> Option<&[FunctionDescriptor]> {
         self.functions.get(name).map(Vec::as_slice)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provider_operation(&self, name: &str) -> Option<&orna_sys_v1::OperationContract> {
+        orna_sys_v1::system_dispatch_table().operation(name)
     }
 
     /// The portable failure-code vocabulary declared by `api/sys.json`.
@@ -529,6 +651,12 @@ impl SystemApi {
                     .map(|descriptor| &descriptor.fields)
             })?
             .get(field)
+    }
+
+    pub(crate) fn type_parameters(&self, type_name: &str) -> Option<&[String]> {
+        self.types
+            .get(type_name)
+            .map(|descriptor| descriptor.type_parameters.as_slice())
     }
 
     pub(crate) fn resolve(&self, path: &[&str]) -> PathResolution<'_> {
@@ -604,6 +732,7 @@ fn fields(
     raw: Vec<RawField>,
     type_arities: &BTreeMap<String, usize>,
     parameters: &BTreeSet<String>,
+    relation_row_types: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, SystemType>, SystemApiError> {
     let mut result = BTreeMap::new();
     for field in raw {
@@ -611,11 +740,47 @@ fn fields(
             return Err(SystemApiError::InvalidName);
         }
         let ty = parse_and_validate_type(&field.ty, type_arities, parameters)?;
+        validate_relation_rows(&ty, relation_row_types, parameters)?;
         if result.insert(field.name, ty).is_some() {
             return Err(SystemApiError::DuplicateName);
         }
     }
     Ok(result)
+}
+
+fn validate_relation_rows(
+    ty: &SystemType,
+    relation_row_types: &BTreeSet<String>,
+    parameters: &BTreeSet<String>,
+) -> Result<(), SystemApiError> {
+    match ty {
+        SystemType::Applied { base, arguments } => {
+            if base == "Relation"
+                && !matches!(arguments.as_slice(), [row]
+                    if relation_row_type_name(row)
+                        .is_some_and(|name| relation_row_types.contains(name))
+                        || matches!(row, SystemType::Named(name) if parameters.contains(name)))
+            {
+                return Err(SystemApiError::InvalidType);
+            }
+            for argument in arguments {
+                validate_relation_rows(argument, relation_row_types, parameters)?;
+            }
+        }
+        SystemType::List(inner) | SystemType::Optional(inner) => {
+            validate_relation_rows(inner, relation_row_types, parameters)?;
+        }
+        SystemType::Named(_) => {}
+    }
+    Ok(())
+}
+
+fn relation_row_type_name(ty: &SystemType) -> Option<&str> {
+    match ty {
+        SystemType::Named(name) => Some(name),
+        SystemType::Applied { base, .. } => Some(base),
+        SystemType::List(_) | SystemType::Optional(_) => None,
+    }
 }
 
 fn relation_key_path_exists(
@@ -766,6 +931,7 @@ fn parse_function(
     )?;
     Ok(FunctionDescriptor {
         label: raw.name.clone(),
+        signature: raw.signature.clone(),
         name,
         type_parameters,
         parameters,
@@ -788,7 +954,11 @@ fn validate_function_metadata(
     snapshot_rule: Option<&str>,
 ) -> Result<(), SystemApiError> {
     let requires_contract = label.starts_with("sys.admin.");
-    let requires_preconditions = FUNCTIONS_WITH_PRECONDITIONS.contains(&label);
+    let requires_preconditions = orna_sys_v1::system_dispatch_table()
+        .operation(label)
+        .map_or(preconditions.is_some(), |operation| {
+            !operation.preconditions.is_empty()
+        });
     let requires_ownership = matches!(label, "sys.start(Value)" | "sys.start<T>");
     let requires_snapshot_rule = matches!(
         label,
@@ -812,28 +982,6 @@ fn validate_function_metadata(
 fn blank(value: &str) -> bool {
     value.trim().is_empty()
 }
-
-// These are the exact callable labels carrying the normative `preconditions`
-// member in api/sys.json.  Applicability is keyed by the full label so a
-// precondition cannot be silently inherited by an unrelated overload.
-const FUNCTIONS_WITH_PRECONDITIONS: &[&str] = &[
-    "sys.admin.checkout(SnapshotRef)",
-    "sys.admin.checkout(CommitRef)",
-    "sys.admin.checkout(BranchRef)",
-    "sys.admin.checkout(TagRef)",
-    "sys.admin.checkout(GitOid)",
-    "sys.admin.checkout(Str)",
-    "sys.admin.create_branch(SnapshotRef)",
-    "sys.admin.create_branch(CommitRef)",
-    "sys.admin.create_branch(BranchRef)",
-    "sys.admin.create_branch(TagRef)",
-    "sys.admin.create_branch(GitOid)",
-    "sys.admin.create_branch(Str)",
-    "sys.admin.retry_failure",
-    "sys.admin.skip_failure",
-    "sys.admin.replay_failure",
-    "sys.admin.resolve_failure",
-];
 
 fn parse_effect(effect: &str) -> Result<SystemEffect, SystemApiError> {
     match effect {
@@ -895,6 +1043,7 @@ fn parse_and_validate_type(
 }
 
 fn parse_type(source: &str) -> Result<SystemType, SystemApiError> {
+    let source = source.trim();
     if let Some(inner) = source.strip_suffix('?') {
         return Ok(SystemType::Optional(Box::new(parse_type(inner)?)));
     }
@@ -909,7 +1058,7 @@ fn parse_type(source: &str) -> Result<SystemType, SystemApiError> {
         if close + 1 != source.len() {
             return Err(SystemApiError::InvalidType);
         }
-        let base = &source[..open];
+        let base = source[..open].trim();
         validate_path(base)?;
         let arguments = split_top_level(&source[open + 1..close], ',')
             .into_iter()
@@ -1802,7 +1951,7 @@ mod tests {
     use super::*;
 
     fn document() -> serde_json::Value {
-        serde_json::from_str(EMBEDDED_SYSTEM_API).unwrap()
+        serde_json::from_str(generated_system_api_json()).unwrap()
     }
 
     fn value_type(document: &mut serde_json::Value) -> &mut serde_json::Value {
@@ -1851,9 +2000,76 @@ mod tests {
     }
 
     #[test]
+    fn semantic_api_binds_the_generated_typed_provider_contracts() {
+        let api = SystemApi::embedded().unwrap();
+        let contract = api
+            .provider_operation("sys.admin.checkout(SnapshotRef)")
+            .expect("semantic operation is linked to the baked ABI");
+        assert_eq!(
+            contract.signature.source,
+            "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef"
+        );
+        assert!(!contract.preconditions.is_empty());
+        assert!(
+            contract
+                .failures
+                .iter()
+                .any(|failure| failure.as_str() == "sys.abi.precondition_failed")
+        );
+        assert!(std::ptr::eq(
+            contract,
+            orna_sys_v1::system_dispatch_table()
+                .operation("sys.admin.checkout(SnapshotRef)")
+                .unwrap()
+        ));
+        let descriptor = api
+            .function("sys.admin.checkout")
+            .unwrap()
+            .iter()
+            .find(|descriptor| descriptor.label == "sys.admin.checkout(SnapshotRef)")
+            .unwrap();
+        assert_eq!(descriptor.effect, SystemEffect::Admin);
+        assert_eq!(
+            descriptor.preconditions.as_deref(),
+            contract
+                .preconditions
+                .first()
+                .map(|precondition| precondition.declaration.as_str())
+        );
+    }
+
+    #[test]
+    fn semantic_admission_rejects_precondition_and_failure_vocab_drift() {
+        let table = orna_sys_v1::system_dispatch_table();
+
+        let mut mismatched_precondition = document();
+        let checkout = function_index(&mismatched_precondition, "sys.admin.checkout(SnapshotRef)");
+        mismatched_precondition["functions"][checkout]["preconditions"] =
+            serde_json::json!("different precondition declaration");
+        let api = SystemApi::from_json(&mismatched_precondition.to_string()).unwrap();
+        assert_eq!(
+            api.validate_dispatch_table(table),
+            Err(SystemApiError::ProviderAbiMismatch)
+        );
+
+        let mut mismatched_failure = document();
+        let failure_codes = mismatched_failure["failure_codes"].as_array_mut().unwrap();
+        let code = failure_codes
+            .iter_mut()
+            .find(|code| **code == "sys.invoke.argument_missing")
+            .unwrap();
+        *code = serde_json::json!("sys.invoke.argument_missing.relabelled");
+        let api = SystemApi::from_json(&mismatched_failure.to_string()).unwrap();
+        assert_eq!(
+            api.validate_dispatch_table(table),
+            Err(SystemApiError::ProviderAbiMismatch)
+        );
+    }
+
+    #[test]
     fn parsed_descriptor_retains_declared_members() {
         let api = SystemApi::embedded().unwrap();
-        let raw = raw_document(EMBEDDED_SYSTEM_API).unwrap();
+        let raw = raw_document(generated_system_api_json()).unwrap();
 
         // This deliberately derives every expected member from the same raw
         // descriptor that the loader consumes. It checks retained-loader
@@ -2228,7 +2444,7 @@ mod tests {
 
     #[test]
     fn function_metadata_is_required_by_applicable_contract() {
-        let raw = raw_document(EMBEDDED_SYSTEM_API).unwrap();
+        let raw = raw_document(generated_system_api_json()).unwrap();
         let declared_preconditions = raw
             .functions
             .iter()
@@ -2236,12 +2452,12 @@ mod tests {
             .map(|function| function.name.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            declared_preconditions.len(),
-            FUNCTIONS_WITH_PRECONDITIONS.len()
-        );
-        assert_eq!(
             declared_preconditions,
-            FUNCTIONS_WITH_PRECONDITIONS.iter().copied().collect()
+            orna_sys_v1::system_dispatch_table()
+                .operations()
+                .filter(|operation| !operation.preconditions.is_empty())
+                .map(|operation| operation.id.as_str())
+                .collect()
         );
 
         let mut blank_purpose = document();
@@ -2423,7 +2639,7 @@ mod tests {
         }
 
         let mut invalid_key_path = document();
-        let raw = raw_document(EMBEDDED_SYSTEM_API).unwrap();
+        let raw = raw_document(generated_system_api_json()).unwrap();
         let (relation_index, dotted_path) = raw
             .relations
             .iter()
@@ -2444,6 +2660,26 @@ mod tests {
             Err(SystemApiError::InvalidRelationMetadata)
         );
 
+        for (member, value) in [
+            ("key", serde_json::json!("profile")),
+            ("key_fields", serde_json::json!(["profile"])),
+        ] {
+            let mut mismatched_key = document();
+            let storage_index = mismatched_key["relations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|relation| relation["name"] == "sys.Storage")
+                .unwrap();
+            mismatched_key["relations"][storage_index][member] = value;
+            let source = serde_json::to_string(&mismatched_key).unwrap();
+            assert_eq!(
+                SystemApi::from_json(&source),
+                Err(SystemApiError::InvalidRelationMetadata),
+                "relation {member} must agree with the other natural-key representation"
+            );
+        }
+
         let mut non_string_invariant = document();
         non_string_invariant["relations"][0]["invariants"] = serde_json::json!([42]);
         let source = serde_json::to_string(&non_string_invariant).unwrap();
@@ -2458,6 +2694,82 @@ mod tests {
         assert_eq!(
             SystemApi::from_json(&source),
             Err(SystemApiError::InvalidRelationMetadata)
+        );
+    }
+
+    #[test]
+    fn malformed_function_defaults_fail_closed() {
+        for (default, label) in [
+            ("sys.MissingScope.all", "unresolved enum namespace"),
+            ("sys.DiffScope.missing", "unknown enum variant"),
+            ("sys.database.missing", "unknown singleton field"),
+            ("sys.database.cwd", "singleton value with the wrong type"),
+            ("true", "boolean with the wrong type"),
+            ("null", "null for a required parameter"),
+        ] {
+            let mut invalid = document();
+            let diff = function_index(&invalid, "sys.diff");
+            let signature = invalid["functions"][diff]["signature"]
+                .as_str()
+                .unwrap()
+                .replace("sys.DiffScope.all", default);
+            invalid["functions"][diff]["signature"] = serde_json::json!(signature);
+            assert_eq!(
+                SystemApi::from_json(&invalid.to_string()),
+                Err(SystemApiError::InvalidDefault),
+                "{label} must be rejected"
+            );
+        }
+
+        let mut singleton_enum_collision = document();
+        singleton_enum_collision["singletons"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "availability": "fixture singleton",
+                "name": "sys.DiffScope",
+                "type": "sys.DatabaseView"
+            }));
+        let singleton_count = singleton_enum_collision["singletons"]
+            .as_array()
+            .unwrap()
+            .len();
+        singleton_enum_collision["counts"]["singletons"] = serde_json::json!(singleton_count);
+        assert_eq!(
+            SystemApi::from_json(&singleton_enum_collision.to_string()),
+            Err(SystemApiError::InvalidDefault),
+            "a singleton path prefix takes precedence over a matching enum name"
+        );
+
+        let mut singleton_field_default = singleton_enum_collision;
+        let diff = function_index(&singleton_field_default, "sys.diff");
+        let signature = singleton_field_default["functions"][diff]["signature"]
+            .as_str()
+            .unwrap()
+            .replace(
+                "scope: sys.DiffScope = sys.DiffScope.all",
+                "scope: sys.SnapshotRef = sys.DiffScope.cwd",
+            );
+        singleton_field_default["functions"][diff]["signature"] = serde_json::json!(signature);
+        assert!(
+            SystemApi::from_json(&singleton_field_default.to_string()).is_ok(),
+            "a colliding path that resolves to a correctly typed singleton field is valid"
+        );
+
+        let mut required_after_default = document();
+        let resolve = function_index(&required_after_default, "sys.resolve");
+        let signature = required_after_default["functions"][resolve]["signature"]
+            .as_str()
+            .unwrap()
+            .replace(
+                "from: sys.ModuleRef? = null): sys.ObjectRef",
+                "from: sys.ModuleRef? = null, required: Bool): sys.ObjectRef",
+            );
+        required_after_default["functions"][resolve]["signature"] = serde_json::json!(signature);
+        assert_eq!(
+            SystemApi::from_json(&required_after_default.to_string()),
+            Err(SystemApiError::InvalidDefault),
+            "required parameters after a default must be rejected"
         );
     }
 
@@ -2570,7 +2882,7 @@ mod tests {
 
     #[test]
     fn duplicate_json_members_are_rejected_at_the_sys_api_boundary() {
-        let mut nested_object = EMBEDDED_SYSTEM_API.to_owned();
+        let mut nested_object = generated_system_api_json().to_owned();
         let insertion = nested_object
             .find(r#""counts": {"#)
             .expect("the API document has a counts object")
@@ -2581,7 +2893,7 @@ mod tests {
             Err(SystemApiError::InvalidJson)
         );
 
-        let mut nested_array = EMBEDDED_SYSTEM_API.to_owned();
+        let mut nested_array = generated_system_api_json().to_owned();
         let array = nested_array
             .find(r#""singletons": ["#)
             .expect("the API document has a singleton array");
@@ -2611,7 +2923,7 @@ mod tests {
     fn deeply_nested_json_is_rejected_before_stack_exhaustion() {
         let opening = "[".repeat(MAX_JSON_NESTING_DEPTH + 1);
         let closing = "]".repeat(MAX_JSON_NESTING_DEPTH + 1);
-        let mut deeply_nested = EMBEDDED_SYSTEM_API.to_owned();
+        let mut deeply_nested = generated_system_api_json().to_owned();
         let insertion = deeply_nested
             .rfind('}')
             .expect("the API document has a root object");
@@ -2692,6 +3004,101 @@ mod tests {
     }
 
     #[test]
+    fn relation_constructors_require_published_relation_or_record_rows() {
+        let mut record_result = document();
+        let history = &mut record_result["functions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|function| {
+                function["signature"]
+                    .as_str()
+                    .is_some_and(|signature| signature.starts_with("fn sys.history("))
+            })
+            .unwrap()["signature"];
+        *history = serde_json::json!(
+            "fn sys.history(object: sys.ObjectRef): Relation<sys.SourceMapEntry>"
+        );
+        assert!(
+            SystemApi::from_json(&record_result.to_string()).is_ok(),
+            "record value types published in Relation<T> fields are valid row types"
+        );
+
+        let mut generic_record_result = document();
+        let history = &mut generic_record_result["functions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|function| {
+                function["signature"]
+                    .as_str()
+                    .is_some_and(|signature| signature.starts_with("fn sys.history("))
+            })
+            .unwrap()["signature"];
+        *history = serde_json::json!(
+            "fn sys.history(object: sys.ObjectRef): Relation<sys.ValueMetadata <sys.Value>>"
+        );
+        assert!(
+            SystemApi::from_json(&generic_record_result.to_string()).is_ok(),
+            "record-generic relation rows resolve with whitespace before their type arguments"
+        );
+
+        let mut generic_parameter_result = document();
+        let meta = &mut generic_parameter_result["functions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|function| function["name"] == "sys.meta")
+            .unwrap()["signature"];
+        *meta = serde_json::json!(
+            "fn sys.meta<T>(value: T): Relation<sys.ValueMetadata<T>>"
+        );
+        assert!(
+            SystemApi::from_json(&generic_parameter_result.to_string()).is_ok(),
+            "an in-scope type parameter can specialize a record-generic relation row"
+        );
+
+        let mut function_result = document();
+        let history = &mut function_result["functions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|function| {
+                function["signature"]
+                    .as_str()
+                    .is_some_and(|signature| signature.starts_with("fn sys.history("))
+            })
+            .unwrap()["signature"];
+        *history = serde_json::json!(
+            "fn sys.history(object: sys.ObjectRef): Relation<sys.DiffScope>"
+        );
+        assert_eq!(
+            SystemApi::from_json(&function_result.to_string()),
+            Err(SystemApiError::InvalidType),
+            "an enum cannot serve as a relation row type"
+        );
+
+        let mut value_field = document();
+        let value_type = value_field["value_types"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|value_type| {
+                value_type["fields"]
+                    .as_array()
+                    .is_some_and(|fields| !fields.is_empty())
+            })
+            .unwrap();
+        value_type["fields"][0]["type"] =
+            serde_json::Value::String("Relation<sys.DiffScope>".into());
+        assert_eq!(
+            SystemApi::from_json(&value_field.to_string()),
+            Err(SystemApiError::InvalidType),
+            "value-type relation fields must also use a relation or record row type"
+        );
+    }
+
+    #[test]
     fn duplicate_enum_variants_are_rejected_before_set_construction() {
         let mut duplicate = document();
         let variants = duplicate["enums"]["sys.FailureStatus"]
@@ -2766,6 +3173,60 @@ mod tests {
         assert_eq!(
             SystemApi::from_json(&removed.to_string()),
             Err(SystemApiError::InvalidRemovedName)
+        );
+
+        for replacement in [
+            "sys.Database",
+            "sys.DatabaseRef",
+            "sys.catalog.databases",
+            "sys.history",
+            "sys.DiffScope.all",
+        ] {
+            let mut valid_replacement = document();
+            valid_replacement["removed_names"]["sys.runtime"]["replacement"] =
+                serde_json::Value::String(replacement.into());
+            assert!(
+                SystemApi::from_json(&valid_replacement.to_string()).is_ok(),
+                "live API path `{replacement}` is a valid removal target"
+            );
+        }
+
+        for live_name in [
+            "sys.Database",
+            "sys.DatabaseRef",
+            "sys.catalog.databases",
+            "sys.history",
+            "sys.DiffScope.all",
+        ] {
+            let mut shadowed = document();
+            let descriptor = shadowed["removed_names"]["sys.runtime"].clone();
+            shadowed["removed_names"][live_name] = descriptor;
+            assert_eq!(
+                SystemApi::from_json(&shadowed.to_string()),
+                Err(SystemApiError::InvalidRemovedName),
+                "removed name `{live_name}` must not shadow a current API path"
+            );
+        }
+
+        let mut singleton_function_collision = document();
+        singleton_function_collision["singletons"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "availability": "fixture singleton",
+                "name": "sys.history",
+                "type": "sys.DatabaseView"
+            }));
+        let singleton_count = singleton_function_collision["singletons"]
+            .as_array()
+            .unwrap()
+            .len();
+        singleton_function_collision["counts"]["singletons"] =
+            serde_json::json!(singleton_count);
+        assert_eq!(
+            SystemApi::from_json(&singleton_function_collision.to_string()),
+            Err(SystemApiError::DuplicateName),
+            "a singleton cannot shadow an overloaded callable base path"
         );
     }
 

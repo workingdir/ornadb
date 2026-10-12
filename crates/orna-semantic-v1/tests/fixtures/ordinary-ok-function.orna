@@ -1,0 +1,2 @@
+pub fn Ok(value: Int): Int = value;
+pub fn use_ok(): Int = Ok(1);

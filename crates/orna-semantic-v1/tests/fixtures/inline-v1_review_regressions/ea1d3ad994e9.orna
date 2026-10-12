@@ -1,0 +1,4 @@
+
+            impl Display { fn display(self): Str = "first"; }
+            impl Display { fn display(self): Str = "second"; }
+        

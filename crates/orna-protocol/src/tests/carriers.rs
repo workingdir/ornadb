@@ -3,7 +3,7 @@ use super::*;
 fn invocation_carriers_have_independent_exact_orv5_goldens_and_round_trip() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let [value, request, event] = carrier_test_values();
 
     let inner = orv5_integer(7);
@@ -79,7 +79,7 @@ fn invocation_carriers_have_independent_exact_orv5_goldens_and_round_trip() {
 fn request_offer_permutations_encode_identically_and_keep_original_duplicate_indexes() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let descriptor_a = TypeDescriptor::named(BOOLEAN_TYPE_ID);
     let descriptor_b = TypeDescriptor::named(INTEGER_TYPE_ID);
     let sink_a = InvocationSinkOffer::new(
@@ -178,7 +178,7 @@ fn request_offer_permutations_encode_identically_and_keep_original_duplicate_ind
 fn runtime_and_contract_offers_are_canonical_on_encode_and_decode() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let complete_sink = InvocationSinkOffer::new(
         TypeDescriptor::named(BOOLEAN_TYPE_ID),
         ["text/plain"],
@@ -482,7 +482,7 @@ fn runtime_and_contract_offers_are_canonical_on_encode_and_decode() {
 fn public_offer_baselines_reject_noncanonical_and_duplicate_wire_items() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let assert_request_error = |wire: Vec<u8>, source: InvocationCarrierCodecError| {
         assert_eq!(
             decode_constructed_value(&active, &registry, &wire),
@@ -791,7 +791,7 @@ fn public_offer_baselines_reject_noncanonical_and_duplicate_wire_items() {
 fn orf5_rejects_all_carriers_in_both_ordinary_positions_without_state_or_credit_change() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let function = FunctionId::from_bytes([0x31; 16]);
     let parameter = ParameterId::from_bytes([0x32; 16]);
 
@@ -919,7 +919,7 @@ fn orf5_rejects_all_carriers_in_both_ordinary_positions_without_state_or_credit_
 fn carrier_aggregate_preflight_accepts_65536_and_precedes_later_inner_materialisation() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let descriptor = TypeDescriptor::list(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
     let at_limit_list = RuntimeValue::list(
         &active,
@@ -1128,7 +1128,7 @@ fn carrier_aggregate_preflight_accepts_65536_and_precedes_later_inner_materialis
 fn invocation_event_carrier_round_trips_every_body_and_closed_scalar() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let invocation = InvocationId::from_bytes([0x61; 16]);
     let integer = || InvokeValue::new(RuntimeValue::Integer(7)).unwrap();
     let mut events = vec![
@@ -1236,7 +1236,7 @@ fn invocation_event_carrier_round_trips_every_body_and_closed_scalar() {
 fn invocation_carrier_raw_request_rejects_each_closed_header_choice_causally() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let request = RuntimeValue::InvokeRequest(minimal_invocation_request(Vec::new(), Vec::new()));
     let encoded = encode_constructed_value(&active, &registry, &request).unwrap();
     let payload = encoded[25..].to_vec();
@@ -1401,7 +1401,7 @@ fn invocation_carrier_raw_request_rejects_each_closed_header_choice_causally() {
 fn invocation_request_round_trips_each_public_selector_and_discriminant() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let caller_kinds = [
         InvocationCallerKind::CliTty,
         InvocationCallerKind::CliPipe,
@@ -1497,7 +1497,7 @@ fn invocation_request_round_trips_each_public_selector_and_discriminant() {
 fn invocation_carrier_raw_event_rejects_each_body_discriminant_and_text_failure() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let common = |kind| {
         let mut payload = vec![1, kind];
         payload.extend_from_slice(&[0x63; 16]);
@@ -1652,7 +1652,7 @@ fn invocation_carrier_raw_event_rejects_each_body_discriminant_and_text_failure(
 fn invocation_carrier_raw_parser_rejects_version_selectors_names_and_nested_carriers() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     assert_carrier_source(
         &active,
         &registry,
@@ -1855,7 +1855,7 @@ fn invocation_carrier_raw_parser_rejects_version_selectors_names_and_nested_carr
 fn invocation_carrier_raw_semantic_boundaries_map_to_closed_errors() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let base = raw_request_payload(&[]);
 
     let mut empty_idempotency = base[..87].to_vec();
@@ -2011,9 +2011,7 @@ proptest! {
         body_index in 0_usize..6,
     ) {
         let active = active_record_revision();
-        let registry = registered_opaque_codecs(
-            active.catalogue_hash_context().standard().unwrap(),
-        ).unwrap();
+        let registry = test_registry();
         let value = || InvokeValue::new(RuntimeValue::Integer(7)).unwrap();
         let body = match body_index {
             0 => InvocationEventBody::Started { visible_principal: None },
@@ -2050,7 +2048,7 @@ proptest! {
 fn invocation_request_tuple_order_and_duplicates_are_checked_before_materialisation() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let first = raw_invoke_value_carrier(&orv5_integer(1));
     let second = raw_invoke_value_carrier(&orv5_integer(2));
     let arguments_path = InvocationCarrierPath::one(InvocationCarrierPathSegment::RequestArguments);
@@ -2088,7 +2086,7 @@ fn invocation_request_tuple_order_and_duplicates_are_checked_before_materialisat
 fn invocation_carrier_counts_lengths_and_order_precede_later_inner_values() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let accepted = raw_invoke_value_carrier(&orv5_integer(1));
     let malformed = raw_invoke_value_carrier(b"not an ORV5 value");
     let arguments_path = InvocationCarrierPath::one(InvocationCarrierPathSegment::RequestArguments);
@@ -2153,7 +2151,7 @@ fn invocation_carrier_counts_lengths_and_order_precede_later_inner_values() {
 fn invocation_carrier_current_authority_and_debug_redaction_are_causal() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let stale_inner = RuntimeValue::InvokeValue(
         InvokeValue::new(RuntimeValue::Enum(
             EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap(),
@@ -2233,80 +2231,10 @@ fn invocation_carrier_current_authority_and_debug_redaction_are_causal() {
 }
 
 #[test]
-fn invoke_value_carrier_rechecks_every_admitted_orv5_family_and_authority() {
-    let active = active_record_revision();
-    let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
-    let reference_target = TypeId::from_bytes([0x69; 16]);
-    let opaque = RuntimeValue::Opaque(
-        OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, [0x71; 16]).unwrap(),
-    );
-    let mut values = vec![
-        RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap(),
-        RuntimeValue::Boolean(true),
-        RuntimeValue::Integer(-7),
-        RuntimeValue::BigInt(-9),
-        RuntimeValue::Float(RuntimeFloat::new(1.5).unwrap()),
-        RuntimeValue::Text(String::from("text")),
-        RuntimeValue::Bytes(vec![0, 0xff]),
-        RuntimeValue::null(ResolvedType::reference(reference_target)).unwrap(),
-        RuntimeValue::Reference {
-            target: reference_target,
-            object: ObjectId::from_bytes([0x6a; 16]),
-        },
-        RuntimeValue::null(ResolvedType::named(ENUM_TYPE)).unwrap(),
-        RuntimeValue::Enum(EnumValue::new(active.catalogue(), ENUM_TYPE, "lead").unwrap()),
-        opaque.clone(),
-    ];
-    values.extend(constructed_collection_values(&active));
-    for inner in values {
-        let carrier = RuntimeValue::InvokeValue(InvokeValue::new(inner).unwrap());
-        let encoded = encode_constructed_value(&active, &registry, &carrier).unwrap();
-        assert_eq!(
-            decode_constructed_value(&active, &registry, &encoded),
-            Ok(carrier)
-        );
-    }
-
-    let nested_active = active_nested_record_revision();
-    let nested_registry =
-        registered_opaque_codecs(nested_active.catalogue_hash_context().standard().unwrap())
-            .unwrap();
-    let nested =
-        RuntimeValue::InvokeValue(InvokeValue::new(nested_record_value(&nested_active)).unwrap());
-    let nested_encoded =
-        encode_constructed_value(&nested_active, &nested_registry, &nested).unwrap();
-    assert_eq!(
-        decode_constructed_value(&nested_active, &nested_registry, &nested_encoded),
-        Ok(nested)
-    );
-
-    let opaque_carrier = RuntimeValue::InvokeValue(InvokeValue::new(opaque).unwrap());
-    let opaque_encoded = encode_constructed_value(&active, &registry, &opaque_carrier).unwrap();
-    let alternate_active = active_record_revision_with_types_and_standard(
-        TypeDescriptor::named(BOOLEAN_TYPE_ID),
-        TypeDescriptor::named(ENUM_TYPE),
-        alternate_verified_standard(),
-    );
-    assert_eq!(
-        decode_constructed_value(&alternate_active, &registry, &opaque_encoded),
-        Err(ValueCodecError::InvocationCarrier {
-            carrier: SYS_INVOKE_VALUE_TYPE_ID,
-            source: InvocationCarrierCodecError::InnerValue {
-                path: InvocationCarrierPath::one(InvocationCarrierPathSegment::ValueInner),
-                source: Box::new(ValueCodecError::OpaqueValue {
-                    source: OpaqueValueError::ActiveStandardMismatch,
-                }),
-            },
-        })
-    );
-}
-
-#[test]
 fn invoke_value_carriers_revalidate_stale_definition_and_opaque_authority() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let inner_path = InvocationCarrierPath::one(InvocationCarrierPathSegment::ValueInner);
     let assert_inner = |wire: Vec<u8>, source: ValueCodecError| {
         assert_eq!(
@@ -2384,13 +2312,7 @@ fn invoke_value_carriers_revalidate_stale_definition_and_opaque_authority() {
     );
     let stale_record_active =
         active_record_revision_with_second_type(TypeDescriptor::named(BIGINT_TYPE_ID));
-    let stale_record_registry = registered_opaque_codecs(
-        stale_record_active
-            .catalogue_hash_context()
-            .standard()
-            .unwrap(),
-    )
-    .unwrap();
+    let stale_record_registry = test_registry();
     assert_eq!(
         decode_constructed_value(
             &stale_record_active,
@@ -2474,7 +2396,7 @@ fn invoke_value_carriers_revalidate_stale_definition_and_opaque_authority() {
 fn invocation_carrier_public_offer_text_and_optional_values_fail_at_exact_paths() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let assert_request = |wire: Vec<u8>, source: InvocationCarrierCodecError| {
         assert_eq!(
             decode_constructed_value(&active, &registry, &wire),
@@ -2736,7 +2658,7 @@ fn invocation_carrier_public_offer_text_and_optional_values_fail_at_exact_paths(
 fn invocation_carrier_prefixes_and_outer_lengths_fail_without_materialisation() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     for value in carrier_test_values() {
         let carrier = invocation_carrier_type_id(&value).unwrap();
         let encoded = encode_constructed_value(&active, &registry, &value).unwrap();

@@ -3,6 +3,71 @@
 use super::super::opaque_codec::{ACTION_DOMAIN_CLIENT, ACTION_IDENTITY_BYTES};
 use super::*;
 
+fn active_revision_without_standard() -> ActiveDatabaseRevision {
+    let schema_id = SchemaId::from_bytes([0xa1; 16]);
+    let catalogue_revision = CatalogueRevisionId::from_bytes([0xa2; 16]);
+    let source_unit_id = SourceUnitId::from_bytes([0xa3; 16]);
+    let source_revision = SourceRevisionId::from_bytes([0xa4; 16]);
+    let source_bundle = SourceBundleId::from_bytes([0xa5; 16]);
+    let source_content = "x";
+    let source_unit = StoredSourceUnit::new(
+        source_unit_id,
+        0,
+        "app/schema.orna",
+        source_content,
+        source_unit_content_digest(source_content).unwrap(),
+    )
+    .unwrap();
+    let bundle_hash = source_bundle_digest(std::slice::from_ref(&source_unit)).unwrap();
+    let source = StoredSourceRevision::new(
+        source_bundle,
+        source_revision,
+        None,
+        vec![source_unit],
+        bundle_hash,
+        source_revision_record_digest(source_bundle, None, bundle_hash).unwrap(),
+    )
+    .unwrap();
+    let catalogue = CatalogueSnapshot::new(
+        catalogue_revision,
+        vec![SchemaDefinition::new(
+            schema_id,
+            QualifiedSemanticName::new(["app"]).unwrap(),
+        )],
+        Vec::new(),
+    )
+    .unwrap();
+    let origins = vec![DefinitionOrigin::new(
+        DefinitionIdentity::Schema(schema_id),
+        SourceOrigin::new(source_unit_id, 0, 1).unwrap(),
+    )];
+    let context = CatalogueHashContext::version_one();
+    let catalogue_hash =
+        catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+    ActiveDatabaseRevision::new_with_catalogue_hash_context(
+        ActiveDatabaseRevisionInput::new(
+            RevisionPair::new(source_revision, catalogue_revision),
+            source,
+            catalogue,
+            catalogue_hash,
+            ActiveRevisionContent::new(Vec::new(), Vec::new(), origins, Vec::new()),
+        ),
+        context,
+    )
+    .unwrap()
+}
+
+#[test]
+fn application_only_registry_fails_closed_without_standard_authority() {
+    let active = active_revision_without_standard();
+    let registry = OpaqueCodecRegistry::application_values_only();
+
+    assert_eq!(
+        OpaqueValue::new(&active, &registry, OPAQUE_TYPE, [0; 16]),
+        Err(OpaqueValueError::ActiveStandardRequired)
+    );
+}
+
 #[test]
 fn opaque_codec_registry_is_complete_unique_and_exact() {
     let active = active_record_revision();

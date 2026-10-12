@@ -1,0 +1,5 @@
+pub table SplitByteResetSource(id: Int) { value: Int, }
+pub table SplitByteResetUnknown(id: Int) { value: Int, }
+pub table SplitByteResetScanTail(id: Int) { value: Int, }
+pub table SplitByteResetFirstTarget(id: Int) { value: Int, }
+pub table SplitByteResetLastTarget(id: Int) { value: Int, }

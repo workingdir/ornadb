@@ -1,0 +1,6 @@
+pub table Note(id: Int) { value: Int, }
+pub fn mutating(rows: Relation<Note>) = rows | filter(note => {
+    Note.insert({ id: note.id, value: note.value });
+    true
+});
+pub fn external(rows: Relation<Note>) = rows | filter(note => std.net.http.get("https://example.com") == "ok");

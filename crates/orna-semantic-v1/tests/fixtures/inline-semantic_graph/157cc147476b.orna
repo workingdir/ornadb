@@ -1,0 +1,1 @@
+fn reset(checkpoint: sys.Checkpoint, to: sys.CheckpointPosition, reason: Str) = sys.admin.reset_checkpoint(checkpoint.reference, expected_position: checkpoint.position, to: to, reason: reason);

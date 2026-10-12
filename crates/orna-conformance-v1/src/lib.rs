@@ -33,6 +33,8 @@ pub mod catalogue_projection;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
+#[cfg(test)]
+mod test_support;
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use catalogue_projection::{
     CatalogueProjectionError, SourceCatalogueActivationError,
@@ -225,8 +227,18 @@ pub struct ReferenceProjectNegativeEvidence {
     pub invoke: String,
     pub args: Vec<Value>,
     pub expected: String,
+    pub diagnostic_code: String,
     pub status: EvidenceStatus,
     pub rollback_verified: bool,
+}
+
+fn expected_reference_failure_code(expectation: &str) -> Option<&'static str> {
+    match expectation {
+        "cross-table assertion failure; no new loan" => Some("ORNA-EVAL-MODULE-ASSERT"),
+        "assertion failure; both stock rows unchanged" => Some("ORNA-EVAL-ASSERT"),
+        "duplicate key; existing loan unchanged" => Some("ORNA-EVAL-TABLE-DUPLICATE"),
+        _ => None,
+    }
 }
 
 /// Evidence from the existing durable project/table/stream adapter.
@@ -442,7 +454,8 @@ impl Corpus {
         env::var_os("ORNA_REFERENCE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0")
+                // The checked-in corpus is enough for normal use on a clean clone.
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
             })
     }
     pub fn load_default() -> Result<Self, CorpusError> {
@@ -999,8 +1012,26 @@ async fn execute_reference_project_runtime_adapter(
                 )
                 .await
                 .map_err(|_| "reference negative activation could not be admitted".to_owned())?;
-            if !matches!(outcome, StageOutcome::Failed(_)) {
-                return Err(format!("negative reference invocation did not fail: {}", case.invoke));
+            let StageOutcome::Failed(diagnostic) = outcome else {
+                return Err(format!(
+                    "negative reference invocation did not fail: {}",
+                    case.invoke
+                ));
+            };
+            let Some(expected_diagnostic_code) = expected_reference_failure_code(&case.expect)
+            else {
+                return Err(format!(
+                    "negative reference expectation has no diagnostic oracle: {}",
+                    case.expect
+                ));
+            };
+            if diagnostic.code() != expected_diagnostic_code {
+                return Err(format!(
+                    "negative reference invocation {} expected diagnostic {}, observed {}",
+                    case.invoke,
+                    expected_diagnostic_code,
+                    diagnostic.code()
+                ));
             }
             let state = RuntimeState::open(&repository, identity, initial_digest)
                 .await
@@ -1015,6 +1046,7 @@ async fn execute_reference_project_runtime_adapter(
                 invoke: case.invoke.clone(),
                 args: case.args.clone(),
                 expected: case.expect.clone(),
+                diagnostic_code: diagnostic.code().into(),
                 status: EvidenceStatus::Passed,
                 rollback_verified,
             });

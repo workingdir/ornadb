@@ -301,7 +301,8 @@ pub enum InspectOutcomeKind {
     Denied,
     /// The invocation failed during execution.
     Failed,
-    /// The invocation was cancelled.
+    /// The invocation was cancelled; an optional caller-supplied reason is
+    /// replaced with the redaction marker before the event is retained.
     Cancelled,
 }
 
@@ -1046,6 +1047,35 @@ impl InspectTraceEvent {
         observer_invocation: Option<InvocationId>,
         purpose: Option<String>,
     ) -> Result<Self, InspectError> {
+        let payload = match payload {
+            InspectTracePayload::ValueBatch { values, .. } => {
+                // This trace model has no per-value secrecy labels or
+                // classifier proof. Keep the batch count and fail closed by
+                // dropping typed payloads before an event can be observed.
+                InspectTracePayload::ValueBatchRedacted {
+                    value_count: values.len() as u64,
+                }
+            }
+            InspectTracePayload::Failed { code } => {
+                if code.is_empty() {
+                    return Err(InspectError::EmptyFailureCode);
+                }
+                // Failure strings are caller supplied; this model has no
+                // classifier that can establish their disclosure safety.
+                InspectTracePayload::Failed {
+                    code: "<redacted>".into(),
+                }
+            }
+            InspectTracePayload::Cancelled { reason } => {
+                if reason.as_deref() == Some("") {
+                    return Err(InspectError::EmptyCancellationReason);
+                }
+                InspectTracePayload::Cancelled {
+                    reason: reason.map(|_| "<redacted>".into()),
+                }
+            }
+            payload => payload,
+        };
         match &payload {
             InspectTracePayload::ValueBatch { values, .. } if values.is_empty() => {
                 return Err(InspectError::EmptyValueBatch);
@@ -1063,9 +1093,11 @@ impl InspectTraceEvent {
             }
             _ => {}
         }
-        if purpose.as_deref() == Some("") {
-            return Err(InspectError::EmptyPurpose);
-        }
+        let purpose = match purpose {
+            Some(purpose) if purpose.is_empty() => return Err(InspectError::EmptyPurpose),
+            Some(_) => Some("<redacted>".to_owned()),
+            None => None,
+        };
         Ok(Self {
             invocation_id,
             sequence,
@@ -1114,7 +1146,8 @@ impl InspectTraceEvent {
         self.observer_invocation
     }
 
-    /// Returns the optional non-empty observation purpose.
+    /// Returns the optional observation-purpose marker. Caller-provided text
+    /// is replaced with `<redacted>` when the event is created.
     pub fn purpose(&self) -> Option<&str> {
         self.purpose.as_deref()
     }

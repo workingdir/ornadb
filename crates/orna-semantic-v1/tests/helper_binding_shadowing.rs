@@ -5,15 +5,7 @@ use orna_semantic_v1::{
     ModuleHeader, ModuleInput, Namespace, analyze,
 };
 
-const TABLE_HELPER: &str = r#"
-    pub table User(id: Uuid) { name: Str, }
-    pub table Account(id: Uuid) { user_id: Uuid, }
-
-    pub fn related(): Bool =
-        every(User, user =>
-            exists(Account, account => account.user_id == user.id)
-        );
-"#;
+const TABLE_HELPER: &str = include_str!("fixtures/imported_helper_dependencies/checks.orna");
 
 fn module<'a>(analysis: &'a Analysis, name: &str) -> &'a ModuleHeader {
     analysis
@@ -54,18 +46,7 @@ fn imported_helper_shadowed_by_callback_local_does_not_expand_imported_tables() 
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            r#"
-                use checks.{related};
-                pub table User(id: Uuid) { name: Str, }
-                pub table Account(id: Uuid) { user_id: Uuid, }
-
-                pub fn callback(): Bool = every(User, user => {
-                    let related = () => true;
-                    related()
-                });
-
-                assert callback();
-            "#,
+            include_str!("fixtures/imported-helper-shadowing/callback-local.orna"),
         ),
     ]);
 
@@ -78,18 +59,7 @@ fn imported_helper_shadowed_by_local_binding_does_not_expand_imported_tables() {
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            r#"
-                use checks.{related};
-                pub table User(id: Uuid) { name: Str, }
-                pub table Account(id: Uuid) { user_id: Uuid, }
-
-                pub fn local(): Bool {
-                    let related = () => true;
-                    return related();
-                }
-
-                assert local();
-            "#,
+            include_str!("fixtures/imported-helper-shadowing/local-binding.orna"),
         ),
     ]);
 
@@ -102,15 +72,7 @@ fn imported_helper_shadowed_by_parameter_does_not_expand_imported_tables() {
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            r#"
-                use checks.{related};
-                pub table User(id: Uuid) { name: Str, }
-                pub table Account(id: Uuid) { user_id: Uuid, }
-
-                pub fn parameter(related: fn(Int): Bool): Bool = related(0);
-
-                assert parameter(_ => true);
-            "#,
+            include_str!("fixtures/imported-helper-shadowing/parameter.orna"),
         ),
     ]);
 
@@ -121,17 +83,7 @@ fn imported_helper_shadowed_by_parameter_does_not_expand_imported_tables() {
 fn same_module_helper_call_keeps_exact_transitive_table_dependencies() {
     let analysis = analyze(&[ModuleInput::new(
         "consumer.orna",
-        r#"
-            pub table User(id: Uuid) { name: Str, }
-            pub table Account(id: Uuid) { user_id: Uuid, }
-
-            pub fn related(): Bool =
-                every(User, user =>
-                    exists(Account, account => account.user_id == user.id)
-                );
-
-            assert related();
-        "#,
+        include_str!("fixtures/same-module-helper-transitive-dependencies.orna"),
     )]);
 
     assert_eq!(
@@ -190,16 +142,7 @@ fn imported_helper_shadowed_by_record_pattern_shorthand_does_not_expand_imported
         ModuleInput::new("checks.orna", TABLE_HELPER),
         ModuleInput::new(
             "consumer.orna",
-            r#"
-                use checks.{related};
-
-                pub fn dispatch(value: { related: fn(): Bool }): Bool =
-                    case value {
-                        { related }: related(),
-                    };
-
-                assert dispatch({ related: () => true });
-            "#,
+            include_str!("fixtures/imported-helper-shadowing/record-pattern-shorthand-consumer.orna"),
         ),
     ]);
 
@@ -210,17 +153,7 @@ fn imported_helper_shadowed_by_record_pattern_shorthand_does_not_expand_imported
 fn direct_return_stops_dependency_walk_before_later_every_expression() {
     let analysis = analyze(&[ModuleInput::new(
         "consumer.orna",
-        r#"
-            pub table User(id: Uuid) { name: Str, }
-            pub table Account(id: Uuid) { user_id: Uuid, }
-
-            pub fn helper(): Bool {
-                return true;
-                every(User, user => true);
-            }
-
-            assert helper();
-        "#,
+        include_str!("fixtures/direct-return-stops-dependency-walk.orna"),
     )]);
 
     assert_eq!(

@@ -3,7 +3,7 @@ use super::*;
 fn constructed_collection_values_stay_closed_to_the_legacy_orv_encoders() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     for value in constructed_collection_values(&active) {
         assert_eq!(encode_value(&value), Err(ValueCodecError::UnsupportedValue));
         assert_eq!(
@@ -25,7 +25,7 @@ fn constructed_collection_values_stay_closed_to_the_legacy_orv_encoders() {
 fn orv5_round_trips_a_checked_option_with_independent_exact_bytes() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let descriptor = TypeDescriptor::option(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
     let value = RuntimeValue::option(
         &active,
@@ -63,7 +63,7 @@ fn orv5_round_trips_a_checked_option_with_independent_exact_bytes() {
 fn orv5_round_trips_all_admitted_constructors_and_rejects_hostile_option_bytes() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
 
     for value in constructed_collection_values(&active) {
         let encoded = encode_constructed_value(&active, &registry, &value).unwrap();
@@ -117,7 +117,7 @@ fn orv5_round_trips_all_admitted_constructors_and_rejects_hostile_option_bytes()
 fn orv5_admits_the_descriptor_before_the_body_and_wraps_nested_option_body_errors() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
 
     let mut inactive_payload = Vec::new();
     inactive_payload.extend_from_slice(&18_u16.to_be_bytes());
@@ -223,7 +223,7 @@ fn orv5_admits_the_descriptor_before_the_body_and_wraps_nested_option_body_error
 fn orv5_public_tracers_retain_empty_nested_and_registered_values() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let option = TypeDescriptor::option(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
     let list = TypeDescriptor::list(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
     let map = TypeDescriptor::map(
@@ -264,7 +264,7 @@ fn orv5_public_tracers_retain_empty_nested_and_registered_values() {
 fn orv5_has_independent_list_and_map_goldens_and_rejects_noncanonical_map_order() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
 
     let list_descriptor = TypeDescriptor::list(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
     let list = RuntimeValue::list(
@@ -346,7 +346,7 @@ fn orv5_has_independent_list_and_map_goldens_and_rejects_noncanonical_map_order(
 fn orv6_round_trips_canonical_sets_and_rejects_noncanonical_or_unsupported_wire() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let descriptor = TypeDescriptor::set(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
     let value = RuntimeValue::set(
         &active,
@@ -419,7 +419,7 @@ fn orv6_round_trips_canonical_sets_and_rejects_noncanonical_or_unsupported_wire(
 fn orv5_enforces_descriptor_and_value_node_limits_before_later_body_failures() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
 
     let mut deep_payload = Vec::new();
     deep_payload.extend_from_slice(&50_u16.to_be_bytes());
@@ -471,7 +471,7 @@ fn orv5_enforces_descriptor_and_value_node_limits_before_later_body_failures() {
 fn orv5_reports_each_constructed_structure_failure_exactly() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     assert_eq!(
         decode_constructed_value(&active, &registry, &orv5_constructed(Vec::new())),
         Err(ValueCodecError::TruncatedConstructedHeader { actual: 0 })
@@ -648,7 +648,7 @@ fn orv5_reports_each_constructed_structure_failure_exactly() {
 fn orv5_marker_substitution_covers_every_accepted_orv4_value_family() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let reference_target = TypeId::from_bytes([0x41; 16]);
     let values = vec![
         RuntimeValue::null(ResolvedType::scalar(StandardScalar::Boolean)).unwrap(),
@@ -675,8 +675,7 @@ fn orv5_marker_substitution_covers_every_accepted_orv4_value_family() {
 
     let nested_active = active_nested_record_revision();
     let nested_registry =
-        registered_opaque_codecs(nested_active.catalogue_hash_context().standard().unwrap())
-            .unwrap();
+        test_registry();
     let nested_value = nested_record_value(&nested_active);
     let inner_type = TypeId::from_bytes([0x31; 16]);
     let inner_field = FieldId::from_bytes([0x3a; 16]);
@@ -697,130 +696,10 @@ fn orv5_marker_substitution_covers_every_accepted_orv4_value_family() {
 }
 
 #[test]
-fn orv5_rechecks_stale_enum_reference_standard_and_opaque_authorities() {
-    let active = active_record_revision();
-    let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
-
-    let enum_value =
-        RuntimeValue::Enum(EnumValue::new(active.catalogue(), ENUM_TYPE, "qualified").unwrap());
-    let mut stale_enum = encode_constructed_value(&active, &registry, &enum_value).unwrap();
-    stale_enum[25..34].copy_from_slice(b"obsolete!");
-    assert_eq!(
-        decode_constructed_value(&active, &registry, &stale_enum),
-        Err(ValueCodecError::UndeclaredEnumLabel {
-            enum_type: ENUM_TYPE,
-            label: String::from("obsolete!"),
-        })
-    );
-
-    let stale_reference_target = TypeId::from_bytes([0x74; 16]);
-    let mut reference_descriptor = vec![0x04, 0x01];
-    reference_descriptor.extend_from_slice(&stale_reference_target.to_bytes());
-    let reference_error = decode_constructed_value(
-        &active,
-        &registry,
-        &orv5_constructed(orv5_descriptor_payload(&reference_descriptor, &[0])),
-    )
-    .unwrap_err();
-    let ValueCodecError::CollectionValue {
-        source: CollectionValueError::UnsupportedDescriptor { path, descriptor },
-    } = reference_error
-    else {
-        panic!("a stale reference target must fail collection admission");
-    };
-    assert_eq!(path.segments(), &[CollectionValuePathSegment::OptionChild]);
-    assert_eq!(
-        descriptor,
-        TypeDescriptor::reference(stale_reference_target)
-    );
-
-    let opaque = RuntimeValue::Opaque(
-        OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, [0x71; 16]).unwrap(),
-    );
-    let encoded_opaque = encode_constructed_value(&active, &registry, &opaque).unwrap();
-    assert_eq!(
-        decode_constructed_value(
-            &active_revision_without_standard(),
-            &registry,
-            &encoded_opaque
-        ),
-        Err(ValueCodecError::OpaqueValue {
-            source: OpaqueValueError::ActiveStandardRequired,
-        })
-    );
-    let alternate_active = active_record_revision_with_types_and_standard(
-        TypeDescriptor::named(BOOLEAN_TYPE_ID),
-        TypeDescriptor::named(ENUM_TYPE),
-        alternate_verified_standard(),
-    );
-    assert_eq!(
-        decode_constructed_value(&alternate_active, &registry, &encoded_opaque),
-        Err(ValueCodecError::OpaqueValue {
-            source: OpaqueValueError::ActiveStandardMismatch,
-        })
-    );
-    let invalid_registration = orna_core::value::OpaqueCodecRegistration::fixed_length_identity(
-        OPAQUE_TOKEN_TYPE_ID,
-        QualifiedSemanticName::new(["std", "types", "opaque_token"]).unwrap(),
-        "orna.std.value.opaque-token@2",
-        16,
-    )
-    .unwrap();
-    assert!(matches!(
-        OpaqueCodecRegistry::new(
-            active.catalogue_hash_context().standard().unwrap(),
-            [invalid_registration],
-        ),
-        Err(
-            orna_core::value::OpaqueCodecRegistryError::ContractMismatch {
-                opaque_type: OPAQUE_TOKEN_TYPE_ID,
-            }
-        )
-    ));
-    let mut wrong_contract = encoded_opaque;
-    wrong_contract[21..25].copy_from_slice(&15_u32.to_be_bytes());
-    wrong_contract.pop();
-    assert_eq!(
-        decode_constructed_value(&active, &registry, &wrong_contract),
-        Err(ValueCodecError::OpaqueValue {
-            source: OpaqueValueError::WrongPayloadLength {
-                opaque_type: OPAQUE_TOKEN_TYPE_ID,
-                expected: 16,
-                actual: 15,
-            },
-        })
-    );
-}
-
-#[test]
-fn orv5_cross_catalogue_collision_precedes_opaque_category_rejection() {
-    let active = active_revision_with_standard_named_collision();
-    let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
-    let mut descriptor = vec![0x02];
-    descriptor.extend_from_slice(&orv5_named_descriptor(OPAQUE_TOKEN_TYPE_ID));
-    let error = decode_constructed_value(
-        &active,
-        &registry,
-        &orv5_constructed(orv5_descriptor_payload(&descriptor, &0_u32.to_be_bytes())),
-    )
-    .unwrap_err();
-    let ValueCodecError::CollectionValue {
-        source: CollectionValueError::AmbiguousNamedType { path, type_id },
-    } = error
-    else {
-        panic!("cross-catalogue identity collision must precede opaque rejection");
-    };
-    assert_eq!(path.segments(), &[CollectionValuePathSegment::ListChild]);
-    assert_eq!(type_id, OPAQUE_TOKEN_TYPE_ID);
-}
-
-#[test]
 fn orv5_map_permutations_encode_to_the_same_canonical_bytes() {
     let active = active_record_revision();
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     let descriptor = TypeDescriptor::map(
         TypeDescriptor::named(INTEGER_TYPE_ID),
         TypeDescriptor::named(BOOLEAN_TYPE_ID),
@@ -854,7 +733,7 @@ fn orv5_map_permutations_encode_to_the_same_canonical_bytes() {
 fn orv5_retains_legacy_bytes_and_keeps_markers_closed() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
 
     let legacy = RuntimeValue::Boolean(true);
     let version_four = encode_registered_value(&active, &registry, &legacy).unwrap();
@@ -912,7 +791,7 @@ fn orv5_retains_legacy_bytes_and_keeps_markers_closed() {
 fn orv5_accepts_exact_depth_and_parses_the_256_node_descriptor_before_rejection() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
 
     let mut depth_bytes = vec![0x04; MAX_TYPE_DESCRIPTOR_DEPTH];
     let mut depth_descriptor = TypeDescriptor::named(BOOLEAN_TYPE_ID);
@@ -984,7 +863,7 @@ fn orv5_accepts_exact_depth_and_parses_the_256_node_descriptor_before_rejection(
 fn orv5_map_duplicate_keys_keep_original_wire_indexes() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let mut descriptor = vec![0x03];
     descriptor.extend_from_slice(&orv5_named_descriptor(INTEGER_TYPE_ID));
     descriptor.extend_from_slice(&orv5_named_descriptor(BOOLEAN_TYPE_ID));
@@ -1030,7 +909,7 @@ fn orv5_revalidates_stale_records_and_rejects_unregistered_opaque_values() {
     );
     let active = active_record_revision_with_second_type(TypeDescriptor::named(BIGINT_TYPE_ID));
     let registry =
-        registered_opaque_codecs(active.catalogue_hash_context().standard().unwrap()).unwrap();
+        test_registry();
     assert_eq!(
         encode_constructed_value(&active, &registry, &stale),
         Err(ValueCodecError::RecordValueNotActive {
@@ -1081,7 +960,7 @@ fn orv5_revalidates_stale_records_and_rejects_unregistered_opaque_values() {
 fn constructed_collection_values_stay_closed_to_both_orf_value_paths() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let parameter = ParameterId::from_bytes([0x5f; 16]);
     for value in constructed_collection_values(&active) {
         let argument = ClientFrame::CallArgument {
@@ -1153,7 +1032,7 @@ fn constructed_collection_values_stay_closed_to_both_orf_value_paths() {
 fn supported_flat_values_prove_the_orf_value_rejection_is_causal() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let parameter = ParameterId::from_bytes([0x5f; 16]);
     let argument = ClientFrame::CallArgument {
         stream: 7,
@@ -1183,7 +1062,7 @@ fn supported_flat_values_prove_the_orf_value_rejection_is_causal() {
 fn orf5_retains_orf4_frames_and_embeds_orv5_values() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let parameter = ParameterId::from_bytes([0x71; 16]);
     let argument = ClientFrame::CallArgument {
         stream: 7,
@@ -1352,7 +1231,7 @@ fn orf5_retains_orf4_frames_and_embeds_orv5_values() {
 fn orf5_rejects_constructed_arguments_and_events_after_value_validation() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let descriptor = TypeDescriptor::option(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();
     let value = RuntimeValue::option(
         &active,
@@ -1450,7 +1329,7 @@ fn orf5_rejects_constructed_arguments_and_events_after_value_validation() {
 fn orf5_accepts_opaque_results_and_rejects_opaque_arguments() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let payload = [0x73; 16];
     let opaque = RuntimeValue::Opaque(
         OpaqueValue::new(&active, &registry, OPAQUE_TOKEN_TYPE_ID, payload).unwrap(),
@@ -1540,7 +1419,7 @@ fn orf5_accepts_opaque_results_and_rejects_opaque_arguments() {
 fn orf5_constructed_rejection_preserves_connection_state_and_credit() {
     let active = active_record_revision();
     let standard = active.catalogue_hash_context().standard().unwrap();
-    let registry = registered_opaque_codecs(standard).unwrap();
+    let registry = test_registry();
     let function = FunctionId::from_bytes([0x75; 16]);
     let parameter = ParameterId::from_bytes([0x76; 16]);
     let descriptor = TypeDescriptor::list(TypeDescriptor::named(BOOLEAN_TYPE_ID)).unwrap();

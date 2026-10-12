@@ -1,0 +1,1 @@
+pub fn legacy() = Ok(1);

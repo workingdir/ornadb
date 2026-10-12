@@ -1,0 +1,1 @@
+compact_fmt.format(1.25.seconds, context: { locale: "en", time_zone: "UTC" })

@@ -1,0 +1,1 @@
+use vault; pub fn bad(value: vault.Missing): vault.Missing = value; pub fn applied(value: List<Missing>): List<Missing> = value;

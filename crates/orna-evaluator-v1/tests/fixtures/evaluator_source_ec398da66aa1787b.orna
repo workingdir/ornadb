@@ -1,0 +1,1 @@
+if true { for instant in range { instant }; 0 }

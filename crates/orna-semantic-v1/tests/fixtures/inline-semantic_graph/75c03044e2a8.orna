@@ -1,0 +1,1 @@
+table Record(id: Uuid) { value: Int, assert every(sys => sys.value >= 0); }

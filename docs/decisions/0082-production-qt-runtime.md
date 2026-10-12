@@ -2,6 +2,58 @@
 
 **Status:** Accepted for the OrnaDB v1 development boundary
 
+## OrnaDB 1.0.0 normative status
+
+The production Qt runtime described by this historical work decision is
+deferred for OrnaDB 1.0.0; it is not a behavior required by the frozen
+normative reference. The applicable requirements are narrower:
+
+- `ORNA-RUN-001` through `ORNA-RUN-003` in
+  Orna-1.0.0 `source/06-expressions.md` define `orna run` entry
+  selection and path behavior.
+- `ORNA-PRES-010` in Orna-1.0.0 `source/13-presentation.md` requires an
+  Inspect-compatible fallback for renderers that do not recognize a rich
+  presentation node.
+- `ORNA-CLI-005` in Orna-1.0.0 `source/18-cli.md` suppresses dynamic progress when
+  output is not a terminal unless explicitly forced.
+
+The normative text, grammar, conformance requirements, examples, API catalogue
+and system reference do not define a production Qt provider, native runtime
+family, `orna_runtime_query_v1` ABI, loader, or installed-runtime selection.
+Those parts of this ADR therefore remain a proposal for a later accepted
+contract. They must not be implemented as OrnaDB 1.0.0 behavior or inferred
+from the test-only headless fixture.
+
+### Failed surface-destroy disposition
+
+OrnaDB 1.0.0 does not define a Qt/provider surface-destroy failure contract,
+so this work ADR does not extend the normative acceptance boundary. The
+closest normative rule, `ORNA-SYS-087` in `source/15-system.md`, requires a
+failed administrative operation to retain runtime state at the last valid
+boundary described by its algorithm; it does not define this adapter's
+provider call, surface ownership, or callback-bookkeeping policy.
+
+A targeted search of the frozen `Orna-1.0.0.md`, `source/`, `api/`, `tests/`,
+`examples/`, and `profiles/` for `destroy_surface`, surface destruction or
+closure, Qt runtime, and provider failure found no normative requirement for
+this adapter behavior. The existing
+`runtime_adapter::tests::failed_surface_destroy_preserves_bookkeeping` test
+checks the implementation's failure and success transitions, but it is not a
+live-provider test. Keep live Qt/provider acceptance deferred until the
+canonical runtime ABI header and Qt build/test toolchain are available; do
+not infer such a provider contract from this implementation test.
+
+The Orna-1.0.0 reference does not define Qt offscreen rendering, screenshot
+capture, or pixel/geometry validation. The targeted search for `Qt`,
+`screenshot`, `offscreen`, `visual smoke`, and `visual test` across the
+normative source and requirements has no matches. A broader search finds only
+the general presentation-width field in `source/30-protocol.md:67`; it defines
+terminal columns or browser CSS pixels, not native visual-test behavior.
+`ORNA-PRES-010` (`source/13-presentation.md:117`) requires an
+Inspect-compatible fallback for an unrecognized rich presentation node, but
+does not require raster capture. Therefore, Qt visual smoke capture and its
+screenshot artifact are deferred and are not OrnaDB 1.0.0 conformance evidence.
+
 ## Context
 
 OrnaDB already has a TTY renderer and a test-only headless runtime fixture. It
@@ -176,11 +228,21 @@ not advertise list/table model contracts in this provider version. Model range,
 child, completion, and cancellation semantics remain a later provider
 extension because the current ABI has no accepted model-construction operation.
 
+The Orna-1.0.0 reference audit searched for `Qt`, `model request`,
+`cancel_request`, `model cancellation`, `virtual model`, and `table model`;
+these searches found no relevant Qt model-request contract. `ORNA-CANCEL-001`
+and `ORNA-CANCEL-002` define general execution cancellation and bounded
+cancellation checkpoints, but do not define a Qt provider status. Since this
+provider advertises no model contract and creates no model-request handles, a
+live `cancel_request` call returns `ORNA_STATUS_UNSUPPORTED` before request
+lookup; it is not a missing-request result. This remains deferred until a
+model-construction and request contract is accepted.
+
 For every model request that a later provider creates, the client completes or
 fails the request exactly once and the runtime rejects late, foreign, duplicate,
-or malformed completion data. `cancel_request` remains idempotent for that
-future request contract. Surface destruction, runtime shutdown, and client
-disconnect cancel pending requests exactly once.
+or malformed completion data. `cancel_request` is idempotent for requests
+created under that future contract. Under that contract, surface destruction,
+runtime shutdown, and client disconnect cancel pending requests exactly once.
 
 ## Shutdown and failure reporting
 

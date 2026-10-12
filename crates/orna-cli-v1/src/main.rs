@@ -3,13 +3,22 @@
     reason = "The bounded binary exposes planning and session seams for a later integration adapter."
 )]
 
+mod cli_args;
+mod cli_dispatch;
+mod cli_help;
+mod cli_status;
+mod cli_serve;
 mod repl;
 
+use cli_args::{
+    Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode,
+    requested_debug_mode,
+};
+use cli_dispatch::execute;
 use repl::{AnsiColor, write_styled, write_styled_display};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{self, BufReader, IsTerminal, Write as _};
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +30,7 @@ use orna_conformance_v1::{
 };
 use orna_evaluator_v1::{Environment, Limits};
 use orna_foundation_v1::{OvbRaw, Value};
-use orna_runtime_v1::{RunObservationStatus, RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::{RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 static CLI_OUTPUT_FORMAT: AtomicU8 = AtomicU8::new(0);
@@ -495,6 +504,7 @@ fn write_diagnostic<W: io::Write>(
     writer: &mut W,
     diagnostic: &Diagnostic,
     color_enabled: bool,
+    debug_enabled: bool,
 ) -> io::Result<()> {
     write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
     writer.write_all(b"[")?;
@@ -511,7 +521,11 @@ fn write_diagnostic<W: io::Write>(
         diagnostic.title.as_bytes(),
         color_enabled,
     )?;
-    if let Some(detail) = &diagnostic.detail {
+    // Semantic source diagnostics remain user-facing. Other attached details
+    // can contain repository/runtime implementation data and require --debug.
+    if let Some(detail) = &diagnostic.detail
+        && (debug_enabled || diagnostic.code == "E2101")
+    {
         writer.write_all(b"\n  ")?;
         write_styled(writer, AnsiColor::Dim, detail.as_bytes(), color_enabled)?;
     }
@@ -678,6 +692,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
+<<<<<<< HEAD
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Invocation {
     Seed,
@@ -951,6 +966,8 @@ fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     })
 }
 
+=======
+>>>>>>> origin/w90zi-imp_merge
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionState {
     Open,
@@ -1235,6 +1252,202 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     }
 >>>>>>> Stashed changes
     Ok(())
+}
+
+fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run the command inside a Git worktree or provide a local project path",
+        )
+    })?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository.worktree())
+        .args([
+            "-c",
+            "color.status=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree status could not be read",
+                "check that Git can read the local worktree, then retry `status --format json`",
+            )
+        })?;
+    if !output.status.success() {
+        return Err(Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "check that Git can read the local worktree, then retry `status --format json`",
+        ));
+    }
+    let branch_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repository.worktree())
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "local Git worktree branch could not be read",
+                "check that Git can read the local worktree, then retry `status --format json`",
+            )
+        })?;
+    let branch =
+        cli_status::branch_name(branch_output.status.success(), &branch_output.stdout);
+    let json = cli_status::encode_status_json(branch, &output.stdout).ok_or_else(|| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "retry `status --format json`",
+        )
+    })?;
+    let unpublished_count = unpublished_mutation_count(&repository)?;
+    let json = append_unpublished_count_json(json, unpublished_count).ok_or_else(|| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be read",
+            "retry `status --format json`",
+        )
+    })?;
+    io::stdout().lock().write_all(&json).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status --format json`",
+        )
+    })?;
+    Ok(())
+}
+
+fn unpublished_mutation_count(
+    repository: &orna_repository_v1::Repository,
+) -> Result<usize, Diagnostic> {
+    if !repository.runtime_paths().state_db().exists() {
+        return Ok(0);
+    }
+    let (identity, initial_digest) = runtime_identity(repository)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `status` after checking the local runtime state",
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(repository, identity, initial_digest))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `status` after checking the local runtime state",
+            )
+        })?;
+    runtime
+        .block_on(state.publication_metadata_rows())
+        .and_then(|rows| {
+            if rows.sys_storage != rows.maintenance_job {
+                return Err(orna_runtime_v1::RuntimeError::RecoveryInvalid);
+            }
+            match rows.sys_storage.raw() {
+                OvbRaw::Map(fields) => fields
+                    .iter()
+                    .find_map(|(key, value)| match (key, value) {
+                        (OvbRaw::Text(key), OvbRaw::Int(value)) if key == "pending_rows" => {
+                            usize::try_from(value.clone()).ok()
+                        }
+                        _ => None,
+                    })
+                    .ok_or(orna_runtime_v1::RuntimeError::RecoveryInvalid),
+                _ => Err(orna_runtime_v1::RuntimeError::RecoveryInvalid),
+            }
+        })
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication status could not be read",
+                "retry `status` after checking the local runtime state",
+            )
+        })
+}
+
+fn runtime_publication_metadata_rows(
+    endpoint: &Endpoint,
+) -> Result<RuntimePublicationMetadataRows, Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "local runtime publication metadata could not be read",
+            "run the command inside an initialized local Orna repository",
+        )
+    })?;
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication metadata could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(&repository, identity, initial_digest))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication metadata could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    runtime
+        .block_on(state.publication_metadata_rows())
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "local runtime publication metadata could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })
+}
+
+fn write_unpublished_summary<W: io::Write>(writer: &mut W, count: usize) -> io::Result<()> {
+    let noun = if count == 1 { "mutation" } else { "mutations" };
+    writeln!(writer, "Unpublished CWD changes: {count} runtime {noun}")
+}
+
+fn append_unpublished_count_json(mut json: Vec<u8>, count: usize) -> Option<Vec<u8>> {
+    let prefix = json.strip_suffix(b"]}\n")?.len();
+    json.truncate(prefix);
+    json.extend_from_slice(b"],\"unpublished_runtime_mutations\":");
+    json.extend_from_slice(count.to_string().as_bytes());
+    json.extend_from_slice(b"}\n");
+    Some(json)
 }
 
 fn osc8_terminal_supports(
@@ -1555,6 +1768,7 @@ fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
+    let unpublished_count = unpublished_mutation_count(&repository)?;
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repository.worktree())
@@ -1602,10 +1816,20 @@ fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
 <<<<<<< Updated upstream
         },
     )?;
+<<<<<<< HEAD
 =======
         })?;
     }
 >>>>>>> Stashed changes
+=======
+    write_unpublished_summary(&mut stdout, unpublished_count).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status`",
+        )
+    })?;
+>>>>>>> origin/w90zi-imp_merge
     Ok(())
 }
 
@@ -1725,7 +1949,7 @@ fn load_project_without_standard_rejection(
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
-    orna_project_v1::ProjectLoader::default()
+    let project = orna_project_v1::ProjectLoader::default()
         .load(&repository)
         .map_err(|_| {
             Diagnostic::target(
@@ -1733,13 +1957,14 @@ fn load_project_without_standard_rejection(
                 "project source could not be loaded",
                 "fix the project module graph and source boundaries, then run check again",
             )
-        })
+        })?;
+    Ok(project)
 }
 
 fn reject_uncaptured_standard_modules(
     project: &orna_project_v1::LoadedProject,
 ) -> Result<(), Diagnostic> {
-    if project.standard_modules().is_empty() {
+    if project.standard_modules().is_empty() || project.standard_profile().is_some() {
         return Ok(());
     }
     Err(Diagnostic::target(
@@ -1749,13 +1974,27 @@ fn reject_uncaptured_standard_modules(
     ))
 }
 
-fn semantic_catalogue() -> orna_semantic_v1::Catalogue {
-    orna_semantic_v1::Catalogue::authoritative_core()
+fn semantic_catalogue(
+    project: &orna_project_v1::LoadedProject,
+) -> Result<orna_semantic_v1::Catalogue, Diagnostic> {
+    let catalogue = orna_semantic_v1::Catalogue::authoritative_core();
+    let Some(profile) = project.standard_profile() else {
+        return Ok(catalogue);
+    };
+    catalogue
+        .with_standard_sources(profile, project.standard_sources().iter().cloned())
+        .map_err(|_| {
+            Diagnostic::target(
+                "ORNA-S010-IMPORT",
+                "imported module is unavailable",
+                "use a captured standard dependency or remove the import",
+            )
+        })
 }
 
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if analysis.is_ok() {
 <<<<<<< Updated upstream
@@ -1779,7 +2018,7 @@ fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnos
 }
 
 fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
-    let modules: Vec<SourceUnit> = project
+    let mut modules: Vec<SourceUnit> = project
         .modules()
         .iter()
         .zip(project.identities())
@@ -1800,6 +2039,20 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             source: row.source().into(),
         })
         .collect();
+    modules.extend(
+        project
+            .standard_sources()
+            .iter()
+            .filter(|(logical_path, _)| {
+                project.standard_runtime_modules().contains(logical_path)
+            })
+            .map(|(logical_path, source)| SourceUnit {
+                fixture_id: "cli-project".into(),
+                source_id: logical_path.clone(),
+                parse_as: "module_unit".into(),
+                source: source.clone(),
+            }),
+    );
     ProjectUnit {
         fixture_id: "cli-project".into(),
         project_id: "cli-project".into(),
@@ -1811,7 +2064,14 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
                 network: false,
                 credentials: false,
                 intrinsics: "Orna 1.0.0 core".into(),
-                stdlib: None,
+                stdlib: project.standard_profile().map(|profile| {
+                    // Verify the full graph-bound bundle in the durable
+                    // evaluator while loading only import-reachable modules.
+                    serde_json::json!({
+                        "snapshot": profile.snapshot(),
+                        "sources": project.standard_sources().iter().cloned().collect::<BTreeMap<_, _>>(),
+                    })
+                }),
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
@@ -1907,8 +2167,22 @@ fn run_public_project_function(
     target: &str,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
+    run_project_function(endpoint, target, false, color_enabled)
+}
+fn run_default_project_main(
+    endpoint: &Endpoint,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    run_project_function(endpoint, "main.main", true, color_enabled)
+}
+fn run_project_function(
+    endpoint: &Endpoint,
+    target: &str,
+    allow_private_root_main: bool,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1917,7 +2191,14 @@ fn run_public_project_function(
             "fix the first reported source contract error, then run the project again",
         ));
     }
-    if !public_project_function(&analysis, target) {
+    let private_default_main_present = allow_private_root_main
+        && target == "main.main"
+        && analysis
+            .modules
+            .get(&orna_semantic_v1::Namespace(Vec::new()))
+            .and_then(|module| module.symbols.get("main"))
+            .is_some_and(|symbol| symbol.kind == orna_semantic_v1::SymbolKind::Function);
+    if !private_default_main_present && !public_project_function(&analysis, target) {
         return Err(Diagnostic::unavailable(
             "durable project invocation is not available",
             "use a supported table transaction; stream roots require the explicit stream runtime",
@@ -1940,7 +2221,7 @@ fn run_project_stream_invocation(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1967,7 +2248,7 @@ fn run_project_invocation_with_arguments(
             )
         })?;
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -2136,7 +2417,12 @@ fn run_pure_invocation(
                 .collect::<Vec<_>>()
         };
         if identity.namespace() == namespace {
+<<<<<<< HEAD
             let authority = ApplicationAuthority::new(semantic_catalogue(), Limits::default());
+=======
+            let authority =
+                ApplicationAuthority::new(semantic_catalogue(&project)?, Limits::default());
+>>>>>>> origin/w90zi-imp_merge
             let admitted = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
@@ -2147,17 +2433,45 @@ fn run_pure_invocation(
                         error.to_string(),
                     )
                 })?;
-            authority
-                .evaluate(&admitted, &Environment::new())
-                .map_err(|error| {
-                    Diagnostic::target_with_detail(
-                        "E2200",
-                        "pure project invocation failed",
-                        "fix the admitted function or retry the invocation",
-                        error.to_string(),
+            if admitted.requires_publication_metadata() {
+                let publication_rows = runtime_publication_metadata_rows(endpoint)?;
+                let activation = authority
+                    .evaluate_staged_with_publication_rows(
+                        &admitted,
+                        &Environment::new(),
+                        publication_rows,
                     )
+<<<<<<< HEAD
                 })?;
 <<<<<<< Updated upstream
+=======
+                    .map_err(|error| {
+                        Diagnostic::target_with_detail(
+                            "E2200",
+                            "pure project invocation failed",
+                            "fix the admitted function or retry the invocation",
+                            error.to_string(),
+                        )
+                    })?;
+                if !activation.mutations().is_empty() {
+                    return Err(Diagnostic::unavailable(
+                        "one-shot invocation cannot commit table mutations",
+                        "use a supported table transaction; stream roots require the explicit stream runtime",
+                    ));
+                }
+            } else {
+                authority
+                    .evaluate(&admitted, &Environment::new())
+                    .map_err(|error| {
+                        Diagnostic::target_with_detail(
+                            "E2200",
+                            "pure project invocation failed",
+                            "fix the admitted function or retry the invocation",
+                            error.to_string(),
+                        )
+                    })?;
+            }
+>>>>>>> origin/w90zi-imp_merge
             write_success_line("invocation completed", color_enabled)?;
 =======
             emit_human("invocation completed");
@@ -2165,7 +2479,7 @@ fn run_pure_invocation(
             return Ok(());
         }
     }
-    let catalogue = semantic_catalogue();
+    let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -2405,6 +2719,7 @@ fn run_repl(
 fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let requested_color = requested_color_mode(&args);
+    let debug_enabled = requested_debug_mode(&args);
     let parsed = match parse_cli(&args) {
         Ok(value) => value,
         Err(error) => {
@@ -2412,6 +2727,7 @@ fn main() -> ExitCode {
                 &mut io::stderr().lock(),
                 &error,
                 requested_color.stderr_enabled(),
+                debug_enabled,
             );
             return ExitCode::from(error.exit as u8);
         }
@@ -2423,6 +2739,7 @@ fn main() -> ExitCode {
                 &mut io::stderr().lock(),
                 &error,
                 parsed.color.stderr_enabled(),
+                debug_enabled,
             );
             ExitCode::from(error.exit as u8)
         }
@@ -2513,24 +2830,28 @@ fn run_fetch(
                 "supply a valid Git branch name",
                 error.to_string(),
             )
+<<<<<<< HEAD
         })?;
     let request = orna_repository_v1::FetchRequest::new(remote.to_owned(), [requested], [])
+=======
+        },
+    )?;
+    let report = repository
+        .fetch_with_local_continuity(remote.to_owned(), [requested])
+>>>>>>> origin/w90zi-imp_merge
         .map_err(|error| {
             Diagnostic::target_with_detail(
                 "E2100",
-                "fetch request is invalid",
-                "supply a configured remote and valid branch",
+                "Git fetch failed",
+                "check the configured remote and retry `fetch`",
                 error.to_string(),
             )
         })?;
-    let report = repository.fetch(&request).map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2100",
-            "Git fetch failed",
-            "check the configured remote and retry `fetch`",
-            error.to_string(),
-        )
-    })?;
+    if let Some(continuity) = report.continuity() {
+        if let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
+            return Err(diagnostic);
+        }
+    }
     let fetched = report.ordinary().first().ok_or_else(|| {
         Diagnostic::target(
             "E2100",
@@ -2583,6 +2904,7 @@ fn run_fetch(
     Ok(())
 }
 
+<<<<<<< HEAD
 fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
@@ -2684,7 +3006,20 @@ fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::Run(Invocation::ProjectFunction(ref target)) => {
             run_public_project_function(&parsed.endpoint, target, parsed.color.stdout_enabled())
         }
+=======
+fn fetch_continuity_diagnostic(
+    continuity: orna_repository_v1::RemoteContinuity,
+) -> Option<Diagnostic> {
+    if continuity.permits_continuity_claim() {
+        return None;
+>>>>>>> origin/w90zi-imp_merge
     }
+    Some(Diagnostic::target_with_detail(
+        "E2100",
+        "Orna continuity witness was rejected",
+        "do not claim allocator or checkpoint continuity until required refs/orna witnesses match",
+        format!("remote continuity state: {continuity:?}"),
+    ))
 }
 
 <<<<<<< Updated upstream
@@ -2729,6 +3064,9 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use orna_runtime_v1::{Mutation, NoFault, RunObservationStatus, RuntimeState};
+    use sha2::{Digest, Sha256};
     #[test]
     fn color_mode_respects_stream_tty_and_explicit_overrides() {
         assert!(!ColorMode::Auto.enabled(false));
@@ -2737,6 +3075,33 @@ mod tests {
         assert!(ColorMode::Always.enabled(true));
         assert!(!ColorMode::Never.enabled(false));
         assert!(!ColorMode::Never.enabled(true));
+    }
+
+    #[test]
+    fn fetch_accepts_only_continuous_witnesses() {
+        assert!(
+            fetch_continuity_diagnostic(orna_repository_v1::RemoteContinuity::Continuous).is_none()
+        );
+
+        for continuity in [
+            orna_repository_v1::RemoteContinuity::Missing,
+            orna_repository_v1::RemoteContinuity::Stale,
+            orna_repository_v1::RemoteContinuity::InvalidEvidence,
+            orna_repository_v1::RemoteContinuity::Unverifiable,
+        ] {
+            let diagnostic = fetch_continuity_diagnostic(continuity)
+                .expect("non-continuous witnesses are rejected");
+            assert_eq!(diagnostic.code, "E2100");
+            assert_eq!(diagnostic.title, "Orna continuity witness was rejected");
+            assert_eq!(
+                diagnostic.help,
+                "do not claim allocator or checkpoint continuity until required refs/orna witnesses match"
+            );
+            assert_eq!(
+                diagnostic.detail.as_deref(),
+                Some(format!("remote continuity state: {continuity:?}").as_str())
+            );
+        }
     }
 
     #[test]
@@ -2832,14 +3197,22 @@ mod tests {
                 format: StatusFormat::Short,
             }
         );
+        assert_eq!(
+            parse_cli(&["status".into(), "--format".into(), "json".into()])
+                .expect("JSON status parses")
+                .command,
+            Command::Status {
+                format: StatusFormat::Json,
+            }
+        );
         let error = parse_cli(&["status".into(), "--porcelain=v2".into()])
             .expect_err("status format is exact");
         assert_eq!(error.code, "E1002");
         assert_eq!(
             (error.title, error.help),
             (
-                "`status` supports no option, `--porcelain`, or `--short`",
-                "use `status`, `status --porcelain`, or `status --short`"
+                "unsupported `status` option or option placement",
+                "use `status`, `status --porcelain`, `status --short`, `status --format human|short|json`, or `--format human|short|json status`"
             )
         );
         assert_eq!(
@@ -2882,15 +3255,15 @@ mod tests {
                 .code,
             "E1001"
         );
-        let error = parse_cli(&["serve".into()]).expect_err("unknown command");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
-            (
-                "E1002",
-                Exit::Usage,
-                "unknown Orna command",
-                "use `--help` to list supported commands",
-            )
+            parse_cli(&["serve".into()]).unwrap().command,
+            Command::Serve { port: 8080 }
+        );
+        assert_eq!(
+            parse_cli(&["serve".into(), "--port".into(), "0".into()])
+                .unwrap()
+                .command,
+            Command::Serve { port: 0 }
         );
     }
 
@@ -3056,6 +3429,76 @@ mod tests {
         assert_eq!(rendered_short, short_output.stdout);
     }
 
+    #[test]
+    fn unpublished_status_summary_reports_zero_and_remaining_runtime_mutations() {
+        let mut rendered = Vec::new();
+        write_unpublished_summary(&mut rendered, 0).expect("empty unpublished summary");
+        write_unpublished_summary(&mut rendered, 1).expect("singular unpublished summary");
+        write_unpublished_summary(&mut rendered, 2).expect("plural unpublished summary");
+        assert_eq!(
+            rendered,
+            b"Unpublished CWD changes: 0 runtime mutations\nUnpublished CWD changes: 1 runtime mutation\nUnpublished CWD changes: 2 runtime mutations\n"
+        );
+    }
+
+    #[test]
+    fn json_status_includes_unpublished_runtime_mutation_count() {
+        assert_eq!(
+            append_unpublished_count_json(
+                b"{\"branch\":\"main\",\"changes\":[]}\n".to_vec(),
+                4,
+            )
+            .expect("JSON status terminator"),
+            b"{\"branch\":\"main\",\"changes\":[],\"unpublished_runtime_mutations\":4}\n"
+        );
+        assert!(append_unpublished_count_json(b"{}".to_vec(), 0).is_none());
+    }
+
+    #[test]
+    fn unpublished_mutation_count_reads_the_runtime_pending_tail() {
+        let directory = tempfile::tempdir().expect("status repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        orna_repository_v1::initialize_repository(directory.path())
+            .expect("initialize Orna repository");
+        let repository = orna_repository_v1::Repository::discover(directory.path())
+            .expect("discover initialized repository");
+        let (identity, initial_digest) = runtime_identity(&repository).expect("runtime identity");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime executor");
+        let state = runtime
+            .block_on(RuntimeState::open(&repository, identity, initial_digest))
+            .expect("open runtime state");
+        assert_eq!(unpublished_mutation_count(&repository), Ok(0));
+
+        let payload = b"pending table mutation".to_vec();
+        let mutation = Mutation {
+            id: [1; 16],
+            digest: Sha256::digest(&payload).into(),
+            payload,
+        };
+        runtime
+            .block_on(async {
+                let lease = state.acquire_lease(identity.repository_id).await?;
+                let capture = state.capture().await?;
+                state
+                    .commit(lease, &capture, &mutation, [2; 32], &NoFault)
+                    .await
+            })
+            .expect("append durable runtime mutation");
+        drop(state);
+
+        assert_eq!(unpublished_mutation_count(&repository), Ok(1));
+    }
+
     fn visible_without_osc8(output: &[u8]) -> Vec<u8> {
         let mut visible = Vec::with_capacity(output.len());
         let mut remaining = output;
@@ -3136,9 +3579,11 @@ mod tests {
     #[test]
     fn project_repl_rejects_an_uncaptured_standard_import() {
         let directory = tempfile::tempdir().expect("temporary project");
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../reference/Orna-1.0.0/examples/valid/page.orna");
-        std::fs::copy(fixture, directory.path().join("main.orna")).expect("accepted source");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            include_str!("../tests/fixtures/reference-project/page.orna"),
+        )
+        .expect("accepted source");
         assert!(
             std::process::Command::new("git")
                 .args(["init", "--quiet"])
@@ -3439,7 +3884,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> "
+            "> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> "
         );
     }
 
@@ -3475,15 +3920,17 @@ mod tests {
             "the expected remote response was unavailable",
         );
         let mut plain = Vec::new();
-        write_diagnostic(&mut plain, &diagnostic, false).expect("plain diagnostic write");
+        write_diagnostic(&mut plain, &diagnostic, false, false)
+            .expect("plain diagnostic write");
         assert_eq!(
             plain,
-            format!("{diagnostic}\n").as_bytes(),
-            "plain CLI diagnostic stays identical to Display plus eprintln's final newline"
+            b"error[E2300]: request failed\nhelp: retry the operation\n",
+            "technical details are hidden in normal output"
         );
 
         let mut colored = Vec::new();
-        write_diagnostic(&mut colored, &diagnostic, true).expect("colored diagnostic write");
+        write_diagnostic(&mut colored, &diagnostic, true, true)
+            .expect("colored diagnostic write");
         assert_eq!(
             String::from_utf8(colored).expect("diagnostic is UTF-8"),
             "\x1b[31merror\x1b[0m[\x1b[31mE2300\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
@@ -3609,17 +4056,14 @@ mod tests {
     #[test]
     fn authoritative_reference_project_runs_seed_exercise_and_sensor_stream() {
         let directory = tempfile::tempdir().expect("temporary reference project");
-        let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../reference/Orna-1.0.0/examples/reference");
-        for name in [
-            "main.orna",
-            "library.orna",
-            "warehouse.orna",
-            "sensors.orna",
-            "values.orna",
+        for (name, source) in [
+            ("main.orna", include_str!("../tests/fixtures/reference-project/main.orna")),
+            ("library.orna", include_str!("../tests/fixtures/reference-project/library.orna")),
+            ("warehouse.orna", include_str!("../tests/fixtures/reference-project/warehouse.orna")),
+            ("sensors.orna", include_str!("../tests/fixtures/reference-project/sensors.orna")),
+            ("values.orna", include_str!("../tests/fixtures/reference-project/values.orna")),
         ] {
-            std::fs::copy(reference.join(name), directory.path().join(name))
-                .expect("reference source");
+            std::fs::write(directory.path().join(name), source).expect("reference source");
         }
         assert!(
             std::process::Command::new("git")

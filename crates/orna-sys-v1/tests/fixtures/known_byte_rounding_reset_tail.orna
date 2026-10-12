@@ -1,0 +1,9 @@
+pub table KnownByteRoundingSource(id: Int) { value: Int, }
+pub table KnownByteRoundingFirstUnknown(id: Int) { value: Int, }
+pub table KnownByteRoundingFirstScan(id: Int) { value: Int, }
+pub table KnownByteRoundingSecondUnknown(id: Int) { value: Int, }
+pub table KnownByteRoundingMiddleScan(id: Int) { value: Int, }
+pub table KnownByteRoundingThirdUnknown(id: Int) { value: Int, }
+pub table KnownByteRoundingLastScan(id: Int) { value: Int, }
+pub table KnownByteRoundingFirstReset(id: Int) { value: Int, }
+pub table KnownByteRoundingLastReset(id: Int) { value: Int, }

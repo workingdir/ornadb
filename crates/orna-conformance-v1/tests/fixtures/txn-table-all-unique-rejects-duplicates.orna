@@ -1,0 +1,9 @@
+pub table Note(id: Int) {
+    text: Str,
+    assert all_unique(note => note.text);
+}
+
+fn parent() {
+    Note.insert({ id: 7, text: "duplicate" });
+    Note.insert({ id: 8, text: "duplicate" });
+}

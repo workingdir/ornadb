@@ -1,0 +1,1 @@
+fn callback() = [1] | map(sys => sys);

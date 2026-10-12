@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
+use orna_value_v1::{Decimal, path_decode_key_components};
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
     LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan, Statement,
@@ -26,7 +27,7 @@ mod system_api;
 
 pub use semantic_payload::{
     DeclarationExplicitness, LocalSourceOrigin, NamedSemanticParameter, SEMANTIC_PAYLOAD_DOMAIN,
-    SEMANTIC_PAYLOAD_VERSION, SemanticDeclaration, SemanticDeclarationKind,
+    SEMANTIC_PAYLOAD_VERSION, SemanticDeclaration, SemanticDeclarationKind, SemanticParameter,
     SemanticPayloadAnalysis, SemanticPayloadError, SemanticPayloadErrorKind,
     analyze_semantic_payloads,
 };
@@ -357,7 +358,7 @@ impl EffectSummary {
         self.may_fail |= other.may_fail;
     }
     fn forbidden_for_assertion(&self) -> bool {
-        !self.effects.is_empty() || self.may_fail
+        !self.effects.is_empty()
     }
 }
 
@@ -387,6 +388,8 @@ pub struct Symbol {
     pub public: bool,
     pub effects: EffectSummary,
     pub generic_parameters: Vec<GenericParameterMetadata>,
+    /// Closed enum variants retained for schema-directed key reconstruction.
+    pub enum_variants: BTreeSet<String>,
     /// Declaration-backed write admission, retained through module exports.
     /// None means the caller supplied no field-admission metadata.
     pub table_schema: Option<TableSchema>,
@@ -671,6 +674,36 @@ impl Catalogue {
             catalogue_module(
                 Namespace(vec!["std".into(), "invoke".into()]),
                 [("echo", function(vec![Type::Int], Type::Int))],
+                std::iter::empty::<&str>(),
+            ),
+        );
+        modules.insert(
+            Namespace(vec!["std".into(), "concurrent".into()]),
+            catalogue_module(
+                Namespace(vec!["std".into(), "concurrent".into()]),
+                [
+                    (
+                        "parallel",
+                        function(
+                            vec![Type::List(Box::new(Type::Error))],
+                            Type::Stream(Box::new(Type::Error)),
+                        ),
+                    ),
+                    (
+                        "race",
+                        function(vec![Type::List(Box::new(Type::Error))], Type::Error),
+                    ),
+                    (
+                        "timeout",
+                        named_function(
+                            vec![
+                                ("callback", function(Vec::new(), Type::Error)),
+                                ("duration", Type::Named("std.DURATION".into())),
+                            ],
+                            Type::Error,
+                        ),
+                    ),
+                ],
                 std::iter::empty::<&str>(),
             ),
         );
@@ -1152,13 +1185,25 @@ impl Catalogue {
             Namespace(vec!["std".into(), "concurrent".into()]),
             fixture_module(
                 Namespace(vec!["std".into(), "concurrent".into()]),
-                [fixture_function(
-                    "parallel",
-                    function(
-                        vec![Type::List(Box::new(Type::Error))],
-                        Type::Stream(Box::new(Type::Error)),
+                [
+                    fixture_function(
+                        "parallel",
+                        function(
+                            vec![Type::List(Box::new(Type::Error))],
+                            Type::Stream(Box::new(Type::Error)),
+                        ),
                     ),
-                )],
+                    fixture_function(
+                        "timeout",
+                        named_function(
+                            vec![
+                                ("callback", function(Vec::new(), Type::Error)),
+                                ("duration", Type::Named("std.DURATION".into())),
+                            ],
+                            Type::Error,
+                        ),
+                    ),
+                ],
                 false,
             ),
         );
@@ -1220,6 +1265,7 @@ where
                     public: true,
                     effects,
                     generic_parameters: Vec::new(),
+                    enum_variants: BTreeSet::new(),
                     ty,
                 },
             )
@@ -1290,6 +1336,7 @@ fn fixture_symbol(kind: SymbolKind, ty: Type) -> Symbol {
         public: true,
         effects: EffectSummary::default(),
         generic_parameters: Vec::new(),
+        enum_variants: BTreeSet::new(),
     }
 }
 
@@ -1527,12 +1574,18 @@ pub fn admit_row_unit(
         ));
         return result;
     };
-    if decoded_key.len() != admission.keys.len()
-        || admission
-            .keys
+    let Some(key_types) = row_key_component_types(admission, analysis) else {
+        result.diagnostics.push(diag(
+            DIAG_TYPE,
+            "project row key path does not match the declared key schema",
+        ));
+        return result;
+    };
+    if decoded_key.len() != key_types.len()
+        || key_types
             .iter()
             .zip(&decoded_key)
-            .any(|((_, ty), value)| !row_key_matches_type(value, ty))
+            .any(|(ty, value)| !row_key_matches_type(value, ty, analysis))
     {
         result.diagnostics.push(diag(
             DIAG_TYPE,
@@ -1681,6 +1734,10 @@ fn analyze_retaining_context(
         parsed.push((namespace, parse.value));
     }
     let mut dependency_summaries = BTreeMap::new();
+    let source_payload_enums = parsed
+        .iter()
+        .map(|(namespace, tree)| (namespace.clone(), payload_enum_names(tree)))
+        .collect::<BTreeMap<_, _>>();
     stabilize_function_summaries(
         &parsed,
         &mut result.modules,
@@ -1692,7 +1749,7 @@ fn analyze_retaining_context(
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
         };
-        let scope = resolve_imports_with_dependencies(
+        let mut scope = resolve_imports_with_dependencies(
             namespace,
             tree,
             &header,
@@ -1702,6 +1759,13 @@ fn analyze_retaining_context(
             &dependency_summaries,
             &mut result.diagnostics,
         );
+        scope
+            .payload_enum_types
+            .extend(imported_payload_enum_bindings(
+                tree,
+                &source_payload_enums,
+                &result.modules,
+            ));
         let mut symbols = header.symbols.clone();
         for symbol in symbols.values_mut() {
             canonicalize_symbol(symbol, &scope.nominal_identities);
@@ -1927,6 +1991,7 @@ fn collect_header(
                     public,
                     effects: EffectSummary::default(),
                     generic_parameters: declared_generic_parameters(item),
+                    enum_variants: declared_enum_variants(item),
                 },
             )
             .is_some()
@@ -2067,6 +2132,16 @@ fn declared_symbol(item: &Item) -> Option<(String, SymbolKind, Type)> {
         _ => None,
     }
 }
+
+fn declared_enum_variants(item: &Item) -> BTreeSet<String> {
+    let Declaration::Enum { variants, .. } = &item.declaration else {
+        return BTreeSet::new();
+    };
+    variants
+        .iter()
+        .map(|variant| variant.name.clone())
+        .collect()
+}
 fn type_of(ty: &TypeExpr) -> Type {
     match ty {
         TypeExpr::Name {
@@ -2077,6 +2152,13 @@ fn type_of(ty: &TypeExpr) -> Type {
         TypeExpr::Name {
             path, arguments, ..
         } if path.as_slice() == ["Relation"] && arguments.len() == 1 => {
+            Type::Relation(Box::new(type_of(&arguments[0])))
+        }
+        TypeExpr::Name {
+            path, arguments, ..
+        } if path.as_slice() == ["Query"] && arguments.len() == 1 => {
+            // Query<T> is the read-only planner handle for the same typed row
+            // stream represented by Relation<T> in the current evaluator.
             Type::Relation(Box::new(type_of(&arguments[0])))
         }
         TypeExpr::Name {
@@ -2570,6 +2652,10 @@ struct Scope {
     /// The nominal owner whose nested implementation body is currently being
     /// checked. Ordinary module code has no private-field owner.
     private_field_owner: Option<String>,
+    /// A same-module nominal constructor used as an argument to a bounded
+    /// generic call may supply that type's private representation. This is
+    /// scoped to argument inference and does not grant ordinary field access.
+    allow_local_private_nominal_construction: bool,
     /// Names whose nominal rows belong to this source module. Imported rows
     /// are selected from the explicitly resolved export instead of by short
     /// name alone.
@@ -2582,6 +2668,9 @@ struct Scope {
     currency_types: BTreeSet<String>,
     /// Local enum payloads retained for closed constructor-pattern checking.
     enum_variants: BTreeMap<String, BTreeMap<String, BTreeMap<String, Type>>>,
+    /// Local or explicitly imported enum types whose variants carry payloads.
+    /// This compact admission metadata is kept separately from public Symbols.
+    payload_enum_types: BTreeSet<String>,
     /// Local transparent aliases. Refined and nominal type declarations are
     /// deliberately excluded so alias resolution cannot erase identity.
     type_aliases: BTreeMap<String, Type>,
@@ -2666,6 +2755,7 @@ fn resolve_imports_with_dependencies(
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
         nominal_private_fields: BTreeMap::new(),
         private_field_owner: None,
+        allow_local_private_nominal_construction: false,
         local_nominal_names: tree
             .items
             .iter()
@@ -2697,6 +2787,7 @@ fn resolve_imports_with_dependencies(
             .collect(),
         currency_types: currency_types(tree),
         enum_variants: enum_variant_types(tree, diagnostics),
+        payload_enum_types: payload_enum_names(tree),
         type_aliases: tree
             .items
             .iter()
@@ -2730,21 +2821,7 @@ fn resolve_imports_with_dependencies(
                     generics,
                     members,
                 } if generics.is_empty() => {
-                    // Keep the checkable surface of a mixed protocol. Only a
-                    // genuinely generic member is omitted; treating the
-                    // whole protocol as generic would skip its static and
-                    // non-generic members as well.
-                    let members = members
-                        .iter()
-                        .filter(|member| match member {
-                            ProtocolMember::Function { signature, .. } => {
-                                signature.generics.is_empty()
-                            }
-                            ProtocolMember::Static { .. } => true,
-                        })
-                        .cloned()
-                        .collect();
-                    Some((name.clone(), members))
+                    Some((name.clone(), members.clone()))
                 }
                 _ => None,
             })
@@ -2855,6 +2932,7 @@ fn resolve_imports_with_dependencies(
                 public: true,
                 effects: EffectSummary::default(),
                 generic_parameters: Vec::new(),
+                enum_variants: BTreeSet::new(),
             };
             match tail {
                 UseTail::None => {
@@ -2909,6 +2987,7 @@ fn resolve_imports_with_dependencies(
                         public: true,
                         effects: EffectSummary::default(),
                         generic_parameters: Vec::new(),
+                        enum_variants: BTreeSet::new(),
                     },
                     diagnostics,
                 );
@@ -2951,6 +3030,7 @@ fn resolve_imports_with_dependencies(
                         public: true,
                         effects: EffectSummary::default(),
                         generic_parameters: Vec::new(),
+                        enum_variants: BTreeSet::new(),
                     },
                     diagnostics,
                 );
@@ -3439,35 +3519,68 @@ fn check_item(
             }
             let mut key_names = BTreeSet::new();
             for key in keys {
-                if let Pattern::Name(key_name, _) = &key.pattern
-                    && !key_names.insert(key_name)
-                {
-                    diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
+                match &key.pattern {
+                    Pattern::Name(key_name, _) => {
+                        if !key_names.insert(key_name.clone()) {
+                            diagnostics.push(diag(DIAG_DUPLICATE, "duplicate primary-key field"));
+                        }
+                    }
+                    // Key paths are reconstructed as an ordered list of named
+                    // columns, so destructuring patterns have no stable schema
+                    // surface here.
+                    _ => diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "primary-key fields must have simple names",
+                    )),
                 }
                 if let Some(annotation) = &key.annotation {
                     validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
+                } else {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "primary-key fields must declare a type",
+                    ));
                 }
                 let ty = key
                     .annotation
                     .as_ref()
                     .map(|annotation| resolved_type_of(annotation, scope))
                     .unwrap_or(Type::Error);
-                let is_range = matches!(&ty, Type::Range(_))
-                    || matches!(&ty, Type::Applied { base, .. } if base == "Range");
-                let is_float = matches!(&ty, Type::Float)
-                    || matches!(&ty, Type::Applied { base, .. } if base == "Float");
-                if is_range || is_float {
-                    let message = if is_range {
-                        "Range<T> is not a primary-key type in version 1.0"
-                    } else {
-                        "Float is not a valid primary-key type"
-                    };
+                if let Some(message) = primary_key_type_error(&ty, scope, &mut BTreeSet::new()) {
                     diagnostics.push(diag(DIAG_TYPE, message));
+                }
+            }
+            // Keep the catalogue's key encoding types transparent through
+            // local aliases; path admission has no source Scope to consult.
+            if let Some(schema) = symbols
+                .get_mut(name)
+                .and_then(|symbol| symbol.table_schema.as_mut())
+            {
+                for key in keys {
+                    let (Pattern::Name(key_name, _), Some(annotation)) =
+                        (&key.pattern, &key.annotation)
+                    else {
+                        continue;
+                    };
+                    let resolved = resolved_type_of(annotation, scope);
+                    schema.fields.insert(key_name.clone(), resolved.clone());
+                    if let Some((_, key_type)) = schema
+                        .admission
+                        .as_mut()
+                        .and_then(|admission| {
+                            admission
+                                .keys
+                                .iter_mut()
+                                .find(|(field, _)| field == key_name)
+                        })
+                    {
+                        *key_type = resolved;
+                    }
                 }
             }
             let row = table_row_type(item);
             let target = Type::Named(name.clone());
-            let row_locals = match &row {
+            let mut row_locals = match &row {
                 Type::Record(fields) => fields
                     .iter()
                     .map(|(field, ty)| {
@@ -3480,12 +3593,67 @@ fn check_item(
                                 public: false,
                                 effects: EffectSummary::default(),
                                 generic_parameters: Vec::new(),
+                                enum_variants: BTreeSet::new(),
                             },
                         )
                     })
                     .collect(),
                 _ => BTreeMap::new(),
             };
+            if matches!(&row, Type::Record(_)) {
+                if keys.is_empty()
+                    && members.iter().any(|member| {
+                        matches!(member, orna_syntax_v1::TableMember::Field { name, .. } if name == "id")
+                    })
+                {
+                    // `id` is already the implicit logical key, so choosing a
+                    // body field of the same name would make row identity
+                    // depend on declaration order.
+                    diagnostics.push(diag(
+                        DIAG_DUPLICATE,
+                        "automatic primary-key field `id` conflicts with a declared field",
+                    ));
+                }
+                let mut declared_fields = key_names.clone();
+                if keys.is_empty() {
+                    declared_fields.insert("id".to_owned());
+                }
+                for member in members {
+                    if let orna_syntax_v1::TableMember::Field { name, .. } = member
+                        && !declared_fields.insert(name.clone())
+                    {
+                        diagnostics.push(diag(
+                            DIAG_DUPLICATE,
+                            "table field conflicts with another field or primary key",
+                        ));
+                    }
+                }
+            }
+            // `self` is the complete prospective row inside key defaults and
+            // row-local field expressions. The table row shape already
+            // includes key columns and the implicit `id` where applicable.
+            if let Type::Record(fields) = &row {
+                row_locals.insert(
+                    "self".into(),
+                    Symbol {
+                        table_schema: None,
+                        kind: SymbolKind::Let,
+                        ty: Type::Record(fields.clone()),
+                        public: false,
+                        effects: EffectSummary::default(),
+                        generic_parameters: Vec::new(),
+                        enum_variants: BTreeSet::new(),
+                    },
+                );
+            }
+            for key in keys {
+                let (Some(annotation), Some(default)) = (&key.annotation, &key.default) else {
+                    continue;
+                };
+                let expected = resolved_type_of(annotation, scope);
+                let inferred = infer_contextual(default, &expected, scope, &row_locals, diagnostics);
+                require_same(&expected, &inferred.ty, diagnostics);
+            }
             validate_non_overlapping_implementations(
                 members.iter().filter_map(|member| match member {
                     orna_syntax_v1::TableMember::Implementation { implementation, .. } => {
@@ -3638,6 +3806,7 @@ fn check_item(
                         public: false,
                         effects: EffectSummary::default(),
                         generic_parameters: Vec::new(),
+                        enum_variants: BTreeSet::new(),
                     },
                 );
             }
@@ -3703,9 +3872,9 @@ fn resolve_local_protocol_name(name: &str, scope: &Scope) -> Option<String> {
 /// conversion dispatch remain outside this validator. Unsupported generic,
 /// qualified, imported, unresolved, and non-protocol identities fail closed.
 /// Only the builtin Display/Present names retain a missing-member-surface
-/// residual. Mixed protocols still check every non-generic member; only generic
-/// members are omitted. `From<Source>` checks the closed source/member shape
-/// below, but does not implement conversion selection or runtime dispatch.
+/// residual. Mixed protocols check generic and non-generic members alike.
+/// `From<Source>` checks the closed source/member shape below, but does not
+/// implement conversion selection or runtime dispatch.
 /// Default compatibility uses the conservative proof described below for
 /// expression behaviour; arbitrary semantic default equivalence is residual.
 fn validate_nested_implementation_members(
@@ -3881,16 +4050,6 @@ fn validate_nested_implementation_members(
 
     let mut implemented_names = BTreeSet::new();
     for member in &implementation.members {
-        // A generic implementation member belongs to the same unresolved
-        // substitution surface as a generic protocol member. Do not let the
-        // checkable non-generic subset reject it as "unknown".
-        if matches!(
-            member,
-            orna_syntax_v1::ImplMember::Function { signature, .. }
-                if !signature.generics.is_empty()
-        ) {
-            continue;
-        }
         let name = match member {
             orna_syntax_v1::ImplMember::Function { signature, .. } => &signature.name,
             orna_syntax_v1::ImplMember::Static { name, .. } => name,
@@ -3942,15 +4101,17 @@ fn validate_nested_implementation_members(
                         "protocol implementation function signature is incompatible",
                     ));
                 } else {
-                    validate_nested_implementation_function(
-                        signature,
-                        implementation_signature,
-                        body,
-                        scope,
-                        target,
-                        target_shape,
-                        diagnostics,
-                    );
+                    if signature.generics.is_empty() {
+                        validate_nested_implementation_function(
+                            signature,
+                            implementation_signature,
+                            body,
+                            scope,
+                            target,
+                            target_shape,
+                            diagnostics,
+                        );
+                    }
                 }
             }
             (
@@ -3980,13 +4141,6 @@ fn validate_nested_implementation_members(
 
     for required in required_members {
         let implemented = implementation.members.iter().any(|member| {
-            if matches!(
-                member,
-                orna_syntax_v1::ImplMember::Function { signature, .. }
-                    if !signature.generics.is_empty()
-            ) {
-                return false;
-            }
             match (required, member) {
                 (
                     ProtocolMember::Function { signature, .. },
@@ -4109,7 +4263,7 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
         Type::Applied { base, arguments } => {
             (matches!(
                 base.as_str(),
-                "List" | "Range" | "Relation" | "Stream" | "Money" | "Float" | "Decimal"
+                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Float" | "Decimal"
             ) || system_api::embedded_system_api().describes_type(base))
                 && arguments
                     .iter()
@@ -4284,14 +4438,56 @@ fn compatible_protocol_function_signature(
     implementation: &orna_syntax_v1::FunctionSignature,
     scope: &Scope,
 ) -> bool {
-    if !implementation.generics.is_empty()
+    if required.generics.len() != implementation.generics.len()
         || required.parameters.len() != implementation.parameters.len()
-        || !compatible_protocol_type_annotation(
-            required.result.as_ref(),
-            implementation.result.as_ref(),
-            scope,
-        )
     {
+        return false;
+    }
+
+    let mut generic_scope = scope.clone();
+    for (index, (required_generic, implementation_generic)) in required
+        .generics
+        .iter()
+        .zip(&implementation.generics)
+        .enumerate()
+    {
+        let placeholder = format!("__protocol_member_generic_{index}");
+        generic_scope.type_aliases.remove(&required_generic.name);
+        generic_scope
+            .type_aliases
+            .remove(&implementation_generic.name);
+        generic_scope.generic_type_parameters.insert(placeholder.clone());
+        generic_scope.type_aliases.insert(
+            required_generic.name.clone(),
+            Type::Named(placeholder.clone()),
+        );
+        generic_scope.type_aliases.insert(
+            implementation_generic.name.clone(),
+            Type::Named(placeholder),
+        );
+
+        if required_generic.bounds.len() != implementation_generic.bounds.len()
+            || !required_generic
+                .bounds
+                .iter()
+                .zip(&implementation_generic.bounds)
+                .all(|(required, implementation)| {
+                    compatible_protocol_type_annotation(
+                        Some(required),
+                        Some(implementation),
+                        &generic_scope,
+                    )
+                })
+        {
+            return false;
+        }
+    }
+
+    if !compatible_protocol_type_annotation(
+        required.result.as_ref(),
+        implementation.result.as_ref(),
+        &generic_scope,
+    ) {
         return false;
     }
     required
@@ -4303,7 +4499,7 @@ fn compatible_protocol_function_signature(
                 && compatible_protocol_type_annotation(
                     required.annotation.as_ref(),
                     implementation.annotation.as_ref(),
-                    scope,
+                    &generic_scope,
                 )
                 && compatible_protocol_defaults(
                     required.default.as_ref(),
@@ -4943,6 +5139,7 @@ fn implementation_has_write(
                             public: false,
                             effects: EffectSummary::default(),
                             generic_parameters: Vec::new(),
+                            enum_variants: BTreeSet::new(),
                         },
                     )),
                     _ => None,
@@ -5294,7 +5491,7 @@ fn annotation_type_name_is_declared(
             || system_api::embedded_system_api().describes_type(last)
             || matches!(
                 last.as_str(),
-                "List" | "Range" | "Relation" | "Stream" | "Money" | "Locale"
+                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Locale"
             )
             || scope.names.get(last).is_some_and(|symbol| {
                 matches!(
@@ -5517,13 +5714,17 @@ fn check_function(
             );
             default_effects.join(&inferred.effects);
         }
-        bind_pattern(
-            &parameter.pattern,
-            ty.unwrap_or(Type::Error),
-            scope,
-            &mut local,
-            diagnostics,
-        );
+        let ty = ty.unwrap_or(Type::Error);
+        if ty == Type::Error {
+            // Preserve a simple parameter name after an invalid annotation so
+            // references in the body do not add a misleading unresolved-name
+            // cascade. The annotation diagnostic remains authoritative.
+            if let Pattern::Name(name, _) = &parameter.pattern {
+                insert_local_binding(name, Type::Error, &mut local, diagnostics);
+                continue;
+            }
+        }
+        bind_pattern(&parameter.pattern, ty, scope, &mut local, diagnostics);
     }
     if let Some(expected) = signature
         .result
@@ -5902,6 +6103,11 @@ fn infer_local_generic_call(
         .iter()
         .map(|generic| generic.name.clone())
         .collect::<BTreeSet<_>>();
+    let bounded_generic_names = generic_parameters
+        .iter()
+        .filter(|generic| !generic.bounds.is_empty())
+        .map(|generic| generic.name.clone())
+        .collect::<BTreeSet<_>>();
     let mut substitutions = BTreeMap::new();
     let mut valid_substitution = true;
     if let Some(type_arguments) = explicit_type_arguments {
@@ -5930,11 +6136,24 @@ fn infer_local_generic_call(
         .iter()
         .enumerate()
         .map(|(index, argument)| {
-            let expected =
-                expected_call_parameter(raw_parameters, parameter_names.as_deref(), arguments, index);
+            let expected = expected_call_parameter(
+                raw_parameters,
+                parameter_names.as_deref(),
+                arguments,
+                index,
+            );
+            let local_constructor_scope = expected.is_some_and(|expected| {
+                matches!(expected, Type::Named(name) if bounded_generic_names.contains(name))
+            });
             let inferred = if let Some(expected) = expected {
                 if type_mentions_generic(expected, &generic_names) {
-                    infer(&argument.value, scope, local, diagnostics)
+                    if local_constructor_scope {
+                        let mut argument_scope = scope.clone();
+                        argument_scope.allow_local_private_nominal_construction = true;
+                        infer(&argument.value, &argument_scope, local, diagnostics)
+                    } else {
+                        infer(&argument.value, scope, local, diagnostics)
+                    }
                 } else {
                     infer_contextual(&argument.value, expected, scope, local, diagnostics)
                 }
@@ -6487,6 +6706,7 @@ fn insert_local_binding(
             public: false,
             effects: EffectSummary::default(),
             generic_parameters: Vec::new(),
+            enum_variants: BTreeSet::new(),
         },
     );
 }
@@ -6958,9 +7178,7 @@ fn infer(
                     effects: base.effects,
                 };
             }
-            if name == "display"
-                && matches!(&base.ty, Type::Applied { base, .. } if base == "Secret")
-            {
+            if name == "display" && contains_secret_value_type(&base.ty) {
                 diagnostics.push(diag(DIAG_TYPE, "secret values cannot be displayed"));
                 return Inferred {
                     ty: Type::Error,
@@ -7054,7 +7272,18 @@ fn infer(
                             Type::Error
                         }
                     });
-                bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
+                if ty == Type::Error {
+                    // Keep an underconstrained lambda parameter in scope as
+                    // an error-typed local. This lets the annotation
+                    // diagnostic point at the useful site without turning
+                    // every use of that parameter into an unrelated
+                    // unresolved-name diagnostic.
+                    if let Pattern::Name(name, _) = &parameter.pattern {
+                        insert_local_binding(name, Type::Error, &mut locals, diagnostics);
+                    }
+                } else {
+                    bind_pattern(&parameter.pattern, ty.clone(), scope, &mut locals, diagnostics);
+                }
                 types.push(ty);
             }
             let value = if matches!(
@@ -7225,6 +7454,26 @@ fn infer(
                 return inferred;
             }
             if let Some(inferred) =
+                infer_parallel_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_race_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_timeout_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
+                infer_relation_member_call(callee, arguments, scope, local, diagnostics)
+            {
+                return inferred;
+            }
+            if let Some(inferred) =
                 infer_table_operation(callee, arguments, scope, local, diagnostics)
             {
                 return inferred;
@@ -7234,6 +7483,8 @@ fn infer(
             {
                 return inferred;
             }
+            let presentation_boundary = qualified_path(callee)
+                .is_some_and(|path| is_secret_sensitive_presentation_path(&path));
             let intrinsic = intrinsic_call_effects(callee);
             let callee = infer(callee, scope, local, diagnostics);
             let mut effects = callee.effects.clone();
@@ -7265,6 +7516,13 @@ fn infer(
                     x.ty
                 })
                 .collect::<Vec<_>>();
+            if presentation_boundary && values.iter().any(contains_secret_value_type) {
+                diagnostics.push(diag(DIAG_TYPE, "secret values cannot be presented"));
+                return Inferred {
+                    ty: Type::Error,
+                    effects,
+                };
+            }
             match callee.ty {
                 Type::Function {
                     parameters,
@@ -7481,6 +7739,30 @@ fn infer(
                     },
                     effects,
                 };
+            }
+            // Elapsed Duration arithmetic is distinct from calendar periods:
+            // it can shift an Instant or combine with another Duration.
+            let duration = Type::Named("std.DURATION".into());
+            let elapsed_result = match (op.as_str(), &left.ty, &right.ty) {
+                ("+", Type::Instant, right) if right == &duration => Some(Type::Instant),
+                ("+", left, Type::Instant) if left == &duration => Some(Type::Instant),
+                ("-", Type::Instant, right) if right == &duration => Some(Type::Instant),
+                ("-", Type::Instant, Type::Instant) => Some(duration.clone()),
+                ("+" | "-", left, right) if left == &duration && right == &duration => {
+                    Some(duration)
+                }
+                // Duration scaling accepts exact numeric factors only; the
+                // runtime rejects results finer than its nanosecond grid.
+                ("*", left, Type::Int) if left == &duration => Some(duration.clone()),
+                ("*", Type::Int, right) if right == &duration => Some(duration.clone()),
+                ("/", left, Type::Int) if left == &duration => Some(duration.clone()),
+                ("*", left, Type::Decimal) if left == &duration => Some(duration.clone()),
+                ("*", Type::Decimal, right) if right == &duration => Some(duration.clone()),
+                ("/", left, Type::Decimal) if left == &duration => Some(duration.clone()),
+                _ => None,
+            };
+            if let Some(ty) = elapsed_result {
+                return Inferred { ty, effects };
             }
             if op == "-"
                 && left.ty == Type::Instant
@@ -9061,8 +9343,18 @@ fn infer_nominal(
     let schema = symbol.table_schema.as_ref();
     let admission = schema.and_then(|schema| schema.admission.as_ref());
     let public_fields = schema.map(|schema| &schema.fields);
-    let owning_private = match &constructor_type {
-        Type::Named(identity) => scope.private_field_owner.as_deref() == Some(identity),
+    let owning_private = match (&constructor_type, path) {
+        (Type::Named(identity), [name]) => {
+            scope.private_field_owner.as_deref() == Some(identity)
+                || (scope.allow_local_private_nominal_construction
+                    && (scope.private_field_owner.is_none()
+                        || scope.private_field_owner.as_deref() == Some(identity))
+                    && scope.local_nominal_names.contains(&name.text)
+                    && scope
+                        .nominal_identities
+                        .get(&name.text)
+                        .is_some_and(|local_identity| local_identity == identity))
+        }
         _ => false,
     };
     let private_field_supplied = match &constructor_type {
@@ -9181,65 +9473,106 @@ fn infer_stream_from_list(
     })
 }
 
+/// Only a public export from the captured std.collection/std.query modules
+/// admits this intrinsic. The query declaration is a source-level re-export
+/// of the same operation identity, not an additional host implementation.
 fn standard_collection_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    scope
-        .available_modules
-        .get(&Namespace(vec!["std".into(), "collection".into()]))
-        .is_some_and(|module| {
-            module
-                .exports
-                .get(operation)
-                .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
-        })
+    ["collection", "query"].into_iter().any(|module_name| {
+        scope
+            .available_modules
+            .get(&Namespace(vec!["std".into(), module_name.into()]))
+            .is_some_and(|module| {
+                module
+                    .exports
+                    .get(operation)
+                    .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
+            })
+    })
 }
 
-fn standard_integer_aggregate_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    standard_aggregate_element(operation, Type::Int, scope).is_some()
+fn is_portable_collection_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "filter"
+            | "map"
+            | "flat_map"
+            | "sort_by"
+            | "chunk"
+            | "flatten"
+            | "partition"
+            | "zip"
+            | "zip_exact"
+            | "unique"
+            | "group_by"
+            | "pairs"
+            | "window"
+            | "split_when"
+            | "rank"
+            | "asof_join"
+            | "bucket_by"
+            | "take"
+            | "drop"
+            | "distinct"
+            | "union"
+            | "count"
+            | "first"
+            | "one"
+            | "sum"
+            | "min"
+            | "max"
+            | "every"
+            | "exists"
+    )
 }
 
-fn standard_float_aggregate_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    standard_aggregate_element(operation, Type::Float, scope).is_some()
-}
-
-fn standard_aggregate_element(operation: &str, element: Type, scope: &Scope) -> Option<Type> {
-    if !matches!(operation, "sum" | "min" | "max") {
-        return None;
+fn standard_collection_module_operation<'a>(
+    callee: &'a Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<&'a str> {
+    let path = qualified_path(callee)?;
+    match path.as_slice() {
+        ["std", "collection" | "query", operation]
+            if !local.contains_key("std")
+                && is_portable_collection_operation(operation)
+                && standard_collection_operation_is_admitted(operation, scope) =>
+        {
+            Some(*operation)
+        }
+        [alias, operation] if !local.contains_key(*alias) => {
+            let namespace = scope.modules.get(*alias)?;
+            if namespace.0.len() == 2
+                && namespace.0[0] == "std"
+                && matches!(namespace.0[1].as_str(), "collection" | "query")
+                && is_portable_collection_operation(operation)
+                && scope
+                    .available_modules
+                    .get(namespace)
+                    .is_some_and(|module| {
+                        module
+                            .exports
+                            .get(*operation)
+                            .is_some_and(|symbol| symbol.kind == SymbolKind::Function)
+                    })
+            {
+                Some(*operation)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
-    let result = if operation == "sum" {
-        element.clone()
-    } else {
-        Type::Optional(Box::new(element.clone()))
-    };
-    let expected = Type::Function {
-        parameters: vec![Type::List(Box::new(element.clone()))],
-        parameter_names: Some(vec!["rows".into()]),
-        default_parameters: BTreeSet::new(),
-        result: Box::new(result),
-    };
-    scope
-        .available_modules
-        .get(&Namespace(vec!["std".into(), "collection".into()]))
-        .and_then(|module| module.exports.get(operation))
-        .is_some_and(|symbol| symbol.kind == SymbolKind::Function && symbol.ty == expected)
-        .then_some(element)
 }
 
-fn standard_finite_list_operation_is_admitted(operation: &str, scope: &Scope) -> bool {
-    if matches!(operation, "sum" | "min" | "max") {
-        standard_integer_aggregate_operation_is_admitted(operation, scope)
-            || standard_float_aggregate_operation_is_admitted(operation, scope)
-    } else {
-        standard_collection_operation_is_admitted(operation, scope)
-    }
-}
-
-fn finite_list_aggregate_element(callee: &Expr, operation: &str, scope: &Scope) -> Option<Type> {
-    if qualified_path(callee)?.as_slice() == ["std", "collection", operation] {
-        standard_aggregate_element(operation, Type::Int, scope)
-            .or_else(|| standard_aggregate_element(operation, Type::Float, scope))
-    } else {
-        None
-    }
+// The pinned collection source declares one generic finite-list signature.
+// Nonempty calls get their element type from the rows; empty aggregates use
+// the caller's context where available and otherwise keep the Int zero rule.
+fn finite_list_aggregate_element(
+    _callee: &Expr,
+    _operation: &str,
+    _scope: &Scope,
+) -> Option<Type> {
+    None
 }
 
 /// Root collection names are ordinary, shadowable bindings in 1.0.0. Keep
@@ -9297,15 +9630,7 @@ fn finite_list_collection_operation<'a>(
     {
         return path.last().copied();
     }
-    match path.as_slice() {
-        ["std", "collection", operation]
-            if !local.contains_key("std")
-                && standard_finite_list_operation_is_admitted(operation, scope) =>
-        {
-            Some(*operation)
-        }
-        _ => None,
-    }
+    standard_collection_module_operation(callee, scope, local)
 }
 
 fn is_finite_list_numeric_aggregate_pipeline_stage(
@@ -9331,10 +9656,18 @@ fn infer_finite_list_collection_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let path = qualified_path(callee)?;
-    if matches!(
-        path.as_slice(),
-        ["every"] | ["exists"] | ["sort_by"] | ["first"] | ["one"] | ["sum"] | ["min"] | ["max"]
-    ) && let Some(argument) = arguments
+    let portable_collection_call = match path.as_slice() {
+        [operation] => matches!(
+            *operation,
+            "filter" | "map" | "flat_map" | "sort_by" | "take" | "drop" | "distinct"
+                | "union" | "count" | "first" | "one" | "sum" | "min" | "max"
+                | "every" | "exists" | "chunk" | "flatten" | "partition" | "zip"
+                | "zip_exact" | "unique" | "group_by" | "pairs" | "window"
+                | "split_when" | "rank" | "asof_join"
+        ),
+        _ => standard_collection_module_operation(callee, scope, local).is_some(),
+    };
+    if portable_collection_call && let Some(argument) = arguments
         .iter()
         .find(|argument| argument.name.as_deref() == Some("rows"))
         .or_else(|| arguments.first())
@@ -9356,18 +9689,7 @@ fn infer_finite_list_collection_call(
         ["sort_by"] if root_collection_intrinsic_is_unshadowed("sort_by", scope, local) => {
             "sort_by"
         }
-        ["std", "collection", "sort_by"]
-            if !local.contains_key("std")
-                && standard_finite_list_operation_is_admitted("sort_by", scope) =>
-        {
-            "sort_by"
-        }
-        ["std", "collection", operation]
-            if standard_finite_list_operation_is_admitted(operation, scope) =>
-        {
-            operation
-        }
-        _ => return None,
+        _ => standard_collection_module_operation(callee, scope, local)?,
     };
     Some(infer_finite_list_collection(
         operation,
@@ -9392,6 +9714,40 @@ fn infer_finite_list_collection(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if operation == "bucket_by" {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "bucket_by requires a relation with an explicit time source",
+        ));
+        return Inferred {
+            ty: Type::Error,
+            effects: input.map_or_else(EffectSummary::default, |input| input.effects),
+        };
+    }
+    if matches!(
+        operation,
+        "chunk"
+            | "flatten"
+            | "partition"
+            | "zip"
+            | "zip_exact"
+            | "unique"
+            | "group_by"
+            | "pairs"
+            | "window"
+            | "split_when"
+            | "rank"
+            | "asof_join"
+    ) {
+        return infer_finite_list_helper_collection(
+            operation,
+            input,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
+    }
     if operation == "first" {
         return infer_finite_list_first(arguments, input, scope, local, diagnostics);
     }
@@ -9422,6 +9778,16 @@ fn infer_finite_list_collection(
             diagnostics,
         );
     }
+    if matches!(operation, "distinct" | "count" | "take" | "drop" | "union") {
+        return infer_finite_list_simple_collection(
+            operation,
+            input,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
+    }
     let pipeline = input.is_some();
     let mut slots = [None, None];
     let mut malformed = false;
@@ -9433,7 +9799,11 @@ fn infer_finite_list_collection(
                 named_started = true;
                 Some(0)
             }
-            Some("transform") => {
+            Some("predicate") if operation == "filter" => {
+                named_started = true;
+                Some(1)
+            }
+            Some("transform") if matches!(operation, "map" | "flat_map") => {
                 named_started = true;
                 Some(1)
             }
@@ -9496,7 +9866,11 @@ fn infer_finite_list_collection(
         let callback = infer_finite_list_callback(
             &arguments[index].value,
             element,
-            Type::Error,
+            if operation == "filter" {
+                Type::Bool
+            } else {
+                Type::Error
+            },
             scope,
             local,
             diagnostics,
@@ -9528,6 +9902,16 @@ fn infer_finite_list_collection(
         };
     };
     let ty = match operation {
+        "filter" => {
+            if callback.ty == Type::Bool {
+                let Type::List(element) = row else {
+                    unreachable!("finite-list row type was checked")
+                };
+                Type::List(element)
+            } else {
+                Type::Error
+            }
+        }
         "map" => Type::List(Box::new(callback.ty)),
         "flat_map" => match callback.ty {
             Type::List(element) => Type::List(element),
@@ -9543,6 +9927,380 @@ fn infer_finite_list_collection(
         _ => unreachable!("finite list collection operation was checked"),
     };
     Inferred { ty, effects }
+}
+
+/// Static signatures for the remaining finite std.collection/std.query
+/// helpers. Their runtime bodies remain evaluator intrinsics admitted by the
+/// same captured module exports.
+fn infer_finite_list_helper_collection(
+    operation: &str,
+    input: Option<Inferred>,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let expected: &[&str] = match operation {
+        "chunk" => &["values", "size"],
+        "flatten" | "unique" | "pairs" => &["values"],
+        "partition" | "split_when" => &["values", "predicate"],
+        "zip" | "zip_exact" => &["left", "right"],
+        "group_by" | "rank" => &["values", "key"],
+        "window" => &["values", "size", "step"],
+        "asof_join" => &["left", "right", "time", "by"],
+        _ => unreachable!("finite-list helper was checked"),
+    };
+    let pipeline = input.is_some();
+    let mut slots = vec![None; expected.len()];
+    let mut values = vec![None; expected.len()];
+    let mut malformed = false;
+    let mut positional = usize::from(pipeline);
+    let mut named_started = false;
+    let mut effects = input
+        .as_ref()
+        .map(|input| input.effects.clone())
+        .unwrap_or_default();
+    if let Some(input) = input {
+        values[0] = Some(input.ty);
+    }
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = if let Some(name) = argument.name.as_deref() {
+            named_started = true;
+            expected.iter().position(|expected| *expected == name)
+        } else if named_started || positional >= expected.len() {
+            None
+        } else {
+            let slot = positional;
+            positional += 1;
+            Some(slot)
+        };
+        let contextual_callback = slot.is_some_and(|slot| {
+            matches!(
+                (operation, slot),
+                ("partition" | "split_when", 1)
+                    | ("group_by" | "rank", 1)
+                    | ("asof_join", 2 | 3)
+            )
+        }) && matches!(&argument.value, Expr::Lambda { .. });
+        let inferred = if contextual_callback {
+            Inferred {
+                ty: Type::Error,
+                effects: EffectSummary::default(),
+            }
+        } else {
+            infer(&argument.value, scope, local, diagnostics)
+        };
+        effects.join(&inferred.effects);
+        if let Some(slot) = slot {
+            if (pipeline && slot == 0) || slots[slot].replace(index).is_some() {
+                malformed = true;
+            } else {
+                values[slot] = Some(inferred.ty);
+            }
+        } else {
+            malformed = true;
+        }
+    }
+    let required = if operation == "window" {
+        expected.len() - 1
+    } else {
+        expected.len()
+    };
+    if values.iter().take(required).any(Option::is_none) {
+        malformed = true;
+    }
+    if operation == "window" && values[2].is_none() {
+        values[2] = Some(Type::Int);
+    }
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("std.collection {operation} arguments do not match its static signature"),
+        ));
+    }
+
+    let list_element = |index: usize, name: &str, diagnostics: &mut Vec<Diagnostic>| {
+        match values.get(index).and_then(Option::as_ref) {
+            Some(Type::List(element)) => element.as_ref().clone(),
+            Some(Type::Error) | None => Type::Error,
+            Some(_) => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.collection {operation} {name} must be a finite list"),
+                ));
+                Type::Error
+            }
+        }
+    };
+    let first = list_element(0, "input", diagnostics);
+    let result = match operation {
+        "chunk" => {
+            let size = values.get(1).and_then(Option::as_ref).unwrap_or(&Type::Error);
+            require_same(&Type::Int, size, diagnostics);
+            if let Some(index) = slots.get(1).and_then(|slot| *slot)
+                && is_non_positive_integer_constant(&arguments[index].value)
+            {
+                diagnostics.push(diag(DIAG_TYPE, "chunk size must be positive"));
+            }
+            Type::List(Box::new(Type::List(Box::new(first))))
+        }
+        "flatten" => match first {
+            Type::List(inner) => Type::List(inner),
+            Type::Error => Type::Error,
+            _ => {
+                diagnostics.push(diag(DIAG_TYPE, "flatten requires a list of finite lists"));
+                Type::Error
+            }
+        },
+        "partition" | "split_when" => {
+            if let Some(index) = slots.get(1).and_then(|slot| *slot) {
+                let callback = infer_finite_list_callback(
+                    &arguments[index].value,
+                    first.clone(),
+                    Type::Bool,
+                    scope,
+                    local,
+                    diagnostics,
+                );
+                effects.join(&callback.effects);
+            }
+            if operation == "partition" {
+                Type::Tuple(vec![
+                    Type::List(Box::new(first.clone())),
+                    Type::List(Box::new(first)),
+                ])
+            } else {
+                Type::List(Box::new(Type::List(Box::new(first))))
+            }
+        }
+        "zip" | "zip_exact" => {
+            let right = list_element(1, "right input", diagnostics);
+            Type::List(Box::new(Type::Tuple(vec![first, right])))
+        }
+        "unique" => {
+            if is_default_float_equality_type(&first) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "unique requires lawful equality; default Float equality is unavailable",
+                ));
+                Type::Error
+            } else {
+                Type::List(Box::new(first))
+            }
+        }
+        "pairs" => Type::List(Box::new(Type::Tuple(vec![first.clone(), first]))),
+        "group_by" | "rank" => {
+            let key_type = if let Some(index) = slots.get(1).and_then(|slot| *slot) {
+                let callback = infer_finite_list_callback(
+                    &arguments[index].value,
+                    first.clone(),
+                    Type::Error,
+                    scope,
+                    local,
+                    diagnostics,
+                );
+                effects.join(&callback.effects);
+                callback.ty
+            } else {
+                Type::Error
+            };
+            if key_type != Type::Error && !is_evaluator_ordered_comparison_type(&key_type) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("std.collection {operation} key must have a lawful total order"),
+                ));
+            }
+            if operation == "group_by" {
+                Type::List(Box::new(Type::Tuple(vec![
+                    key_type,
+                    Type::List(Box::new(first)),
+                ])))
+            } else {
+                Type::List(Box::new(Type::Tuple(vec![first, Type::Int])))
+            }
+        }
+        "window" => {
+            for index in [1, 2] {
+                let size = values.get(index).and_then(Option::as_ref).unwrap_or(&Type::Error);
+                require_same(&Type::Int, size, diagnostics);
+                if let Some(argument_index) = slots.get(index).and_then(|slot| *slot)
+                    && is_non_positive_integer_constant(&arguments[argument_index].value)
+                {
+                    diagnostics.push(diag(DIAG_TYPE, "window size and step must be positive"));
+                }
+            }
+            Type::List(Box::new(Type::List(Box::new(first))))
+        }
+        "asof_join" => {
+            let right = list_element(1, "right input", diagnostics);
+            require_same(&first, &right, diagnostics);
+            for index in [2, 3] {
+                if let Some(argument_index) = slots.get(index).and_then(|slot| *slot) {
+                    let callback = infer_finite_list_callback(
+                        &arguments[argument_index].value,
+                        first.clone(),
+                        Type::Error,
+                        scope,
+                        local,
+                        diagnostics,
+                    );
+                    effects.join(&callback.effects);
+                    if index == 2
+                        && callback.ty != Type::Error
+                        && !is_evaluator_ordered_comparison_type(&callback.ty)
+                    {
+                        diagnostics.push(diag(DIAG_TYPE, "asof_join time key must be ordered"));
+                    }
+                }
+            }
+            Type::List(Box::new(Type::Tuple(vec![
+                first.clone(),
+                Type::Optional(Box::new(first)),
+            ])))
+        }
+        _ => unreachable!("finite-list helper was checked"),
+    };
+    Inferred {
+        ty: if malformed { Type::Error } else { result },
+        effects,
+    }
+}
+
+fn infer_finite_list_simple_collection(
+    operation: &str,
+    input: Option<Inferred>,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let pipeline = input.is_some();
+    let expected: &[&str] = match operation {
+        "distinct" | "count" => &["rows"],
+        "take" | "drop" => &["rows", "count"],
+        "union" => &["left", "right"],
+        _ => unreachable!("simple finite-list operation was checked"),
+    };
+    let mut slots = vec![None; expected.len()];
+    let mut malformed = false;
+    let mut positional = usize::from(pipeline);
+    let mut named_started = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let slot = match argument.name.as_deref() {
+            Some(name) => {
+                named_started = true;
+                expected.iter().position(|expected| *expected == name)
+            }
+            None if named_started || positional >= expected.len() => None,
+            None => {
+                let slot = positional;
+                positional += 1;
+                Some(slot)
+            }
+        };
+        if let Some(slot) = slot {
+            if pipeline && slot == 0 || slots[slot].replace(index).is_some() {
+                malformed = true;
+            }
+        } else {
+            malformed = true;
+        }
+    }
+    if pipeline {
+        if slots[0].is_some() {
+            malformed = true;
+        }
+    } else if slots[0].is_none() {
+        malformed = true;
+    }
+    if slots.iter().skip(1).any(Option::is_none) {
+        malformed = true;
+    }
+
+    let mut effects = input
+        .as_ref()
+        .map(|input| input.effects.clone())
+        .unwrap_or_default();
+    let mut values = vec![None; expected.len()];
+    if let Some(input) = input {
+        values[0] = Some(input.ty);
+    }
+    for (index, argument) in arguments.iter().enumerate() {
+        let Some(slot) = slots.iter().position(|candidate| *candidate == Some(index)) else {
+            let inferred = infer(&argument.value, scope, local, diagnostics);
+            effects.join(&inferred.effects);
+            continue;
+        };
+        let inferred = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        values[slot] = Some(inferred.ty);
+    }
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("std.collection {operation} arguments do not match its static signature"),
+        ));
+    }
+    let first = values.first().and_then(Option::as_ref).cloned().unwrap_or(Type::Error);
+    let Type::List(element) = first else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("finite-list {operation} requires a finite list"),
+        ));
+        return Inferred { ty: Type::Error, effects };
+    };
+    let result = match operation {
+        "count" => Type::Int,
+        "distinct" => {
+            if is_default_float_equality_type(&element) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "distinct requires a lawful equality key; default Float equality is unavailable",
+                ));
+                Type::Error
+            } else {
+                Type::List(element)
+            }
+        }
+        "take" | "drop" => {
+            let count = values.get(1).and_then(Option::as_ref).unwrap_or(&Type::Error);
+            if count != &Type::Int && count != &Type::Error {
+                diagnostics.push(diag(DIAG_TYPE, format!("{operation} count must be an Int")));
+                Type::Error
+            } else if count == &Type::Int
+                && slots[1].is_some_and(|index| is_negative_integer_constant(&arguments[index].value))
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("{operation} count must be nonnegative"),
+                ));
+                Type::Error
+            } else {
+                Type::List(element)
+            }
+        }
+        "union" => {
+            let right = values.get(1).and_then(Option::as_ref).cloned().unwrap_or(Type::Error);
+            match right {
+                Type::List(right_element) if types_match(&element, &right_element) => {
+                    Type::List(element)
+                }
+                Type::Error => Type::Error,
+                _ => {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "finite-list union requires lists with compatible element types",
+                    ));
+                    Type::Error
+                }
+            }
+        }
+        _ => unreachable!("simple finite-list operation was checked"),
+    };
+    Inferred {
+        ty: if malformed { Type::Error } else { result },
+        effects,
+    }
 }
 
 /// Checks the finite-list `sort_by(rows, key)` signature.  The key callback is
@@ -9719,11 +10477,10 @@ fn is_sort_key_type(ty: &Type) -> bool {
     }
 }
 
-/// Checks the bounded finite-list numeric aggregate signatures. Unqualified
-/// calls admit only `List<Int>` and `List<Float>`; qualified calls pass the
-/// exact element type from their pinned standard declaration. Empty lists use
-/// that declaration or the contextual result type, falling back to Int for
-/// the unannotated legacy form. Effects from the input expression are retained.
+/// Checks the bounded finite-list numeric aggregate signatures. The pinned
+/// source declarations are generic, so rows supply the element type and the
+/// operation admits only supported numeric element kinds. Empty unannotated
+/// lists retain the legacy Int-zero rule; input effects are preserved.
 fn infer_finite_list_numeric_aggregate(
     operation: &str,
     arguments: &[orna_syntax_v1::Argument],
@@ -9809,7 +10566,8 @@ fn infer_finite_list_numeric_aggregate(
     }
     let valid = match (&rows, aggregate_element.as_ref()) {
         (Type::List(element), Some(expected)) => element.as_ref() == expected,
-        (Type::List(element), None) => matches!(element.as_ref(), Type::Int | Type::Float),
+        (Type::List(element), None) if operation == "sum" => is_sum_element_type(element),
+        (Type::List(element), None) => is_sort_key_type(element),
         _ => false,
     };
     if !valid {
@@ -9821,7 +10579,7 @@ fn infer_finite_list_numeric_aggregate(
         } else {
             diagnostics.push(diag(
                 DIAG_TYPE,
-                format!("finite-list {operation} requires a finite list of Int or Float values"),
+                format!("finite-list {operation} requires a finite list with a supported {operation} element type"),
             ));
         }
     }
@@ -9843,6 +10601,11 @@ fn infer_finite_list_numeric_aggregate(
         },
         effects,
     }
+}
+
+fn is_sum_element_type(element: &Type) -> bool {
+    matches!(element, Type::Int | Type::Decimal | Type::Float)
+        || matches!(element, Type::Applied { base, .. } if base == "Money")
 }
 
 fn infer_finite_list_aggregate_rows(
@@ -10369,7 +11132,7 @@ fn infer_relation_collection_call(
         {
             *operation
         }
-        _ => return None,
+        _ => standard_collection_module_operation(callee, scope, local)?,
     };
     if operation == "union" {
         return infer_relation_union_call(arguments, scope, local, diagnostics);
@@ -10512,6 +11275,195 @@ fn infer_relation_collection_call(
         },
         effects,
     })
+}
+
+fn infer_relation_collection_pipeline(
+    operation: &str,
+    input: Inferred,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let Type::Relation(element) = input.ty else {
+        unreachable!("qualified relation pipeline is selected for Relation<T>")
+    };
+    let mut effects = input.effects;
+    let element = *element;
+    let callback_parameter = match operation {
+        "filter" | "every" | "exists" => Some("predicate"),
+        "map" | "flat_map" => Some("transform"),
+        "sort_by" => Some("key"),
+        _ => None,
+    };
+    if let Some(parameter) = callback_parameter {
+        let expected_count = 1;
+        let malformed = arguments.len() != expected_count
+            || arguments
+                .first()
+                .is_some_and(|argument| argument.name.as_deref().is_some_and(|name| name != parameter));
+        let Some(argument) = arguments.first() else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {operation} requires a {parameter} callback"),
+            ));
+            return Inferred { ty: Type::Error, effects };
+        };
+        let callback = infer_relation_callback(
+            &argument.value,
+            element.clone(),
+            if matches!(operation, "filter" | "every" | "exists") {
+                Type::Bool
+            } else {
+                Type::Error
+            },
+            scope,
+            local,
+            diagnostics,
+        );
+        effects.join(&callback.effects);
+        if malformed {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {operation} pipeline arguments do not match its static signature"),
+            ));
+        }
+        let valid = !malformed
+            && match operation {
+                "filter" | "every" | "exists" => callback.ty == Type::Bool,
+                "map" => callback.ty != Type::Error,
+                "flat_map" => matches!(callback.ty, Type::List(_) | Type::Relation(_)),
+                "sort_by" => is_sort_key_type(&callback.ty),
+                _ => false,
+            };
+        return Inferred {
+            ty: if valid {
+                match operation {
+                    "every" | "exists" => Type::Bool,
+                    "map" => Type::Relation(Box::new(callback.ty)),
+                    "flat_map" => match callback.ty {
+                        Type::List(element) | Type::Relation(element) => Type::Relation(element),
+                        _ => Type::Error,
+                    },
+                    _ => Type::Relation(Box::new(element)),
+                }
+            } else {
+                Type::Error
+            },
+            effects,
+        };
+    }
+
+    let expected = match operation {
+        "take" | "drop" | "union" => 1,
+        "one" => usize::from(!arguments.is_empty()),
+        "count" | "first" | "distinct" | "sum" | "min" | "max" => 0,
+        _ => unreachable!("qualified relation collection operation was checked"),
+    };
+    let expected_name = match operation {
+        "take" | "drop" => Some("count"),
+        "union" => Some("right"),
+        "one" => Some("predicate"),
+        _ => None,
+    };
+    let mut malformed = arguments.len() != expected;
+    if let Some(name) = expected_name {
+        malformed |= arguments
+            .first()
+            .is_some_and(|argument| argument.name.as_deref().is_some_and(|actual| actual != name));
+    }
+    let mut values = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let value = if matches!(operation, "one") {
+            infer_relation_callback(
+                &argument.value,
+                element.clone(),
+                Type::Bool,
+                scope,
+                local,
+                diagnostics,
+            )
+        } else {
+            infer(&argument.value, scope, local, diagnostics)
+        };
+        effects.join(&value.effects);
+        values.push(value.ty);
+    }
+    if malformed {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            format!("relation {operation} pipeline arguments do not match its static signature"),
+        ));
+    }
+    let ty = match operation {
+        "count" => Type::Int,
+        "first" => Type::Optional(Box::new(element.clone())),
+        "one" => {
+            if values.first().is_some_and(|ty| *ty != Type::Bool) {
+                diagnostics.push(diag(DIAG_TYPE, "relation one predicate must return Bool"));
+                Type::Error
+            } else {
+                effects.may_fail = true;
+                element.clone()
+            }
+        }
+        "distinct" => {
+            if is_default_float_equality_type(&element) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "distinct requires a lawful equality key; default Float equality is unavailable",
+                ));
+                Type::Error
+            } else {
+                Type::Relation(Box::new(element.clone()))
+            }
+        }
+        "take" | "drop" => {
+            if values.first().is_some_and(|ty| *ty != Type::Int) {
+                diagnostics.push(diag(DIAG_TYPE, format!("relation {operation} count must be an Int")));
+                Type::Error
+            } else if values.first() == Some(&Type::Int)
+                && is_negative_integer_constant(&arguments[0].value)
+            {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!("relation {operation} count must be nonnegative"),
+                ));
+                Type::Error
+            } else {
+                Type::Relation(Box::new(element.clone()))
+            }
+        }
+        "union" => match values.first() {
+            Some(Type::Relation(right)) if types_match(&element, right) => {
+                Type::Relation(Box::new(element.clone()))
+            }
+            Some(Type::Error) => Type::Error,
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "relation union requires a compatible relation",
+                ));
+                Type::Error
+            }
+        },
+        "sum" if is_sum_element_type(&element) => element.clone(),
+        "min" | "max" if is_sort_key_type(&element) => {
+            Type::Optional(Box::new(element.clone()))
+        }
+        "sum" | "min" | "max" => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {operation} requires a supported element type"),
+            ));
+            Type::Error
+        }
+        _ => unreachable!("qualified relation collection operation was checked"),
+    };
+    Inferred {
+        ty: if malformed { Type::Error } else { ty },
+        effects,
+    }
 }
 
 fn infer_relation_union_call(
@@ -10792,12 +11744,17 @@ fn infer_relation_terminal_call(
         }
         "take" | "drop" => Type::Relation(element.clone()),
         "window" => Type::Relation(Box::new(Type::List(Box::new(element.as_ref().clone())))),
-        "sum" | "min" | "max" if matches!(element.as_ref(), Type::Int | Type::Float) => {
-            if operation == "sum" {
-                element.as_ref().clone()
-            } else {
-                Type::Optional(element.clone())
-            }
+        "sum" if is_sum_element_type(element.as_ref()) => element.as_ref().clone(),
+        "min" | "max" if is_sort_key_type(element.as_ref()) => {
+            Type::Optional(element.clone())
+        }
+        "sum" | "min" | "max" => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                format!("relation {operation} requires a supported element type"),
+            ));
+            valid = false;
+            Type::Error
         }
         _ => {
             diagnostics.push(diag(
@@ -10980,6 +11937,31 @@ fn infer_success_pipeline(
     if let Expr::Call {
         callee, arguments, ..
     } = rhs
+        && qualified_path(callee).as_deref() == Some(["sys", "explain"].as_slice())
+    {
+        let functions = system_api::embedded_system_api()
+            .function("sys.explain")
+            .expect("descriptor-driven sys.explain path has a descriptor");
+        let stage = infer_query_explain_system_call(
+            functions,
+            arguments,
+            None,
+            Some(&input.ty),
+            scope,
+            local,
+            diagnostics,
+        )
+        .expect("sys.explain has a query-plan overload");
+        let mut effects = input.effects;
+        effects.join(&stage.effects);
+        return Inferred {
+            ty: stage.ty,
+            effects,
+        };
+    }
+    if let Expr::Call {
+        callee, arguments, ..
+    } = rhs
         && qualified_path(callee).as_deref() == Some(["sys", "cancel"].as_slice())
     {
         let functions = system_api::embedded_system_api()
@@ -11010,6 +11992,21 @@ fn infer_success_pipeline(
             ty: Type::Error,
             effects: input.effects,
         };
+    }
+    if matches!(&input.ty, Type::Relation(_))
+        && let Expr::Call {
+            callee, arguments, ..
+        } = rhs
+        && let Some(operation) = standard_collection_module_operation(callee, scope, local)
+    {
+        return infer_relation_collection_pipeline(
+            operation,
+            input,
+            arguments,
+            scope,
+            local,
+            diagnostics,
+        );
     }
     if let Type::Relation(element) = &input.ty
         && let Expr::Call {
@@ -12070,7 +13067,8 @@ fn infer_generic_pipeline_stage(
             effects,
         };
     };
-    if path == ["sys", "meta"]
+    if path == ["sys", "explain"]
+        || path == ["sys", "meta"]
         || path == ["sys", "await"]
         || path == ["sys", "cancel"]
         || path == ["sys", "invoke"]
@@ -12368,6 +13366,59 @@ fn infer_finite_list_callback(
         ty: *callback_result,
         effects: callback.effects,
     }
+}
+
+/// Resolves the genuine `Relation<T>` instance members from ORNA-MEMBER-005.
+/// Table-owned operations stay on their existing path so their schema and
+/// operation checks continue to use the table symbol directly.
+fn infer_relation_member_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let Expr::Field { base, name, .. } = callee else {
+        return None;
+    };
+    if !matches!(name.as_str(), "count" | "first")
+        || table_symbol(base, scope, local).is_some()
+    {
+        return None;
+    }
+
+    let diagnostic_count = diagnostics.len();
+    let receiver = infer(base, scope, local, diagnostics);
+    let Type::Relation(element) = receiver.ty else {
+        diagnostics.truncate(diagnostic_count);
+        return None;
+    };
+
+    let values = arguments
+        .iter()
+        .map(|argument| infer(&argument.value, scope, local, diagnostics).ty)
+        .collect::<Vec<_>>();
+    check_call_arguments(
+        &[],
+        Some(&[]),
+        &BTreeSet::new(),
+        arguments,
+        &values,
+        None,
+        diagnostics,
+    );
+
+    let mut effects = receiver.effects;
+    effects.effects.insert("database read".into());
+    effects.may_fail = true;
+    Some(Inferred {
+        ty: match name.as_str() {
+            "count" => Type::Int,
+            "first" => Type::Optional(element),
+            _ => unreachable!("relation member name was checked above"),
+        },
+        effects,
+    })
 }
 
 /// Resolves the small, intrinsic associated-operation surface of a table.
@@ -12828,6 +13879,9 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
     }
     match (expected, actual) {
         (Type::Optional(_), Type::Null) => true,
+        // Optional parameters accept their non-null payload directly; callers
+        // do not need to wrap ordinary values in a nullable constructor.
+        (Type::Optional(expected), actual) => types_match(expected, actual),
         (
             Type::Applied {
                 base: expected_base,
@@ -12901,6 +13955,194 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
         "CWD" | "HEAD" => Some(Type::Named("sys.SnapshotRef".into())),
         _ => None,
     }
+}
+
+fn infer_parallel_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let is_parallel = qualified_path(callee)
+        .as_deref()
+        .is_some_and(|path| path == ["std", "concurrent", "parallel"])
+        || matches!(callee, Expr::Name { text, .. }
+            if text == "parallel"
+                && local.get(text).or_else(|| scope.names.get(text)).is_none());
+    if !is_parallel || arguments.len() != 1 || arguments[0].name.is_some() {
+        return None;
+    }
+    let Expr::List { elements, .. } = &arguments[0].value else {
+        return None;
+    };
+
+    let mut effects = EffectSummary::default();
+    let mut result_type: Option<Type> = None;
+    for callback in elements {
+        let inferred = infer(callback, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        let Type::Function { result, .. } = inferred.ty else {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "parallel entries must be callback functions",
+            ));
+            continue;
+        };
+        if let Some(expected) = &result_type {
+            if !types_match(expected, &result) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "parallel callbacks must have compatible result types",
+                ));
+            }
+        } else {
+            result_type = Some(*result);
+        }
+    }
+    Some(Inferred {
+        ty: Type::Stream(Box::new(result_type.unwrap_or(Type::Error))),
+        effects,
+    })
+}
+
+fn infer_race_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let is_race = qualified_path(callee)
+        .as_deref()
+        .is_some_and(|path| path == ["std", "concurrent", "race"])
+        || matches!(callee, Expr::Name { text, .. }
+            if text == "race"
+                && local.get(text).or_else(|| scope.names.get(text)).is_none());
+    if !is_race || arguments.len() != 1 || arguments[0].name.is_some() {
+        return None;
+    }
+    let Expr::List { elements, .. } = &arguments[0].value else {
+        return None;
+    };
+
+    let mut effects = EffectSummary::default();
+    let mut result_type: Option<Type> = None;
+    for callback in elements {
+        let inferred = infer(callback, scope, local, diagnostics);
+        effects.join(&inferred.effects);
+        let Type::Function { result, .. } = inferred.ty else {
+            diagnostics.push(diag(DIAG_TYPE, "race entries must be callback functions"));
+            continue;
+        };
+        if let Some(expected) = &result_type {
+            if !types_match(expected, &result) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "race callbacks must have compatible result types",
+                ));
+            }
+        } else {
+            result_type = Some(*result);
+        }
+    }
+    Some(Inferred {
+        ty: result_type.unwrap_or(Type::Error),
+        effects,
+    })
+}
+
+fn infer_timeout_call(
+    callee: &Expr,
+    arguments: &[orna_syntax_v1::Argument],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let is_timeout = qualified_path(callee)
+        .as_deref()
+        .is_some_and(|path| path == ["std", "concurrent", "timeout"])
+        || matches!(callee, Expr::Name { text, .. }
+            if text == "timeout"
+                && local.get(text).or_else(|| scope.names.get(text)).is_none());
+    if !is_timeout {
+        return None;
+    }
+
+    let mut callback = None;
+    let mut duration = None;
+    let mut positional = 0;
+    for argument in arguments {
+        match argument.name.as_deref() {
+            Some("callback") if callback.is_none() => callback = Some(&argument.value),
+            Some("duration") if duration.is_none() => duration = Some(&argument.value),
+            Some(_) => {
+                diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects: EffectSummary::default(),
+                });
+            }
+            None => {
+                let slot = match positional {
+                    0 => &mut callback,
+                    1 => &mut duration,
+                    _ => {
+                        diagnostics.push(diag(
+                            DIAG_TYPE,
+                            "timeout expects a callback and a duration",
+                        ));
+                        return Some(Inferred {
+                            ty: Type::Error,
+                            effects: EffectSummary::default(),
+                        });
+                    }
+                };
+                if slot.is_some() {
+                    diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+                    return Some(Inferred {
+                        ty: Type::Error,
+                        effects: EffectSummary::default(),
+                    });
+                }
+                *slot = Some(&argument.value);
+                positional += 1;
+            }
+        }
+    }
+    let (Some(callback), Some(duration)) = (callback, duration) else {
+        diagnostics.push(diag(DIAG_TYPE, "timeout expects a callback and a duration"));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects: EffectSummary::default(),
+        });
+    };
+
+    let callback = infer(callback, scope, local, diagnostics);
+    let duration = infer(duration, scope, local, diagnostics);
+    let mut effects = callback.effects.clone();
+    effects.join(&duration.effects);
+    let Type::Function {
+        parameters, result, ..
+    } = callback.ty
+    else {
+        diagnostics.push(diag(DIAG_TYPE, "timeout callback must be a function"));
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    };
+    if !parameters.is_empty() {
+        diagnostics.push(diag(DIAG_TYPE, "timeout callback must not take parameters"));
+    }
+    let expected_duration = Type::Named("std.DURATION".into());
+    if !types_match(&expected_duration, &duration.ty) {
+        diagnostics.push(diag(DIAG_TYPE, "timeout duration must be a Duration"));
+    }
+    Some(Inferred {
+        ty: *result,
+        effects,
+    })
 }
 
 enum DescriptorPathInference {
@@ -13047,6 +14289,19 @@ fn infer_descriptor_system_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let functions = system_api::embedded_system_api().function(&path.join("."))?;
+    if path == ["sys", "explain"] {
+        if let Some(explained) = infer_query_explain_system_call(
+            functions,
+            arguments,
+            type_arguments,
+            None,
+            scope,
+            local,
+            diagnostics,
+        ) {
+            return Some(explained);
+        }
+    }
     if path == ["sys", "meta"] {
         return Some(infer_meta_system_call(
             functions,
@@ -13746,6 +15001,15 @@ fn substitute_generic_descriptor_type(
             .get(name)
             .cloned()
             .or_else(|| Some(descriptor_type(ty))),
+        system_api::SystemType::Applied { base, arguments }
+            if matches!(base.as_str(), "Relation" | "Query") =>
+        {
+            let element = arguments.first()?;
+            Some(Type::Relation(Box::new(substitute_generic_descriptor_type(
+                element,
+                substitutions,
+            )?)))
+        }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
             arguments: arguments
@@ -13760,6 +15024,203 @@ fn substitute_generic_descriptor_type(
             substitute_generic_descriptor_type(element, substitutions)?,
         ))),
     }
+}
+
+/// `sys.explain(Query<T>)` is the generic planner overload. The v1 evaluator
+/// currently represents a typed query handle as `Relation<T>`, so the
+/// semantic layer specializes this descriptor without exposing a second
+/// runtime type. The actual planner adapter still resolves the query against
+/// the pinned catalogue snapshot.
+fn infer_query_explain_system_call(
+    functions: &[system_api::FunctionDescriptor],
+    arguments: &[orna_syntax_v1::Argument],
+    type_arguments: Option<&[TypeExpr]>,
+    input: Option<&Type>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let query_descriptor = functions.iter().find(|function| {
+        let [parameter] = function.parameters.as_slice() else {
+            return false;
+        };
+        if function.type_parameters.len() != 1 {
+            return false;
+        }
+        let generic = function
+            .type_parameters
+            .iter()
+            .next()
+            .expect("one type parameter was checked above");
+        function.name == "sys.explain"
+            && function.label == "sys.explain(Query)"
+            && function.effect == system_api::SystemEffect::Read
+            && parameter.name == "query"
+            && !parameter.has_default
+            && parameter.ty
+                == system_api::SystemType::Applied {
+                    base: "Query".into(),
+                    arguments: vec![system_api::SystemType::Named(generic.clone())],
+                }
+            && function.result == system_api::SystemType::Named("sys.Plan".into())
+    })?;
+
+    let has_input = input.is_some();
+    let mut effects = EffectSummary::default();
+    let mut values = Vec::with_capacity(arguments.len() + usize::from(has_input));
+    if let Some(input) = input {
+        values.push(input.clone());
+    }
+    for argument in arguments {
+        let value = infer(&argument.value, scope, local, diagnostics);
+        effects.join(&value.effects);
+        values.push(value.ty);
+    }
+
+    let query_shape = if has_input {
+        arguments.is_empty()
+    } else {
+        arguments.len() == 1
+            && arguments[0]
+                .name
+                .as_deref()
+                .is_none_or(|name| name == "query")
+    };
+    let generic_requested = type_arguments.is_some_and(|arguments| !arguments.is_empty());
+    let query_named = arguments
+        .iter()
+        .any(|argument| argument.name.as_deref() == Some("query"));
+    let query_value = values.first();
+    let is_query = query_value.is_some_and(|ty| match ty {
+        Type::Relation(_) => true,
+        Type::Applied { base, .. } => base == "Query",
+        _ => false,
+    });
+    let wants_query = query_shape && (query_named || is_query || generic_requested);
+
+    if wants_query {
+        effects.join(&descriptor_effects(query_descriptor.effect));
+        if query_value.is_some_and(|ty| matches!(ty, Type::Error)) {
+            return Some(Inferred {
+                ty: Type::Error,
+                effects,
+            });
+        }
+        let query_element = match query_value.expect("query shape contains a value") {
+            Type::Relation(element) => element.as_ref(),
+            Type::Applied { base, arguments } if base == "Query" => {
+                let Some(element) = arguments.first() else {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "sys.explain(Query) requires a typed query value",
+                    ));
+                    return Some(Inferred {
+                        ty: Type::Error,
+                        effects,
+                    });
+                };
+                element
+            }
+            _ => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.explain(Query) requires a typed query value",
+                ));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects,
+                });
+            }
+        };
+
+        if let Some(type_arguments) = type_arguments.filter(|arguments| !arguments.is_empty()) {
+            let explicit = type_arguments
+                .iter()
+                .map(|argument| valid_static_type(argument, scope))
+                .collect::<Option<Vec<_>>>();
+            let Some([explicit]) = explicit.as_deref() else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.explain requires exactly one valid explicit query element type",
+                ));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects,
+                });
+            };
+            if !types_match(explicit, query_element) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "sys.explain explicit query element type must match the query value",
+                ));
+                return Some(Inferred {
+                    ty: Type::Error,
+                    effects,
+                });
+            }
+        }
+
+        let generic = query_descriptor
+            .type_parameters
+            .iter()
+            .next()
+            .expect("validated query descriptor has one type parameter");
+        let substitutions = BTreeMap::from([(generic.clone(), query_element.clone())]);
+        return Some(Inferred {
+            ty: substitute_generic_descriptor_type(&query_descriptor.result, &substitutions)
+                .unwrap_or(Type::Error),
+            effects,
+        });
+    }
+
+    if values.iter().any(|ty| matches!(ty, Type::Error)) {
+        return Some(Inferred {
+            ty: Type::Error,
+            effects,
+        });
+    }
+
+    if has_input {
+        if arguments.is_empty()
+            && let Some(function) = functions.iter().find(|function| {
+                function.name == "sys.explain"
+                    && function.label != "sys.explain(Query)"
+                    && function.type_parameters.is_empty()
+                    && function.parameters.len() == 1
+                    && types_match(&descriptor_type(&function.parameters[0].ty), &values[0])
+            })
+        {
+            effects.join(&descriptor_effects(function.effect));
+            return Some(Inferred {
+                ty: descriptor_type(&function.result),
+                effects,
+            });
+        }
+    } else if type_arguments.is_none() {
+        if let Some(function) = functions
+            .iter()
+            .filter(|function| {
+                function.name == "sys.explain"
+                    && descriptor_function_is_staticly_supported(function)
+            })
+            .find(|function| descriptor_arguments_match(function, arguments, &values))
+        {
+            effects.join(&descriptor_effects(function.effect));
+            return Some(Inferred {
+                ty: descriptor_type(&function.result),
+                effects,
+            });
+        }
+    }
+
+    diagnostics.push(diag(
+        DIAG_TYPE,
+        "arguments do not match a portable sys.explain overload",
+    ));
+    Some(Inferred {
+        ty: Type::Error,
+        effects,
+    })
 }
 
 /// `sys.meta<T>` is the one generic system operation whose type parameter is
@@ -13874,6 +15335,15 @@ fn infer_descriptor_system_call_with_input(
 ) -> Option<Inferred> {
     let functions = system_api::embedded_system_api().function(&path.join("."))?;
     match path {
+        ["sys", "explain"] => infer_query_explain_system_call(
+            functions,
+            arguments,
+            (!type_arguments.is_empty()).then_some(type_arguments),
+            Some(input),
+            scope,
+            local,
+            diagnostics,
+        ),
         ["sys", "meta"] => Some(infer_meta_system_call(
             functions,
             arguments,
@@ -14329,6 +15799,16 @@ fn descriptor_call_type(
     match ty {
         system_api::SystemType::Named(name) if type_parameters.contains(name) => None,
         system_api::SystemType::Named(_) => Some(descriptor_type(ty)),
+        system_api::SystemType::Applied { base, arguments } if base == "Relation" => {
+            // Source annotations normalize Relation<T> to this semantic type.
+            let [element] = arguments.as_slice() else {
+                return None;
+            };
+            Some(Type::Relation(Box::new(descriptor_call_type(
+                element,
+                type_parameters,
+            )?)))
+        }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
             arguments: arguments
@@ -14377,7 +15857,9 @@ fn descriptor_type(ty: &system_api::SystemType) -> Type {
             "Duration" => Type::Named("std.DURATION".into()),
             other => Type::Named(other.into()),
         },
-        system_api::SystemType::Applied { base, arguments } if base == "Relation" => {
+        system_api::SystemType::Applied { base, arguments }
+            if matches!(base.as_str(), "Relation" | "Query") =>
+        {
             Type::Relation(Box::new(
                 arguments
                     .first()
@@ -14644,12 +16126,27 @@ fn infer_historical_member(
 }
 
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
-    if let Type::Named(system_type) = base
-        && let Some(ty) = system_api::embedded_system_api().field(system_type, name)
-    {
-        return Some(descriptor_type(ty));
+    let api = system_api::embedded_system_api();
+    match base {
+        Type::Named(system_type) => api.field(system_type, name).map(descriptor_type),
+        Type::Applied {
+            base: system_type,
+            arguments,
+        } => {
+            let parameters = api.type_parameters(system_type)?;
+            if parameters.len() != arguments.len() {
+                return None;
+            }
+            let substitutions = parameters
+                .iter()
+                .cloned()
+                .zip(arguments.iter().cloned())
+                .collect::<BTreeMap<_, _>>();
+            api.field(system_type, name)
+                .and_then(|ty| substitute_generic_descriptor_type(ty, &substitutions))
+        }
+        _ => None,
     }
-    None
 }
 
 fn infer_text_member(base: &Type, name: &str) -> Option<Type> {
@@ -14719,6 +16216,15 @@ fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type>
             })
         }
         Type::Int | Type::Decimal | Type::Float if name == "decimal" => Some(Type::Decimal),
+        // These postfix units are evaluated as elapsed Duration values. Keep
+        // their static type aligned with the runtime representation so the
+        // ordinary Duration APIs (including optional std formatters) accept
+        // them without requiring std to define the core temporal value.
+        Type::Int | Type::Decimal
+            if matches!(name, "hour" | "hours" | "minute" | "minutes" | "min" | "second" | "seconds" | "s") =>
+        {
+            Some(Type::Named("std.DURATION".into()))
+        }
         Type::Int | Type::Decimal | Type::Float => Some(Type::Applied {
             base: numeric_base(base)?.into(),
             arguments: vec![Type::Named(name.into())],
@@ -14888,6 +16394,45 @@ fn infer_money_constructor_type(
 
 fn is_money_rate(ty: &Type) -> bool {
     matches!(ty, Type::MoneyPerUnit { .. })
+}
+
+fn contains_secret_value_type(ty: &Type) -> bool {
+    match ty {
+        Type::Applied { base, arguments } => {
+            base == "Secret" || arguments.iter().any(contains_secret_value_type)
+        }
+        Type::List(value)
+        | Type::Range(value)
+        | Type::Relation(value)
+        | Type::Stream(value)
+        | Type::Optional(value) => contains_secret_value_type(value),
+        Type::Record(fields) => fields.values().any(contains_secret_value_type),
+        Type::Tuple(values) => values.iter().any(contains_secret_value_type),
+        Type::MoneyPerUnit { currency, unit } => {
+            contains_secret_value_type(currency) || contains_secret_value_type(unit)
+        }
+        Type::Function {
+            parameters, result, ..
+        } => {
+            parameters.iter().any(contains_secret_value_type)
+                || contains_secret_value_type(result)
+        }
+        Type::Named(name) => name == "Secret",
+        Type::Int
+        | Type::Decimal
+        | Type::Float
+        | Type::Date
+        | Type::Instant
+        | Type::Text
+        | Type::Bool
+        | Type::Null
+        | Type::Bottom
+        | Type::Error => false,
+    }
+}
+
+fn is_secret_sensitive_presentation_path(path: &[&str]) -> bool {
+    path.starts_with(&["std", "ui"]) || path == &["std", "terminal", "present_table"]
 }
 
 fn infer_ui_action_call(
@@ -15408,6 +16953,12 @@ fn table_row_type(item: &Item) -> Type {
         unreachable!("table row type requested for a non-table declaration");
     };
     let mut fields = BTreeMap::new();
+    if keys.is_empty() {
+        // Automatic IDs are real logical row fields even though insertion
+        // allocates them. This keeps selection and catalogue schema shape in
+        // sync with the implicit primary key.
+        fields.insert("id".into(), Type::Int);
+    }
     for key in keys {
         if let Pattern::Name(name, _) = &key.pattern {
             fields.insert(
@@ -15422,6 +16973,92 @@ fn table_row_type(item: &Item) -> Type {
         }
     }
     Type::Record(fields)
+}
+
+fn primary_key_type_error(
+    ty: &Type,
+    scope: &Scope,
+    visiting_tables: &mut BTreeSet<String>,
+) -> Option<&'static str> {
+    let resolved = resolve_type_aliases(ty, &scope.type_aliases, &mut BTreeSet::new());
+    if &resolved != ty {
+        return primary_key_type_error(&resolved, scope, visiting_tables);
+    }
+    match ty {
+        Type::Int | Type::Decimal | Type::Date | Type::Instant | Type::Text | Type::Bool => None,
+        Type::Tuple(elements) if elements.is_empty() => {
+            Some("Unit is not a primary-key type in version 1.0")
+        }
+        Type::Tuple(elements) => elements
+            .iter()
+            .find_map(|element| primary_key_type_error(element, scope, visiting_tables)),
+        Type::Named(name) if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") => None,
+        Type::Named(name) if scope.payload_enum_types.contains(name) => {
+            Some("payload-bearing enums cannot be primary-key types")
+        }
+        Type::Named(name) => {
+            let symbol = scope_named_symbol(name, scope);
+            match symbol {
+                Some(symbol) if symbol.kind == SymbolKind::Enum => None,
+                Some(symbol) if symbol.kind == SymbolKind::Table => {
+                    if !visiting_tables.insert(name.clone()) {
+                        return Some("table reference key type is recursively defined");
+                    }
+                    let result = match symbol
+                        .table_schema
+                        .as_ref()
+                        .and_then(|schema| schema.admission.as_ref())
+                    {
+                        Some(admission) => {
+                            if admission.keys.is_empty() {
+                                Some("table reference has no canonical primary key")
+                            } else {
+                                admission.keys.iter().find_map(|(_, key_type)| {
+                                    primary_key_type_error(key_type, scope, visiting_tables)
+                                })
+                            }
+                        }
+                        None => Some("table reference has no canonical primary key"),
+                    };
+                    visiting_tables.remove(name);
+                    result
+                }
+                _ => Some("type has no canonical primary-key encoding"),
+            }
+        }
+        Type::Float => {
+            Some("Float is not a valid primary-key type")
+        }
+        Type::Applied { base, .. } if base == "Float" => {
+            Some("Float is not a valid primary-key type")
+        }
+        Type::Range(_) => Some("Range<T> is not a primary-key type in version 1.0"),
+        Type::Applied { base, .. } if base == "Range" => {
+            Some("Range<T> is not a primary-key type in version 1.0")
+        }
+        Type::Error => None,
+        _ => Some("type has no canonical primary-key encoding"),
+    }
+}
+
+fn scope_named_symbol<'a>(name: &str, scope: &'a Scope) -> Option<&'a Symbol> {
+    if let Some(symbol) = scope.names.get(name) {
+        return Some(symbol);
+    }
+    if let Some((module_alias, member)) = name.split_once('.')
+        && let Some(namespace) = scope.modules.get(module_alias)
+    {
+        return scope
+            .available_modules
+            .get(namespace)
+            .and_then(|module| module.symbols.get(member));
+    }
+    let mut matches = scope
+        .names
+        .values()
+        .filter(|symbol| symbol.ty == Type::Named(name.to_owned()));
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 fn nominal_row_type(item: &Item) -> Option<(String, Type)> {
@@ -15503,6 +17140,123 @@ fn enum_variant_types(
         enums.insert(name.clone(), typed_variants);
     }
     enums
+}
+
+fn payload_enum_names(tree: &SyntaxTree) -> BTreeSet<String> {
+    tree.items
+        .iter()
+        .filter_map(|item| match &item.declaration {
+            Declaration::Enum { name, variants, .. }
+                if variants.iter().any(|variant| !variant.fields.is_empty()) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn imported_payload_enum_bindings(
+    tree: &SyntaxTree,
+    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) -> BTreeSet<String> {
+    let mut bindings = BTreeSet::new();
+    for item in &tree.items {
+        let Declaration::Use { path, tail } = &item.declaration else {
+            continue;
+        };
+        let target = Namespace(path.iter().map(|segment| segment.name.clone()).collect());
+        let Some(module) = modules.get(&target) else {
+            continue;
+        };
+        match tail {
+            UseTail::None => {
+                if let Some(binding) = target.0.last() {
+                    add_qualified_payload_enum_bindings(
+                        &mut bindings,
+                        binding,
+                        &target,
+                        payload_enums,
+                        modules,
+                    );
+                }
+            }
+            UseTail::Alias { name, .. } if name != "_" => {
+                add_qualified_payload_enum_bindings(
+                    &mut bindings,
+                    name,
+                    &target,
+                    payload_enums,
+                    modules,
+                );
+            }
+            UseTail::Alias { .. } => {
+                if let Some(names) = payload_enums.get(&target) {
+                    for name in names {
+                        if module.prelude_exports.contains(name) && is_exported_enum(module, name) {
+                            bindings.insert(name.clone());
+                        }
+                    }
+                }
+            }
+            UseTail::Glob { .. } => {
+                if let Some(names) = payload_enums.get(&target) {
+                    bindings.extend(
+                        names
+                            .iter()
+                            .filter(|name| is_exported_enum(module, name))
+                            .cloned(),
+                    );
+                }
+            }
+            UseTail::Names(imports) => {
+                if let Some(names) = payload_enums.get(&target) {
+                    bindings.extend(
+                        imports
+                            .iter()
+                            .map(|import| &import.name)
+                            .filter(|name| names.contains(*name) && is_exported_enum(module, name))
+                            .cloned(),
+                    );
+                }
+            }
+        }
+    }
+    bindings
+}
+
+fn add_qualified_payload_enum_bindings(
+    bindings: &mut BTreeSet<String>,
+    binding: &str,
+    target: &Namespace,
+    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) {
+    for (namespace, names) in payload_enums {
+        if namespace.0.len() < target.0.len() || namespace.0[..target.0.len()] != target.0[..] {
+            continue;
+        }
+        let Some(module) = modules.get(namespace) else {
+            continue;
+        };
+        let mut prefix = vec![binding.to_owned()];
+        prefix.extend(namespace.0[target.0.len()..].iter().cloned());
+        for name in names {
+            if is_exported_enum(module, name) {
+                let mut qualified = prefix.clone();
+                qualified.push(name.clone());
+                bindings.insert(qualified.join("."));
+            }
+        }
+    }
+}
+
+fn is_exported_enum(module: &ModuleHeader, name: &str) -> bool {
+    module
+        .exports
+        .get(name)
+        .is_some_and(|symbol| symbol.kind == SymbolKind::Enum)
 }
 
 fn pattern_binding_names(pattern: &Pattern) -> Vec<String> {
@@ -15767,123 +17521,112 @@ fn valid_row_component(component: &str) -> bool {
 }
 
 fn decode_row_key_path(components: &[String]) -> Option<Vec<String>> {
-    let last = components.last()?;
-    let stem = last.strip_suffix(".orna")?;
-    if stem.is_empty() {
-        return None;
+    path_decode_key_components(components).ok()
+}
+
+fn row_key_component_types(admission: &TableAdmission, analysis: &Analysis) -> Option<Vec<Type>> {
+    // Editable paths contain scalar key leaves in declaration order. Flatten
+    // tuple and table-reference types recursively: a reference contributes
+    // its target key path, never target-row data or a table identity segment.
+    fn append(
+        ty: &Type,
+        analysis: &Analysis,
+        visiting: &mut BTreeSet<String>,
+        output: &mut Vec<Type>,
+    ) -> bool {
+        match ty {
+            Type::Tuple(elements) if !elements.is_empty() => elements
+                .iter()
+                .all(|element| append(element, analysis, visiting, output)),
+            Type::Tuple(_) => false,
+            Type::Named(name) if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") => {
+                output.push(ty.clone());
+                true
+            }
+            Type::Named(name) => {
+                let Some(symbol) = analysis_named_symbol(name, analysis) else {
+                    output.push(ty.clone());
+                    return true;
+                };
+                if symbol.kind != SymbolKind::Table {
+                    output.push(ty.clone());
+                    return true;
+                }
+                if !visiting.insert(name.clone()) {
+                    return false;
+                }
+                let Some(referenced_keys) = symbol
+                    .table_schema
+                    .as_ref()
+                    .and_then(|schema| schema.admission.as_ref())
+                    .map(|schema| schema.keys.clone())
+                    .filter(|keys| !keys.is_empty())
+                else {
+                    visiting.remove(name);
+                    return false;
+                };
+                let valid = referenced_keys
+                    .iter()
+                    .all(|(_, key_type)| append(key_type, analysis, visiting, output));
+                visiting.remove(name);
+                valid
+            }
+            _ => {
+                output.push(ty.clone());
+                true
+            }
+        }
     }
-    let mut decoded = Vec::with_capacity(components.len());
-    for (index, component) in components.iter().enumerate() {
-        let encoded = if index + 1 == components.len() {
-            stem
-        } else {
-            component.as_str()
-        };
-        let value = decode_row_component(encoded)?;
-        if index + 1 == components.len() && value.is_empty() {
+
+    let mut output = Vec::new();
+    let mut visiting = BTreeSet::new();
+    for (_, ty) in &admission.keys {
+        if !append(ty, analysis, &mut visiting, &mut output) {
             return None;
         }
-        decoded.push(value);
     }
-    Some(decoded)
+    Some(output)
 }
 
-fn decode_row_component(encoded: &str) -> Option<String> {
-    if encoded == "~ff" {
-        return Some(String::new());
-    }
-    if !encoded.is_ascii()
-        || encoded.is_empty()
-        || encoded.len() > 200
-        || encoded.contains("~ff")
-    {
-        return None;
-    }
-    let bytes = encoded.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'~' {
-            if index + 2 >= bytes.len() {
-                return None;
+fn analysis_named_symbol<'a>(name: &str, analysis: &'a Analysis) -> Option<&'a Symbol> {
+    let mut exact = Vec::new();
+    let mut qualified = Vec::new();
+    for (namespace, module) in &analysis.modules {
+        for (symbol_name, symbol) in &module.symbols {
+            if symbol.ty == Type::Named(name.to_owned()) {
+                exact.push(symbol);
             }
-            let value = std::str::from_utf8(&bytes[index + 1..index + 3])
-                .ok()
-                .and_then(|hex| u8::from_str_radix(hex, 16).ok())?;
-            decoded.push(value);
-            index += 3;
-        } else {
-            if !matches!(
-                bytes[index],
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'
-            ) {
-                return None;
+            let full_name = if namespace.0.is_empty() {
+                symbol_name.clone()
+            } else {
+                format!("{}.{symbol_name}", namespace.0.join("."))
+            };
+            if full_name == name {
+                qualified.push(symbol);
             }
-            decoded.push(bytes[index]);
-            index += 1;
         }
     }
-    let value = String::from_utf8(decoded).ok()?;
-    (encode_row_component(&value) == encoded).then_some(value)
+    let matches = if qualified.is_empty() { exact } else { qualified };
+    (matches.len() == 1).then(|| matches[0])
 }
 
-fn encode_row_component(value: &str) -> String {
-    if value.is_empty() {
-        return "~ff".into();
-    }
-    let bytes = value.as_bytes();
-    let reserved = reserved_row_name(value);
-    let trailing = bytes.iter().rposition(|byte| *byte != b'.').map_or(0, |index| index + 1);
-    let mut encoded = String::new();
-    for (index, byte) in bytes.iter().enumerate() {
-        let force = (reserved && index == 0) || (*byte == b'.' && index >= trailing);
-        if !force
-            && matches!(
-                *byte,
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'
-            )
-        {
-            encoded.push(*byte as char);
-        } else {
-            encoded.push_str(&format!("~{byte:02x}"));
-        }
-    }
-    encoded
-}
-
-fn reserved_row_name(value: &str) -> bool {
-    let trimmed = value.trim_end_matches([' ', '.']);
-    let lower = trimmed.to_ascii_lowercase();
-    if lower == ".git" {
-        return true;
-    }
-    let first = lower.split('.').next().unwrap_or_default();
-    matches!(
-        first,
-        "con" | "prn" | "aux" | "nul" | "clock$" | "conin$" | "conout$"
-    ) || (first.len() == 4
-        && (first.starts_with("com") || first.starts_with("lpt"))
-        && matches!(first.as_bytes()[3], b'1'..=b'9'))
-}
-
-fn row_key_matches_type(value: &str, ty: &Type) -> bool {
+fn row_key_matches_type(value: &str, ty: &Type, analysis: &Analysis) -> bool {
     match ty {
         Type::Text => true,
         Type::Int => canonical_integer(value),
-        Type::Decimal => canonical_decimal(value),
+        Type::Decimal => Decimal::from_canonical_text(value).is_ok(),
         Type::Bool => matches!(value, "true" | "false"),
-        Type::Date => {
-            value.len() == 10
-                && value.as_bytes()[4] == b'-'
-                && value.as_bytes()[7] == b'-'
-                && value
-                    .bytes()
-                    .enumerate()
-                    .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
-        }
-        Type::Instant => value.contains('T') && (value.ends_with('Z') || value.contains('+')),
+        Type::Date => canonical_date(value),
+        Type::Instant => canonical_instant(value),
         Type::Named(name) => {
-            matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") && canonical_uuid(value)
+            if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") {
+                canonical_uuid(value)
+            } else {
+                analysis_named_symbol(name, analysis)
+                    .is_some_and(|symbol| {
+                        symbol.kind == SymbolKind::Enum && symbol.enum_variants.contains(value)
+                    })
+            }
         }
         _ => false,
     }
@@ -15891,30 +17634,82 @@ fn row_key_matches_type(value: &str, ty: &Type) -> bool {
 
 fn canonical_integer(value: &str) -> bool {
     let digits = value.strip_prefix('-').unwrap_or(value);
-    !digits.is_empty()
+    !(value.starts_with('-') && digits == "0")
+        && !digits.is_empty()
         && digits.bytes().all(|byte| byte.is_ascii_digit())
         && (digits == "0" || !digits.starts_with('0'))
 }
 
-fn canonical_decimal(value: &str) -> bool {
-    let value = value.strip_prefix('-').unwrap_or(value);
-    let (mantissa, exponent) = value.split_once(['e', 'E']).map_or((value, None), |(m, e)| {
-        (m, Some(e))
-    });
-    if let Some(exponent) = exponent {
-        if exponent.is_empty() {
-            return false;
-        }
-        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
-        if exponent.is_empty() || !exponent.bytes().all(|byte| byte.is_ascii_digit()) {
-            return false;
+fn canonical_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let year = value[..4].parse::<u32>().ok();
+    let month = value[5..7].parse::<u32>().ok();
+    let day = value[8..].parse::<u32>().ok();
+    let (Some(year), Some(month), Some(day)) = (year, month, day) else {
+        return false;
+    };
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=9999).contains(&year) && (1..=max_day).contains(&day)
+}
+
+fn canonical_instant(value: &str) -> bool {
+    // Row paths carry one stable UTC spelling. Offsets are accepted in source
+    // literals but normalize before storage, so they are not alternate keys.
+    let Some(body) = value.strip_suffix('Z') else {
+        return false;
+    };
+    let Some((date, time)) = body.split_once('T') else {
+        return false;
+    };
+    if !canonical_date(date) {
+        return false;
+    }
+    let (clock, fraction) = time
+        .split_once('.')
+        .map_or((time, None), |(clock, fraction)| (clock, Some(fraction)));
+    let clock_bytes = clock.as_bytes();
+    if clock_bytes.len() != 8
+        || clock_bytes[2] != b':'
+        || clock_bytes[5] != b':'
+        || !clock_bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let hour = clock[..2].parse::<u32>().ok();
+    let minute = clock[3..5].parse::<u32>().ok();
+    let second = clock[6..8].parse::<u32>().ok();
+    if !matches!((hour, minute, second), (Some(h), Some(m), Some(s)) if h < 24 && m < 60 && s < 60)
+    {
+        return false;
+    }
+    match fraction {
+        None => true,
+        Some(fraction) => {
+            !fraction.is_empty()
+                && fraction.len() <= 9
+                && fraction.bytes().all(|byte| byte.is_ascii_digit())
+                && !fraction.ends_with('0')
         }
     }
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    !whole.is_empty()
-        && whole.bytes().all(|byte| byte.is_ascii_digit())
-        && (whole == "0" || !whole.starts_with('0'))
-        && (fraction.is_empty() || fraction.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn canonical_uuid(value: &str) -> bool {
@@ -15922,7 +17717,7 @@ fn canonical_uuid(value: &str) -> bool {
         && value.bytes().enumerate().all(|(index, byte)| {
             matches!(index, 8 | 13 | 18 | 23)
                 .then_some(byte == b'-')
-                .unwrap_or(byte.is_ascii_hexdigit())
+                .unwrap_or(byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
 }
 

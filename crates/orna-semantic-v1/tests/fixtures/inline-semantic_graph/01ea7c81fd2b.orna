@@ -1,0 +1,1 @@
+fn change() = {prefix}{operation};

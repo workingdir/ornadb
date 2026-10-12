@@ -10,7 +10,7 @@ use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 pub use orna_value_v1::{
     Error as ValueError, GitHash, OVB_VERSION, Raw as OvbRaw, SchemaDescriptor, Snapshot, Value,
-    canonical_uuid_text, parse_canonical_uuid_text,
+    canonical_uuid_text, compare_primary_keys, parse_canonical_uuid_text,
 };
 
 /// Canonical values, closed descriptors and snapshot encodings are owned by
@@ -62,7 +62,20 @@ impl RowRef {
             .encode()
             .map_err(FoundationError::Value)
     }
+
+    /// Decodes a canonical, snapshot-pinned row reference from OVB-1 bytes.
+    /// Strict snapshot decoding preserves the exact captured CWD generation;
+    /// it never substitutes a later current-CWD pin.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FoundationError> {
+        let value = Value::decode(bytes).map_err(FoundationError::Value)?;
+        row_ref_from_raw(value.raw())
+    }
+
     fn raw(&self) -> Result<OvbRaw, FoundationError> {
+        // RowRef fields are public for compatibility. Revalidate the nested
+        // pin before encoding so malformed generation identities cannot enter
+        // storage through a directly constructed Snapshot enum variant.
+        Snapshot::decode(&self.snapshot.raw()).map_err(FoundationError::Value)?;
         Ok(OvbRaw::Tag(
             60010,
             Box::new(OvbRaw::Array(vec![
@@ -908,11 +921,21 @@ impl SourceSpan {
     }
 }
 /// Exact `sys.DiagnosticLabel`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DiagnosticLabel {
     pub span: SourceSpan,
     pub message: String,
     pub primary: bool,
+}
+impl fmt::Debug for DiagnosticLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiagnosticLabel")
+            .field("span", &self.span)
+            .field("message", &"<redacted>")
+            .field("primary", &self.primary)
+            .finish()
+    }
 }
 
 /// Exact `sys.Value`: a validated tag-60026 `[closed_type_descriptor, value]`.
@@ -991,7 +1014,7 @@ impl DiagnosticSeverity {
     }
 }
 /// Exact `api/sys.json` `sys.Diagnostic` relation shape.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SystemDiagnostic {
     pub reference: DiagnosticRef,
     pub id: String,
@@ -1008,24 +1031,62 @@ pub struct SystemDiagnostic {
     pub redacted: bool,
     pub trace: Option<TraceRef>,
 }
+impl fmt::Debug for SystemDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Debug has no disclosure grant. Keep stable identity and source
+        // references while hiding free-form text and arbitrary typed data.
+        formatter
+            .debug_struct("SystemDiagnostic")
+            .field("reference", &self.reference)
+            .field("id", &self.id)
+            .field("severity", &self.severity)
+            .field("code", &self.code)
+            .field("message", &"<redacted>")
+            .field("object", &self.object)
+            .field("definition", &self.definition)
+            .field("primary_span", &self.primary_span)
+            .field("labels", &self.labels)
+            .field("causes", &self.causes)
+            .field("help", &"<redacted>")
+            .field("data", &self.data.as_ref().map(|_| "<redacted>"))
+            .field("redacted", &self.redacted)
+            .field("trace", &self.trace)
+            .finish()
+    }
+}
+
+fn redact_system_diagnostic(diagnostic: &mut SystemDiagnostic) {
+    // SystemDiagnostic has no per-field secrecy classifier. At the
+    // explanation boundary, redact free-form payload text and typed data
+    // fail-closed; stable diagnostic codes/identity, source/object references,
+    // and the opaque trace reference remain correlation metadata, not payload.
+    diagnostic.message = "<redacted>".into();
+    for label in &mut diagnostic.labels {
+        label.message = "<redacted>".into();
+    }
+    diagnostic.help.fill("<redacted>".into());
+    diagnostic.data = None;
+    diagnostic.redacted = true;
+    for cause in &mut diagnostic.causes {
+        redact_system_diagnostic(cause);
+    }
+}
 
 /// Input envelope for the local `sys.explain` boundary.
 ///
-/// The envelope deliberately owns the complete canonical diagnostic instead of
-/// projecting it into the smaller live-protocol [`Diagnostic`]. In particular,
-/// row identity, source authority, labels, structured data, and trace
-/// authority remain available to the consumer. No renderer-facing text is
-/// derived or redacted by this adapter.
+/// The envelope retains diagnostic identity and authority fields while
+/// redacting free-form content before it reaches local explanation code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SystemDiagnosticExplanationInput {
     diagnostic: SystemDiagnostic,
 }
 
 impl SystemDiagnosticExplanationInput {
-    /// Admit one canonical diagnostic without dropping fields at the local
-    /// explanation boundary.
-    pub fn new(diagnostic: SystemDiagnostic) -> Result<Self, SystemDiagnosticAdapterError> {
+    /// Admit one canonical diagnostic after validating and redacting its
+    /// renderer-facing fields.
+    pub fn new(mut diagnostic: SystemDiagnostic) -> Result<Self, SystemDiagnosticAdapterError> {
         validate_system_diagnostic(&diagnostic)?;
+        redact_system_diagnostic(&mut diagnostic);
         Ok(Self { diagnostic })
     }
 
@@ -1037,9 +1098,10 @@ impl SystemDiagnosticExplanationInput {
         self.diagnostic
     }
 
-    /// Attach the renderer-independent explanation fields returned by
-    /// `sys.explain`. Causes are copied from the admitted canonical row; the
-    /// canonical row itself remains intact in the result.
+    /// Attach renderer-independent, code-based explanation fields returned by
+    /// trusted local `sys.explain` logic. The diagnostic payload in the result
+    /// remains redacted while its stable identity and authority fields survive;
+    /// callers must not copy raw diagnostic text into the explanation fields.
     pub fn finish(
         self,
         summary: impl Into<String>,
@@ -1065,12 +1127,25 @@ impl SystemDiagnosticExplanationInput {
 /// fields require authority owned by the system projection. A sys/runtime
 /// consumer can add them after this envelope is produced, while every field
 /// of the canonical diagnostic remains lossless.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SystemDiagnosticExplanationOutput {
     diagnostic: SystemDiagnostic,
     summary: String,
     causes: Vec<SystemDiagnostic>,
     suggestions: Vec<String>,
+}
+impl fmt::Debug for SystemDiagnosticExplanationOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Summaries and suggestions are caller-provided free text. Their
+        // display API is intentional, but Debug alone is not authorization.
+        formatter
+            .debug_struct("SystemDiagnosticExplanationOutput")
+            .field("diagnostic", &self.diagnostic)
+            .field("summary", &"<redacted>")
+            .field("causes", &self.causes)
+            .field("suggestions", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SystemDiagnosticExplanationOutput {
@@ -1258,7 +1333,7 @@ fn is_safe_diagnostic_path(file_path: &str) -> bool {
 /// Live-protocol `Diagnostic`: tag 60011 around exact integer-key map
 /// `{0: code, 1: severity, 2: message, 3: spans, 4: notes, 5: causes,
 /// 6: redacted, 7?: stable diagnostic UUID}`. Causes are recursively tagged.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Diagnostic {
     code: SafeText,
     severity: DiagnosticSeverity,
@@ -1267,7 +1342,29 @@ pub struct Diagnostic {
     notes: Vec<SafeText>,
     causes: Vec<Diagnostic>,
     redacted: bool,
+    // Clone state follows the record; clone_from replaces this admission from
+    // its source rather than preserving a destination's stale trust mark.
+    // That copied mark still authorizes only this record's root projection;
+    // replacements do not rewrite marks on earlier or sibling snapshots.
+    root_message_admitted: bool,
     reference: Option<[u8; 16]>,
+}
+impl fmt::Debug for Diagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // SafeText validates syntax, not disclosure. Never let Debug become
+        // an implicit grant to print caller-controlled text or nested causes.
+        formatter
+            .debug_struct("Diagnostic")
+            .field("code", &"<redacted>")
+            .field("severity", &self.severity)
+            .field("message", &"<redacted>")
+            .field("spans", &"<redacted>")
+            .field("notes", &"<redacted>")
+            .field("causes", &"<redacted>")
+            .field("redacted", &self.redacted)
+            .field("reference", &self.reference)
+            .finish()
+    }
 }
 impl Diagnostic {
     pub fn new(
@@ -1286,6 +1383,7 @@ impl Diagnostic {
             notes: vec![],
             causes: vec![],
             redacted: false,
+            root_message_admitted: false,
             reference: None,
         })
     }
@@ -1308,16 +1406,52 @@ impl Diagnostic {
             .for_each(|note| *note = SafeText::redacted());
         self.causes = self.causes.into_iter().map(Diagnostic::redacted).collect();
         self.redacted = true;
+        // Explicit redaction revokes any earlier local root-message admission.
+        // Admission is value-local: revoking this owned value does not mutate
+        // a sibling clone that still carries its own local admission.
+        self.root_message_admitted = false;
         self
     }
-    /// Recursively redacts messages and notes, then installs the caller-admitted
-    /// root message while preserving diagnostic identities and spans.
+    /// Recursively redacts messages and notes, revokes nested admissions, then
+    /// installs the caller-admitted root message while preserving diagnostic
+    /// identities and spans.
     /// [`SafeText`] validates control safety only; the caller is responsible
     /// for admitting this message for disclosure.
     pub fn redacted_with_message(self, message: SafeText) -> Self {
         let mut diagnostic = self.redacted();
         diagnostic.message = message;
+        // This private, in-memory mark is the sole authority to preserve a
+        // non-marker root message across local serialization projections.
+        diagnostic.root_message_admitted = true;
         diagnostic
+    }
+    fn boundary_projection(&self) -> Self {
+        // The wire `redacted` bit is descriptive, not trusted admission.
+        // Keep a root message only when this object received local admission.
+        // Admission is record-local: cause edges discard a child's trust mark
+        // whether the child or parent was admitted first, including nested
+        // cause slots reused, appended, or dropped by Clone::clone_from.
+        // Re-admitting a cloned root remains local if it is later composed as
+        // a cause; the containing diagnostic does not inherit that authority.
+        // Building that projection does not consume or revoke an admitted
+        // sibling clone that is serialized at its own root.
+        // Clone::clone_from similarly replaces only its receiver's local mark.
+        let mut projection = if self.root_message_admitted {
+            self.clone()
+        } else {
+            self.clone().redacted()
+        };
+        projection.notes = projection
+            .notes
+            .iter()
+            .map(|_| SafeText::redacted())
+            .collect();
+        projection.causes = projection
+            .causes
+            .iter()
+            .map(|cause| cause.clone().redacted())
+            .collect();
+        projection
     }
     pub fn with_reference(mut self, reference: [u8; 16]) -> Self {
         self.reference = Some(reference);
@@ -1330,13 +1464,30 @@ impl Diagnostic {
         self.message.as_str()
     }
     pub fn encode_ovb(&self) -> Result<Vec<u8>, FoundationError> {
-        Value::new(self.raw()?)
+        Value::new(self.boundary_projection().raw()?)
             .map_err(FoundationError::Value)?
             .encode()
             .map_err(FoundationError::Value)
     }
     pub fn decode_ovb(bytes: &[u8]) -> Result<Self, FoundationError> {
-        Self::from_raw(Value::decode(bytes).map_err(FoundationError::Value)?.raw())
+        let diagnostic = Self::from_raw(Value::decode(bytes).map_err(FoundationError::Value)?.raw())?;
+        // The wire redacted bit is an untrusted producer claim, not a
+        // disclosure grant. Generic decoding therefore redacts every payload.
+        Ok(diagnostic.redacted())
+    }
+    /// Reloads this diagnostic from one OVB value.
+    ///
+    /// Decoding and recursive redaction complete before the receiver changes,
+    /// so invalid input leaves the current diagnostic untouched. On success,
+    /// each cause slot is rebound from the same encoded array position,
+    /// including repeated stable references; references do not coalesce or
+    /// reorder slots. Wire decoding does not restore local message admission.
+    pub fn reload_ovb(&mut self, bytes: &[u8]) -> Result<(), FoundationError> {
+        let replacement = Self::decode_ovb(bytes)?;
+        // Replace through Clone::clone_from so reused nested vectors are
+        // rebound slot by slot without changing their serialized order.
+        self.clone_from(&replacement);
+        Ok(())
     }
     fn validate_redaction_consistency(&self) -> Result<(), FoundationError> {
         // The explicit span marker is itself a redaction claim. Do not let a
@@ -1417,6 +1568,7 @@ impl Diagnostic {
                 .map(Self::from_raw)
                 .collect::<Result<_, _>>()?,
             redacted: boolean(required(&fields, 6)?)?,
+            root_message_admitted: false,
             reference: fields.get(&7).map(|value| uuid_bytes(value)).transpose()?,
         };
         diagnostic
@@ -1429,23 +1581,26 @@ impl Diagnostic {
 /// JSON evidence representation for the live protocol diagnostic. This is
 /// intentionally separate from tag-60011: JSON is an audit/report transport,
 /// whereas tag-60011 remains the normative binary codec.
+/// Both serializers apply a safe boundary projection before writing fields.
 ///
 /// Values that JSON cannot represent safely are deliberately strings: UUIDs
 /// are canonical lower-case UUID text, arbitrary precision integers are base
 /// ten text, and canonical OVB values are lower-case hexadecimal bytes.
 impl Serialize for Diagnostic {
     fn serialize<T: Serializer>(&self, serializer: T) -> Result<T::Ok, T::Error> {
-        self.validate_redaction_consistency()
+        let projection = self.boundary_projection();
+        projection
+            .validate_redaction_consistency()
             .map_err(|_| <T::Error as serde::ser::Error>::custom("invalid diagnostic redaction"))?;
         let mut state = serializer.serialize_struct("Diagnostic", 8)?;
-        state.serialize_field("code", self.code.as_str())?;
-        state.serialize_field("severity", diagnostic_severity_name(self.severity))?;
-        state.serialize_field("message", self.message.as_str())?;
-        state.serialize_field("spans", &DiagnosticSpans(&self.spans))?;
-        state.serialize_field("notes", &SafeTexts(&self.notes))?;
-        state.serialize_field("causes", &Diagnostics(&self.causes))?;
-        state.serialize_field("redacted", &self.redacted)?;
-        if let Some(reference) = self.reference {
+        state.serialize_field("code", projection.code.as_str())?;
+        state.serialize_field("severity", diagnostic_severity_name(projection.severity))?;
+        state.serialize_field("message", projection.message.as_str())?;
+        state.serialize_field("spans", &DiagnosticSpans(&projection.spans))?;
+        state.serialize_field("notes", &SafeTexts(&projection.notes))?;
+        state.serialize_field("causes", &Diagnostics(&projection.causes))?;
+        state.serialize_field("redacted", &projection.redacted)?;
+        if let Some(reference) = projection.reference {
             state.serialize_field("reference", &uuid_text(reference))?;
         }
         state.end()
@@ -1872,7 +2027,10 @@ mod tests {
             Value::decode(&bytes).unwrap().raw(),
             OvbRaw::Tag(60011, _)
         ));
-        assert_eq!(Diagnostic::decode_ovb(&bytes).unwrap(), diagnostic);
+        assert_eq!(
+            Diagnostic::decode_ovb(&bytes).unwrap(),
+            diagnostic.clone().redacted()
+        );
     }
     #[test]
     fn committed_and_cwd_snapshot_pins_round_trip_without_rebinding() {

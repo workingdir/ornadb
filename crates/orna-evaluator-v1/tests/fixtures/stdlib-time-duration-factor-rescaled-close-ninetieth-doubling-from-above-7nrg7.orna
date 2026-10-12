@@ -1,0 +1,12 @@
+(() => {
+    let scaled_prefix = 5.seconds * 6.0 * 2.0000000001 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0;
+    let scaled_duration_step_1 = scaled_prefix * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0;
+    let scaled_duration_step_2 = scaled_duration_step_1 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0;
+    let scaled_duration = scaled_duration_step_2 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0 * 2.0;
+    [
+        compact_fmt.format(scaled_duration - 3713820117856140824.697372672.seconds),
+        clock_fmt.format(scaled_duration - 3713820117856140824.697372672.seconds),
+        words_fmt.format(scaled_duration - 3713820117856140824.697372672.seconds),
+        iso_fmt.format(scaled_duration - 3713820117856140824.697372672.seconds),
+    ]
+})()

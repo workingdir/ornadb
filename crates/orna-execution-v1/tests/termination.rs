@@ -36,6 +36,14 @@ impl ProviderExecutor<Value> for NeverProvider {
     }
 }
 
+struct PanickingProvider;
+
+impl ProviderExecutor<Value> for PanickingProvider {
+    fn execute(&mut self, _: ActivationId) -> Result<Value, ProviderError> {
+        panic!("provider execution panicked")
+    }
+}
+
 struct RejectedProvider;
 
 impl ProviderExecutor<Value> for RejectedProvider {
@@ -62,6 +70,22 @@ impl AtomicCommitStore for Store {
         Ok(CommitReceipt {
             sequence: self.commits as u64,
         })
+    }
+}
+
+#[derive(Default)]
+struct PanickingStore {
+    commits: usize,
+}
+
+impl AtomicCommitStore for PanickingStore {
+    fn commit(
+        &mut self,
+        _: CommitRequest,
+        _: &dyn OwnerFence,
+    ) -> Result<CommitReceipt, StoreError> {
+        // Deliberately panic before changing the store's visible state.
+        panic!("store panicked before publication")
     }
 }
 
@@ -219,7 +243,7 @@ fn requests_all_child_cancellations_before_joining_any_child() {
 }
 
 #[test]
-fn cancellation_request_failure_fans_out_before_retrying_joins() {
+fn cancellation_errors_still_fan_out_joins() {
     let (mut coordinator, owner) = active();
     let first = coordinator.spawn_child(owner).unwrap();
     let second = coordinator.spawn_child(owner).unwrap();
@@ -234,7 +258,10 @@ fn cancellation_request_failure_fans_out_before_retrying_joins() {
         Err(orna_execution_v1::CoordinationError::ChildOutstanding)
     );
     assert_eq!(coordinator.phase(), TransactionPhase::ChildrenJoining);
-    assert_eq!(supervisor.events, vec![('c', first), ('c', second)]);
+    assert_eq!(
+        supervisor.events,
+        vec![('c', first), ('c', second), ('j', first), ('j', second)]
+    );
     assert_eq!(store.commits, 0);
 
     coordinator
@@ -243,14 +270,7 @@ fn cancellation_request_failure_fans_out_before_retrying_joins() {
     assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
     assert_eq!(
         supervisor.events,
-        vec![
-            ('c', first),
-            ('c', second),
-            ('c', first),
-            ('c', second),
-            ('j', first),
-            ('j', second),
-        ]
+        vec![('c', first), ('c', second), ('j', first), ('j', second)]
     );
 
     let mut provider = Provider;
@@ -360,6 +380,56 @@ fn rolled_back_owner_cannot_execute_publish_or_pass_its_fence() {
     );
     assert_eq!(store.commits, 0);
     assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+}
+
+#[test]
+fn provider_panic_revokes_owner_before_unwind_escapes() {
+    let (mut coordinator, owner) = active();
+    let mut provider = PanickingProvider;
+    let mut store = Store::default();
+    let mut faults = NoFault;
+
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        coordinator.execute(
+            owner,
+            &mut provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+        )
+    }));
+
+    assert!(unwind.is_err());
+    assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+    assert!(!coordinator.permits(owner));
+    assert_eq!(
+        store.commit(stale_commit(owner), &coordinator),
+        Err(StoreError::OwnerFenceRejected)
+    );
+    assert_eq!(store.commits, 0);
+}
+
+#[test]
+fn store_panic_revokes_owner_before_unwind_escapes() {
+    let (mut coordinator, owner) = active();
+    let mut provider = Provider;
+    let mut store = PanickingStore::default();
+    let mut faults = NoFault;
+
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        coordinator.execute(
+            owner,
+            &mut provider,
+            &mut store,
+            checkpoint(),
+            &mut faults,
+        )
+    }));
+
+    assert!(unwind.is_err());
+    assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
+    assert!(!coordinator.permits(owner));
+    assert_eq!(store.commits, 0);
 }
 
 #[test]

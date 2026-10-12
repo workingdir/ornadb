@@ -1,0 +1,1 @@
+case value { Availability.ready: "ready", Availability.waiting { reason }: reason }

@@ -32,16 +32,33 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0076 | Test-only headless runtime conformance fixture | Production runtime ABI/loading remains deferred. ADR 0082 records a legacy/proposal Qt v1 boundary, not a current 1.0 acceptance; native runtime packaging and installed-runtime selection remain deferred, alongside browser, second-toolkit, and native platform expansion. |
 | 0077, 0078, 0079 | Resource language/transport and `std.action.call` | Virtual models, replay/cursor/cleanup semantics, sequence/parallel actions, automatic retries, graphical bindings, and reflective gateways remain deferred. |
 | 0080, 0081 | Headless ordinary Inspector v1 and generic `std.inspect.render@1` | Graphical/native runtimes, live trace streams, durable snapshots, source editing/apply, and reflective gateways remain deferred. |
-| 0082 | Legacy/proposal Qt v1 runtime boundary | Current 1.0 does not accept a Qt provider, loader, session bridge, or installed-runtime selection; browser runtime, second toolkit/platform, production CLIENT VM, Studio database operations, and gateways remain deferred. |
-| 0083 | Retained `std.ui.window` CLIENT entry point and host-owned adapter boundary | General UI JSON-to-ABI transport, models, Studio operations, launch metadata, and second runtimes remain separately gated. |
-| 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, launch metadata, gateways, and broader UI transport remain deferred. |
+| 0082 | Legacy/proposal Qt v1 runtime boundary | Current 1.0 does not accept a Qt provider, loader, session bridge, or installed-runtime selection; Qt visual smoke and screenshot evidence remain deferred; browser runtime, second toolkit/platform, production CLIENT VM, Studio database operations, and gateways remain deferred. |
+| 0083 | Retained `std.ui.window` CLIENT entry point and host-owned adapter boundary | General UI JSON-to-ABI transport, models, Studio operations, `std.launch` metadata (bounded by 0094), and second runtimes remain separately gated. |
+| 0084 | Programmable CLIENT plans and shared runtime hosts | Collection/range `FOR`, general algebraic values, second toolkit/browser deployment, `std.launch` metadata (bounded by 0094), gateways, and broader UI transport remain deferred. |
 | 0085 | Legacy/proposal fixed Qt runtime-package selection boundary | Current 1.0 does not prescribe an installed package path or native-runtime selection policy; browser/second toolkit, arbitrary runtime paths, database-selected native code, and model contracts remain deferred. |
-| 0086 | Bounded population of existing Inspector projection rows | Resource/UI/presenter identity enrichment is accepted by 0086; request lifecycle, full UI tree, models, and richer redaction remain deferred. |
+| 0086 | Deferred: populated Inspector projection rows are not required by frozen Orna 1.0.0 | Structural Inspect, snapshot coherence, unavailable-detail metadata, and redaction remain required; resource/UI/presenter row schemas and capture semantics remain deferred. |
 | 0087 | Bounded `std.data.Rows` and retained table presentation | Materialised Rows, shape-preserving sealed presentation, and V8 retained table input are accepted; virtual models, Rows resources, lossless JSON, and extra presenters remain deferred. |
 | 0088 | Structural UI constructors for source-authored CLIENT work | Seven V9 pure UI constructors are accepted after Rows V8; actions, models, Studio operations, metadata, and runtime expansion remain deferred. |
 | 0089 | Trusted resource lineage authority: compiled evaluator and installed authenticated execution derive principal/profile/instance lineage; parent/call-site identities remain correlation-only, and direct constructors remain low-level compatibility/test seams. | Hostile external-plugin authenticated binding remains deferred; no runtime or security-surface expansion is accepted. |
 | 0090 | Local principal and authenticated-session authority boundary for local invocation, resource, raw, and USER-state paths. | Credential/provider/secret enrollment, durable sessions, role selection, definer/effective-principal transitions, delegation, EXTERNAL principals, remote gateway auth, and production CLIENT VM trust features remain deferred. |
 | 0092 | Legacy/proposal function-backed CLI-session boundary | Canonical 1.0 entry execution is `orna run` or `orna repl`; it defines no accepted `std.cli.repl` catalogue identity. Endpoint transport, persistent action loops, native session-frame wiring, remote TLS/auth, and production artifact trust remain deferred. |
+| 0093 | 1.0.0 `orna serve` and `orna.present.v1` contract crosswalk | Generic reflective gateways, service discovery, JSON-RPC, MCP, custom auth, `std.protocol`/`std.service` identities and registrations, and alternate service lifecycles remain deferred. The reference specifies `orna.present.v1` under `ORNA-PROTO-001`–`ORNA-PROTO-004`; `ORNA-LIB-003` requires exact pinned module declarations rather than inferring an API from a namespace. |
+| 0094 | Reference-defined `orna run` entry selection and ownership crosswalk | `std.launch` catalogue/metadata, application argument schemas, presenter/runtime selection through metadata, launch-specific authorization, and additional lifecycle behavior remain undefined and deferred. |
+| 0095 | OrnaDB 1.0 principal, credential, and delegation scope | Built-in principal metadata, credential enrollment/providers, delegated sessions, and multi-user authorization remain deferred; `sys.Secret` exposes only its normative redacted metadata. |
+| 0096 | OrnaDB 1.0 trust policy and function security boundary | Accepts the trusted-host and network-perimeter rules in ORNA-TRUST-001..003; function ownership, policy evaluation, and SECURITY DEFINER semantics remain undefined and deferred. |
+| 0097 | Normative local REPL scope and conformance boundary | The function-backed session API from 0092 remains deferred; normative `ORNA-REPL-001` through `ORNA-REPL-006` remain in scope. |
+| 0098 | Ring-1 catalogue/source/dependency/revision gateway deferral | Normative system API semantics remain; sealed Ring-1 registration is deferred pending accepted function identities and runtime authority. |
+| 0099 | OrnaDB 1.0 CLIENT capability-grant configuration boundary | Local CLIENT grant loading and its configuration contract are not defined; the built-in grants database remains explicitly outside the 1.0 profile. |
+| 0100 | Studio source tooling boundary | Orna 1.0 accepts semantic CLI diff and read-only retained source/revision APIs; Studio source editing/apply, revision browsing UI, and public revision activation remain deferred. |
+| 0101 | Deferred: CLIENT STATE dogfood is not defined by frozen Orna 1.0.0 | ORNA-PAGE-001/002 define pages and widgets as ordinary values, not CLIENT state declarations, scope/default semantics, or StateClientPlan metadata. |
+| 0102 | Qualified type editor highlighting deferral | Lowercase qualified-name capture semantics are unspecified, and the current main branch contains no editor/tree-sitter implementation to update. |
+| 0103 | Studio runtime and Inspector reference boundary | Generic Orna inspection, presentation, redaction, and snapshot rules remain required; Studio-specific runtime and explorer contracts are deferred. |
+| 0105 | Deferred: Studio security/DBA page reference and authority boundary | A production page, CLIENT-to-administration authority path, and its interaction contract are not defined by the frozen reference; existing security implementation and CLI are unchanged. |
+| 0109 | Deferred: `orna-artifact` owns no PUB-1 immutable publication-object consumer | Keep executable plan codecs separate from compact segments, manifests, Git objects, and durability barriers; continue at the accepted runtime/storage/repository publication boundary. |
+| 0110 | Source-document and object-description contracts as specified by Orna 1.0.0 | A separate bounded function-declaration metadata value and `sys.source.function` API remain gated on a canonical contract; this ADR does not add identities or runtime behavior. |
+| 0111 | Design for `sys` as a baked typed module ABI with one provider protocol for built-ins and extensions. | Typed provider dispatch, semantic-role linkage, capability negotiation, Wasm loading, and adapters are phased follow-on slices; 1.0.0 `sys` semantics and `api/sys.json` remain frozen. |
+| 0112 | Phase 1 typed `sys` provider protocol implementation and 1.0 compatibility choices. | Build-time typed registry and role linkage are consumed by semantic/runtime crates; Wasm/WIT loading remains deferred. |
+| 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
 
@@ -198,7 +215,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Programmable CLIENT Plans and Shared Runtime Hosts](0084-client-control-flow.md)
 * **work ADR 0085:**
   [Install and Select the Qt Runtime from a Fixed Package Path](0085-installed-qt-runtime-package.md)
-* **work ADR 0086:**
+* **work ADR 0086 (deferred):**
   [Populate Existing Inspector Projection Rows](0086-populated-inspector-projections.md)
 * **work ADR 0087:**
   [Bounded `std.data.Rows` and Retained Table Presenter](0087-std-data-rows.md)
@@ -208,7 +225,50 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Resource Lineage Authority](0089-resource-lineage-authority.md)
 * **work ADR 0090:**
   [Local Principal and Session Authority](0090-local-principal-session-authority.md)
-* **work ADR 0091 (proposed):**
+* **work ADR 0091 (deferred):**
   [CLIENT VM Trust and Sandbox](0091-client-vm-trust-and-sandbox.md)
 * **work ADR 0092:**
   [Function-Backed CLI Sessions](0092-function-backed-cli-sessions.md)
+* **work ADR 0093 (deferred):**
+  [Source Introspection Reference Gate](0093-source-introspection-reference-gate.md)
+* **work ADR 0093:**
+  [Gateway and Protocol Contract Boundaries](0093-reflective-gateway-contracts.md)
+* **work ADR 0094:**
+  [Reference-Defined Run Entry Contract](0094-std-launch-contract.md)
+* **work ADR 0095:**
+  [OrnaDB 1.0 Principal, Credential, and Delegation Scope](0095-principal-credential-delegation-scope.md)
+* **work ADR 0096:**
+  [OrnaDB 1.0 Trust Policy and Function Security Boundary](0096-trust-policy-function-security.md)
+* **work ADR 0097:**
+  [Normative REPL Boundary](0097-normative-repl-boundary.md)
+* **work ADR 0098:**
+  [Ring-1 Catalogue and Revision Gateway Deferral](0098-ring1-catalogue-revision-deferral.md)
+* **work ADR 0099:**
+  [OrnaDB 1.0 CLIENT Capability-Grant Configuration Boundary](0099-client-capability-grant-configuration.md)
+* **work ADR 0100:**
+  [Studio Source Tooling Boundary](0100-studio-source-tooling-boundary.md)
+* **work ADR 0101 (deferred):**
+  [Defer CLIENT STATE Dogfood as Orna 1.0.0 Conformance](0101-client-state-dogfood-reference-deferral.md)
+* **work ADR 0102 (deferred):**
+  [Qualified Type Editor Highlighting Deferral](0102-qualified-type-editor-highlighting-deferral.md)
+* **work ADR 0103 (deferred):**
+  [Studio Runtime and Inspector Reference Boundary](0103-studio-runtime-inspector-reference-boundary.md)
+* **work ADR 0104 (deferred):**
+  [Studio Catalogue Tree and Function Search Boundary](0104-studio-catalogue-tree-search-boundary.md)
+* **work ADR 0105 (deferred):**
+  [Studio Security and DBA Page Boundary](0105-studio-security-dba-page-boundary.md)
+* **work ADR 0101:**
+  [OrnaDB 1.0 CLIENT VM Trust Boundary](0101-client-vm-trust-boundary.md)
+* **work ADR 0108 (deferred):**
+  [Persistent Scalar and Record Backend Parity](0108-persistent-value-backend-parity-deferral.md)
+* **work ADR 0109 (deferred):**
+  [Publication Object Encoding in `orna-artifact`](0109-publication-artifact-completeness-boundary.md)
+* **work ADR 0110 (deferred):**
+  [Source Introspection Reference Gate](0110-source-introspection-reference-gate.md)
+* **work ADR 0111:**
+  [`sys` Baked Module ABI and Extensible Provider Protocol](0111-sys-baked-module-abi.md)
+
+## External reference records
+
+* [Sys binding architecture addendum](0113-reference-sys-bindings-addendum.md) — records the standalone Orna 1.0.0 reference-tree addendum and its checksum verification.
+* [Sys binding addendum placement check](0114-reference-sys-bindings-placement-check.md) — verifies the previously placed reference file and proves byte identity for the reference tree.

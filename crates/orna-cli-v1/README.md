@@ -2,6 +2,34 @@
 
 A developing CLI for the current Orna 1.0 source language.
 
+## Command surface
+
+This binary currently accepts `init`, `status`, `fetch`, `diff`, `check`,
+`invoke`, `explain`, `repl`, and `run`, plus help and version options. The
+available command groups and option forms are listed by `orna --help`; that
+list describes this bounded implementation, not the complete Orna 1.0
+command set.
+
+The frozen CLI reference also names `serve`, `fmt`, `verify`, and `prune`, as
+well as Git-compatible operations that this binary does not yet implement.
+Their presence in the canonical list is not a claim that this binary supports
+them. The package remains explicit about the boundary rather than accepting
+placeholder commands without their command-specific behavior.
+
+The reference requires no separate `stream`, `checkpoint`, `failure`,
+`grants`, or extension-permission command hierarchies. Under `ORNA-CLI-002`,
+runtime, checkpoint, failure, and uncommon recovery details belong in typed
+`sys` values available to REPL code and optional `std.devtools` pages. Storage
+preference and rewrite operations likewise remain typed administration rather
+than a built-in command family (`ORNA-STORAGE-010`).
+
+`ORNA-CLI-001` covers Git-compatible command naming, flags, and observable
+semantics; `ORNA-DIAG-002` covers extended diagnostic documentation through
+`explain`. See the frozen reference's `source/18-cli.md`, `source/16-administration.md`,
+`source/17-repl.md`, `source/19-repository.md`, `source/23-storage.md`, and
+`source/34-system-reference.md` for those boundaries. This package does not
+claim the unimplemented command surface as complete.
+
 `init [DIRECTORY]` initializes a local Git-backed database, using the current
 directory when no target is supplied. It creates missing repository metadata
 and an empty root module without staging files or creating a commit. Existing

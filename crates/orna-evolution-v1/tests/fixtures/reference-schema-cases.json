@@ -1,0 +1,84 @@
+{
+  "cases": {
+    "stable_identity_rename": {
+      "from": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "name", "type": "Str", "role": "stored", "optional": false, "fallback": null }
+        ]
+      },
+      "to": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "display_name", "type": "Str", "role": "stored", "optional": false, "fallback": null }
+        ]
+      }
+    },
+    "plain_rename": {
+      "from": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "country", "type": "Str", "role": "stored", "optional": false, "fallback": null }
+        ]
+      },
+      "to": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 3, "name": "country", "type": "Str", "role": "stored", "optional": true, "fallback": null }
+        ]
+      }
+    },
+    "optional_addition": {
+      "from": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "name", "type": "Str", "role": "stored", "optional": false, "fallback": null }
+        ]
+      },
+      "to": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "name", "type": "Str", "role": "stored", "optional": false, "fallback": null },
+          { "id": 3, "name": "email", "type": "Str", "role": "stored", "optional": true, "fallback": null }
+        ]
+      }
+    },
+    "frozen_fallback": {
+      "from": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "name", "type": "Str", "role": "stored", "optional": false, "fallback": null }
+        ]
+      },
+      "to": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "name", "type": "Str", "role": "stored", "optional": false, "fallback": null },
+          { "id": 3, "name": "country", "type": "Str", "role": "stored", "optional": false, "fallback": "GB" }
+        ]
+      },
+      "edited": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "name", "type": "Str", "role": "stored", "optional": false, "fallback": null },
+          { "id": 3, "name": "country", "type": "Str", "role": "stored", "optional": false, "fallback": "US" }
+        ]
+      }
+    },
+    "required_without_fallback": {
+      "from": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "name", "type": "Str", "role": "stored", "optional": false, "fallback": null }
+        ]
+      },
+      "to": {
+        "table": { "id": 1, "name": "Contact", "explicit_key": true },
+        "fields": [
+          { "id": 2, "name": "name", "type": "Str", "role": "stored", "optional": false, "fallback": null },
+          { "id": 3, "name": "country", "type": "Str", "role": "stored", "optional": false, "fallback": null }
+        ]
+      }
+    }
+  }
+}

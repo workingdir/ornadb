@@ -1,0 +1,1 @@
+pub fn bad(id: Int): Int = id = 2;

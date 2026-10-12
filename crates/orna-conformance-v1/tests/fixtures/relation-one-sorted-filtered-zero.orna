@@ -1,0 +1,7 @@
+pub table Note(id: Int) { value: Int, }
+fn selected() = Note | sort_by(note => -note.id) | one(note => note.id == 99);
+fn parent() {
+    Note.insert({ id: 1, value: 1 });
+    Note.insert({ id: 2, value: 2 });
+    selected();
+}

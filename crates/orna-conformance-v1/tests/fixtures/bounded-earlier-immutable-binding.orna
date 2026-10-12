@@ -1,0 +1,1 @@
+pub fn incremented() = if true { let answer = 41; std.math.increment(answer) } else { 0 };

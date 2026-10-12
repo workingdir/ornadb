@@ -1,0 +1,6 @@
+
+            pub type Other { value: Int, }
+            pub type Box {
+                impl Other {}
+            }
+        

@@ -1,0 +1,7 @@
+use checks.{related};
+pub table User(id: Uuid) { name: Str, }
+pub table Account(id: Uuid) { user_id: Uuid, }
+
+pub fn parameter(related: fn(Int): Bool): Bool = related(0);
+
+assert parameter(_ => true);

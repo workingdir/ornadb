@@ -1,0 +1,8 @@
+
+            pub table Note(id: Int) {
+                value: Int,
+                assert valid_notes(Note);
+            }
+            pub fn valid_notes(rows: Relation<Note>): Bool =
+                rows | filter(note => note.value > 0) | count == 2;
+        

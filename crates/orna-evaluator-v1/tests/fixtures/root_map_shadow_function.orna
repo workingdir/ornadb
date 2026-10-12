@@ -1,0 +1,2 @@
+fn map(value: Int) = value + 100;
+fn run() = map(1);

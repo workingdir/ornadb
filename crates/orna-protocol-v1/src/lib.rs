@@ -229,6 +229,38 @@ pub enum RequestState {
     Terminal,
     Orphaned,
 }
+
+/// Stable identity for one typed child in a Present tree.
+///
+/// Record fields use their declared name or ObjectId, relation rows use the
+/// table ObjectId and complete primary key, keyed UI children use an explicit
+/// typed value, and `None` on [`PresentNode::new`] represents an unkeyed,
+/// position-addressed child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PresentIdentity {
+    RecordField(String),
+    RecordFieldObjectId([u8; 16]),
+    RelationRow {
+        table_object_id: [u8; 16],
+        primary_key: CanonicalValue,
+    },
+    Explicit(CanonicalValue),
+}
+
+/// Stable type/name used by a Present node.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PresentKind {
+    Name(String),
+    ObjectId([u8; 16]),
+}
+
+/// Stable key used by a typed Present property.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PresentPropertyKey {
+    Name(String),
+    ObjectId([u8; 16]),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PresentNode(ValueNode);
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -541,7 +573,7 @@ impl Message {
             if fields.iter().any(|(known, _)| known == key) {
                 return Err(Error::InvalidMessage);
             }
-            fields.push((*key, value.0.clone()));
+            fields.push((*key, present_value_node(&to_ovb(&value.0)?)?));
         }
         Ok(Node::Map(
             fields
@@ -666,8 +698,8 @@ impl Message {
                 if number >= 32768 {
                     return Err(Error::UnknownMandatoryExtension);
                 }
-                let _ = canonical_value(value)?;
-                extensions.insert(number, ValueNode(value.clone()));
+                let safe = canonical_value(value)?;
+                extensions.insert(number, ValueNode(from_ovb(safe.raw())?));
             }
         }
         message.validate_envelope(request, watch)?;
@@ -835,8 +867,73 @@ impl RequestState {
 
 impl PresentNode {
     fn decode(node: &Node) -> Result<Self> {
-        validate_present(node)?;
-        Ok(Self(ValueNode(node.clone())))
+        let node = redact_present_values(node)?;
+        validate_present(&node)?;
+        Ok(Self(ValueNode(node)))
+    }
+
+    /// Builds one validated renderer-neutral Present node with stable child
+    /// identities. The builder keeps record fields, relation rows, explicitly
+    /// keyed children and positional list children distinct at the API edge.
+    pub fn new(
+        kind: PresentKind,
+        identity: Option<PresentIdentity>,
+        properties: impl IntoIterator<Item = (PresentPropertyKey, CanonicalValue)>,
+        children: impl IntoIterator<Item = PresentNode>,
+    ) -> Result<Self> {
+        let kind = match kind {
+            PresentKind::Name(name) => Node::Text(name),
+            PresentKind::ObjectId(object_id) => uuid_node(object_id),
+        };
+        let identity = match identity {
+            None => Node::Null,
+            Some(PresentIdentity::RecordField(name)) => {
+                Node::Array(vec![uint(0), Node::Text(name)])
+            }
+            Some(PresentIdentity::RecordFieldObjectId(object_id)) => {
+                Node::Array(vec![uint(0), uuid_node(object_id)])
+            }
+            Some(PresentIdentity::RelationRow {
+                table_object_id,
+                primary_key,
+            }) => Node::Array(vec![
+                uint(1),
+                uuid_node(table_object_id),
+                value_node(&primary_key)?,
+            ]),
+            Some(PresentIdentity::Explicit(key)) => {
+                Node::Array(vec![uint(3), value_node(&key)?])
+            }
+        };
+        let mut properties = properties
+            .into_iter()
+            .map(|(key, value)| {
+                let key = match key {
+                    PresentPropertyKey::Name(name) => Node::Text(name),
+                    PresentPropertyKey::ObjectId(object_id) => uuid_node(object_id),
+                };
+                let encoded_key = encode_node(&key)?;
+                Ok((encoded_key, key, value_node(&value)?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        properties.sort_by(|left, right| left.0.cmp(&right.0));
+        let properties = properties
+            .into_iter()
+            .map(|(_, key, value)| (key, value))
+            .collect();
+        let children = children
+            .into_iter()
+            .map(|child| child.0.0)
+            .collect();
+        Self::decode(&Node::Tag(
+            60012,
+            Box::new(Node::Array(vec![
+                kind,
+                identity,
+                Node::Map(properties),
+                Node::Array(children),
+            ])),
+        ))
     }
 
     /// Wraps one canonical application value in a renderer-neutral Present
@@ -849,7 +946,10 @@ impl PresentNode {
             Box::new(Node::Array(vec![
                 Node::Text("value".into()),
                 Node::Null,
-                Node::Map(vec![(Node::Text("value".into()), value_node(&value)?)]),
+                Node::Map(vec![(
+                    Node::Text("value".into()),
+                    present_value_node(value.raw())?,
+                )]),
                 Node::Array(Vec::new()),
             ])),
         ))
@@ -900,8 +1000,11 @@ impl PresentNode {
 }
 impl PatchList {
     fn decode(node: &Node) -> Result<Self> {
-        validate_patches(node)?;
-        Ok(Self(ValueNode(node.clone())))
+        // Patch lists are generic trace values. Sanitize their nested payloads
+        // before retaining the tree because Delta serialization reuses it.
+        let node = present_value_node(&to_ovb(node)?)?;
+        validate_patches(&node)?;
+        Ok(Self(ValueNode(node)))
     }
 }
 
@@ -1295,7 +1398,18 @@ fn matches_selector(node: &Node, selector: &PatchPathComponent) -> Result<bool> 
 impl Diagnostic {
     fn decode(node: &Node) -> Result<Self> {
         validate_diagnostic(node)?;
-        Ok(Self(ValueNode(node.clone())))
+        let bytes = encode_node(node)?;
+        let diagnostic = orna_foundation_v1::Diagnostic::decode_ovb(&bytes)
+            .map_err(|_| Error::InvalidValue)?
+            .redacted();
+        // The wire protocol carries no disclosure authorization. Redact every
+        // diagnostic at ingress so standalone, Result, and status responses
+        // share the same fail-closed boundary, including recursive causes.
+        let safe_bytes = diagnostic
+            .encode_ovb()
+            .map_err(|_| Error::InvalidValue)?;
+        let safe = CanonicalValue::decode(&safe_bytes).map_err(|_| Error::InvalidValue)?;
+        Ok(Self(ValueNode(from_ovb(safe.raw())?)))
     }
 }
 impl ResultBody {
@@ -1313,9 +1427,10 @@ impl ResultBody {
     }
 
     fn decode(node: &Node) -> Result<Self> {
-        let body = map(node).ok_or(Error::InvalidValue)?;
-        let _ = Message::decode(18, Some([0; 16]), None, body)?;
-        Ok(Self(ValueNode(node.clone())))
+        let node = redacted_value_node(node)?;
+        let body = map(&node).ok_or(Error::InvalidValue)?;
+        let (message, extensions) = Message::decode(18, Some([0; 16]), None, body)?;
+        Ok(Self(ValueNode(message.body(&extensions)?)))
     }
 }
 
@@ -1439,7 +1554,20 @@ fn validate_diagnostic(node: &Node) -> Result<()> {
 }
 
 fn canonical_value(node: &Node) -> Result<CanonicalValue> {
-    CanonicalValue::new(to_ovb(node)?).map_err(|_| Error::InvalidValue)
+    let value = CanonicalValue::new(to_ovb(node)?).map_err(|_| Error::InvalidValue)?;
+    value
+        .redacted_for_trace()
+        .map_err(|_| Error::InvalidValue)
+}
+fn redacted_value_node(node: &Node) -> Result<Node> {
+    // Result bodies are typed envelopes. Preserve Diagnostic/Present wrappers
+    // until their owning decoders apply field-aware redaction, while still
+    // scrubbing generic Error values at this trace boundary.
+    let value = CanonicalValue::new(to_ovb(node)?).map_err(|_| Error::InvalidValue)?;
+    let value = value
+        .redacted_error_values_for_trace()
+        .map_err(|_| Error::InvalidValue)?;
+    from_ovb(value.raw())
 }
 fn nullable_value(node: &Node) -> Result<Option<CanonicalValue>> {
     if matches!(node, Node::Null) {
@@ -1465,8 +1593,71 @@ fn to_ovb(node: &Node) -> Result<OvbRaw> {
         Node::Tag(tag, value) => OvbRaw::Tag(*tag, Box::new(to_ovb(value)?)),
     })
 }
+fn present_value_node(value: &OvbRaw) -> Result<Node> {
+    match value {
+        OvbRaw::Tag(0 | 60011 | 60012 | 60026, _) => {
+            // The generic fallback has no type witness or per-field disclosure
+            // proof. ORNA-SYS-100 and ORNA-SECRET-002 require an unmistakable
+            // marker, so discard the complete protected wrapper payload.
+            Ok(Node::Text("<redacted>".into()))
+        }
+        OvbRaw::Tag(60016, _) => {
+            let value = CanonicalValue::new(value.clone()).map_err(|_| Error::InvalidValue)?;
+            from_ovb(
+                value
+                    .redacted_for_trace()
+                    .map_err(|_| Error::InvalidValue)?
+                    .raw(),
+            )
+        }
+        OvbRaw::Array(values) => Ok(Node::Array(
+            values
+                .iter()
+                .map(present_value_node)
+                .collect::<Result<Vec<_>>>()?,
+        )),
+        OvbRaw::Map(original_entries) => {
+            let mut entries = original_entries
+                .iter()
+                .map(|(key, value)| Ok((present_value_node(key)?, present_value_node(value)?)))
+                .collect::<Result<Vec<_>>>()?;
+            let mut changed_key = false;
+            for ((key, _), (safe_key, _)) in original_entries.iter().zip(&entries) {
+                if to_ovb(safe_key)? != key.clone() {
+                    changed_key = true;
+                    break;
+                }
+            }
+            if changed_key {
+                // Redacting keys can merge distinct entries. Fail closed for
+                // the whole map rather than emit an ambiguous trace value.
+                return Ok(Node::Text("<redacted>".into()));
+            }
+            entries.sort_by(|(left, _), (right, _)| {
+                encode_node(left)
+                    .expect("validated presentation keys remain encodable")
+                    .cmp(
+                        &encode_node(right)
+                            .expect("validated presentation keys remain encodable"),
+                    )
+            });
+            Ok(Node::Map(entries))
+        }
+        OvbRaw::Tag(tag, value) => Ok(Node::Tag(
+            *tag,
+            Box::new(present_value_node(value)?),
+        )),
+        value => from_ovb(value),
+    }
+}
 fn value_node(value: &CanonicalValue) -> Result<Node> {
-    from_ovb(value.raw())
+    // Protocol serialization is an unprivileged trace boundary; preserve the
+    // portable local Error for recovery, but never send its caller text or
+    // details across the wire without a disclosure classifier.
+    let safe = value
+        .redacted_for_trace()
+        .map_err(|_| Error::InvalidValue)?;
+    from_ovb(safe.raw())
 }
 fn from_ovb(value: &OvbRaw) -> Result<Node> {
     Ok(match value {
@@ -1484,6 +1675,54 @@ fn from_ovb(value: &OvbRaw) -> Result<Node> {
         ),
         OvbRaw::Tag(tag, value) => Node::Tag(*tag, Box::new(from_ovb(value)?)),
     })
+}
+
+fn redact_present_values(node: &Node) -> Result<Node> {
+    let Node::Tag(60012, body) = node else {
+        return Err(Error::InvalidValue);
+    };
+    let fields = array(body).ok_or(Error::InvalidValue)?;
+    if fields.len() != 4 {
+        return Err(Error::InvalidValue);
+    }
+
+    let kind = fields[0].clone();
+    let identity = if let Some(identity_fields) = array(&fields[1]) {
+        match identity_fields.as_slice() {
+            [kind, table, key] if u64_value(kind).ok() == Some(1) => Node::Array(vec![
+                kind.clone(),
+                table.clone(),
+                present_value_node(&to_ovb(key)?)?,
+            ]),
+            [kind, key] if u64_value(kind).ok() == Some(3) => Node::Array(vec![
+                kind.clone(),
+                present_value_node(&to_ovb(key)?)?,
+            ]),
+            _ => fields[1].clone(),
+        }
+    } else {
+        fields[1].clone()
+    };
+    let properties = map(&fields[2]).ok_or(Error::InvalidValue)?;
+    let properties = properties
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), present_value_node(&to_ovb(value)?)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let children = array(&fields[3]).ok_or(Error::InvalidValue)?;
+    let children = children
+        .iter()
+        .map(redact_present_values)
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Node::Tag(
+        60012,
+        Box::new(Node::Array(vec![
+            kind,
+            identity,
+            Node::Map(properties),
+            Node::Array(children),
+        ])),
+    ))
 }
 fn snapshot(node: &Node) -> Result<CanonicalSnapshot> {
     CanonicalSnapshot::decode(&to_ovb(node)?).map_err(|_| Error::InvalidValue)
@@ -1909,6 +2148,192 @@ mod tests {
         let present = PresentNode::from_value(value()).unwrap();
         present.validate_with_limits(Limits::default()).unwrap();
     }
+
+    #[test]
+    fn present_value_fallback_discards_nested_protected_payloads() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let value = OvbRaw::Map(vec![(
+            OvbRaw::Text("credential".into()),
+            OvbRaw::Array(vec![OvbRaw::Tag(
+                0,
+                Box::new(OvbRaw::Text(fixture.to_owned())),
+            )]),
+        )]);
+
+        assert_eq!(
+            present_value_node(&value).unwrap(),
+            Node::Map(vec![(
+                Node::Text("credential".into()),
+                Node::Array(vec![Node::Text("<redacted>".into())]),
+            )]),
+        );
+        assert!(!format!("{:?}", present_value_node(&value).unwrap()).contains(fixture));
+
+        let marker = PresentNode::from_value(CanonicalValue::protected()).unwrap();
+        let rendered = format!("{marker:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("Tag(0"));
+    }
+
+    #[test]
+    fn present_projection_redacts_composed_wrappers_without_losing_present_shape() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let diagnostic = Node::Tag(
+            60011,
+            Box::new(Node::Map(vec![
+                (uint(0), Node::Text("ORNA-E-TEST".into())),
+                (uint(1), uint(3)),
+                (uint(2), Node::Text(fixture.into())),
+                (uint(3), Node::Array(vec![])),
+                (uint(4), Node::Array(vec![Node::Text(fixture.into())])),
+                (uint(5), Node::Array(vec![])),
+                (uint(6), Node::Bool(false)),
+            ])),
+        );
+        let sys_value = Node::Tag(
+            60026,
+            Box::new(Node::Array(vec![
+                Node::Array(vec![uint(0), Node::Text("Str".into())]),
+                Node::Text(fixture.into()),
+            ])),
+        );
+        let error = Node::Tag(
+            60016,
+            Box::new(Node::Map(vec![
+                (uint(0), Node::Text("ORNA-E-TEST".into())),
+                (uint(1), Node::Text(fixture.into())),
+                (uint(2), Node::Array(vec![])),
+                (
+                    uint(3),
+                    Node::Map(vec![(Node::Text("credential".into()), Node::Text(fixture.into()))]),
+                ),
+            ])),
+        );
+        let child = present_node(
+            Node::Null,
+            vec![],
+        );
+        let child = match child {
+            Node::Tag(60012, body) => {
+                let Node::Array(mut fields) = *body else { unreachable!() };
+                fields[2] = Node::Map(vec![(Node::Text("error".into()), error)]);
+                Node::Tag(60012, Box::new(Node::Array(fields)))
+            }
+            _ => unreachable!(),
+        };
+        let incoming = Node::Tag(
+            60012,
+            Box::new(Node::Array(vec![
+                Node::Text("root".into()),
+                Node::Null,
+                Node::Map(vec![
+                    (Node::Text("diagnostic".into()), diagnostic),
+                    (
+                        Node::Text("legacy-secret".into()),
+                        Node::Tag(0, Box::new(Node::Text(fixture.into()))),
+                    ),
+                    (Node::Text("sys".into()), sys_value),
+                ]),
+                Node::Array(vec![child]),
+            ])),
+        );
+
+        let decoded = PresentNode::decode(&incoming).unwrap();
+        let encoded = encode_node(&decoded.0.0).unwrap();
+        assert!(!encoded
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        let Node::Tag(60012, root_body) = &decoded.0.0 else {
+            panic!("typed Present shape was discarded")
+        };
+        let root_fields = array(root_body).unwrap();
+        let root_children = array(&root_fields[3]).unwrap();
+        assert_eq!(root_children.len(), 1);
+        assert!(matches!(root_fields[2], Node::Map(_)));
+    }
+
+    #[test]
+    fn present_builder_distinguishes_stable_child_identities_from_positions() {
+        let text_value = |value: &str| {
+            CanonicalValue::new(OvbRaw::Text(value.to_owned())).unwrap()
+        };
+        let record = PresentNode::new(
+            PresentKind::Name("record".into()),
+            Some(PresentIdentity::RecordField("customer".into())),
+            [(PresentPropertyKey::Name("label".into()), text_value("record"))],
+            [],
+        )
+        .unwrap();
+        let field_id = PresentNode::new(
+            PresentKind::Name("record".into()),
+            Some(PresentIdentity::RecordFieldObjectId([3; 16])),
+            [],
+            [],
+        )
+        .unwrap();
+        let relation = PresentNode::new(
+            PresentKind::Name("row".into()),
+            Some(PresentIdentity::RelationRow {
+                table_object_id: [4; 16],
+                primary_key: CanonicalValue::new(OvbRaw::Int(1.into())).unwrap(),
+            }),
+            [],
+            [],
+        )
+        .unwrap();
+        let keyed = PresentNode::new(
+            PresentKind::Name("card".into()),
+            Some(PresentIdentity::Explicit(text_value("card-1"))),
+            [],
+            [],
+        )
+        .unwrap();
+        let positional = PresentNode::new(PresentKind::Name("item".into()), None, [], []).unwrap();
+        let tree = PresentNode::new(
+            PresentKind::Name("page".into()),
+            None,
+            [],
+            [record, field_id, relation, keyed, positional],
+        )
+        .unwrap();
+        tree.validate_with_limits(Limits::default()).unwrap();
+
+        let envelope = Envelope {
+            request: Some(id(1)),
+            watch: Some(id(2)),
+            message: Message::Snapshot {
+                revision: 0,
+                present: tree,
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let bytes = envelope.encode(Limits::default()).unwrap();
+        assert_eq!(Envelope::decode(&bytes, Limits::default()).unwrap(), envelope);
+    }
+
+    #[test]
+    fn present_builder_rejects_duplicate_sibling_identities() {
+        let child = || {
+            PresentNode::new(
+                PresentKind::Name("record".into()),
+                Some(PresentIdentity::RecordField("same".into())),
+                [],
+                [],
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            PresentNode::new(
+                PresentKind::Name("page".into()),
+                None,
+                [],
+                [child(), child()],
+            ),
+            Err(Error::InvalidValue)
+        );
+    }
+
     #[test]
     fn minimum_node_limit_accepts_one_hundred_thousand_present_nodes() {
         let children = (1..MIN_MAX_NODES)
@@ -2958,5 +3383,246 @@ mod tests {
         let error = Envelope::decode(&[0xff], Limits::default()).unwrap_err();
         assert_eq!(error.to_string(), "wire.unsupported");
         assert!(!error.to_string().contains("ff"));
+    }
+
+    #[test]
+    fn diagnostic_wire_paths_redact_payloads_without_trace_context() {
+        let fixture = include_str!("../tests/fixtures/secret-diagnostic.orna").trim();
+        let diagnostic = |code: &str| {
+            let cause = Node::Tag(
+                60011,
+                Box::new(Node::Map(vec![
+                    (uint(0), Node::Text("vendor.secret.cause".into())),
+                    (uint(1), uint(2)),
+                    (uint(2), Node::Text(fixture.into())),
+                    (uint(3), Node::Array(vec![])),
+                    (uint(4), Node::Array(vec![Node::Text(fixture.into())])),
+                    (uint(5), Node::Array(vec![])),
+                    (uint(6), Node::Bool(false)),
+                ])),
+            );
+            Node::Tag(
+                60011,
+                Box::new(Node::Map(vec![
+                    (uint(0), Node::Text(code.into())),
+                    (uint(1), uint(3)),
+                    (uint(2), Node::Text(fixture.into())),
+                    (uint(3), Node::Array(vec![])),
+                    (uint(4), Node::Array(vec![Node::Text(fixture.into())])),
+                    (uint(5), Node::Array(vec![cause])),
+                    (uint(6), Node::Bool(false)),
+                ])),
+            )
+        };
+        let standalone = wire(
+            19,
+            Some(id(1)),
+            Some(id(2)),
+            Node::Map(vec![
+                (uint(0), diagnostic("wire.secret.failure")),
+                (uint(1), Node::Bool(true)),
+            ]),
+        );
+        let result = wire(
+            18,
+            Some(id(1)),
+            None,
+            Node::Map(vec![
+                (uint(0), uint(ResultStatus::Failure.code())),
+                (uint(1), Node::Null),
+                (uint(2), Node::Bytes(digest(4).to_vec())),
+                (uint(3), diagnostic("wire.secret.result")),
+            ]),
+        );
+
+        for incoming in [standalone, result] {
+            let decoded = Envelope::decode(&incoming, Limits::default()).unwrap();
+            assert!(!format!("{decoded:?}").contains(fixture));
+            let outgoing = decoded.encode(Limits::default()).unwrap();
+            assert!(!outgoing.windows(fixture.len()).any(|part| part == fixture.as_bytes()));
+            assert_eq!(Envelope::decode(&outgoing, Limits::default()).unwrap(), decoded);
+        }
+    }
+
+    #[test]
+    fn error_trace_values_are_redacted_on_wire_and_present_serialization() {
+        let fixture = include_str!("../tests/fixtures/error-trace-secret.orna").trim();
+        fn error_node(secret: &str, nested: bool) -> Node {
+            Node::Tag(
+                60016,
+                Box::new(Node::Map(vec![
+                    (uint(0), Node::Text(secret.into())),
+                    (uint(1), Node::Text(secret.into())),
+                    (
+                        uint(2),
+                        Node::Array(if nested {
+                            vec![error_node(secret, false)]
+                        } else {
+                            vec![]
+                        }),
+                    ),
+                    (
+                        uint(3),
+                        Node::Map(vec![(
+                            Node::Text("credential".into()),
+                            Node::Text(secret.into()),
+                        )]),
+                    ),
+                ])),
+            )
+        }
+
+        let raw_incoming = wire(
+            18,
+            Some(id(1)),
+            None,
+            Node::Map(vec![
+                (uint(0), uint(ResultStatus::Success.code())),
+                (uint(1), error_node(fixture, true)),
+                (uint(2), Node::Bytes(digest(8).to_vec())),
+                (uint(3), Node::Null),
+            ]),
+        );
+        let decoded = Envelope::decode(&raw_incoming, Limits::default()).unwrap();
+        assert!(!format!("{decoded:?}").contains(fixture));
+        let redacted_wire = decoded.encode(Limits::default()).unwrap();
+        assert!(!redacted_wire
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        assert_eq!(
+            Envelope::decode(&redacted_wire, Limits::default()).unwrap(),
+            decoded
+        );
+
+        let extension_incoming = wire(
+            3,
+            Some(id(5)),
+            Some(id(6)),
+            Node::Map(vec![
+                (uint(0), uint(0)),
+                (uint(1), Node::Bytes(id(7).to_vec())),
+                (uint(2), Node::Text("ordinary event value".into())),
+                (uint(3), Node::Bytes(digest(9).to_vec())),
+                (uint(11), error_node(fixture, true)),
+            ]),
+        );
+        let extension = Envelope::decode(&extension_incoming, Limits::default()).unwrap();
+        assert!(!format!("{extension:?}").contains(fixture));
+        let extension_wire = extension.encode(Limits::default()).unwrap();
+        assert!(!extension_wire
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        assert_eq!(
+            Envelope::decode(&extension_wire, Limits::default()).unwrap(),
+            extension
+        );
+
+        let patch_incoming = wire(
+            17,
+            None,
+            Some(id(8)),
+            Node::Map(vec![
+                (uint(0), uint(0)),
+                (uint(1), uint(1)),
+                (
+                    uint(2),
+                    Node::Array(vec![Node::Array(vec![
+                        uint(0),
+                        Node::Array(vec![]),
+                        error_node(fixture, true),
+                    ])]),
+                ),
+                (uint(3), snapshot_node(&snapshot()).unwrap()),
+            ]),
+        );
+        let patch = Envelope::decode(&patch_incoming, Limits::default()).unwrap();
+        assert!(!format!("{patch:?}").contains(fixture));
+        let patch_wire = patch.encode(Limits::default()).unwrap();
+        assert!(!patch_wire
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+
+        let status = Envelope {
+            request: Some(id(4)),
+            watch: None,
+            message: Message::RequestStatusResult {
+                target: id(1),
+                state: RequestState::Terminal,
+                fingerprint: Some(digest(8)),
+                result: Some(ResultBody::from_result(&decoded, Limits::default()).unwrap()),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let status_wire = status.encode(Limits::default()).unwrap();
+        assert!(!status_wire
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        let decoded_status = Envelope::decode(&status_wire, Limits::default()).unwrap();
+        assert!(!format!("{decoded_status:?}").contains(fixture));
+
+        let value = CanonicalValue::new(to_ovb(&error_node(fixture, true)).unwrap()).unwrap();
+        let present = PresentNode::new(
+            PresentKind::Name("failure".into()),
+            None,
+            [(PresentPropertyKey::Name("error".into()), value.clone())],
+            [],
+        )
+        .unwrap();
+        let present_envelope = Envelope {
+            request: Some(id(2)),
+            watch: Some(id(3)),
+            message: Message::Snapshot {
+                revision: 1,
+                present,
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let present_wire = present_envelope.encode(Limits::default()).unwrap();
+        assert!(!present_wire
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        let decoded_present = Envelope::decode(&present_wire, Limits::default()).unwrap();
+        assert!(!format!("{decoded_present:?}").contains(fixture));
+    }
+
+    #[test]
+    fn generic_diagnostic_wrapper_is_redacted_from_extension_wire_traces() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let diagnostic = Node::Tag(
+            60011,
+            Box::new(Node::Map(vec![
+                (uint(0), Node::Text("ORNA-E-EXTENSION".into())),
+                (uint(1), uint(3)),
+                (uint(2), Node::Text(fixture.into())),
+                (uint(3), Node::Array(vec![])),
+                (uint(4), Node::Array(vec![Node::Text(fixture.into())])),
+                (uint(5), Node::Array(vec![])),
+                (uint(6), Node::Bool(false)),
+            ])),
+        );
+        let incoming = wire(
+            3,
+            Some(id(1)),
+            Some(id(2)),
+            Node::Map(vec![
+                (uint(0), uint(1)),
+                (uint(1), Node::Bytes(id(3).to_vec())),
+                (uint(2), Node::Text("extension projection".into())),
+                (uint(3), Node::Bytes(digest(4).to_vec())),
+                (uint(11), diagnostic),
+            ]),
+        );
+
+        let decoded = Envelope::decode(&incoming, Limits::default()).unwrap();
+        assert!(!format!("{decoded:?}").contains(fixture));
+        let outgoing = decoded.encode(Limits::default()).unwrap();
+        assert!(!outgoing
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+        assert_eq!(
+            Envelope::decode(&outgoing, Limits::default()).unwrap(),
+            decoded
+        );
     }
 }

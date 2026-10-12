@@ -1,0 +1,1 @@
+use std.math; pub fn main(): Int = std.math.increment(41);

@@ -1,0 +1,10 @@
+pub table KnownByteWorkThreeTailSource(id: Int) { value: Int, }
+pub table KnownByteWorkThreeTailUnknownFirst(id: Int) { value: Int, }
+pub table KnownByteWorkThreeTailScanFirst(id: Int) { value: Int, }
+pub table KnownByteWorkThreeTailUnknownSecond(id: Int) { value: Int, }
+pub table KnownByteWorkThreeTailScanMiddle(id: Int) { value: Int, }
+pub table KnownByteWorkThreeTailUnknownThird(id: Int) { value: Int, }
+pub table KnownByteWorkThreeTailScanLast(id: Int) { value: Int, }
+pub table KnownByteWorkThreeTailResetFirst(id: Int) { value: Int, }
+pub table KnownByteWorkThreeTailResetMiddle(id: Int) { value: Int, }
+pub table KnownByteWorkThreeTailResetLast(id: Int) { value: Int, }

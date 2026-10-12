@@ -1,0 +1,2 @@
+pub table MaxSourceMaterializationOverflow(id: Int) { value: Int, }
+pub fn max_source_materialization_overflow() = MaxSourceMaterializationOverflow;

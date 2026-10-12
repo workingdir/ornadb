@@ -1,0 +1,10 @@
+pub table Contact(id: Str) {
+    name: Str,
+    full_name: Str => name,
+}
+
+pub fn forge() = Contact.insert({
+    id: "alice",
+    name: "Alice",
+    full_name: "Forged Alice",
+});

@@ -1,0 +1,1 @@
+fn compute(first = 1 / 0) = first;

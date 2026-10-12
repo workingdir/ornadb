@@ -1,0 +1,17 @@
+pub table Reading(id: Int) { value: Decimal, }
+fn minimum(): Decimal? = Reading | map(reading => reading.value) | min();
+fn maximum(): Decimal? = Reading | map(reading => reading.value) | max();
+fn parent() {
+
+            assert minimum() == null;
+            assert maximum() == null;
+            Reading.insert({ id: 2, value: 2.003 });
+            assert (minimum() ?? 0.000) == 2.0030;
+            assert (maximum() ?? 0.000) == 2.0030;
+            Reading.insert({ id: 1, value: 1.20 });
+            Reading.insert({ id: 3, value: 1.2000 });
+            Reading.insert({ id: 4, value: 2.0030 });
+            assert (minimum() ?? 0.000) == 1.200;
+            assert (maximum() ?? 0.000) == 2.003;
+
+}

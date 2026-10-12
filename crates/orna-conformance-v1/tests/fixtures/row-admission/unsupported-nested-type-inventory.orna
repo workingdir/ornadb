@@ -1,0 +1,1 @@
+pub table Item(id: Int) { opaque_ids: [Uuid], }

@@ -1,0 +1,6 @@
+fn number_one(): Int = 1;
+fn number_two(prefix: Str): Int = 2;
+fn text_result(): Str = "done";
+
+pub fn winner() = std.concurrent.race([number_one, number_two]);
+pub fn incompatible() = std.concurrent.race([number_one, text_result]);

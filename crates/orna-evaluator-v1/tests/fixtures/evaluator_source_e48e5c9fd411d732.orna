@@ -1,0 +1,1 @@
+std.collection.rank([1, 2], value => if value == 1 { value } else { "two" })

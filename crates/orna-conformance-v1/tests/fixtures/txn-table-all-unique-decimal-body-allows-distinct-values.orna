@@ -1,0 +1,10 @@
+pub table Reading(id: Int) {
+    value: Decimal,
+    label: Str,
+    assert all_unique(reading => reading.value);
+}
+
+fn parent() {
+    Reading.insert({ id: 1, value: 18.25, label: "first" });
+    Reading.insert({ id: 2, value: 18.26, label: "second" });
+}

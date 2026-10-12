@@ -1,0 +1,2 @@
+pub fn erased(function: sys.FunctionRef, arguments: sys.ArgumentMap) =
+    sys.invoke(function, arguments);

@@ -1,0 +1,14 @@
+
+            table Reading(id: Int) { value: Int, }
+            fn positive(value: Int) = value > 0;
+            fn reads_predicate(value: Int) = Reading.count() > 0 && value > 0;
+            pub fn direct(rows: [Int]) = every(rows, positive);
+            pub fn direct_lambda(rows: [Int]) = exists(rows, value => value > 0);
+            pub fn named(rows: [Int]) = every(predicate: positive, rows: rows);
+            pub fn pipeline(rows: [Int]) = rows | every(positive);
+            pub fn pipeline_named(rows: [Int]) = rows | exists(predicate: value => value > 0);
+            pub fn qualified(rows: [Int]) = std.collection.every(rows: rows, predicate: positive);
+            pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.exists(predicate: positive);
+            pub fn reads(rows: [Int]) = every(rows, reads_predicate);
+            pub fn relation_exists() = exists(Reading, reading => reading.value > 0);
+        

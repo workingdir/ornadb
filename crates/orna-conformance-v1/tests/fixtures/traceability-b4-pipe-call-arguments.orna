@@ -1,0 +1,5 @@
+fn combine(first: Int, second: Int): Int = first * 10 + second;
+
+fn main() {
+    assert 3 | combine(4) == 34;
+}

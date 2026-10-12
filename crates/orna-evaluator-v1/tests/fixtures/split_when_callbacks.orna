@@ -1,0 +1,16 @@
+fn even(value: Int) = value % 2 == 0;
+fn truthy(value: Int) = value;
+fn fails_for_zero(value: Int) = 10 / value > 0;
+fn bad_arity(value: Int, other: Int) = true;
+
+fn function_callback() = std.collection.split_when([1, 2, 3, 4], even);
+fn odd_runs() = std.collection.split_when([3, 1, 2, 4], even);
+fn begins_with_boundary() = std.collection.split_when([2, 4, 5], even);
+fn empty_skips_callback() = std.collection.split_when([], fails_for_zero);
+fn callback_result_must_be_bool() = std.collection.split_when([1], truthy);
+fn callback_failure_propagates() = std.collection.split_when([1, 0, 2], fails_for_zero);
+fn callback_arity_is_checked() = std.collection.split_when([1], bad_arity);
+fn splits_at_two() = std.collection.split_when([1, 2, 3], value => value == 2);
+fn invalid_collection() = std.collection.split_when(1, value => true);
+fn non_callback() = std.collection.split_when([1], 1);
+fn extra_argument() = std.collection.split_when([1], value => true, extra: value => true);

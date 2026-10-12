@@ -1,0 +1,1 @@
+fn total(rows: [Float]) = sum(rows);

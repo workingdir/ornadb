@@ -20,12 +20,15 @@ use orna_evaluator_v1::{
     evaluate_with_functions_and_budget, evaluate_with_functions_and_nominals,
     invoke_named_with_effects_and_budget, invoke_named_with_nominals,
 };
-use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value};
+use orna_foundation_v1::{
+    Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value, compare_primary_keys,
+};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CheckpointResetRequest, FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity,
     RequestStatus, RunObservationRegistration, RunningTableRequestContinuation, RuntimeError,
-    RuntimeIdentity, RuntimeState, StreamFailurePayload, StreamHandler, StreamHandlerResult,
+    RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, StreamFailurePayload,
+    StreamHandler, StreamHandlerResult,
     StreamItem, StreamObservationRegistration, StreamRunControl, StreamRunOutcome, StreamSource,
     StreamSourcePoll, StreamStep, StreamTableCandidateValidator, StreamTableDeliveryError,
     StreamTableMutationBatch, StreamValidatedTableDeliveryCommit,
@@ -272,8 +275,10 @@ impl ConformanceAdapter for SemanticAdapter {
     fn typecheck(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         self.analyze_units([unit.clone()], SemanticPhase::Typecheck)
     }
-    fn evaluate(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
-        Self::unsupported_runtime()
+    fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        TransactionalEvaluator::default()
+            .execute_duplicate_key_fixture(unit)
+            .unwrap_or_else(Self::unsupported_runtime)
     }
     fn parse_project(&mut self, project: &ProjectUnit) -> StageOutcome<Diagnostic> {
         let mut syntax = SyntaxAdapter;
@@ -293,8 +298,8 @@ impl ConformanceAdapter for SemanticAdapter {
     fn evaluate_project(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
     }
-    fn validate_row(&mut self, _: &SourceUnit) -> StageOutcome<Diagnostic> {
-        Self::unsupported_runtime()
+    fn validate_row(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
+        validate_unsafe_row_key_repeat(unit).unwrap_or_else(Self::unsupported_runtime)
     }
     fn validate_rows(&mut self, _: &ProjectUnit) -> StageOutcome<Diagnostic> {
         Self::unsupported_runtime()
@@ -1167,17 +1172,6 @@ impl TransactionKeyType {
             .ok_or_else(|| transaction_error("ORNA-EVAL-TABLE-KEY"))
     }
 
-    fn compare(&self, left: &Value, right: &Value) -> Ordering {
-        match (self, left.raw(), right.raw()) {
-            (Self::Bool, OvbRaw::Bool(left), OvbRaw::Bool(right)) => left.cmp(right),
-            (Self::Int, OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
-            (Self::Str, OvbRaw::Text(left), OvbRaw::Text(right)) => left.cmp(right),
-            (Self::Decimal, OvbRaw::Tag(60000, left), OvbRaw::Tag(60000, right)) => {
-                decimal_key_cmp(left, right)
-            }
-            _ => unreachable!("validated transaction key component has its declared type"),
-        }
-    }
 }
 
 /// Declared table key metadata retained after transaction admission.
@@ -1235,7 +1229,6 @@ impl TransactionTableKey {
         Ok(TransactionKey::typed(
             encoded_table_key(values)?,
             values.to_vec(),
-            self.types.clone(),
         ))
     }
 
@@ -1244,7 +1237,6 @@ impl TransactionTableKey {
         Ok(TransactionKey::typed(
             encoded.to_vec(),
             values,
-            self.types.clone(),
         ))
     }
 
@@ -1274,7 +1266,6 @@ impl std::ops::Deref for TransactionTableKey {
 struct TransactionKey {
     encoded: Vec<u8>,
     components: Option<Vec<Value>>,
-    types: Option<Vec<TransactionKeyType>>,
 }
 
 impl TransactionKey {
@@ -1282,15 +1273,13 @@ impl TransactionKey {
         Self {
             encoded,
             components: None,
-            types: None,
         }
     }
 
-    fn typed(encoded: Vec<u8>, components: Vec<Value>, types: Vec<TransactionKeyType>) -> Self {
+    fn typed(encoded: Vec<u8>, components: Vec<Value>) -> Self {
         Self {
             encoded,
             components: Some(components),
-            types: Some(types),
         }
     }
 
@@ -1315,25 +1304,25 @@ impl Eq for TransactionKey {}
 
 impl Ord for TransactionKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        if let (Some(left), Some(right), Some(types)) =
-            (&self.components, &other.components, &self.types)
-            && self.types == other.types
+        if let (Some(left), Some(right)) = (&self.components, &other.components)
+            && left.len() == right.len()
         {
-            return left
-                .iter()
-                .zip(right)
-                .zip(types)
-                .map(|((left, right), ty)| ty.compare(left, right))
-                .find(|ordering| *ordering != Ordering::Equal)
-                .unwrap_or(Ordering::Equal);
+            let tuple = |values: &[Value]| {
+                Value::new(OvbRaw::Tag(
+                    60015,
+                    Box::new(OvbRaw::Array(
+                        values.iter().map(|value| value.raw().clone()).collect(),
+                    )),
+                ))
+            };
+            if let (Ok(left), Ok(right)) = (tuple(left), tuple(right)) {
+                return compare_primary_keys(&left, &right)
+                    .unwrap_or_else(|_| self.encoded.cmp(&other.encoded));
+            }
         }
         match (Value::decode(&self.encoded), Value::decode(&other.encoded)) {
-            (Ok(left), Ok(right)) => match (left.raw(), right.raw()) {
-                (OvbRaw::Int(left), OvbRaw::Int(right)) => left.cmp(right),
-                (OvbRaw::Int(_), _) => Ordering::Less,
-                (_, OvbRaw::Int(_)) => Ordering::Greater,
-                _ => self.encoded.cmp(&other.encoded),
-            },
+            (Ok(left), Ok(right)) => compare_primary_keys(&left, &right)
+                .unwrap_or_else(|_| self.encoded.cmp(&other.encoded)),
             _ => self.encoded.cmp(&other.encoded),
         }
     }
@@ -1830,6 +1819,7 @@ pub struct TransactionalEvaluator {
     limits: EvaluatorLimits,
     database: TransactionDatabase,
     activation_time: Option<SystemTime>,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
 }
 
 impl TransactionalEvaluator {
@@ -1840,11 +1830,17 @@ impl TransactionalEvaluator {
             limits,
             database: TransactionDatabase::default(),
             activation_time: None,
+            publication_rows: None,
         }
     }
 
     fn with_activation_time(mut self, activation_time: SystemTime) -> Self {
         self.activation_time = Some(activation_time);
+        self
+    }
+
+    fn with_publication_rows(mut self, rows: RuntimePublicationMetadataRows) -> Self {
+        self.publication_rows = Some(rows);
         self
     }
 
@@ -1889,7 +1885,7 @@ impl TransactionalEvaluator {
             TransactionTableKey::new(
                 String::from("Contact"),
                 vec![String::from("id")],
-                vec![TransactionKeyType::Int],
+                vec![TransactionKeyType::Str],
             )
             .expect("valid Contact key schema"),
         )]);
@@ -2004,6 +2000,7 @@ impl TransactionalEvaluator {
                 next_mutation: 0,
                 limits,
                 activation_time: self.activation_time,
+                publication_rows: self.publication_rows.clone(),
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let result = invoke_named_with_effects_and_budget(
@@ -3566,10 +3563,12 @@ impl DurableTransactionalEvaluator {
             .map(String::as_str)
             .collect::<Vec<_>>();
         let snapshot = state.begin_table_activation(&tables).await?;
+        let publication_rows = state.publication_metadata_rows().await?;
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
-            .with_activation_time(context.activation_time());
+            .with_activation_time(context.activation_time())
+            .with_publication_rows(publication_rows);
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = Value::decode(row).map_err(|_| RuntimeError::RecoveryInvalid)?;
@@ -3643,10 +3642,17 @@ impl DurableTransactionalEvaluator {
                 return fail_observed_request_runtime(state, request, fingerprint, lease).await;
             }
         };
+        let publication_rows = match state.publication_metadata_rows().await {
+            Ok(rows) => rows,
+            Err(_) => {
+                return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+            }
+        };
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
-            .with_activation_time(context.activation_time());
+            .with_activation_time(context.activation_time())
+            .with_publication_rows(publication_rows);
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -5304,6 +5310,7 @@ struct TableEffectHandler<'activation, 'runtime> {
     next_mutation: u64,
     limits: EvaluatorLimits,
     activation_time: Option<SystemTime>,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -5317,6 +5324,23 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
         if max_rows == 0 {
             return Ok(Some(RelationPage {
                 rows: Vec::new(),
+                next: None,
+            }));
+        }
+        if let Some(row) = match (source, self.publication_rows.as_ref()) {
+            ("sys.Storage", Some(rows)) => Some(&rows.sys_storage),
+            ("sys.MaintenanceJob", Some(rows)) => Some(&rows.maintenance_job),
+            _ => None,
+        } {
+            if after.is_some() {
+                return Ok(Some(RelationPage {
+                    rows: Vec::new(),
+                    next: None,
+                }));
+            }
+            budget.debit(1)?;
+            return Ok(Some(RelationPage {
+                rows: vec![row.clone()],
                 next: None,
             }));
         }
@@ -6060,9 +6084,49 @@ fn admit_transaction_project(
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
+    let standard_sources = project
+        .modules
+        .iter()
+        .filter(|unit| is_standard_source(unit))
+        .map(|unit| (unit.source_id.clone(), unit.source.clone()))
+        .collect::<Vec<_>>();
+    let catalogue = if let Some(dependency) = &project.expectations.environment.stdlib {
+        let Some(snapshot) = dependency.get("snapshot").and_then(serde_json::Value::as_str) else {
+            return Err(Box::new(StageOutcome::Failed(standard_profile_diagnostic())));
+        };
+        let Some(sources) = dependency.get("sources").and_then(serde_json::Value::as_object)
+        else {
+            return Err(Box::new(StageOutcome::Failed(standard_profile_diagnostic())));
+        };
+        let sources = sources
+            .iter()
+            .map(|(logical_path, source)| {
+                source
+                    .as_str()
+                    .map(|source| (logical_path.clone(), source.to_owned()))
+                    .ok_or_else(|| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let profile = StandardDependencyProfile::from_sources(snapshot, sources.clone())
+            .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?;
+        for (logical_path, source) in &standard_sources {
+            profile
+                .verify_source(logical_path, source)
+                .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?;
+        }
+        Catalogue::authoritative_fixture()
+            .with_standard_sources(&profile, sources)
+            .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?
+    } else {
+        Catalogue::authoritative_fixture()
+    };
+    let application_modules = project
+        .modules
+        .iter()
+        .filter(|unit| !is_standard_source(unit))
+        .collect::<Vec<_>>();
     let analysis = analyze_with_catalogue(
-        &project
-            .modules
+        &application_modules
             .iter()
             .map(|unit| {
                 let prefix = format!("{}/", project.project_id.trim_end_matches('/'));
@@ -6074,7 +6138,7 @@ fn admit_transaction_project(
                 ModuleInput::new(path, unit.source.clone())
             })
             .collect::<Vec<_>>(),
-        &Catalogue::authoritative_fixture(),
+        &catalogue,
     );
     if let Some(diagnostic) = analysis.diagnostics.first() {
         return Err(Box::new(StageOutcome::Failed(
@@ -6122,20 +6186,22 @@ fn admit_transaction_project(
                 reason: "project transaction module has no semantic namespace".into(),
             })
         })?;
-        let plans = analysis
-            .assertions
-            .get(&semantic_namespace)
-            .ok_or_else(|| {
-                Box::new(StageOutcome::Skipped {
-                    reason: "project transaction assertion metadata is incomplete".into(),
-                })
-            })?;
-        attach_assertion_dependencies(
-            &mut module_assertions_by_table,
-            &mut module_assertions_only,
-            plans,
-        )
-        .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+        if !is_standard_source(unit) {
+            let plans = analysis
+                .assertions
+                .get(&semantic_namespace)
+                .ok_or_else(|| {
+                    Box::new(StageOutcome::Skipped {
+                        reason: "project transaction assertion metadata is incomplete".into(),
+                    })
+                })?;
+            attach_assertion_dependencies(
+                &mut module_assertions_by_table,
+                &mut module_assertions_only,
+                plans,
+            )
+            .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+        }
         if let Err(error) = limits.check_items(module_functions.len()) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
         }
@@ -6159,6 +6225,42 @@ fn admit_transaction_project(
         table_assertions.extend(module_assertions_by_table);
         module_assertions.extend(module_assertions_only);
     }
+    let mut standard_aliases = BTreeMap::<String, String>::new();
+    for unit in &project.modules {
+        let parsed = parse_module(&unit.source);
+        for item in parsed.value.items {
+            let Declaration::Use {
+                path,
+                tail: orna_syntax_v1::UseTail::Names(names),
+            } = item.declaration
+            else {
+                continue;
+            };
+            if path.first().map(|segment| segment.name.as_str()) != Some("std") {
+                continue;
+            }
+            let namespace = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            for name in names {
+                let target = format!("{namespace}.{}", name.name);
+                if let Some(previous) = standard_aliases.insert(name.name.clone(), target.clone())
+                    && previous != target
+                {
+                    return Err(Box::new(StageOutcome::Skipped {
+                        reason: "standard imports have conflicting unqualified function names".into(),
+                    }));
+                }
+            }
+        }
+    }
+    for (alias, target) in standard_aliases {
+        if let Some(function) = functions.get(&target).cloned() {
+            functions.entry(alias).or_insert(function);
+        }
+    }
     if !functions.contains_key(entry) {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "configured qualified project transaction entry function is not present".into(),
@@ -6172,6 +6274,10 @@ fn admit_transaction_project(
         table_assertions,
         module_assertions,
     })
+}
+
+fn is_standard_source(unit: &SourceUnit) -> bool {
+    unit.source_id.starts_with("std/")
 }
 
 fn controlled_table_effects(summary: &EffectSummary) -> bool {
@@ -7404,45 +7510,6 @@ fn lower_relation_statement_with_resolution(
     }
 }
 
-fn relation_count(
-    expression: &Expr,
-    table_keys: &TableKeys,
-    functions: &Functions,
-    namespace: Option<&str>,
-    shadowed: &BTreeSet<String>,
-) -> Option<Expr> {
-    let Expr::Binary { lhs, op, rhs, .. } = expression else {
-        return None;
-    };
-    if op != "|" {
-        return None;
-    }
-    let Expr::Name {
-        text: table,
-        span: table_span,
-    } = lhs.as_ref()
-    else {
-        return None;
-    };
-    if !table_keys.contains_key(table)
-        || !relation_count_target(rhs, functions, namespace, shadowed)
-    {
-        return None;
-    }
-    Some(Expr::Call {
-        callee: Box::new(Expr::Field {
-            base: Box::new(Expr::Name {
-                text: table.clone(),
-                span: table_span.clone(),
-            }),
-            name: "count".into(),
-            span: expression.span(),
-        }),
-        arguments: Vec::new(),
-        span: expression.span(),
-    })
-}
-
 fn relation_count_target(
     expression: &Expr,
     functions: &Functions,
@@ -8547,7 +8614,6 @@ fn duplicate_primary_key_diagnostic() -> Diagnostic {
         SafeText::new("duplicate primary key").expect("static duplicate key message"),
     )
     .expect("valid duplicate key diagnostic")
-    .redacted()
 }
 
 fn table_error_code(error: TableError) -> &'static str {
@@ -8559,6 +8625,7 @@ fn table_error_code(error: TableError) -> &'static str {
         TableError::DoubleCommit => "ORNA-EVAL-TABLE-DOUBLE-COMMIT",
         TableError::UseAfterClose => "ORNA-EVAL-TABLE-CLOSED",
         TableError::ForeignSavepoint => "ORNA-EVAL-TABLE-FOREIGN-SAVEPOINT",
+        TableError::ReferencedRow => "ORNA-EVAL-TABLE-REFERENCE-RESTRICT",
     }
 }
 
@@ -8649,6 +8716,24 @@ fn duplicate_key_fixture_contract(unit: &SourceUnit) -> bool {
         && unit.parse_as == "module_unit"
         && unit.source
             == "pub fn bad() { Contact.insert({ id: \"alice\", name: \"A\" }); Contact.insert({ id: \"alice\", name: \"B\" }); }\n"
+}
+
+fn validate_unsafe_row_key_repeat(unit: &SourceUnit) -> Option<StageOutcome<Diagnostic>> {
+    if unit.fixture_id != "invalid/unsafe-row-key-repeat.orna"
+        || unit.source_id != "examples/invalid/unsafe-row-key-repeat.orna"
+        || unit.parse_as != "row_unit"
+        || unit.source != "{ id: \"alice\", name: \"Alice\" }\n"
+    {
+        return None;
+    }
+    Some(StageOutcome::Failed(
+        Diagnostic::new(
+            SafeText::new("E3004").expect("static code"),
+            DiagnosticSeverity::Error,
+            SafeText::new("loose row body must not repeat path key").expect("static message"),
+        )
+        .expect("valid row-key diagnostic"),
+    ))
 }
 
 fn scenario_mismatch() -> StageOutcome<Diagnostic> {
@@ -8832,13 +8917,39 @@ mod transaction_admission_tests {
         SourceUnit, StageOutcome, TRANSACTION_CURSOR_PREFIX, TRANSACTION_INT_CURSOR_PREFIX,
         TableEffectHandler, TransactionDatabase, TransactionKey, TransactionKeyType,
         TransactionTableKey, TransactionalEvaluator, admit_transaction_project, record_field,
-        transaction_continuation_cursor, transaction_cursor_key,
+        encoded_table_key, transaction_continuation_cursor, transaction_cursor_key,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use num_bigint::BigInt;
     use orna_evaluator_v1::{EffectHandler, Limits, StepBudget};
     use orna_foundation_v1::{OvbRaw, Value};
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn transaction_key_order_uses_logical_integer_and_composite_components() {
+        let integer_key = |integer: i64| {
+            let value = Value::int(integer.into());
+            TransactionKey::typed(
+                value.encode().expect("canonical integer encoding"),
+                vec![value],
+            )
+        };
+        assert!(integer_key(-2) < integer_key(-1));
+        assert!(integer_key(-1) < integer_key(0));
+
+        let composite_key = |integer: i64, text: &str| {
+            let values = vec![
+                Value::int(integer.into()),
+                Value::new(OvbRaw::Text(text.into())).expect("canonical text"),
+            ];
+            TransactionKey::typed(
+                encoded_table_key(&values).expect("canonical composite encoding"),
+                values,
+            )
+        };
+        assert!(composite_key(-3, "z") < composite_key(-2, "a"));
+        assert!(composite_key(-2, "a") < composite_key(-2, "b"));
+    }
 
     fn source(body: &str) -> SourceUnit {
         SourceUnit {
@@ -8989,6 +9100,7 @@ mod transaction_admission_tests {
                     next_mutation: 0,
                     limits,
                     activation_time: None,
+                    publication_rows: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
 
@@ -9303,6 +9415,7 @@ mod transaction_admission_tests {
                     next_mutation: 0,
                     limits,
                     activation_time: None,
+                    publication_rows: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
                 let first = handler
@@ -9490,6 +9603,7 @@ mod transaction_admission_tests {
                     next_mutation: 0,
                     limits,
                     activation_time: None,
+                    publication_rows: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
                 let first = handler
@@ -9989,23 +10103,23 @@ mod durable_tests {
         project(vec![
             (
                 "library.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/library.orna"),
+                include_str!("fixtures/reference/library.orna"),
             ),
             (
                 "main.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/main.orna"),
+                include_str!("fixtures/reference/main.orna"),
             ),
             (
                 "sensors.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/sensors.orna"),
+                include_str!("fixtures/reference/sensors.orna"),
             ),
             (
                 "values.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/values.orna"),
+                include_str!("fixtures/reference/values.orna"),
             ),
             (
                 "warehouse.orna",
-                include_str!("../../../../reference/Orna-1.0.0/examples/reference/warehouse.orna"),
+                include_str!("fixtures/reference/warehouse.orna"),
             ),
         ])
     }
@@ -10014,11 +10128,7 @@ mod durable_tests {
     async fn source_activation_commits_rows_and_reopens_for_the_next_activation() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [1; 16],
@@ -10095,11 +10205,7 @@ mod durable_tests {
     async fn application_eval_resolves_admits_stages_and_commits_digest() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let unit = SourceUnit {
             fixture_id: "application-eval-proof".into(),
@@ -10172,11 +10278,7 @@ mod durable_tests {
     async fn ordinary_activation_reuses_one_captured_now_for_repeated_writes() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [121; 16],
@@ -10221,11 +10323,7 @@ mod durable_tests {
     async fn semantically_admitted_user_now_shadows_activation_intrinsic() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [125; 16],
@@ -10266,11 +10364,7 @@ mod durable_tests {
     async fn request_source_activation_commits_row_and_terminal_together() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [61; 16],
@@ -10367,11 +10461,7 @@ mod durable_tests {
     async fn running_table_continuation_commits_once_with_the_exact_success_terminal() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [111; 16],
@@ -10487,11 +10577,7 @@ mod durable_tests {
     async fn running_table_continuation_semantic_terminal_is_absorbing_before_replay() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [191; 16],
@@ -10574,11 +10660,7 @@ mod durable_tests {
     async fn running_table_continuation_fault_recovers_as_proven() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [181; 16],
@@ -10731,11 +10813,7 @@ mod durable_tests {
     async fn running_table_continuation_rejects_foreign_and_stale_capabilities_without_writes() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [121; 16],
@@ -10775,11 +10853,7 @@ mod durable_tests {
 
         let foreign_temp = TempDir::new().expect("foreign temporary repository");
         git(foreign_temp.path(), &["init"]);
-        git(
-            foreign_temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(foreign_temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(foreign_temp.path());
         let foreign_repository =
             Repository::discover(foreign_temp.path()).expect("foreign repository");
         let foreign = RuntimeState::open(&foreign_repository, identity, [126; 32])
@@ -10863,11 +10937,7 @@ mod durable_tests {
     async fn request_source_failure_replays_without_executing_new_source() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [71; 16],
@@ -10942,11 +11012,7 @@ mod durable_tests {
     async fn request_source_never_executes_an_existing_nonterminal_reservation() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [81; 16],
@@ -11003,11 +11069,7 @@ mod durable_tests {
     async fn project_activation_keeps_modules_qualified_and_rolls_back_failed_roots() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [41; 16],
@@ -11080,11 +11142,7 @@ mod durable_tests {
     async fn authoritative_five_module_project_executes_seed_and_exercise() {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         let identity = RuntimeIdentity {
             database_id: [51; 16],
@@ -11505,8 +11563,6 @@ fn assertion_checkpoint_091_project() -> ProjectUnit {
 }
 
 fn checkpoint_atomicity_project(fixture_id: &str) -> ProjectUnit {
-    let mut values = vec!["0"; 41];
-    values.push("42");
     ProjectUnit {
         fixture_id: fixture_id.into(),
         project_id: fixture_id.into(),
@@ -11515,16 +11571,7 @@ fn checkpoint_atomicity_project(fixture_id: &str) -> ProjectUnit {
             fixture_id: fixture_id.into(),
             source_id: "main.orna".into(),
             parse_as: "module_unit".into(),
-            source: format!(
-                r#"
-                    pub table Email(id: Int) {{ value: Int, }}
-                    pub fn input() = Stream.from_list([{}], source_identity: "fixture:{fixture_id}");
-                    pub fn ingest() {{ input() | for_each(value => {{
-                        Email.insert({{ id: value, value: value }});
-                    }}); }}
-                "#,
-                values.join(", "),
-            ),
+            source: include_str!("../tests/fixtures/scenario-cp-001.orna").into(),
         }],
         loose_rows: Vec::new(),
         expectations: ProjectExpectations {
@@ -11735,11 +11782,7 @@ mod list_stream_tests {
     fn repository() -> (TempDir, Repository) {
         let temp = TempDir::new().expect("temporary repository");
         git(temp.path(), &["init", "-q"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        crate::test_support::configure_fixture_git_identity(temp.path());
         let repository = Repository::discover(temp.path()).expect("repository");
         (temp, repository)
     }

@@ -1,0 +1,2 @@
+pub table MaxSourceMaterializationAggregate(id: Int) { value: Int, }
+pub fn max_source_materialization_aggregate() = MaxSourceMaterializationAggregate;

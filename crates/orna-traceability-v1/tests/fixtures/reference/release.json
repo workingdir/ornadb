@@ -1,0 +1,110 @@
+{
+  "publication": "Orna language and runtime specification",
+  "version": "1.0.0",
+  "publication_date": "2026-09-05",
+  "kind": "specification-source-and-publication",
+  "status": "Specification",
+  "editorial_revision": "2026-09-05",
+  "requirements": 870,
+  "review_findings_with_specification_dispositions": 32,
+  "syntax_probe": {
+    "agree": 166,
+    "count": 166,
+    "scope": "Bounded EBNF syntax probe, not an Orna compiler. ASCII lexical recognisers; strings opaque; no interpolation, Unicode-profile, type/effect checking or evaluator."
+  },
+  "selected_contract_models": {
+    "passed": 15,
+    "total": 15,
+    "scope": "Selected reference algorithms, static contract checks and real-Git experiments. No complete Orna implementation, independent Parquet reader/writer or network client/server was executed."
+  },
+  "selected_protocol_models": {
+    "passed": 5,
+    "total": 5,
+    "scope": "Selected protocol structural and state models, not independent clients/servers, complete tagged-value validation, authentication or malformed-WebSocket fuzzing."
+  },
+  "publications": [
+    {
+      "file": "index.html",
+      "sha256": "4d8b20da4c6c479d2f76c222d9f1687304533a7e20edb85ffc4ebc3e4dd9c52e"
+    },
+    {
+      "file": "sys-reference.html",
+      "sha256": "9928937147b16f8c5cf9f577bf81bdac2b3b15ecda8794c90643fdedf563ca9d"
+    },
+    {
+      "file": "Orna-1.0.0.md",
+      "sha256": "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d"
+    },
+    {
+      "file": "Orna-1.0.0.pdf",
+      "sha256": "f5fa9f977cd2ab1b81c783db595c864d288514a5bd498c122c278a092f7f5631"
+    },
+    {
+      "file": "Orna-1.0.0-system-reference.pdf",
+      "sha256": "4da2b7f58edbd441c437f2b8890cfb0b88a06367090543d682f194f7cf529dd1"
+    }
+  ],
+  "pdf_pages": {
+    "Orna-1.0.0.pdf": 271,
+    "Orna-1.0.0-system-reference.pdf": 94
+  },
+  "normative_payload_sha256": {
+    "Orna-1.0.0.md": "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d",
+    "api/sys.json": "318b6d54f51d44e8117ffc91520dfd2dc2722cc023fdad51bd4dba601dd9abcb",
+    "grammar/orna.ebnf": "cb42b88bf387a76bc2c7f42858fedcb30b8d8373273066636691e0e8151ff6db",
+    "profiles/compact-storage.md": "1a1ea74be9bc4f2410715f5a8f351e701681119178cbbb3478cb1db5b406e752",
+    "profiles/hybrid-and-rekey.md": "d919d2848d06811dd3328af8d43faafd66ec02297f87af5751c7851e3652c998",
+    "profiles/key-path.md": "fefb33111670c4c89b45a53eedc7a7e6fa02109b58507da047a95091091258e4",
+    "profiles/live-messages.json": "69e4a9d3628fa5b844d277400fb8be1655d5dcff454192c3498631bf78cdfbca",
+    "profiles/live-protocol.md": "309f5f20927093801158994c03199d546a1665bf22f11efc434918e4c15f9cea",
+    "profiles/session.schema.json": "a155e9aab4dc9e70f0ef1249cd491d1bee30088c385170ad3e01edea1293b4f2",
+    "source/01-scope.md": "26b8cc52da70ed17a0efd3fe2ef1b0da4f55a64e689b68e952dab24a0786ef06",
+    "source/02-concepts.md": "c3907be7ce36ebf0fed3cd5e9f50fe74efc6caca2b80a2545cbc4d1771221d56",
+    "source/03-source-modules.md": "bf07fc04975bcf3386b2bfa29afa0696efef1a5e546d8045281049a926b8e0a3",
+    "source/04-lexical.md": "f9b0ad6b4940b5822c9e35f87f57985fa2f1e7c5a733547189e972dd0243d91f",
+    "source/05-types.md": "401d016cb29630058714e3e008917795a155ad068e47b6a34785146615fb93f2",
+    "source/06-expressions.md": "75d13e654515d1fe220281848f8a9ca7d688ba1577cd6cfc90e332e13373c706",
+    "source/07-tables.md": "8b34dc641312f1acc22c0e5c39ad59393a3b64372aa53853d4f4ca9bc9727294",
+    "source/08-relations.md": "c601e606d1108b61bf3322f4990bf9662cc81b123c86974651af722892fff8e2",
+    "source/09-standard-library.md": "cd9a95f9313ba31efcb5b16d229c6ec524011adef19af85bac0a70cfd61a7d90",
+    "source/10-execution.md": "3c194277ae2328059bd2fbc9733a09d0cf38415fa84c080d6879f8d21a4dada4",
+    "source/11-streams.md": "7b760c491827194fc5fb04a536fc60ae978e1e73d782949bd0a9e4acfc75780d",
+    "source/12-checkpoints.md": "0ebdf8a46d9ae7afeeefbeea8b76c93aab719d904e9fa3af66807a60214e927a",
+    "source/13-presentation.md": "91ac846cf577d409cb482333301000af850d7d0b17f840663bfc665939bf084b",
+    "source/14-pages.md": "de1e89719af78f5af57d65ba956f8f97930cf14fcc5e0ec4b0ac4d477ff0cdd3",
+    "source/15-system.md": "6ec17895d789eff4d4d1c23bbaf76a0837cff706d1a92a0114beba10ae840572",
+    "source/16-administration.md": "2c5f37350b5abb4ddb5e80a052624433d9a87e616405a1201046d4619004bf15",
+    "source/17-repl.md": "28cb663a8f2f41f1df1baea827868586aee017ba3fee1394b078022772f1bd60",
+    "source/18-cli.md": "0cbcd8704857ab824e0f06589874e2e5da73866de623f2625a7f281b795350ae",
+    "source/19-repository.md": "a1f333e2509287f74686858a93351afb59fae66bc9cdeb678e0416ef6a17cd3a",
+    "source/20-embedded.md": "55c913fa1cde0524014443155567afa8c826979b4e528b01fe1e5d4df3fcf6bf",
+    "source/21-branching.md": "79a4443dfd31c5f7496ccc81a14b157338ecfdcbfbd6cbd7c92cb50a9ac1531f",
+    "source/22-publication.md": "ba4bf34f74abf030caed13e025bde24d6f8d6dd2299a7cabe72d42a122f94154",
+    "source/23-storage.md": "9f302f18aafb2d0792250c11c3dfdb4dd7cb941c29b082e3c6ab4fc6c3ed92b4",
+    "source/24-git-history.md": "ceceb9a42f17f26ee0245db60dd40240fccf8c2b03bc2b9bd29742436f1da62f",
+    "source/25-evolution.md": "5f23f96ad1166a6082055442649f8bd0ffc43773f56c73f41269f3cd2c360244",
+    "source/26-security.md": "db5c2de5c87dabd305f3d57a89dd813df1982a61106fec0463a7ada741fe6d1e",
+    "source/27-secrets.md": "b2d266671d8bc0b8eb37b56f12b10478eb6bf73a0957307103e1f0c20dcd3e95",
+    "source/28-serving.md": "1b030187aa438d7b0e2e595cc024170a4188e8c77e30debae9614ccc5024f537",
+    "source/29-formats.md": "c304e767f55b107b8cedf3f1f6806e6b247c1f746df539a89b90779a22837d54",
+    "source/30-protocol.md": "4394b08dbb03d4034a70cff2e05280a012ee1b4560fa59abeb67f57ee375edfd",
+    "source/31-examples.md": "5343790360d049f5b317581af8fd002229236a316bffd4876139be2e4ac0e8a7",
+    "source/32-conformance.md": "89fd8e2cd9986fe874d3917cbfad30dd060439d4fda87ed07a57ea2a65ecf2df",
+    "source/33-diagnostics.md": "3e630de84aabfbb1aa4fb8d76ff48cab2e135cd9d916e6576b1a3e329002c713",
+    "source/34-grammar.md": "cd6f6351f2786b2d0870c052b54b4a97db369493e42d1eb97d321b46650e46cc",
+    "source/34-system-reference.md": "6fb35a6693d4d25534f0bc73f69329fc57ba350fadbf67ab40e8a88176f27e54",
+    "source/35-references.md": "91d6156f9236f574d5fdb3334b788dd013fcb993e0fe63c95fd2a3fec6e9e90b",
+    "source/manifest.json": "7b6fc36817360c24259bbd2eead054f3aa0af907ffb4d1d3a8d07b27232784b1"
+  },
+  "authoritative_input_inventory": "provenance/inputs.json",
+  "finding_dispositions": "evidence/review-dispositions.json",
+  "evidence_report": "evidence/REVIEW.md",
+  "implementation_limits": [
+    "No complete Orna compiler/runtime executed.",
+    "Syntax checks do not establish resolution, type checking or evaluation.",
+    "Independent Parquet interoperability and independent network client/server execution were not performed.",
+    "Complete crash-injection, security, fuzzing and accessibility certification were not performed.",
+    "A specification publication is not a proof that no defects remain."
+  ],
+  "packaging": "Fixed ordered members and timestamps; same completed files must produce the same ZIP bytes."
+}

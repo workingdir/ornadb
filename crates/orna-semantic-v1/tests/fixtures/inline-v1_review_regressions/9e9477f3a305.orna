@@ -1,0 +1,6 @@
+
+            pub type Vault {
+                seed: Int = 1,
+                label: Str = seed + 1,
+            }
+        

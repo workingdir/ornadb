@@ -1,0 +1,1 @@
+[3, 1, 2] | flat_map(transform: value => [value, value + 10])

@@ -1,0 +1,1 @@
+pub table User(id: Uuid) { callback: fn(Int): Str check(value > 0), }

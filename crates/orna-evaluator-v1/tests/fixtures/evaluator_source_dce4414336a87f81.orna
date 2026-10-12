@@ -1,0 +1,1 @@
+std.collection.map([1, 2], value => Vault { secret: value }.secret)

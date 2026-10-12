@@ -1,0 +1,1 @@
+pub table Row { name: Str, } pub fn compare() = {expression};

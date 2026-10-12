@@ -1,0 +1,4 @@
+pub fn answer(): Int = 42;
+pub dim Length;
+pub dim Time;
+unit meter: Length base;

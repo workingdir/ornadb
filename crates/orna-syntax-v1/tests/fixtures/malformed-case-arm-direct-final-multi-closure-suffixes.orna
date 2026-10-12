@@ -1,0 +1,8 @@
+pub fn bad(flag: Bool): Int { case flag {
+1: 2 3 { value: 4 },
+true: 5,
+false: (selected, spare,) => { case selected {
+true: result => "first {result} retains {spare} after",
+false: result => "final {result} retains {selected} through",
+} },
+} }

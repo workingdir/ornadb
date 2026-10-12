@@ -1,0 +1,9 @@
+pub table Note(id: Int) { value: Int, }
+fn parent() {
+    Note.insert({ id: 1, value: 10 });
+    Note.insert({ id: 2, value: 20 });
+    assert ((Note | take(0) | sort_by(note => note.id)
+        | map(note => note.id % (note.id - note.id)) | first()) ?? -1) == -1;
+    assert ((Note | sort_by(note => -note.id)
+        | map(note => note.id % (note.id - 1)) | first()) ?? -1) == 0;
+}

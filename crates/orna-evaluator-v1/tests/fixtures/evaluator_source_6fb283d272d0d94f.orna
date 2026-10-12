@@ -1,0 +1,1 @@
+std.collection.rank([4, 3, 2, 1], value => value)

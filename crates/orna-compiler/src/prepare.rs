@@ -41,7 +41,6 @@ use std::{
 
 use orna_artifact::{
     client_plan::{
-        ACTION_FORMAT_VERSION as CLIENT_PLAN_ACTION_VERSION, ActionClientPlan, ActionOperationNode,
         CAPABILITY_FORMAT_VERSION as CLIENT_PLAN_CAPABILITY_VERSION,
         CONTROL_FLOW_FORMAT_VERSION as CLIENT_PLAN_CONTROL_FLOW_VERSION, CapabilityArgumentSource,
         CapabilityClientPlan, CapabilityRequirement, ClientExpressionNode, ClientLocal,
@@ -120,7 +119,7 @@ use crate::{
     },
     relational::{supports_server_select_distinct, supports_server_select_equality},
     resolver::{
-        CheckedActionOperation, CheckedClientControlFlowStatement, CheckedClientExpression,
+        CheckedClientControlFlowStatement, CheckedClientExpression,
         CheckedClientFunctionBody, CheckedClientLocal, CheckedClientLocalKind,
         CheckedClientReturnShape, CheckedClientStateSlot, CheckedClientStatement,
         CheckedFieldRename, CheckedInspectOperation, CheckedInspectProjection,
@@ -2502,12 +2501,6 @@ fn client_expression_locations<'a>(
             client_expression_locations(expression, locations);
         }
         CheckedClientExpression::Resource { operation } => {
-            locations.push(operation.location());
-            for (_, argument) in operation.arguments() {
-                client_expression_locations(argument, locations);
-            }
-        }
-        CheckedClientExpression::Action { operation } => {
             locations.push(operation.location());
             for (_, argument) in operation.arguments() {
                 client_expression_locations(argument, locations);

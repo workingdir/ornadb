@@ -1,0 +1,3 @@
+table Person(id: Str) { name: Str, }
+table Team(id: Str) { name: Str, }
+fn names() = Person | map(Person.name);

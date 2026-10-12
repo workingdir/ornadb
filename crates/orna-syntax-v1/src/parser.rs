@@ -930,7 +930,15 @@ pub fn parse_row(source: &str) -> Parse<Expr> {
 pub fn parse_repl(source: &str) -> Parse<ReplInput> {
     let mut p = Parser::new(source);
     p.reset_syntax_budget();
-    let value = if matches!(
+    let public_table = matches!(p.keyword(), Some(Keyword::Pub))
+        && matches!(
+            p.tokens.get(p.at + 1).map(|token| &token.kind),
+            Some(TokenKind::Keyword(Keyword::Table))
+        );
+    let value = if public_table {
+        p.error_here("ORNA-PARSE-001", "public table declarations are not valid REPL input");
+        None
+    } else if matches!(
         p.keyword(),
         Some(Keyword::Use | Keyword::Let | Keyword::Fn | Keyword::Pub)
     ) {
@@ -1679,21 +1687,6 @@ impl Parser {
                     "ORNA091-E-STATIC-FN",
                     "protocols use instance functions and static properties, not static functions",
                 )),
-                (_, TokenKind::Punct("?"))
-                    if matches!(
-                        tokens[i].kind,
-                        TokenKind::Integer | TokenKind::Punct(")" | "]")
-                    ) =>
-                {
-                    Some((
-                        "ORNA091-E-POSTFIX-QUESTION",
-                        if matches!(tokens[i].kind, TokenKind::Integer) {
-                            "postfix propagation `?` was removed; failures propagate automatically"
-                        } else {
-                            "remove postfix `?`; failure propagation is automatic"
-                        },
-                    ))
-                }
                 (TokenKind::Punct("|"), TokenKind::Punct("!")) => Some((
                     "ORNA-A091-010",
                     "`|!` is not assertion syntax; use `assert`",
@@ -3300,11 +3293,37 @@ impl Parser {
                 Some(
                     Keyword::For | Keyword::While | Keyword::Loop | Keyword::If | Keyword::Case,
                 ) => {
-                    let value = self.parse_control_expression();
+                    // Parse the complete expression spine before deciding
+                    // whether this control form is a statement or the block
+                    // tail. This preserves postfix/infix continuations and
+                    // lets a final unsemicolonated control expression produce
+                    // its value; a following block item is an unambiguous
+                    // statement boundary under ORNA-PARSE-002.
+                    let value = self.expr().unwrap_or_else(|| self.error_expr());
                     let span = value.span();
-                    statements.push(Statement::Control { value, span });
                     if self.is_punct(";") {
+                        if matches!(&value, Expr::Control { .. }) {
+                            statements.push(Statement::Control { value, span });
+                        } else {
+                            statements.push(Statement::Expression { value, span });
+                        }
                         self.bump()
+                    } else if self.is_punct("}") {
+                        tail = Some(Box::new(value));
+                        break;
+                    } else if matches!(&value, Expr::Control { .. }) {
+                        statements.push(Statement::Control { value, span });
+                    } else {
+                        statements.push(Statement::Expression { value, span });
+                        self.error_here(
+                            "ORNA-PARSE-002",
+                            "expected `;` after expression statement",
+                        );
+                        // The expression parser stopped at the next block
+                        // item. Diagnose the missing boundary, then let the
+                        // block loop parse that item so a later final tail is
+                        // retained in the malformed tree.
+                        continue;
                     }
                 }
                 _ => {
@@ -3726,6 +3745,12 @@ impl Parser {
     fn parse_generic_parameters(&mut self) -> Vec<GenericParameter> {
         let mut parameters = Vec::new();
         self.require_punct("<", "expected `<`");
+        if self.is_punct(">") {
+            self.error_here(
+                "ORNA-PARSE-001",
+                "generic parameter lists require at least one parameter",
+            );
+        }
         while !self.eof() && !self.is_punct(">") {
             let start = self.current().span.clone();
             let name = self.require_name_text();
@@ -3801,18 +3826,25 @@ impl Parser {
                 let mut arguments = Vec::new();
                 if self.is_punct("<") {
                     self.bump();
-                    while !self.eof() && !self.is_punct(">") {
-                        arguments.push(self.parse_type_expr()?);
-                        if self.is_punct(",") {
-                            self.bump();
-                            if self.is_punct(">") {
-                                self.error_here(
-                                    "ORNA-PARSE-001",
-                                    "trailing commas are not allowed in generic type arguments",
-                                );
+                    if self.is_punct(">") {
+                        self.error_here(
+                            "ORNA-PARSE-001",
+                            "generic types require at least one type argument",
+                        );
+                    } else {
+                        while !self.eof() && !self.is_punct(">") {
+                            arguments.push(self.parse_type_expr()?);
+                            if self.is_punct(",") {
+                                self.bump();
+                                if self.is_punct(">") {
+                                    self.error_here(
+                                        "ORNA-PARSE-001",
+                                        "trailing commas are not allowed in generic type arguments",
+                                    );
+                                }
+                            } else {
+                                break;
                             }
-                        } else {
-                            break;
                         }
                     }
                     if self.is_punct(">") {
@@ -4106,6 +4138,18 @@ impl Parser {
                     break;
                 }
             }
+            // `?` is a postfix type suffix in type grammar and a removed
+            // propagation operator in expressions. Keep this check here so
+            // every expression shape gets the targeted code without flagging
+            // optional types in declarations.
+            if self.is_punct("?") {
+                self.error_here(
+                    "ORNA091-E-POSTFIX-QUESTION",
+                    "remove postfix `?`; failure propagation is automatic",
+                );
+                self.bump();
+                continue;
+            }
             let Some((prec, right)) = self.infix() else {
                 break;
             };
@@ -4190,6 +4234,13 @@ impl Parser {
                 }
             });
             let Some(rhs) = rhs else { break };
+            if op == "|" && matches!(rhs, Expr::Lambda { .. }) {
+                self.errors.push(Diagnostic::error(
+                    "ORNA-PARSE-001",
+                    "pipeline lambdas must be parenthesized",
+                    rhs.span(),
+                ));
+            }
             if !self.within_depth(expr_depth(&lhs).max(expr_depth(&rhs)) + 1) {
                 return Some(lhs);
             }
@@ -4547,7 +4598,14 @@ impl Parser {
                     self.bump();
                     while !self.eof() && !self.is_punct("}") {
                         let arm_start = self.current().span.clone();
+                        let pattern_start = self.at;
                         let pattern = self.parse_pattern();
+                        if self.at == pattern_start {
+                            if self.recover_case_arms() {
+                                continue;
+                            }
+                            break;
+                        }
                         let guard = if self.keyword() == Some(Keyword::If) {
                             self.bump();
                             self.expr()
@@ -4556,6 +4614,9 @@ impl Parser {
                         };
                         if !self.is_punct(":") {
                             self.error_here("ORNA-PARSE-001", "expected `:` after case pattern");
+                            if self.recover_case_arms() {
+                                continue;
+                            }
                             break;
                         }
                         self.bump();
@@ -4569,9 +4630,9 @@ impl Parser {
                         });
                         if self.is_punct(",") {
                             self.bump()
-                        } else {
-                            break;
                         }
+                        // Case-arm commas are optional; otherwise the next
+                        // loop pass parses the adjacent arm pattern.
                     }
                     if self.is_punct("}") {
                         self.bump()
@@ -5009,6 +5070,50 @@ impl Parser {
             self.bump()
         }
     }
+    fn recover_case_arms(&mut self) -> bool {
+        let mut delimiters = (0usize, 0usize, 0usize);
+        let mut interpolation_delimiters = Vec::new();
+        while !self.eof() {
+            let (braces, parens, brackets) = delimiters;
+            if interpolation_delimiters.is_empty() && braces == 0 && parens == 0 && brackets == 0 {
+                // Stop before this case expression's close, or consume its
+                // arm separator and resume parsing later arms. This keeps a
+                // malformed arm from swallowing valid arms or the outer tail.
+                if self.is_punct("}") {
+                    return false;
+                }
+                if self.is_punct(",") {
+                    self.bump();
+                    return true;
+                }
+            }
+            // Interpolation boundaries are dedicated tokens, not braces.
+            match &self.current().kind {
+                TokenKind::InterpolationStart => {
+                    // Keep malformed delimiters local to this expression so
+                    // they cannot hide the enclosing case-arm boundary. A
+                    // nested string interpolation restores its parent's depth
+                    // when it ends.
+                    interpolation_delimiters.push(delimiters);
+                    delimiters = (0, 0, 0);
+                }
+                TokenKind::InterpolationEnd => {
+                    if let Some(outer) = interpolation_delimiters.pop() {
+                        delimiters = outer;
+                    }
+                }
+                TokenKind::Punct("{") => delimiters.0 += 1,
+                TokenKind::Punct("}") => delimiters.0 = delimiters.0.saturating_sub(1),
+                TokenKind::Punct("(") => delimiters.1 += 1,
+                TokenKind::Punct(")") => delimiters.1 = delimiters.1.saturating_sub(1),
+                TokenKind::Punct("[") => delimiters.2 += 1,
+                TokenKind::Punct("]") => delimiters.2 = delimiters.2.saturating_sub(1),
+                _ => {}
+            }
+            self.bump();
+        }
+        false
+    }
     fn contextual(&self) -> bool {
         matches!(
             self.current().kind,
@@ -5141,6 +5246,20 @@ mod tests {
         let nesting_limit = parse_repl(cases[9]);
         assert!(!nesting_limit.is_incomplete());
         assert!(nesting_limit.is_malformed());
+    }
+
+    #[test]
+    fn rejects_public_table_repl_input_and_preserves_public_functions() {
+        let table = include_str!("../tests/fixtures/repl_public_table.orna");
+        let rejected = parse_repl(table);
+        assert!(rejected.is_malformed());
+        assert!(rejected.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "ORNA-PARSE-001"
+                && diagnostic.message == "public table declarations are not valid REPL input"
+        }));
+
+        let function = include_str!("../tests/fixtures/generic-money-call.orna");
+        assert!(parse_repl(function).is_ok());
     }
 
     #[test]

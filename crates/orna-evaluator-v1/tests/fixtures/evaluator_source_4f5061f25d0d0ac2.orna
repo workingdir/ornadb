@@ -1,0 +1,1 @@
+std.text.starts_with("βeta", "βe")

@@ -1,0 +1,1 @@
+clock_fmt.format(((-30).seconds * 0.9999999995) * 2)

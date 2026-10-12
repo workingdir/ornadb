@@ -1,0 +1,9 @@
+fn encode(a: Int, b: Int) = 10 * a + b;
+
+fn caller() {
+    let counter = 0;
+    encode(
+        b: if true { counter += 1; counter } else { 0 },
+        a: if true { counter += 1; counter } else { 0 }
+    )
+}

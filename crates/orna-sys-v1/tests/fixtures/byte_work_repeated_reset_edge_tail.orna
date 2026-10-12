@@ -1,0 +1,5 @@
+pub table ByteWorkResetSource(id: Int) { value: Int, }
+pub table ByteWorkResetUnknown(id: Int) { value: Int, }
+pub table ByteWorkResetScanTail(id: Int) { value: Int, }
+pub table ByteWorkResetFirstTarget(id: Int) { value: Int, }
+pub table ByteWorkResetLastTarget(id: Int) { value: Int, }

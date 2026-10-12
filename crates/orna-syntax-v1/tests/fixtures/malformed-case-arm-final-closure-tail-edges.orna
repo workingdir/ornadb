@@ -1,0 +1,18 @@
+pub fn bad(captured: Bool): Int { case 1 {
+1: 2 3 { value: 4 },
+true: {
+5;
+ignored => { case captured {
+true: { 1; "first {true} and {false} then {true} done" },
+false: { 0; "second {false} then {true} done" }
+} }
+},
+false: {
+6;
+last => { case false {
+true: { 3; "third {true} then {false} done" },
+false: { 4; "final {false} and {true} done" },
+} }
+}
+}
+}

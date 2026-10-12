@@ -1,9 +1,93 @@
+use std::cell::RefCell;
 use std::future::Future;
 
 use super::{
+<<<<<<< HEAD
     FaultInjector, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, TableMutation,
     WriterLease,
 };
+=======
+    CatalogueAdmission, FaultInjector, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot,
+    TableMutation, WriterLease,
+};
+
+tokio::task_local! {
+    /// Runtime administration transitions and nested activations on the same
+    /// state are rejected while its activation callback is running. The
+    /// task-local scope follows async calls without serializing independent
+    /// activations on other tasks.
+    static ACTIVE_ACTIVATION_STATES: RefCell<Vec<usize>>;
+}
+
+pub(crate) fn runtime_activation_active(state: &RuntimeState) -> bool {
+    let state_id = std::ptr::from_ref(state) as usize;
+    ACTIVE_ACTIVATION_STATES
+        .try_with(|states| states.borrow().contains(&state_id))
+        .unwrap_or(false)
+}
+
+/// Runs one async application callback inside the runtime's reentrancy fence.
+/// Reentrant administration on this state is rejected before opening its
+/// transaction, while the caller still owns the writer lease.
+pub async fn with_activation_scope<T, E, F, Fut>(
+    state: &RuntimeState,
+    lease: WriterLease,
+    callback: F,
+) -> Result<Result<T, E>, RuntimeError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let state_id = std::ptr::from_ref(state) as usize;
+    let mut active = ACTIVE_ACTIVATION_STATES
+        .try_with(|states| states.borrow().clone())
+        .unwrap_or_default();
+    if active.contains(&state_id) {
+        return Err(RuntimeError::AdminBusy);
+    }
+    active.push(state_id);
+
+    ACTIVE_ACTIVATION_STATES
+        .scope(RefCell::new(active), async {
+            if state.current_lease().await? != Some(lease) {
+                return Err(RuntimeError::OwnerLost);
+            }
+            Ok(callback().await)
+        })
+        .await
+}
+
+/// Runs one already validated, terminal administrative effect after removing
+/// this runtime's activation fence for the duration of the effect. Callers
+/// must first prove that the activation staged no table mutations; this is a
+/// host boundary helper, not an application capability.
+pub async fn with_terminal_admin_effect<T, F, Fut>(
+    state: &RuntimeState,
+    lease: WriterLease,
+    callback: F,
+) -> Result<T, RuntimeError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, RuntimeError>>,
+{
+    let state_id = std::ptr::from_ref(state) as usize;
+    let mut active = ACTIVE_ACTIVATION_STATES
+        .try_with(|states| states.borrow().clone())
+        .unwrap_or_default();
+    if let Some(index) = active.iter().position(|active_id| *active_id == state_id) {
+        active.remove(index);
+    }
+
+    ACTIVE_ACTIVATION_STATES
+        .scope(RefCell::new(active), async {
+            if state.current_lease().await? != Some(lease) {
+                return Err(RuntimeError::OwnerLost);
+            }
+            callback().await
+        })
+        .await
+}
+>>>>>>> origin/w90zi-imp_merge
 
 /// Staged table changes and the typed value produced by one activation.
 ///
@@ -14,6 +98,7 @@ pub struct ActivationWork<T> {
     mutations: Vec<TableMutation>,
     next_digest: [u8; 32],
     result: T,
+    catalogue_admission: Option<CatalogueAdmission>,
 }
 
 impl<T> ActivationWork<T> {
@@ -23,7 +108,17 @@ impl<T> ActivationWork<T> {
             mutations,
             next_digest,
             result,
+            catalogue_admission: None,
         }
+    }
+
+    /// Includes a complete resolved source catalogue in this activation's
+    /// atomic runtime commit. Its predecessor must be the activation's pinned
+    /// starting capture; catalogue identities are committed with the table
+    /// writes and next capture, or none of them become visible.
+    pub fn with_catalogue_admission(mut self, admission: CatalogueAdmission) -> Self {
+        self.catalogue_admission = Some(admission);
+        self
     }
 
     /// Returns the typed table mutations staged for commit.
@@ -72,6 +167,33 @@ where
     F: FnOnce(&RuntimeTableActivationSnapshot) -> Fut,
     Fut: Future<Output = Result<ActivationWork<T>, E>>,
 {
+    let state_id = std::ptr::from_ref(state) as usize;
+    let mut active = ACTIVE_ACTIVATION_STATES
+        .try_with(|states| states.borrow().clone())
+        .unwrap_or_default();
+    if active.contains(&state_id) {
+        return Err(ActivationError::Runtime(RuntimeError::AdminBusy));
+    }
+    active.push(state_id);
+
+    ACTIVE_ACTIVATION_STATES
+        .scope(RefCell::new(active), async {
+            run_table_activation_inner(state, lease, tables, faults, evaluator).await
+        })
+        .await
+}
+
+async fn run_table_activation_inner<T, E, F, Fut>(
+    state: &RuntimeState,
+    lease: WriterLease,
+    tables: &[&str],
+    faults: &dyn FaultInjector,
+    evaluator: F,
+) -> Result<T, ActivationError<E>>
+where
+    F: FnOnce(&RuntimeTableActivationSnapshot) -> Fut,
+    Fut: Future<Output = Result<ActivationWork<T>, E>>,
+{
     // Reject an owner superseded before evaluation starts. The commit repeats
     // this check transactionally to catch a takeover racing this precheck.
     if state
@@ -94,10 +216,34 @@ where
         mutations,
         next_digest,
         result,
+        catalogue_admission,
     } = work;
+<<<<<<< HEAD
     state
         .commit_table_activation(lease, snapshot.context(), &mutations, next_digest, faults)
         .await
         .map_err(ActivationError::Runtime)?;
+=======
+    match catalogue_admission {
+        Some(admission) => {
+            state
+                .commit_catalogue_table_activation(
+                    lease,
+                    snapshot.context(),
+                    &admission,
+                    &mutations,
+                    next_digest,
+                    faults,
+                )
+                .await
+        }
+        None => {
+            state
+                .commit_table_activation(lease, snapshot.context(), &mutations, next_digest, faults)
+                .await
+        }
+    }
+    .map_err(ActivationError::Runtime)?;
+>>>>>>> origin/w90zi-imp_merge
     Ok(result)
 }

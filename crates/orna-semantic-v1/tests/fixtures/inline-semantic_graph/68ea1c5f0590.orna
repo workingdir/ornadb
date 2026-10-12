@@ -1,0 +1,1 @@
+fn hidden(): Int = 2;

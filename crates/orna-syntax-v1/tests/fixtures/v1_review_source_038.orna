@@ -1,0 +1,1 @@
+table T(id: Int) { impl P { fn make() { constraints { value: raw } } } }

@@ -1,0 +1,11 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn main() {
+    Note.rekey(1, 2);
+    Note.insert({ id: 1, text: "replacement", quantity: 4 });
+    Note.update(1, { quantity: 5 });
+    Note.update(2, { quantity: 6 });
+}

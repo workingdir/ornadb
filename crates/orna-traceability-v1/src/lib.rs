@@ -810,6 +810,16 @@ fn validate(
                     fixture.id
                 )));
             }
+            "valid"
+                if fixture.expect.get("parse").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("resolve").map(String::as_str) != Some("pass")
+                    || fixture.expect.get("typecheck").map(String::as_str) != Some("pass") =>
+            {
+                return Err(err(format!(
+                    "valid fixture lacks required pass expectations: {}",
+                    fixture.id
+                )));
+            }
             "invalid"
                 if fixture.failing_phase.is_none()
                     || fixture.diagnostic.is_none()
@@ -1138,7 +1148,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     fn corpus() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../reference/Orna-1.0.0")
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
     }
     fn copy_corpus() -> std::path::PathBuf {
         let target = std::env::temp_dir().join(format!(
@@ -1343,6 +1353,61 @@ mod tests {
         assert!(!json.contains("\"statement\""));
     }
     #[test]
+    fn rejects_valid_fixture_without_successful_phase_expectations() {
+        const FIXTURE_PATH: &str = "examples/valid/minimal-root.orna";
+        const REQUIRED_PHASES: [&str; 3] = ["parse", "resolve", "typecheck"];
+        let authoritative = corpus();
+        assert!(authoritative.join(FIXTURE_PATH).is_file());
+        generate(&authoritative).expect("authoritative unmodified reference bundle");
+
+        let root = copy_corpus();
+        let authoritative_fixture = fs::read(authoritative.join(FIXTURE_PATH)).expect("fixture");
+        assert_eq!(
+            fs::read(root.join(FIXTURE_PATH)).expect("copied fixture"),
+            authoritative_fixture
+        );
+        generate(&root).expect("unmodified copied reference bundle");
+
+        let manifest = root.join("tests/conformance-manifest.json");
+        let original_manifest = fs::read_to_string(&manifest).expect("copied manifest");
+        for phase in REQUIRED_PHASES {
+            for failing_expectation in [false, true] {
+                let mut value: Value =
+                    serde_json::from_str(&original_manifest).expect("manifest JSON");
+                let fixture = value["fixtures"]
+                    .as_array_mut()
+                    .expect("fixture list")
+                    .iter_mut()
+                    .find(|fixture| fixture["path"].as_str() == Some(FIXTURE_PATH))
+                    .expect("valid fixture");
+                assert_eq!(fixture["kind"].as_str(), Some("valid"));
+                let fixture_id = fixture["id"].as_str().expect("fixture id").to_owned();
+                let expectations = fixture["expect"].as_object_mut().expect("expectations");
+                if failing_expectation {
+                    expectations.insert(phase.to_owned(), Value::from("fail"));
+                } else {
+                    assert_eq!(
+                        expectations.remove(phase).as_ref().and_then(Value::as_str),
+                        Some("pass")
+                    );
+                }
+                fs::write(&manifest, serde_json::to_vec(&value).expect("serialize manifest"))
+                    .expect("write copied manifest");
+                let error = generate(&root).expect_err("invalid valid-fixture expectation");
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!(
+                            "valid fixture lacks required pass expectations: {fixture_id}"
+                        )),
+                    "{phase} rejection should come from expectation validation, got: {error}"
+                );
+            }
+        }
+        fs::remove_dir_all(root).expect("remove copied bundle");
+    }
+
+    #[test]
     fn rejects_broken_links_and_counts() {
         let root = copy_corpus();
         let evidence = root.join("tests/requirement-evidence.json");
@@ -1353,6 +1418,27 @@ mod tests {
         );
         fs::write(&evidence, changed).expect("write");
         assert!(generate(&root).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn rejects_requirement_without_recorded_evidence_obligation() {
+        let root = copy_corpus();
+        let evidence_path = root.join("tests/requirement-evidence.json");
+        let mut evidence: Value =
+            serde_json::from_slice(&fs::read(&evidence_path).expect("read evidence"))
+                .expect("valid evidence JSON");
+        evidence["requirements"][0]["tests"] = Value::Array(Vec::new());
+        fs::write(
+            &evidence_path,
+            serde_json::to_vec(&evidence).expect("serialize evidence"),
+        )
+        .expect("write evidence without obligation");
+
+        let error = generate(&root).expect_err("empty evidence obligation must reject bundle");
+        assert!(
+            error.to_string().contains("broken link or empty test list"),
+            "unexpected validation error: {error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
     #[test]
@@ -1499,7 +1585,29 @@ mod tests {
 
     #[test]
     fn digest_bound_engine_witnesses_add_only_explicit_executed_boundaries() {
-        let root = corpus();
+        // A fixture-stage witness is accepted only when the evidence register
+        // declares that exact fixture and path. Keep the frozen reference
+        // unchanged and make this test's positive case explicit in a copy.
+        let root = copy_corpus();
+        let evidence_path = root.join("tests/requirement-evidence.json");
+        let mut evidence: Value = serde_json::from_slice(
+            &fs::read(&evidence_path).expect("copied requirement evidence"),
+        )
+        .expect("valid copied requirement evidence");
+        let requirement = evidence["requirements"]
+            .as_array_mut()
+            .expect("requirement evidence array")
+            .iter_mut()
+            .find(|entry| entry["requirement"] == "ORNA-SOURCE-001")
+            .expect("source requirement evidence");
+        requirement["tests"][0]["fixture"] = Value::String("valid/minimal-root.orna".into());
+        requirement["tests"][0]["path"] =
+            Value::String("examples/valid/minimal-root.orna".into());
+        fs::write(
+            evidence_path,
+            serde_json::to_vec(&evidence).expect("serialize copied requirement evidence"),
+        )
+        .expect("write explicit fixture declaration to copied evidence");
         let harness = orna_conformance_v1::Harness::new(
             orna_conformance_v1::Corpus::load(&root).expect("conformance corpus loads"),
         );
@@ -1544,6 +1652,7 @@ mod tests {
             .engine_witnesses(&mismatched_report, std::slice::from_ref(&binding))
             .expect("witness can carry the observed report digest inventory");
         assert!(generate_with_engine_witnesses(&root, &mismatched).is_err());
+        fs::remove_dir_all(root).expect("remove copied corpus");
     }
     #[test]
     fn digest_bound_scenario_witnesses_remain_distinct_from_engine_execution() {

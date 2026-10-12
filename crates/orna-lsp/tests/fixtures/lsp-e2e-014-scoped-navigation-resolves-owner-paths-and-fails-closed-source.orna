@@ -1,0 +1,48 @@
+CREATE SCHEMA owners;
+CREATE TYPE owners.first_obj AS OBJECT (stored BOOLEAN);
+CREATE TYPE owners.second_obj AS OBJECT (stored BOOLEAN);
+CREATE TYPE owners.quoted_obj AS OBJECT ("display_name" BOOLEAN);
+CREATE TYPE owners.client_obj AS OBJECT ("display_name" BOOLEAN);
+CREATE SCHEMA unicode_nav;
+CREATE TYPE unicode_nav.café AS OBJECT (résumé BOOLEAN);
+CREATE SERVER FUNCTION read_first() RETURNS ROWS (stored BOOLEAN) AS
+SELECT first_alias.stored FROM owners.first_obj first_alias;
+CREATE SERVER FUNCTION read_second() RETURNS ROWS (stored BOOLEAN) AS
+SELECT second_alias.stored FROM owners.second_obj second_alias;
+CREATE SERVER FUNCTION read_quoted() RETURNS ROWS ("display_name" BOOLEAN) AS
+SELECT quoted_alias."display_name" FROM owners.quoted_obj quoted_alias;
+CREATE SERVER FUNCTION read_unicode() RETURNS ROWS (résumé BOOLEAN) AS
+SELECT unicode_alias.RÉSUMÉ FROM unicode_nav.CAFÉ unicode_alias;
+CREATE SERVER FUNCTION unresolved_property() RETURNS BOOLEAN AS
+SELECT unknown_alias.missing FROM owners.first_obj unknown_alias;
+CREATE CLIENT FUNCTION client_read(entry REF owners.client_obj) RETURNS BOOLEAN AS
+entry."display_name";
+CREATE CLIENT FUNCTION client_field_shadow(entry REF owners.client_obj) RETURNS BOOLEAN IS
+    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;
+BEGIN
+    RETURN entry."display_name";
+END;
+CREATE CLIENT FUNCTION client_call(entry BOOLEAN) RETURNS BOOLEAN AS entry;
+CREATE CLIENT FUNCTION client_caller() RETURNS BOOLEAN AS
+owners.client_call(entry => TRUE);
+CREATE TYPE owners.child_obj AS OBJECT (stored BOOLEAN);
+CREATE TYPE owners.parent_obj AS OBJECT (child REF owners.child_obj);
+CREATE SERVER FUNCTION read_nested() RETURNS ROWS (stored BOOLEAN) AS
+SELECT nested_alias.child.stored FROM owners.parent_obj nested_alias;
+CREATE SERVER FUNCTION invalid_alias() RETURNS ROWS (stored BOOLEAN) AS
+SELECT wrong_alias.stored FROM owners.first_obj real_alias;
+CREATE SERVER FUNCTION unknown_insert(p_stored BOOLEAN) RETURNS ROWS (created REF owners.first_obj) AS
+INSERT INTO owners.first_obj AS made ("missing") VALUES (p_stored) RETURNING REF(made);
+CREATE SERVER FUNCTION unknown_update(p_stored BOOLEAN, p_key REF owners.first_obj) RETURNS ROWS (changed REF owners.first_obj) AS
+UPDATE owners.first_obj AS changed SET "missing" = p_stored WHERE REF(changed) = p_key RETURNING REF(changed);
+CREATE CLIENT FUNCTION shadow(entry BOOLEAN) RETURNS BOOLEAN IS
+    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;
+BEGIN
+    RETURN entry;
+END;
+CREATE CLIENT FUNCTION future() RETURNS BOOLEAN IS
+    STATE first BOOLEAN SCOPE LOCAL DEFAULT later;
+    STATE later BOOLEAN SCOPE LOCAL DEFAULT TRUE;
+BEGIN
+    RETURN first;
+END;

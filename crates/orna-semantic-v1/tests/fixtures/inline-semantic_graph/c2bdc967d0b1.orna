@@ -1,0 +1,1 @@
+fn bad(values: [Float<C>]) = sum(values);

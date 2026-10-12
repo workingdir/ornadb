@@ -1,0 +1,6 @@
+pub table MultiScanResetSource(id: Int) { value: Int, }
+pub table MultiScanResetUnknown(id: Int) { value: Int, }
+pub table MultiScanResetFirstByteScan(id: Int) { value: Int, }
+pub table MultiScanResetSecondByteScan(id: Int) { value: Int, }
+pub table MultiScanResetFirstTarget(id: Int) { value: Int, }
+pub table MultiScanResetLastTarget(id: Int) { value: Int, }

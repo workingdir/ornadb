@@ -1,0 +1,39 @@
+accepted CLIENT V4 state scalar fixture
+accepted CLIENT action call
+accepted CLIENT Inspector fixture
+alter type rename field
+client function with expression body
+client function with procedural body
+client function with no-STATE procedural locals and assignments
+external client function with runtime contract
+CLIENT short RETURN body accepts AWAIT
+CLIENT state blocks reject pre-BEGIN LET locals
+CLIENT state blocks reject AWAIT in returns
+CLIENT procedural blocks reject CONST declarations
+CLIENT procedural blocks reject CALL statements
+CLIENT procedural blocks reject standalone AWAIT statements
+CLIENT procedural blocks accept IF statements
+CLIENT comparison operators accept standalone angle brackets
+closed CLIENT calls, named arguments, concatenation
+CLIENT expression bodies reject AWAIT
+expression literals and qualified names
+line and block comments
+server function with select body
+server function with rows return and select distinct
+server function with insert body
+server function with update body
+server function with delete body
+create schema
+create schema lowercase keywords
+create schema accepts keyword-initial qualified names
+string escapes and quoted identifiers
+create enum type
+create object type with field modifiers
+create object type accepts keyword-initial qualified names
+canonical scalar type spellings and alias boundaries
+unicode unquoted identifiers
+normal whitespace remains extras
+leading BOM is an error
+interior BOM is an error
+leading word joiner is an error
+interior word joiner is an error

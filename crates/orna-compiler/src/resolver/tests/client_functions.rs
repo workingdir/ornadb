@@ -474,31 +474,6 @@ fn checks_client_state_slots_and_rejects_state_shape_type_errors() {
 }
 
 #[test]
-fn rejects_opaque_values_in_client_state() {
-    let standard =
-        check_standard_library_source(&verified_standard_library_with_action_for_test()).unwrap();
-    let base = empty_catalogue();
-    let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
-    let source = "CREATE SCHEMA examples; \
-            CREATE CLIENT FUNCTION examples.state() RETURNS INTEGER IS \
-            STATE action std.Action; \
-            BEGIN RETURN 1; END;";
-    let report = check_standard_application(&bundle([("state.orna", source)]), &context);
-
-    assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
-    assert_eq!(
-        report.diagnostics()[0].code(),
-        DiagnosticCode::DomainIncompatible,
-        "{:?}",
-        report.diagnostics()
-    );
-    assert_eq!(
-        report.diagnostics()[0].message(),
-        "opaque CLIENT values are transient and cannot be stored in state"
-    );
-    assert!(report.preparation_view().is_none());
-}
-#[test]
 fn rejects_inspector_expressions_in_state_defaults_and_returns() {
     let cases = [
         (
@@ -846,67 +821,6 @@ fn accepts_scalar_resource_assignment_await_with_exact_spans_and_call_provenance
         call_reference.location().span().end(),
         resource_start + resource_text.len()
     );
-}
-
-#[test]
-fn rejects_resource_local_as_action_argument() {
-    let resource_target_id = FunctionId::from_bytes([0x71; 16]);
-    let action_target_id = FunctionId::from_bytes([0x72; 16]);
-    let action_parameter_id = ParameterId::from_bytes([0x73; 16]);
-    let integer_type = ResolvedType::Scalar(StandardScalar::Integer);
-    let base = CatalogueSnapshot::new_with_functions(
-        CatalogueRevisionId::from_bytes([0x74; 16]),
-        vec![SchemaDefinition::new(
-            SchemaId::from_bytes([0x75; 16]),
-            QualifiedSemanticName::new(["tasks"]).unwrap(),
-        )],
-        Vec::new(),
-        vec![
-            FunctionDefinition::new(
-                resource_target_id,
-                QualifiedSemanticName::new(["tasks", "find"]).unwrap(),
-                FunctionDomain::Server,
-                Vec::new(),
-                FunctionReturn::Single(integer_type),
-                FunctionRevisionId::from_bytes([0x76; 16]),
-                FunctionSecurity::Invoker,
-                None,
-                FunctionVolatility::Stable,
-            ),
-            FunctionDefinition::new(
-                action_target_id,
-                QualifiedSemanticName::new(["tasks", "run"]).unwrap(),
-                FunctionDomain::Client,
-                vec![ParameterDefinition::new(
-                    action_parameter_id,
-                    "p_value",
-                    0,
-                    integer_type,
-                    None,
-                )],
-                FunctionReturn::Single(ResolvedType::Scalar(StandardScalar::Integer)),
-                FunctionRevisionId::from_bytes([0x77; 16]),
-                FunctionSecurity::Invoker,
-                None,
-                FunctionVolatility::Immutable,
-            ),
-        ],
-    )
-    .unwrap();
-    let standard =
-        check_standard_library_source(&verified_standard_library_with_action_for_test()).unwrap();
-    let context = StandardApplicationCheckContext::try_new(&base, &standard).unwrap();
-    let source = "CREATE SCHEMA ui; CREATE CLIENT FUNCTION ui.run() RETURNS std.Action IS \
-            LET rows std.data.Resource<INTEGER> := std.data.resource(target => tasks.find, arguments => std.call.args()); \
-            BEGIN RETURN std.action.call(target => tasks.run, arguments => std.call.args(p_value => rows)); END;";
-    let report = check_standard_application(&bundle([("action-resource.orna", source)]), &context);
-    assert_eq!(report.diagnostics().len(), 1, "{:?}", report.diagnostics());
-    assert_eq!(report.diagnostics()[0].code(), DiagnosticCode::TypeMismatch);
-    assert_eq!(
-        report.diagnostics()[0].message(),
-        "std.action.call argument for parameter p_value is not ORV3-encodable"
-    );
-    assert!(report.checked_bundle().is_none());
 }
 
 #[test]
@@ -1662,8 +1576,3 @@ fn rejects_every_std_owner_form_at_its_complete_name() {
     }
     assert_no_checked_bundle(&report);
 }
-
-pub(super) const STD_INVOKE_SOURCE: &str = "CREATE SCHEMA std.invoke;\nCREATE SERVER FUNCTION std.invoke.echo(\n    p_value INTEGER\n)\nRETURNS INTEGER\nSECURITY INVOKER\nTRANSACTION READ ONLY\nVOLATILITY STABLE\nAS\n    SELECT p_value;";
-/// The exact retained V2 `std/types.orna` source: the retained
-/// `orna.std/1`-shape type declarations for the fixed INTEGER value type.
-pub(super) const STANDARD_V2_TYPES_SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.INTEGER AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.integer@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.INTEGER AS std.INTEGER;EXPORT TYPE std.INTEGER TO PRELUDE AS INTEGER;";

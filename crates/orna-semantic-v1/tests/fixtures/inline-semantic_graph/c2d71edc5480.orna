@@ -1,0 +1,1 @@
+pub fn skip(failure: sys.Failure, reason: Str) = sys.admin.skip_failure(failure.reference, expected_version: failure.version, expected_status: failure.status, reason: reason);

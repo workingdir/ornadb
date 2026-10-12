@@ -15,6 +15,7 @@ pub mod physical;
 pub mod presenter;
 pub mod revision;
 pub mod security;
+pub mod semantic_diff;
 pub mod source;
 pub mod source_metadata;
 pub mod state;

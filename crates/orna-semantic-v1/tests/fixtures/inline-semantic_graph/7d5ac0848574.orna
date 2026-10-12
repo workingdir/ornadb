@@ -1,0 +1,1 @@
+fn wrong_label(failure: sys.Failure) = sys.await(job: sys.admin.replay_failure(failure.reference, expected_version: failure.version));

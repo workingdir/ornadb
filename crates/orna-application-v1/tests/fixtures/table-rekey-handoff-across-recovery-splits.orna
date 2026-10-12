@@ -1,0 +1,19 @@
+pub table Note(id: Int) {
+    text: Str,
+    quantity: Int,
+}
+
+fn update_then_blocked_handoff() {
+    Note.update(1, { quantity: 11 });
+    Note.rekey(2, 3)
+}
+
+fn retry_after_split_failure() {
+    Note.delete(3);
+    Note.rekey(2, 3);
+    Note.rekey(1, 2)
+}
+
+fn main() = Note.rekey(1, 2)
+    |? (owner_retry => update_then_blocked_handoff())
+    |? (split_retry => retry_after_split_failure());

@@ -1,0 +1,15 @@
+fn verify() {
+    let seed = 2;
+    let compute = value => value + seed;
+    seed = 9;
+    if (10 | compute) == 12 { 1 } else { 1 / 0 }
+}
+
+fn reject() {
+    let seed = 1;
+    let mutate = () => {
+        seed += 1;
+        seed
+    };
+    mutate()
+}

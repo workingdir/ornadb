@@ -1,0 +1,1 @@
+pub fn bad(): Int { case 1 { "value {([1, "middle {(2, "deep {3, 4}"}"}": 7, true: 8 } }

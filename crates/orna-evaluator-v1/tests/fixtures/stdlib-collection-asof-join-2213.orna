@@ -1,0 +1,1 @@
+query_ops.asof_join([10], [9, 11], value => value, value => 0)

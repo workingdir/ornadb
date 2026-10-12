@@ -1,0 +1,1 @@
+use contacts as mail; fn mail(): Int = 2; fn misuse() = mail.Email.one();

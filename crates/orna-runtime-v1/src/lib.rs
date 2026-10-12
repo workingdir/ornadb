@@ -24,16 +24,19 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libsql::{Builder, Connection, Transaction, TransactionBehavior, params};
 use num_bigint::{BigInt, Sign};
 use orna_foundation_v1::{
-    AssertionRef, CanonicalSnapshot, CheckpointRef, CwdCapture, ExpressionRef, FailureRef,
-    InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID, SYS_STREAM_TABLE_ID,
-    SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value, checkpoint_reference,
-    failure_reference, invocation_reference, snapshot_reference, validate_checkpoint_reference,
-    validate_failure_reference, validate_invocation_reference, validate_run_reference,
-    validate_stream_reference,
+    AssertionRef, CanonicalSnapshot, CanonicalValue, CheckpointRef, CwdCapture, ExpressionRef,
+    FailureRef, InvocationRef, ObjectRef, OvbRaw, RowRef, RunRef, SYS_RUN_TABLE_ID,
+    SYS_STREAM_TABLE_ID, SafeText, Snapshot, SnapshotRef, SourceSpan, StreamRef, Value,
+    checkpoint_reference, failure_reference, invocation_reference, snapshot_reference,
+    validate_checkpoint_reference, validate_failure_reference, validate_invocation_reference,
+    validate_run_reference, validate_stream_reference,
 };
 #[cfg(test)]
 use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
-use orna_repository_v1::{CompactPublicationPending, CompactRuntimeReceipt, Repository};
+use orna_repository_v1::{
+    CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, GitCommitRef,
+    Repository,
+};
 use orna_stream_v1::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
     AsyncFailurePayloadBackend, CancellationClassification, CheckpointPrecondition, CommitIntent,
@@ -50,13 +53,25 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 mod activation;
-pub use activation::{ActivationError, ActivationWork, run_table_activation};
+pub use activation::{
+    ActivationError, ActivationWork, run_table_activation, with_activation_scope,
+    with_terminal_admin_effect,
+};
+mod checkpoint_bootstrap;
 mod catalogue;
+mod invocation;
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
     CatalogueFunction, CatalogueFunctionDeclaration, CatalogueModule, CatalogueModuleDeclaration,
     CatalogueObject, CatalogueObjectKind, CatalogueParameterDeclaration, CatalogueParameterHandle,
     CatalogueTypeDeclaration, CatalogueTypeForm, CatalogueTypeHandle, CatalogueTypeSpec,
+};
+pub use invocation::{
+    InvocationArgumentInput, InvocationArgumentObservation, InvocationCompletion,
+    InvocationLaunchOwner, InvocationObservation, InvocationObservationRegistration,
+    InvocationObservationStatus, InvocationObservationTailCursor,
+    InvocationObservationTailEntry, InvocationObservationTailPage, MaterializedProcedure,
+    MaterializedProcedureParameter,
 };
 
 const SCHEMA: &str = r#"
@@ -106,6 +121,36 @@ CREATE TABLE IF NOT EXISTS checkpoint (
     digest BLOB NOT NULL CHECK (length(digest) = 32),
     mutation_sequence INTEGER NOT NULL
 );
+-- Runtime checkpoints are retained after their pending mutation prefix is
+-- published. Keep table row versions independently so a local generation
+-- remains readable after publication has pruned that prefix.
+CREATE TABLE IF NOT EXISTS runtime_table_history (
+    mutation_sequence INTEGER NOT NULL CHECK (mutation_sequence >= 0),
+    table_id TEXT NOT NULL CHECK (length(table_id) > 0),
+    row_key BLOB NOT NULL CHECK (length(row_key) > 0),
+    row_value BLOB,
+    row_digest BLOB,
+    deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+    PRIMARY KEY (mutation_sequence, table_id, row_key),
+    CHECK (
+        (deleted = 1 AND row_value IS NULL AND row_digest IS NULL)
+        OR (deleted = 0 AND row_value IS NOT NULL AND length(row_digest) = 32)
+    )
+);
+CREATE INDEX IF NOT EXISTS runtime_table_history_lookup
+    ON runtime_table_history (table_id, row_key, mutation_sequence);
+CREATE TABLE IF NOT EXISTS runtime_table_history_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    floor_generation INTEGER NOT NULL CHECK (floor_generation >= 0),
+    floor_digest BLOB NOT NULL CHECK (length(floor_digest) = 32)
+);
+-- These boundaries make append-only governance observations part of an exact
+-- checkpoint view. Audits themselves do not advance the table generation.
+CREATE TABLE IF NOT EXISTS runtime_history_governance_boundary (
+    generation INTEGER PRIMARY KEY CHECK (generation >= 0),
+    admin_audit_sequence INTEGER NOT NULL CHECK (admin_audit_sequence >= 0),
+    checkpoint_reset_audit_sequence INTEGER NOT NULL CHECK (checkpoint_reset_audit_sequence >= 0)
+);
 CREATE TABLE IF NOT EXISTS publication_freeze (
     intent_id BLOB PRIMARY KEY CHECK (length(intent_id) = 16),
     checkpoint_generation INTEGER NOT NULL,
@@ -125,6 +170,15 @@ CREATE TABLE IF NOT EXISTS publication_commit (
     commit_id BLOB NOT NULL CHECK (length(commit_id) IN (40, 64)),
     compact_receipt BLOB
 );
+CREATE TABLE IF NOT EXISTS publication_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    compressed_target_bytes INTEGER NOT NULL DEFAULT 16777216
+        CHECK (compressed_target_bytes BETWEEN 8388608 AND 33554432),
+    published_mutations INTEGER NOT NULL DEFAULT 0 CHECK (published_mutations >= 0),
+    published_payload_bytes INTEGER NOT NULL DEFAULT 0 CHECK (published_payload_bytes >= 0),
+    last_publication_ms INTEGER
+);
+INSERT OR IGNORE INTO publication_metadata (singleton) VALUES (1);
 CREATE TABLE IF NOT EXISTS request_ledger (
     session_id BLOB NOT NULL CHECK (length(session_id) = 16),
     request_id BLOB NOT NULL CHECK (length(request_id) = 16),
@@ -186,6 +240,10 @@ CREATE TABLE IF NOT EXISTS stream_checkpoint_history (
     generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32),
     transition INTEGER NOT NULL CHECK (transition IN (1, 2)),
     PRIMARY KEY (key_id, version)
+);
+CREATE TABLE IF NOT EXISTS stream_checkpoint_bootstrap (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+    selected_commit TEXT NOT NULL CHECK (length(selected_commit) > 0)
 );
 CREATE TABLE IF NOT EXISTS stream_failure (
     identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
@@ -272,6 +330,22 @@ CREATE TABLE IF NOT EXISTS stream_retry_claim (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     identity_id TEXT NOT NULL CHECK (length(identity_id) > 0)
 );
+-- A provider receipt is keyed by the complete delivery identity, effect
+-- ordinal, provider and operation. Request bytes are never retained here;
+-- the digest fences a replay from changing the effect for an existing key.
+-- Applied receipts are retained because an explicit checkpoint reset may
+-- encounter any prior delivery again; pruning would remove its dedupe fence.
+CREATE TABLE IF NOT EXISTS stream_provider_effect_receipt (
+    effect_identity BLOB PRIMARY KEY CHECK (length(effect_identity) > 0),
+    request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+    idempotency_key BLOB NOT NULL CHECK (length(idempotency_key) = 32),
+    lease_fence INTEGER NOT NULL CHECK (lease_fence > 0),
+    attempts_in_fence INTEGER NOT NULL CHECK (attempts_in_fence > 0),
+    total_attempts INTEGER NOT NULL CHECK (total_attempts > 0),
+    status INTEGER NOT NULL CHECK (status IN (1, 2, 3, 4)),
+    receipt BLOB CHECK (receipt IS NULL OR length(receipt) <= 16777216),
+    CHECK ((status = 2 AND receipt IS NOT NULL) OR (status <> 2 AND receipt IS NULL))
+);
 CREATE TABLE IF NOT EXISTS stream_replay_claim (
     identity_id TEXT PRIMARY KEY CHECK (length(identity_id) > 0),
     version INTEGER NOT NULL CHECK (version >= 0),
@@ -292,6 +366,7 @@ CREATE TABLE IF NOT EXISTS stream_pause_reason (
 CREATE TABLE IF NOT EXISTS stream_checkpoint_reset_audit (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     key_id TEXT NOT NULL CHECK (length(key_id) > 0),
+    observed_generation INTEGER NOT NULL DEFAULT -1 CHECK (observed_generation >= -1),
     old_version INTEGER NOT NULL CHECK (old_version >= 0),
     old_position TEXT,
     new_version INTEGER NOT NULL CHECK (new_version >= 0),
@@ -310,6 +385,11 @@ CREATE TABLE IF NOT EXISTS admin_invocation_audit (
     terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
     succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
     redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS admin_invocation_checkpoint_result (
+    invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
+    version INTEGER NOT NULL CHECK (version >= 0),
+    committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
 );
 
 CREATE TABLE IF NOT EXISTS sys_run_observation (
@@ -332,6 +412,76 @@ CREATE TABLE IF NOT EXISTS sys_run_observation (
     diagnostic_code INTEGER,
     diagnostic_class INTEGER,
     CHECK ((diagnostic_code IS NULL) = (diagnostic_class IS NULL))
+);
+CREATE TABLE IF NOT EXISTS sys_invocation_observation (
+    invocation_id BLOB PRIMARY KEY CHECK (length(invocation_id) = 16),
+    function_object_id BLOB NOT NULL CHECK (length(function_object_id) = 16),
+    snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32),
+    runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
+    runtime_generation INTEGER NOT NULL CHECK (runtime_generation >= 0),
+    owner_kind INTEGER NOT NULL CHECK (owner_kind IN (1, 2, 3)),
+    parent_invocation_id BLOB REFERENCES sys_invocation_observation(invocation_id),
+    run_id BLOB REFERENCES sys_run_observation(run_id),
+    owner_session_id BLOB,
+    owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+    owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER,
+    observed_ms INTEGER NOT NULL,
+    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 6),
+    result_type_object_id BLOB NOT NULL CHECK (length(result_type_object_id) = 16),
+    failure_code TEXT,
+    idempotency_key_hash BLOB CHECK (idempotency_key_hash IS NULL OR length(idempotency_key_hash) = 32),
+    CHECK ((parent_invocation_id IS NOT NULL AND owner_kind = 1 AND owner_session_id IS NULL)
+        OR (parent_invocation_id IS NULL AND owner_kind = 2 AND owner_session_id IS NOT NULL AND length(owner_session_id) = 16)
+        OR (parent_invocation_id IS NULL AND owner_kind = 3 AND owner_session_id IS NULL AND run_id IS NOT NULL)),
+    CHECK ((status IN (1, 2) AND ended_ms IS NULL AND failure_code IS NULL)
+        OR (status = 3 AND ended_ms IS NOT NULL AND failure_code IS NULL)
+        OR (status = 4 AND ended_ms IS NOT NULL AND failure_code IS NOT NULL)
+        OR (status IN (5, 6) AND ended_ms IS NOT NULL)),
+    CHECK (started_ms <= observed_ms AND (ended_ms IS NULL OR (started_ms <= ended_ms AND ended_ms <= observed_ms))),
+    FOREIGN KEY (function_object_id, snapshot)
+        REFERENCES sys_procedure_materialization(function_object_id, snapshot),
+    FOREIGN KEY (result_type_object_id, snapshot)
+        REFERENCES runtime_catalogue_type(object_id, snapshot)
+);
+CREATE TABLE IF NOT EXISTS sys_invocation_argument (
+    invocation_id BLOB NOT NULL REFERENCES sys_invocation_observation(invocation_id),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL CHECK (length(name) > 0),
+    type_object_id BLOB NOT NULL CHECK (length(type_object_id) = 16),
+    value_digest BLOB CHECK (value_digest IS NULL OR length(value_digest) = 32),
+    redacted INTEGER NOT NULL CHECK (redacted IN (0, 1)),
+    PRIMARY KEY (invocation_id, position),
+    UNIQUE (invocation_id, name),
+    CHECK (redacted = 0 OR value_digest IS NULL)
+);
+-- Invocation tails are append-only change notifications. A stable sequence is
+-- used instead of wall-clock ordering so equal timestamps and later terminal
+-- transitions cannot be skipped by a continuation cursor.
+CREATE TABLE IF NOT EXISTS sys_invocation_observation_tail (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    invocation_id BLOB NOT NULL REFERENCES sys_invocation_observation(invocation_id),
+    observed_ms INTEGER NOT NULL CHECK (observed_ms >= 0),
+    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 6),
+    UNIQUE (invocation_id, observed_ms, status)
+);
+CREATE INDEX IF NOT EXISTS sys_invocation_observation_tail_by_invocation
+    ON sys_invocation_observation_tail(invocation_id, sequence);
+-- Backfill once for runtimes that already retained invocation rows before
+-- tailing was added. Skip known rows before INSERT: SQLite may advance an
+-- AUTOINCREMENT sequence for a duplicate INSERT OR IGNORE, leaving cursor gaps
+-- on every restart even though no lifecycle event was appended.
+INSERT INTO sys_invocation_observation_tail
+    (invocation_id, observed_ms, status)
+SELECT observation.invocation_id, observation.observed_ms, observation.status
+FROM sys_invocation_observation AS observation
+WHERE NOT EXISTS (
+    SELECT 1 FROM sys_invocation_observation_tail AS tail
+    WHERE tail.invocation_id = observation.invocation_id
+      AND tail.observed_ms = observation.observed_ms
+      AND tail.status = observation.status
 );
 CREATE TABLE IF NOT EXISTS runtime_catalogue_identity (
     object_id BLOB PRIMARY KEY CHECK (length(object_id) = 16),
@@ -398,6 +548,37 @@ CREATE TABLE IF NOT EXISTS runtime_catalogue_parameter (
     FOREIGN KEY (object_id, snapshot)
         REFERENCES runtime_catalogue_function(object_id, snapshot)
 );
+-- A procedure is a runtime materialization of one exact catalogue function.
+-- Orna 1.0 exposes the portable declaration as sys.Function; this cache adds
+-- no second source identity and is always pinned to that function revision.
+CREATE TABLE IF NOT EXISTS sys_procedure_materialization (
+    function_object_id BLOB NOT NULL CHECK (length(function_object_id) = 16),
+    snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+    qualified_name TEXT NOT NULL CHECK (length(qualified_name) > 0),
+    revision_id BLOB NOT NULL CHECK (length(revision_id) = 32),
+    semantic_hash BLOB NOT NULL CHECK (length(semantic_hash) = 32),
+    result_type_object_id BLOB NOT NULL CHECK (length(result_type_object_id) = 16),
+    materialized_ms INTEGER NOT NULL CHECK (materialized_ms >= 0),
+    PRIMARY KEY (function_object_id, snapshot),
+    UNIQUE (snapshot, qualified_name),
+    FOREIGN KEY (function_object_id, snapshot)
+        REFERENCES runtime_catalogue_function(object_id, snapshot),
+    FOREIGN KEY (result_type_object_id, snapshot)
+        REFERENCES runtime_catalogue_type(object_id, snapshot)
+);
+CREATE TABLE IF NOT EXISTS sys_procedure_parameter_materialization (
+    function_object_id BLOB NOT NULL,
+    snapshot BLOB NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL CHECK (length(name) > 0),
+    type_object_id BLOB NOT NULL CHECK (length(type_object_id) = 16),
+    PRIMARY KEY (function_object_id, snapshot, position),
+    UNIQUE (function_object_id, snapshot, name),
+    FOREIGN KEY (function_object_id, snapshot)
+        REFERENCES sys_procedure_materialization(function_object_id, snapshot),
+    FOREIGN KEY (type_object_id, snapshot)
+        REFERENCES runtime_catalogue_type(object_id, snapshot)
+);
 CREATE TABLE IF NOT EXISTS sys_stream_observation (
     stream_id BLOB PRIMARY KEY CHECK (length(stream_id) = 16),
     run_id BLOB NOT NULL REFERENCES sys_run_observation(run_id),
@@ -446,6 +627,111 @@ pub struct Mutation {
     pub digest: [u8; 32],
 }
 
+/// Effective publication policy used by the runtime's compact publisher.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationPolicy {
+    /// Target compressed bytes per publication batch.
+    pub compressed_target_bytes: u64,
+    /// Maximum encoded file size for the active compact profile.
+    pub max_file_bytes: u64,
+    /// Maximum age, in seconds, for a pending batch before publication.
+    pub max_pending_age_seconds: u64,
+}
+
+impl Default for RuntimePublicationPolicy {
+    fn default() -> Self {
+        Self {
+            compressed_target_bytes: 16 * 1024 * 1024,
+            max_file_bytes: 64 * 1024 * 1024,
+            max_pending_age_seconds: 60,
+        }
+    }
+}
+
+/// One coherent read of effective policy and durable publication state.
+///
+/// Published counters and `last_publication_ms` cover completions recorded
+/// since this metadata ledger was installed. Publications completed before
+/// installation cannot be reconstructed because their pending payloads have
+/// already been removed; a zero count after upgrading an older runtime means
+/// "not recorded by this ledger," not necessarily "never published."
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationMetadata {
+    pub publication_policy: RuntimePublicationPolicy,
+    /// Durable mutations waiting for publication.
+    pub pending_rows: u64,
+    /// Encoded payload bytes waiting for publication.
+    pub pending_bytes: u64,
+    /// Durable mutations consumed by completed publications.
+    pub published_rows: u64,
+    /// Encoded payload bytes consumed by completed publications.
+    pub published_bytes: u64,
+    /// Unix epoch milliseconds for the most recently completed publication.
+    pub last_publication_ms: Option<i64>,
+}
+
+/// Canonical publication field records corresponding to both system views.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePublicationMetadataRows {
+    pub sys_storage: CanonicalValue,
+    pub maintenance_job: CanonicalValue,
+}
+
+fn publication_metadata_record(
+    metadata: &RuntimePublicationMetadata,
+) -> Result<CanonicalValue, RuntimeError> {
+    let policy = publication_text_map(vec![
+        (
+            "compressed_target_bytes",
+            OvbRaw::Int(metadata.publication_policy.compressed_target_bytes.into()),
+        ),
+        (
+            "max_file_bytes",
+            OvbRaw::Int(metadata.publication_policy.max_file_bytes.into()),
+        ),
+        (
+            "max_pending_age_seconds",
+            OvbRaw::Int(metadata.publication_policy.max_pending_age_seconds.into()),
+        ),
+    ]);
+    let last_publication = match metadata.last_publication_ms {
+        Some(milliseconds) => {
+            let seconds = milliseconds.div_euclid(1_000);
+            let nanoseconds = milliseconds.rem_euclid(1_000) * 1_000_000;
+            OvbRaw::Tag(
+                60002,
+                Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Int(seconds.into()),
+                    OvbRaw::Int(nanoseconds.into()),
+                ])),
+            )
+        }
+        None => OvbRaw::Null,
+    };
+    CanonicalValue::new(publication_text_map(vec![
+        ("publication_policy", policy),
+        ("pending_rows", OvbRaw::Int(metadata.pending_rows.into())),
+        ("pending_bytes", OvbRaw::Int(metadata.pending_bytes.into())),
+        ("published_rows", OvbRaw::Int(metadata.published_rows.into())),
+        ("published_bytes", OvbRaw::Int(metadata.published_bytes.into())),
+        ("last_publication", last_publication),
+    ]))
+    .map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+fn publication_text_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
+    let mut fields = fields;
+    fields.sort_by(|(left, _), (right, _)| {
+        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+    });
+    OvbRaw::Map(
+        fields
+            .into_iter()
+            .map(|(key, value)| (OvbRaw::Text(key.into()), value))
+            .collect(),
+    )
+}
+
 const MAX_TABLE_MUTATION_BYTES: usize = 16 * 1024 * 1024;
 
 /// A schema-independent durable table change.
@@ -461,6 +747,8 @@ pub struct TableMutation {
     table: String,
     key: Vec<u8>,
     value: Option<Vec<u8>>,
+    rekey_to: Option<Vec<u8>>,
+    insert_only: bool,
 }
 
 impl TableMutation {
@@ -477,6 +765,54 @@ impl TableMutation {
             table,
             key,
             value,
+            rekey_to: None,
+            insert_only: false,
+        })
+    }
+
+    /// Creates an insert-only operation. Commit rejects an occupied key
+    /// instead of replacing the row as the generic replacement constructor does.
+    pub fn insert(
+        id: [u8; 16],
+        table: impl Into<String>,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<Self, RuntimeError> {
+        let table = table.into();
+        validate_table_mutation(id, &table, &key, Some(&value))?;
+        Ok(Self {
+            id,
+            table,
+            key,
+            value: Some(value),
+            rekey_to: None,
+            insert_only: true,
+        })
+    }
+
+    /// Creates one explicit primary-key move, retaining the semantic intent
+    /// through the durable mutation ledger. The replacement row is supplied
+    /// because the application layer owns the admitted key-field schema.
+    pub fn rekey(
+        id: [u8; 16],
+        table: impl Into<String>,
+        old_key: Vec<u8>,
+        new_key: Vec<u8>,
+        replacement: Vec<u8>,
+    ) -> Result<Self, RuntimeError> {
+        let table = table.into();
+        validate_table_mutation(id, &table, &old_key, Some(&replacement))?;
+        validate_table_identity(&table, &new_key)?;
+        if old_key == new_key {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        Ok(Self {
+            id,
+            table,
+            key: old_key,
+            value: Some(replacement),
+            rekey_to: Some(new_key),
+            insert_only: false,
         })
     }
 
@@ -496,6 +832,16 @@ impl TableMutation {
         self.value.as_deref()
     }
 
+    /// Returns the destination key for an explicit semantic re-key.
+    pub fn rekey_to(&self) -> Option<&[u8]> {
+        self.rekey_to.as_deref()
+    }
+
+    /// Whether this mutation requires its destination key to be absent.
+    pub fn is_insert(&self) -> bool {
+        self.insert_only
+    }
+
     /// Decodes a mutation previously produced by this typed boundary.
     /// Generic runtime mutations are rejected unless their payload, digest,
     /// and canonical table operation all validate together.
@@ -505,16 +851,38 @@ impl TableMutation {
         if digest != mutation.digest {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        let mut cursor = 0;
-        let prefix = b"ORNA-TABLE-MUTATION\0";
-        if mutation.payload.get(..prefix.len()) != Some(prefix) {
+        let (mut cursor, version_two) = if mutation
+            .payload
+            .starts_with(b"ORNA-TABLE-MUTATION-2\0")
+        {
+            (b"ORNA-TABLE-MUTATION-2\0".len(), true)
+        } else if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION\0") {
+            (b"ORNA-TABLE-MUTATION\0".len(), false)
+        } else {
             return Err(RuntimeError::InvalidTableMutation);
-        }
-        cursor += prefix.len();
+        };
         let table =
             String::from_utf8(read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec())
                 .map_err(|_| RuntimeError::InvalidTableMutation)?;
         let key = read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec();
+        let operation = if version_two {
+            Some(
+                *mutation
+                    .payload
+                    .get(cursor)
+                    .ok_or(RuntimeError::InvalidTableMutation)?,
+            )
+        } else {
+            None
+        };
+        if version_two {
+            cursor += 1;
+        }
+        let rekey_to = if operation == Some(2) {
+            Some(read_length_prefixed(&mutation.payload, &mut cursor)?.to_vec())
+        } else {
+            None
+        };
         let value = match mutation.payload.get(cursor).copied() {
             Some(0) => {
                 cursor += 1;
@@ -529,11 +897,31 @@ impl TableMutation {
         if cursor != mutation.payload.len() {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        Self::new(mutation.id, table, key, value)
+        match (operation, rekey_to) {
+            (Some(1), None) => Self::insert(
+                mutation.id,
+                table,
+                key,
+                value.ok_or(RuntimeError::InvalidTableMutation)?,
+            ),
+            (Some(2), Some(new_key)) => Self::rekey(
+                mutation.id,
+                table,
+                key,
+                new_key,
+                value.ok_or(RuntimeError::InvalidTableMutation)?,
+            ),
+            (None, None) => Self::new(mutation.id, table, key, value),
+            _ => Err(RuntimeError::InvalidTableMutation),
+        }
     }
 
     fn runtime_mutation(&self) -> Result<Mutation, RuntimeError> {
-        let payload = encode_table_mutation(self)?;
+        let payload = if self.rekey_to.is_some() || self.insert_only {
+            encode_v2_table_mutation(self)?
+        } else {
+            encode_table_mutation(self)?
+        };
         Ok(Mutation {
             id: self.id,
             digest: Sha256::digest(&payload).into(),
@@ -616,6 +1004,198 @@ pub struct Checkpoint {
     pub generation: u64,
     pub digest: [u8; 32],
     pub mutation_sequence: u64,
+}
+
+/// A read-only pin to one runtime checkpoint generation.
+///
+/// The mutation sequence is retained privately because generation numbers
+/// alone do not identify the row state when querying the append-only history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalSnapshot {
+    capture: CwdCapture,
+    generation: u64,
+    mutation_sequence: u64,
+    admin_audit_sequence: u64,
+    checkpoint_reset_audit_sequence: u64,
+}
+
+impl HistoricalSnapshot {
+    /// The exact database/runtime/generation identity selected by this pin.
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    /// The checkpoint generation represented by this immutable pin.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Canonical logical ID for this database/runtime/generation pin.
+    ///
+    /// The checkpoint digest remains separate in [`CwdCapture`], so equal
+    /// payload digests at adjacent generations still have distinct IDs.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        historical_snapshot_id(&self.capture)
+    }
+
+    /// The immutable checkpoint mutation boundary represented by this pin.
+    pub const fn mutation_sequence(&self) -> u64 {
+        self.mutation_sequence
+    }
+
+    /// Last generic administrative audit row included by this checkpoint.
+    pub const fn admin_audit_sequence(&self) -> u64 {
+        self.admin_audit_sequence
+    }
+
+    /// Last specialized checkpoint-reset audit row included by this checkpoint.
+    pub const fn checkpoint_reset_audit_sequence(&self) -> u64 {
+        self.checkpoint_reset_audit_sequence
+    }
+
+    /// Whether two values can safely participate in one snapshot-scoped
+    /// operation. Runtime snapshots at different generations are distinct
+    /// contexts even when they belong to the same database.
+    pub fn require_same_context(&self, other: &Self) -> Result<(), RuntimeError> {
+        if self.capture == other.capture {
+            Ok(())
+        } else {
+            Err(RuntimeError::SnapshotContextMismatch)
+        }
+    }
+}
+
+/// Context-bearing result of a governance audit read at one checkpoint pin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalAuditRows<T> {
+    capture: CwdCapture,
+    rows: Vec<T>,
+}
+
+impl<T> HistoricalAuditRows<T> {
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    /// Canonical logical ID of the generation used for this audit read.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        historical_snapshot_id(&self.capture)
+    }
+
+    pub fn rows(&self) -> &[T] {
+        &self.rows
+    }
+
+    /// Prevents audit rows observed at different checkpoint pins from being
+    /// combined as one historical result.
+    pub fn require_same_context<U>(
+        &self,
+        other: &HistoricalAuditRows<U>,
+    ) -> Result<(), RuntimeError> {
+        if self.capture == other.capture {
+            Ok(())
+        } else {
+            Err(RuntimeError::SnapshotContextMismatch)
+        }
+    }
+}
+
+/// Integrity summary for the logical rows available at a retained checkpoint.
+/// It is a local integrity statement, not a signature or external trust proof.
+/// Raw-value hashes are deliberately withheld: this generic layer cannot
+/// identify low-entropy secrets, whose hashes could disclose their values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalSnapshotAttestation {
+    capture: CwdCapture,
+    generation: u64,
+    mutation_sequence: u64,
+    row_count: u64,
+    table_count: u64,
+    admin_audit_sequence: u64,
+    checkpoint_reset_audit_sequence: u64,
+}
+
+impl HistoricalSnapshotAttestation {
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    /// The checkpoint generation whose retained rows were verified.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Canonical logical ID of the generation whose rows were verified.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        historical_snapshot_id(&self.capture)
+    }
+
+    pub const fn mutation_sequence(&self) -> u64 {
+        self.mutation_sequence
+    }
+
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    pub const fn table_count(&self) -> u64 {
+        self.table_count
+    }
+
+    pub const fn admin_audit_sequence(&self) -> u64 {
+        self.admin_audit_sequence
+    }
+
+    pub const fn checkpoint_reset_audit_sequence(&self) -> u64 {
+        self.checkpoint_reset_audit_sequence
+    }
+}
+
+fn historical_snapshot_id(capture: &CwdCapture) -> [u8; 32] {
+    // The canonical Snapshot ID hashes database, runtime and generation. Keep
+    // the mutable-data digest out of this stable logical key; CwdCapture still
+    // carries that digest for exact context validation.
+    match capture.snapshot() {
+        Snapshot::Cwd { id, .. } => *id,
+        Snapshot::Commit { .. } => unreachable!("CwdCapture only contains CWD snapshots"),
+    }
+}
+
+/// The result of reading one table at a pinned historical runtime generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalTableRows {
+    capture: CwdCapture,
+    table: String,
+    rows: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl HistoricalTableRows {
+    pub fn capture(&self) -> &CwdCapture {
+        &self.capture
+    }
+
+    /// Canonical logical ID of the generation used for this table read.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        historical_snapshot_id(&self.capture)
+    }
+
+    /// Whether rows read under these pins can be combined as one historical
+    /// value context.
+    pub fn require_same_context(&self, other: &Self) -> Result<(), RuntimeError> {
+        if self.capture == other.capture {
+            Ok(())
+        } else {
+            Err(RuntimeError::SnapshotContextMismatch)
+        }
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn rows(&self) -> &[(Vec<u8>, Vec<u8>)] {
+        &self.rows
+    }
 }
 
 /// The canonical row encoding selected by the compact publication profile.
@@ -705,6 +1285,19 @@ impl PublicationCommitId {
 pub struct RequestIdentity {
     pub session_id: [u8; 16],
     pub request_id: [u8; 16],
+}
+
+/// Derives the stable administrative receipt identity for one admitted
+/// request. Keeping the session in the digest prevents request IDs that are
+/// only unique within a session from aliasing in the runtime-wide receipt log.
+pub fn admin_invocation_id(request: RequestIdentity) -> [u8; 16] {
+    let mut digest = Sha256::new();
+    digest.update(b"orna.admin.invocation.v1\0");
+    digest.update(request.session_id);
+    digest.update(request.request_id);
+    digest.finalize()[..16]
+        .try_into()
+        .expect("SHA-256 has at least 16 bytes")
 }
 
 /// Durable identity of the activation that owns a running request.
@@ -1182,15 +1775,15 @@ impl SysStreamProjection {
         observation: &StreamObservation,
         run: &RunObservation,
     ) -> Result<Self, RuntimeError> {
-        if observation.live
-            && (!run.live
-                || run.status.is_terminal()
-                || matches!(
-                    observation.status,
-                    StreamObservationStatus::Completed
-                        | StreamObservationStatus::Cancelled
-                        | StreamObservationStatus::Orphaned
-                ))
+        let stream_is_terminal = matches!(
+            observation.status,
+            StreamObservationStatus::Completed
+                | StreamObservationStatus::Failed
+                | StreamObservationStatus::Cancelled
+                | StreamObservationStatus::Orphaned
+        );
+        if (run.status.is_terminal() && !stream_is_terminal)
+            || (observation.live && (!run.live || stream_is_terminal))
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
@@ -1351,10 +1944,23 @@ pub enum RuntimeError {
     InvalidDigest,
     InvalidObservationReference,
     ObservationCoordinateMismatch,
+    ProcedureMaterializationConflict,
+    InvocationObservationConflict,
+    InvocationStateConflict,
+    InvocationChildrenActive,
+    InvocationOwnerInvalid,
+    InvocationTailInvalid,
+    InvocationTailLimit,
     StreamIdentityMismatch,
+    StreamSourceNotReplayable,
     StreamCheckpointStale,
     CheckpointNotReplayable,
+    SnapshotNotFound,
+    SnapshotIncomplete,
+    SnapshotContextMismatch,
     LeaseHeld,
+    AdminBusy,
+    AdminInvocationConflict,
     OwnerLost,
     RecoveryPending,
     StaleCapture { current: Box<CwdCapture> },
@@ -1364,6 +1970,7 @@ pub enum RuntimeError {
     ConflictingPublicationIntent,
     ConflictingPublicationCommit,
     InvalidPublicationCommit,
+    InvalidPublicationPolicy,
     CompactPublicationRequired,
     CompactReceiptKeyMismatch,
     InvalidCompactReceipt,
@@ -1376,6 +1983,7 @@ pub enum RuntimeError {
     TerminalOutcomeTooLarge,
     RecoveryInvalid,
     FaultInjected(FaultPoint),
+    SystemProviderAbiInvalid,
     StorageUnavailable,
 }
 impl RuntimeError {
@@ -1386,8 +1994,14 @@ impl RuntimeError {
     /// internal to this crate's existing error convention.
     pub fn public_code(&self) -> Option<&'static str> {
         match self {
+            Self::AdminBusy => Some("sys.admin.busy"),
             Self::StreamCheckpointStale => Some("sys.checkpoint.conflict"),
             Self::CheckpointNotReplayable => Some("sys.checkpoint.not_replayable"),
+            Self::SnapshotNotFound => Some("sys.snapshot.not_found"),
+            Self::SnapshotIncomplete => Some("sys.snapshot.incomplete"),
+            // No standalone cross-context code is defined; an exact pin that
+            // cannot be resolved in this runtime is incomplete, never rebound.
+            Self::SnapshotContextMismatch => Some("sys.snapshot.incomplete"),
             _ => None,
         }
     }
@@ -1400,10 +2014,23 @@ impl fmt::Display for RuntimeError {
             Self::InvalidDigest => "invalid durable digest",
             Self::InvalidObservationReference => "invalid runtime observation reference",
             Self::ObservationCoordinateMismatch => "runtime observation coordinates do not match",
+            Self::ProcedureMaterializationConflict => "runtime procedure materialization conflicts with its catalogue row",
+            Self::InvocationObservationConflict => "runtime invocation observation conflicts with retained state",
+            Self::InvocationStateConflict => "runtime invocation state transition conflicts",
+            Self::InvocationChildrenActive => "runtime invocation has active child invocations",
+            Self::InvocationOwnerInvalid => "runtime invocation owner or arguments are invalid",
+            Self::InvocationTailInvalid => "runtime invocation tail cursor is invalid",
+            Self::InvocationTailLimit => "runtime invocation tail page limit is invalid",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
+            Self::StreamSourceNotReplayable => "stream source does not support durable recovery",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::CheckpointNotReplayable => "checkpoint target is not replayable",
+            Self::SnapshotNotFound => "runtime checkpoint generation was not found",
+            Self::SnapshotIncomplete => "historical runtime generation is incomplete",
+            Self::SnapshotContextMismatch => "historical snapshot contexts do not match",
             Self::LeaseHeld => "runtime writer is held",
+            Self::AdminBusy => "runtime administration callback is busy",
+            Self::AdminInvocationConflict => "administrative invocation identity was reused",
             Self::OwnerLost => "runtime writer ownership was lost",
             Self::RecoveryPending => "runtime takeover recovery is pending",
             Self::StaleCapture { .. } => "runtime capture is stale",
@@ -1413,6 +2040,7 @@ impl fmt::Display for RuntimeError {
             Self::ConflictingPublicationIntent => "conflicting publication intent",
             Self::ConflictingPublicationCommit => "conflicting publication commit",
             Self::InvalidPublicationCommit => "invalid publication commit",
+            Self::InvalidPublicationPolicy => "invalid publication policy",
             Self::CompactPublicationRequired => {
                 "compact-bound publication requires a runtime receipt"
             }
@@ -1429,6 +2057,7 @@ impl fmt::Display for RuntimeError {
             Self::TerminalOutcomeTooLarge => "runtime terminal outcome exceeds its bound",
             Self::RecoveryInvalid => "runtime recovery validation failed",
             Self::FaultInjected(_) => "runtime fault injected",
+            Self::SystemProviderAbiInvalid => "baked system provider ABI is invalid",
             Self::StorageUnavailable => "runtime state unavailable",
         })
     }
@@ -1450,6 +2079,8 @@ pub enum TableActivationError {
 pub struct RuntimeState {
     connection: Connection,
     compact_receipt_signing_key: SigningKey,
+    system_dispatch: &'static orna_sys_v1::SystemDispatchTable,
+    system_provider_roles: orna_sys_v1::ProviderRoleRegistry,
 }
 
 enum RequestActivationTransactionError {
@@ -1566,7 +2197,235 @@ impl RuntimeTableActivationSnapshot {
     pub fn table_rows(&self) -> &RuntimeTableRows {
         &self.table_rows
     }
+
+    /// Starts a query session over this activation's captured table rows.
+    ///
+    /// The reference defines live-query and read-your-writes semantics but
+    /// does not prescribe a runtime API shape. This API uses the canonical
+    /// encoded primary key as its exact-match identity and gives each session
+    /// a private mutation overlay.
+    pub fn query_session(&self) -> RuntimeQuerySession<'_> {
+        RuntimeQuerySession {
+            snapshot: self,
+            overlay: BTreeMap::new(),
+            mutations: Vec::new(),
+        }
+    }
+
+    /// Returns the captured row whose encoded primary key exactly matches
+    /// `key`. Keys are canonical OVB bytes, so schema-aware callers normalize
+    /// logical aliases before entering this schema-independent runtime API.
+    pub fn query_exact(&self, table: &str, key: &[u8]) -> Result<Option<&[u8]>, RuntimeQueryError> {
+        let rows = self
+            .table_rows
+            .get(table)
+            .ok_or(RuntimeQueryError::TableNotAdmitted)?;
+        Ok(rows
+            .binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+            .ok()
+            .map(|index| rows[index].1.as_slice()))
+    }
 }
+
+/// A private exact-query view over one activation snapshot.
+///
+/// Staged writes shadow captured rows immediately and disappear when the
+/// session is dropped. The owner passes [`Self::staged_mutations`] to the
+/// existing atomic activation commit when evaluation succeeds.
+pub struct RuntimeQuerySession<'snapshot> {
+    snapshot: &'snapshot RuntimeTableActivationSnapshot,
+    overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+    mutations: Vec<TableMutation>,
+}
+
+impl RuntimeQuerySession<'_> {
+    /// Checks that the activation captured this relation without reading rows.
+    ///
+    /// `take(0)` does not need to enumerate or project anything, but it still
+    /// validates admission so an unavailable relation cannot masquerade as a
+    /// known empty one. The reference requires bounded enumeration but leaves
+    /// this zero-row admission boundary open; the runtime preserves its
+    /// admitted-empty versus unadmitted distinction.
+    pub fn ensure_table_admitted(&self, table: &str) -> Result<(), RuntimeQueryError> {
+        self.snapshot
+            .table_rows
+            .contains_key(table)
+            .then_some(())
+            .ok_or(RuntimeQueryError::TableNotAdmitted)
+    }
+
+    /// Returns the session's current row for the exact canonical key.
+    ///
+    /// Every call checks the current overlay before the immutable base rows;
+    /// query results are deliberately not memoized, preserving independent
+    /// call semantics and making preceding writes visible immediately.
+    pub fn query_exact(&self, table: &str, key: &[u8]) -> Result<Option<&[u8]>, RuntimeQueryError> {
+        self.ensure_table_admitted(table)?;
+        if let Some(value) = self.overlay.get(table).and_then(|rows| rows.get(key)) {
+            return Ok(value.as_deref());
+        }
+        self.snapshot.query_exact(table, key)
+    }
+
+    /// Returns the exact row or the typed miss used by a required `lookup`
+    /// effect. An admitted table with no matching key is distinct from a
+    /// relation the activation did not admit.
+    pub fn lookup_exact(&self, table: &str, key: &[u8]) -> Result<&[u8], RuntimeQueryError> {
+        self.query_exact(table, key)?
+            .ok_or(RuntimeQueryError::RowNotFound)
+    }
+
+    /// Reads one bounded page from the session's current relation view.
+    ///
+    /// Rows are ordered by canonical encoded key. `after` is exclusive, and
+    /// `next` is the last returned key only when a lookahead row proves that
+    /// another page exists. The reference specifies read-your-writes but not
+    /// a runtime cursor shape, so this follows the evaluator's exclusive
+    /// canonical-cursor contract and avoids empty continuation pages. Pages
+    /// are capped at 1,024 rows as a pragmatic runtime bound; the evaluator
+    /// currently requests one row per page. Each continuation reads the
+    /// session's latest overlay: a newly staged key after the cursor is seen,
+    /// while a key at or before the cursor does not restart the scan.
+    pub fn query_page(
+        &self,
+        table: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<RuntimeQueryPage, RuntimeQueryError> {
+        if limit == 0 || limit > MAX_RUNTIME_QUERY_PAGE_ROWS {
+            return Err(RuntimeQueryError::InvalidPageSize);
+        }
+        let base = self
+            .snapshot
+            .table_rows
+            .get(table)
+            .ok_or(RuntimeQueryError::TableNotAdmitted)?;
+
+        let base_start = after.map_or(0, |cursor| {
+            base.partition_point(|(key, _)| key.as_slice() <= cursor)
+        });
+        let mut base_rows = base[base_start..].iter().peekable();
+        let mut staged_rows = self
+            .overlay
+            .get(table)
+            .into_iter()
+            .flat_map(|rows| {
+                use std::ops::Bound::{Excluded, Unbounded};
+
+                let bounds = after.map_or((Unbounded, Unbounded), |cursor| {
+                    (Excluded(cursor), Unbounded)
+                });
+                rows.range::<[u8], _>(bounds)
+            })
+            .peekable();
+        let mut rows = Vec::with_capacity(limit);
+        let mut has_more = false;
+        loop {
+            let base_next = base_rows.peek().copied();
+            let staged_next = staged_rows.peek().copied();
+            let (key, value) = match (base_next, staged_next) {
+                (Some((base_key, _)), Some((staged_key, _)))
+                    if base_key.as_slice() == staged_key.as_slice() =>
+                {
+                    base_rows.next();
+                    let (key, value) = staged_rows.next().expect("peeked staged row");
+                    (key.as_slice(), value.as_deref())
+                }
+                (Some((base_key, _)), Some((staged_key, _)))
+                    if base_key.as_slice() < staged_key.as_slice() =>
+                {
+                    let (key, value) = base_rows.next().expect("peeked base row");
+                    (key.as_slice(), Some(value.as_slice()))
+                }
+                (Some(_), Some(_)) => {
+                    let (key, value) = staged_rows.next().expect("peeked staged row");
+                    (key.as_slice(), value.as_deref())
+                }
+                (Some(_), None) => {
+                    let (key, value) = base_rows.next().expect("peeked base row");
+                    (key.as_slice(), Some(value.as_slice()))
+                }
+                (None, Some(_)) => {
+                    let (key, value) = staged_rows.next().expect("peeked staged row");
+                    (key.as_slice(), value.as_deref())
+                }
+                (None, None) => break,
+            };
+            let Some(value) = value else {
+                continue;
+            };
+            if after.is_some_and(|cursor| key <= cursor) {
+                continue;
+            }
+            if rows.len() == limit {
+                has_more = true;
+                break;
+            }
+            rows.push((key.to_vec(), value.to_vec()));
+        }
+        let next = has_more
+            .then(|| rows.last().map(|(key, _)| key.clone()))
+            .flatten();
+        Ok(RuntimeQueryPage { rows, next })
+    }
+
+    /// Adds one already validated mutation to this private session.
+    ///
+    /// A repeated key replaces the session's query view in order of staging,
+    /// while all operations remain in the returned commit batch.
+    pub fn stage_mutation(&mut self, mutation: TableMutation) -> Result<(), RuntimeQueryError> {
+        if !self.snapshot.table_rows.contains_key(mutation.table()) {
+            return Err(RuntimeQueryError::TableNotAdmitted);
+        }
+        self.overlay
+            .entry(mutation.table().to_owned())
+            .or_default()
+            .insert(mutation.key().to_vec(), mutation.value().map(<[u8]>::to_vec));
+        self.mutations.push(mutation);
+        Ok(())
+    }
+
+    /// Returns the mutations staged in source order for an atomic runtime commit.
+    pub fn staged_mutations(&self) -> &[TableMutation] {
+        &self.mutations
+    }
+
+    /// Consumes the session and returns its mutations in staging order.
+    pub fn into_mutations(self) -> Vec<TableMutation> {
+        self.mutations
+    }
+}
+
+const MAX_RUNTIME_QUERY_PAGE_ROWS: usize = 1024;
+
+/// A bounded page of visible runtime rows in canonical key order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeQueryPage {
+    /// Canonical encoded primary keys and canonical row values.
+    pub rows: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Exclusive cursor for a later page, present only when more rows exist.
+    pub next: Option<Vec<u8>>,
+}
+
+/// A query requested a relation that was not included in its activation snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeQueryError {
+    TableNotAdmitted,
+    RowNotFound,
+    InvalidPageSize,
+}
+
+impl fmt::Display for RuntimeQueryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TableNotAdmitted => "table was not admitted to this query session",
+            Self::RowNotFound => "exact query did not match a row",
+            Self::InvalidPageSize => "query page size is outside the supported range",
+        })
+    }
+}
+
+impl std::error::Error for RuntimeQueryError {}
 
 impl RuntimeActivationContext {
     pub fn capture(&self) -> &CwdCapture {
@@ -1980,6 +2839,78 @@ pub fn decode_checkpoint_snapshot_watermark(
     })
 }
 
+const CHECKPOINT_SNAPSHOT_MAX_TREE_ENTRIES: usize = 4_096;
+const CHECKPOINT_SNAPSHOT_MAX_RECORD_BYTES: usize = 64 * 1024;
+const CHECKPOINT_SNAPSHOT_DIRECTORY: &str = ".orna/checkpoints";
+
+/// Reads the unique portable checkpoint watermark for `key` from the selected
+/// immutable commit. It never consults HEAD, the index, the worktree, or
+/// runtime state.
+pub fn read_checkpoint_snapshot_watermark(
+    repository: &Repository,
+    selected_commit: &GitCommitRef,
+    key: &CheckpointKey,
+) -> Result<Option<PortableStreamCheckpointWatermark>, RuntimeError> {
+    read_checkpoint_snapshot_watermark_bounded(
+        repository,
+        selected_commit,
+        key,
+        CHECKPOINT_SNAPSHOT_MAX_TREE_ENTRIES,
+        CHECKPOINT_SNAPSHOT_MAX_RECORD_BYTES,
+    )
+}
+
+fn read_checkpoint_snapshot_watermark_bounded(
+    repository: &Repository,
+    selected_commit: &GitCommitRef,
+    key: &CheckpointKey,
+    max_tree_entries: usize,
+    max_record_bytes: usize,
+) -> Result<Option<PortableStreamCheckpointWatermark>, RuntimeError> {
+    if max_tree_entries == 0 || max_record_bytes == 0 {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+
+    let entries = repository
+        .list_committed_tree(selected_commit, max_tree_entries)
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if entries.len() > max_tree_entries {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+
+    let checkpoint_directory = Path::new(CHECKPOINT_SNAPSHOT_DIRECTORY);
+    let mut matching = None;
+    for entry in entries {
+        let path = entry.path().as_path();
+        let Ok(relative_path) = path.strip_prefix(checkpoint_directory) else {
+            continue;
+        };
+        if relative_path.as_os_str().is_empty() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        match entry.kind() {
+            CommittedTreeEntryKind::File { .. } => {}
+            CommittedTreeEntryKind::Symlink | CommittedTreeEntryKind::Submodule => {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+
+        let bytes = repository
+            .read_committed_file(selected_commit, path, max_record_bytes)
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let watermark =
+            decode_checkpoint_snapshot_watermark(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if watermark.checkpoint.key == *key {
+            if matching.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            matching = Some(watermark);
+        }
+    }
+
+    Ok(matching)
+}
+
 fn append_component(
     bytes: &mut Vec<u8>,
     component: &Component,
@@ -2259,6 +3190,146 @@ impl StreamSource for ListStreamSource {
 
 pub trait StreamHandler {
     fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult;
+
+    /// Returns staged external effects only after `handle` has produced a
+    /// successful commit result. The runtime executes these intents before it
+    /// atomically commits Orna writes and the source checkpoint.
+    fn take_provider_effects(&mut self) -> Vec<StreamProviderEffect> {
+        Vec::new()
+    }
+
+    /// Replayability is a source-delivery promise, not an external effect
+    /// guarantee. A handler must opt into `IdempotentByKey` only when its
+    /// provider atomically deduplicates calls by the supplied stable key and
+    /// retains the resulting receipt across the runtime retry horizon.
+    fn provider_effect_contract(&self, _provider: &str) -> ProviderEffectDeliveryContract {
+        ProviderEffectDeliveryContract::ReplayableOnly
+    }
+
+    /// Applies one staged effect under the provider's durable idempotency
+    /// contract. Returned receipt bytes must be non-secret, deterministic for
+    /// a stable key, and no larger than `MAX_TERMINAL_OUTCOME_BYTES`.
+    fn apply_provider_effect_once<'a>(
+        &'a mut self,
+        _key: ProviderEffectKey,
+        _effect: &'a StreamProviderEffect,
+    ) -> ProviderEffectFuture<'a> {
+        Box::pin(std::future::ready(Err(ProviderEffectFailure::Unsupported)))
+    }
+}
+
+/// Delivery capability declared for external provider effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderEffectDeliveryContract {
+    /// The provider can replay source deliveries but has no idempotent effect
+    /// operation. Runtime retries must not claim exactly-once effects.
+    ReplayableOnly,
+    /// The provider durably deduplicates concurrent/repeated effect calls by
+    /// the runtime-supplied `ProviderEffectKey`.
+    IdempotentByKey,
+}
+
+/// Stable key supplied to an idempotent provider for one effect of a delivery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ProviderEffectKey([u8; 32]);
+
+impl ProviderEffectKey {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// A non-secret receipt returned by an idempotent provider.
+pub type ProviderEffectFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<u8>, ProviderEffectFailure>> + 'a>>;
+
+/// Safe provider result class. Arbitrary error strings are intentionally not
+/// retained in runtime state or exposed through delivery diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderEffectFailure {
+    Retryable,
+    Permanent,
+    /// The provider may have applied the effect but did not confirm it. This
+    /// retries only because the declared idempotency contract reuses the key.
+    OutcomeUnknown,
+    Unsupported,
+}
+
+/// One external effect staged by a successful stream handler.
+#[derive(Clone, Eq, PartialEq)]
+pub struct StreamProviderEffect {
+    provider: String,
+    operation: String,
+    request: Vec<u8>,
+}
+
+impl fmt::Debug for StreamProviderEffect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamProviderEffect")
+            .field("provider", &self.provider)
+            .field("operation", &self.operation)
+            .field("request_bytes", &self.request.len())
+            .field("request", &"<redacted>")
+            .finish()
+    }
+}
+
+impl StreamProviderEffect {
+    pub fn new(
+        provider: impl Into<String>,
+        operation: impl Into<String>,
+        request: Vec<u8>,
+    ) -> Result<Self, RuntimeError> {
+        let provider = provider.into();
+        let operation = operation.into();
+        if !valid_provider_effect_name(&provider)
+            || !valid_provider_effect_name(&operation)
+            || request.len() > MAX_TERMINAL_OUTCOME_BYTES
+        {
+            return Err(RuntimeError::InvalidIdentity);
+        }
+        Ok(Self {
+            provider,
+            operation,
+            request,
+        })
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn operation(&self) -> &str {
+        &self.operation
+    }
+
+    pub fn request(&self) -> &[u8] {
+        &self.request
+    }
+}
+
+fn valid_provider_effect_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/')
+        })
+}
+
+const MAX_STREAM_PROVIDER_EFFECTS: usize = 64;
+/// Maximum provider calls made for one effect under one delivery lease.
+pub const MAX_STREAM_PROVIDER_EFFECT_ATTEMPTS: u32 = 3;
+
+enum ProviderEffectPreparation {
+    Cached,
+    Started { attempt: u32 },
+    Rejected(ProviderEffectFailure),
+}
+
+enum ProviderEffectDispatchError {
+    Runtime(RuntimeError),
+    Provider(ProviderEffectFailure),
 }
 
 /// Lets a stream owner stop admission between delivery transactions.
@@ -2503,6 +3574,10 @@ pub enum StreamAdministrationOutcome {
 /// the explicit redaction marker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CheckpointResetAudit {
+    pub sequence: u64,
+    /// None means the audit predates generation pinning and cannot be assigned
+    /// honestly to a historical checkpoint.
+    pub observed_generation: Option<u64>,
     pub key: CheckpointKey,
     pub old_version: u64,
     pub old_position: Option<Position>,
@@ -2525,6 +3600,24 @@ pub struct CheckpointResetRequest {
 /// Successful state-changing calls are committed with their transition in one
 /// local transaction. Failed calls are retained after the transition rolls
 /// back, so an audit never claims that a requested state change occurred.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminLifecycleEffect {
+    CheckpointReset,
+    StreamPaused { changed: bool },
+    StreamPausePending { changed: bool },
+    StreamResumed { changed: bool },
+    Busy,
+    BlockingFailure,
+    Failed,
+}
+
+/// The replayable result retained for a successful checkpoint reset receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminCheckpointResetResult {
+    pub version: u64,
+    pub committed_position: Position,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdminInvocationAudit {
     pub sequence: u64,
@@ -2534,6 +3627,10 @@ pub struct AdminInvocationAudit {
     pub owner: WriterLease,
     pub observed_generation: u64,
     pub terminal_outcome: String,
+    /// Typed runtime effect decoded from the durable terminal outcome.
+    pub effect: AdminLifecycleEffect,
+    /// Present for checkpoint-reset receipts created with result retention.
+    pub checkpoint_reset_result: Option<AdminCheckpointResetResult>,
     pub succeeded: bool,
     pub redacted: bool,
 }
@@ -2582,7 +3679,20 @@ fn admin_checkpoint_result(result: AdminOperationResult) -> Result<StreamCheckpo
     }
 }
 
+<<<<<<< HEAD
 fn admin_invocation_descriptor(operation: &AdminInvocationOperation) -> AdminInvocationDescriptor {
+=======
+fn admin_invocation_descriptor(
+    operation: &AdminInvocationOperation,
+) -> AdminInvocationDescriptor {
+    admin_invocation_descriptor_with_id(operation, Uuid::new_v4().into_bytes())
+}
+
+fn admin_invocation_descriptor_with_id(
+    operation: &AdminInvocationOperation,
+    invocation_id: [u8; 16],
+) -> AdminInvocationDescriptor {
+>>>>>>> origin/w90zi-imp_merge
     let (function, arguments, redacted) = match operation {
         AdminInvocationOperation::Pause { key, reason } => {
             let has_reason = reason.is_some();
@@ -2644,13 +3754,118 @@ fn admin_invocation_descriptor(operation: &AdminInvocationOperation) -> AdminInv
         ),
     };
     AdminInvocationDescriptor {
-        invocation_id: Uuid::new_v4().into_bytes(),
+        invocation_id,
         function,
         safe_arguments: arguments,
         redacted,
     }
 }
 
+<<<<<<< HEAD
+=======
+fn admin_reference_descriptor(
+    invocation_id: [u8; 16],
+    function: &'static str,
+    reference: &Value,
+    reason: Option<&str>,
+) -> AdminInvocationDescriptor {
+    let reason_redacted = reason.is_some_and(admin_argument_redacted);
+    let reason_digest = reason
+        .map(|value| admin_digest(value.as_bytes()))
+        .unwrap_or_else(|| "none".into());
+    let reason_marker = match reason {
+        None => "<none>",
+        Some(_) if reason_redacted => "<redacted>",
+        Some(_) => "<safe>",
+    };
+    let reference_digest = reference
+        .encode()
+        .ok()
+        .map(|encoded| admin_digest(&encoded))
+        .unwrap_or_else(|| "unavailable".into());
+    AdminInvocationDescriptor {
+        invocation_id,
+        function,
+        safe_arguments: format!(
+            "stream_ref_digest={reference_digest};reason_digest={reason_digest};reason={reason_marker}"
+        ),
+        redacted: reason_redacted,
+    }
+}
+
+fn replay_admin_stream_result(
+    receipt: &AdminInvocationAudit,
+) -> Result<AdminOperationResult, RuntimeError> {
+    if let Some(failure) = receipt.terminal_outcome.strip_prefix("failure:") {
+        return Err(match failure {
+            "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
+            "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
+            "checkpoint_not_replayable" => RuntimeError::CheckpointNotReplayable,
+            "stream_checkpoint_stale" => RuntimeError::StreamCheckpointStale,
+            _ => RuntimeError::StorageUnavailable,
+        });
+    }
+    let result = match receipt.terminal_outcome.as_str() {
+        "paused" => StreamAdministrationOutcome::Paused { changed: true },
+        "paused_noop" => StreamAdministrationOutcome::Paused { changed: false },
+        "pause_pending" => StreamAdministrationOutcome::PausePending { changed: true },
+        "pause_pending_noop" => StreamAdministrationOutcome::PausePending { changed: false },
+        "resumed" => StreamAdministrationOutcome::Running { changed: true },
+        "resumed_noop" => StreamAdministrationOutcome::Running { changed: false },
+        "busy" => StreamAdministrationOutcome::Busy,
+        "blocking_failure" => StreamAdministrationOutcome::BlockingFailure,
+        _ => return Err(RuntimeError::AdminInvocationConflict),
+    };
+    Ok(AdminOperationResult::Stream(result))
+}
+
+fn admin_failure_outcome(error: &RuntimeError) -> &'static str {
+    match error {
+        RuntimeError::AdminBusy => "admin_busy",
+        RuntimeError::InvalidObservationReference => "invalid_observation_reference",
+        RuntimeError::CheckpointNotReplayable => "checkpoint_not_replayable",
+        RuntimeError::StreamCheckpointStale => "stream_checkpoint_stale",
+        _ => "unavailable",
+    }
+}
+
+fn admin_result_from_receipt(
+    operation: Option<&AdminInvocationOperation>,
+    descriptor: &AdminInvocationDescriptor,
+    receipt: &AdminInvocationAudit,
+) -> Result<AdminOperationResult, RuntimeError> {
+    if receipt.function != descriptor.function
+        || receipt.safe_arguments != descriptor.safe_arguments
+        || receipt.redacted != descriptor.redacted
+    {
+        return Err(RuntimeError::AdminInvocationConflict);
+    }
+    match operation {
+        Some(AdminInvocationOperation::Reset { key, .. }) => {
+            if receipt.terminal_outcome.starts_with("failure:") {
+                return replay_admin_stream_result(receipt);
+            }
+            let result = receipt
+                .checkpoint_reset_result
+                .as_ref()
+                .ok_or(RuntimeError::AdminInvocationConflict)?;
+            Ok(AdminOperationResult::Checkpoint(StreamCheckpoint {
+                key: key.clone(),
+                version: result.version,
+                committed: Some(result.committed_position.clone()),
+            }))
+        }
+        Some(AdminInvocationOperation::Pause { .. })
+        | Some(AdminInvocationOperation::Resume { .. })
+        | None => replay_admin_stream_result(receipt),
+    }
+}
+
+fn admin_argument_redacted(value: &str) -> bool {
+    value.len() > 16_777_216 || SafeText::new(value.to_owned()).is_err()
+}
+
+>>>>>>> origin/w90zi-imp_merge
 fn admin_digest(value: &[u8]) -> String {
     Sha256::digest(value)
         .iter()
@@ -2705,6 +3920,9 @@ impl RuntimeState {
     ) -> Result<Self, RuntimeError> {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
+        let system_dispatch = orna_sys_v1::system_dispatch_table();
+        let system_provider_roles = orna_sys_v1::ProviderRoleRegistry::from_baked_abi(system_dispatch)
+            .map_err(|_| RuntimeError::SystemProviderAbiInvalid)?;
         let database = Builder::new_local(path)
             .build()
             .await
@@ -2716,7 +3934,11 @@ impl RuntimeState {
             .execute_batch(SCHEMA)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        migrate_admin_checkpoint_reset_receipts(&connection).await?;
         Self::initialize_runtime_meta(&connection, identity, initial_digest).await?;
+        migrate_runtime_table_history(&connection).await?;
+        migrate_historical_governance(&connection).await?;
+        migrate_publication_policy_schema(&connection).await?;
         migrate_compact_receipt_schema(&connection).await?;
         let (compact_receipt_signing_key, compact_receipt_public_key) =
             initialize_compact_receipt_key(&connection).await?;
@@ -2726,6 +3948,8 @@ impl RuntimeState {
         let state = Self {
             connection,
             compact_receipt_signing_key,
+            system_dispatch,
+            system_provider_roles,
         };
         state.migrate_observation_projection_schema().await?;
         state.migrate_stream_observation_failure_identity().await?;
@@ -2737,6 +3961,60 @@ impl RuntimeState {
         state.migrate_catalogue_identity_schema().await?;
         state.validate_recovery().await?;
         Ok(state)
+    }
+
+    /// The runtime links the baked module roles at startup. Extension loading
+    /// is not part of this 1.0 runtime surface.
+    pub fn system_provider_roles(&self) -> &orna_sys_v1::ProviderRoleRegistry {
+        &self.system_provider_roles
+    }
+
+    /// The generated operation table consumed by runtime call boundaries.
+    pub fn system_dispatch_table(&self) -> &'static orna_sys_v1::SystemDispatchTable {
+        self.system_dispatch
+    }
+
+    /// Resolves a typed system operation contract by its stable registry ID.
+    pub fn system_operation_contract(
+        &self,
+        operation: &str,
+    ) -> Option<&orna_sys_v1::OperationContract> {
+        self.system_dispatch.operation(operation)
+    }
+
+    /// Resolves, checks the registry-declared preconditions, and dispatches
+    /// one native operation through the generated system table. The selected
+    /// contract and failure vocabulary come from the same registry entry.
+    pub fn dispatch_system_operation<T>(
+        &self,
+        operation: &str,
+        check: impl FnMut(&orna_sys_v1::Precondition) -> Result<(), orna_sys_v1::FailureCode>,
+        invoke: impl FnOnce(
+            &orna_sys_v1::OperationContract,
+        ) -> Result<T, orna_sys_v1::FailureCode>,
+    ) -> Result<orna_sys_v1::SystemDispatchResult<T>, orna_sys_v1::ProviderDiagnostic> {
+        self.system_dispatch.dispatch(operation, check, invoke)
+    }
+
+    /// Runs the registry-declared preconditions before a native operation is
+    /// allowed to proceed. Any failure code returned by the checker is also
+    /// checked against that operation's declared vocabulary.
+    pub fn check_system_operation_preconditions(
+        &self,
+        operation: &str,
+        check: impl FnMut(&orna_sys_v1::Precondition) -> Result<(), orna_sys_v1::FailureCode>,
+    ) -> Result<&orna_sys_v1::OperationContract, orna_sys_v1::ProviderDiagnostic> {
+        self.system_dispatch.check_preconditions(operation, check)
+    }
+
+    /// Prevents a host or provider failure outside an operation's declared
+    /// vocabulary from crossing the runtime boundary.
+    pub fn validate_system_failure(
+        &self,
+        operation: &str,
+        code: &orna_sys_v1::FailureCode,
+    ) -> Result<(), orna_sys_v1::ProviderDiagnostic> {
+        self.system_dispatch.validate_failure(operation, code)
     }
 
     /// Creates a stream backend whose mutations are fenced by this writer lease.
@@ -3607,6 +4885,155 @@ impl RuntimeState {
         .and_then(admin_stream_result)
     }
 
+    /// Applies a pause with a caller-stable invocation identity. A repeated
+    /// identity with the same operation returns its retained outcome without
+    /// reapplying the transition; reusing it for different arguments fails.
+    pub async fn pause_stream_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let operation = AdminInvocationOperation::Pause { key, reason: None };
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        self.apply_admin_invocation_with_descriptor(lease, None, operation, descriptor)
+            .await
+            .and_then(admin_stream_result)
+    }
+
+    /// Reason-bearing stable-receipt form of a stream pause.
+    pub async fn pause_stream_with_reason_and_invocation_id(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        reason: String,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let operation = AdminInvocationOperation::Pause {
+            key,
+            reason: Some(reason),
+        };
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        self.apply_admin_invocation_with_descriptor(lease, None, operation, descriptor)
+            .await
+            .and_then(admin_stream_result)
+    }
+
+    /// Resolves an admitted portable `sys.StreamRef` against the live writer's
+    /// owner-fenced current-runtime observations, then pauses that exact stream
+    /// only while its activation capture remains current.
+    pub async fn pause_stream_reference_at_capture(
+        &self,
+        lease: WriterLease,
+        reference: Value,
+        reason: Option<String>,
+        expected_capture: &CwdCapture,
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        self.pause_stream_reference_at_capture_with_invocation_id(
+            lease,
+            reference,
+            reason,
+            expected_capture,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
+    }
+
+    /// Stable-receipt form of [`Self::pause_stream_reference_at_capture`].
+    /// The public reference digest is the argument identity, so an exact
+    /// request replay can recover its result before resolving a now-stale
+    /// observation reference.
+    pub async fn pause_stream_reference_at_capture_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        reference: Value,
+        reason: Option<String>,
+        expected_capture: &CwdCapture,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let function = if reason.is_some() {
+            "sys.admin.pause_stream_with_reason"
+        } else {
+            "sys.admin.pause_stream"
+        };
+        let descriptor = admin_reference_descriptor(
+            invocation_id,
+            function,
+            &reference,
+            reason.as_deref(),
+        );
+        if let Some(result) = self
+            .replay_admin_invocation_receipt(lease, None, &descriptor)
+            .await?
+        {
+            return admin_stream_result(result);
+        }
+        if activation::runtime_activation_active(self) {
+            return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
+        }
+        let row = match reference
+            .encode()
+            .map_err(|_| RuntimeError::InvalidObservationReference)
+            .and_then(decode_row_ref)
+        {
+            Ok(row) => row,
+            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+        };
+        let requested = match validate_stream_reference(row, expected_capture) {
+            Ok(requested) => requested,
+            Err(_) => {
+                return Err(self
+                    .record_failed_admin_and_return(
+                        &descriptor,
+                        lease,
+                        RuntimeError::InvalidObservationReference,
+                    )
+                    .await);
+            }
+        };
+        let fence = match self.runtime_observation_fence(lease).await {
+            Ok(fence) => fence,
+            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+        };
+        if fence.capture() != expected_capture {
+            return Err(self
+                .record_failed_admin_and_return(
+                    &descriptor,
+                    lease,
+                    RuntimeError::StaleCapture {
+                        current: Box::new(fence.capture().clone()),
+                    },
+                )
+                .await);
+        }
+        let view = match self.current_runtime_observations(&fence).await {
+            Ok(view) => view,
+            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+        };
+        let key = view
+            .streams
+            .iter()
+            .find_map(|stream| {
+                let run = view.runs.iter().find(|run| run.id == stream.run)?;
+                (stream.reference(run).ok().as_ref() == Some(&requested))
+                    .then(|| stream.checkpoint.clone())
+            })
+            .ok_or(RuntimeError::InvalidObservationReference);
+        let key = match key {
+            Ok(key) => key,
+            Err(error) => return Err(self.record_failed_admin_and_return(&descriptor, lease, error).await),
+        };
+        let operation = AdminInvocationOperation::Pause { key, reason };
+        self.apply_admin_invocation_with_descriptor(
+            lease,
+            Some(expected_capture),
+            operation,
+            descriptor,
+        )
+        .await
+        .and_then(admin_stream_result)
+    }
+
     /// Applies a writer-fenced pause while retaining its supplied reason in
     /// the same local transaction that admits the pause. A no-op pause never
     /// overwrites the reason already attached to the existing pause.
@@ -3663,7 +5090,24 @@ impl RuntimeState {
         lease: WriterLease,
         request: CheckpointResetRequest,
     ) -> Result<StreamCheckpoint, RuntimeError> {
-        self.reset_checkpoint_at_capture(lease, request, None).await
+        self.reset_checkpoint_with_invocation_id(
+            lease,
+            request,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
+    }
+
+    /// Replays a checkpoint reset receipt for a caller-stable invocation ID.
+    /// This lets a caller reconcile an admitted reset after losing its result.
+    pub async fn reset_checkpoint_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        request: CheckpointResetRequest,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamCheckpoint, RuntimeError> {
+        self.reset_checkpoint_at_capture_with_invocation_id(lease, request, None, invocation_id)
+            .await
     }
 
     /// Provider-gated form of [`Self::reset_checkpoint`]. The host supplies
@@ -3676,8 +5120,14 @@ impl RuntimeState {
         request: CheckpointResetRequest,
         provider: &P,
     ) -> Result<StreamCheckpoint, RuntimeError> {
-        self.reset_checkpoint_at_capture_with_provider(lease, request, None, provider)
-            .await
+        self.reset_checkpoint_at_capture_with_provider_and_invocation_id(
+            lease,
+            request,
+            None,
+            provider,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
     }
 
     /// Capture-fenced provider-gated form of the checkpoint reset boundary.
@@ -3688,18 +5138,46 @@ impl RuntimeState {
         expected_capture: Option<&CwdCapture>,
         provider: &P,
     ) -> Result<StreamCheckpoint, RuntimeError> {
+        self.reset_checkpoint_at_capture_with_provider_and_invocation_id(
+            lease,
+            request,
+            expected_capture,
+            provider,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
+    }
+
+    /// Provider-gated reset with a stable receipt identity for reconciliation.
+    pub async fn reset_checkpoint_at_capture_with_provider_and_invocation_id<
+        P: CheckpointResetProvider,
+    >(
+        &self,
+        lease: WriterLease,
+        request: CheckpointResetRequest,
+        expected_capture: Option<&CwdCapture>,
+        provider: &P,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamCheckpoint, RuntimeError> {
         let operation = AdminInvocationOperation::Reset {
             key: request.key.clone(),
             expected: request.expected.clone(),
             to: request.to.clone(),
             reason: request.reason.clone(),
         };
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        if let Some(result) = self
+            .replay_admin_invocation_receipt(lease, Some(&operation), &descriptor)
+            .await?
+        {
+            return admin_checkpoint_result(result);
+        }
         if provider.checkpoint_key() != request.key || !provider.supports_reset_target(&request.to)
         {
             let error = RuntimeError::CheckpointNotReplayable;
 <<<<<<< Updated upstream
             return match self
-                .record_failed_admin_invocation(&operation, lease, &error)
+                .record_failed_admin_descriptor(&descriptor, lease, &error)
                 .await
             {
                 Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
@@ -3712,7 +5190,12 @@ impl RuntimeState {
             return Err(error);
 >>>>>>> Stashed changes
         }
-        self.apply_admin_invocation(lease, expected_capture, operation)
+        self.apply_admin_invocation_with_descriptor(
+            lease,
+            expected_capture,
+            operation,
+            descriptor,
+        )
             .await
             .and_then(admin_checkpoint_result)
     }
@@ -3725,13 +5208,31 @@ impl RuntimeState {
         request: CheckpointResetRequest,
         expected_capture: Option<&CwdCapture>,
     ) -> Result<StreamCheckpoint, RuntimeError> {
+        self.reset_checkpoint_at_capture_with_invocation_id(
+            lease,
+            request,
+            expected_capture,
+            Uuid::new_v4().into_bytes(),
+        )
+        .await
+    }
+
+    /// Capture-fenced reset with a stable receipt identity for reconciliation.
+    pub async fn reset_checkpoint_at_capture_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        request: CheckpointResetRequest,
+        expected_capture: Option<&CwdCapture>,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamCheckpoint, RuntimeError> {
         let operation = AdminInvocationOperation::Reset {
             key: request.key,
             expected: request.expected,
             to: request.to,
             reason: request.reason,
         };
-        self.apply_admin_invocation(lease, expected_capture, operation)
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        self.apply_admin_invocation_with_descriptor(lease, expected_capture, operation, descriptor)
             .await
             .and_then(admin_checkpoint_result)
     }
@@ -3741,6 +5242,47 @@ impl RuntimeState {
     /// through [`Self::checkpoint_reset_audits`].
     pub async fn admin_invocation_audits(&self) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
         load_admin_invocation_audits(&self.connection).await
+    }
+
+    /// Reads one durable administrative receipt by its stable invocation ID.
+    pub async fn admin_invocation_receipt(
+        &self,
+        invocation_id: [u8; 16],
+    ) -> Result<Option<AdminInvocationAudit>, RuntimeError> {
+        load_admin_invocation_receipt(&self.connection, invocation_id).await
+    }
+
+    /// Retains the failed receipt for an admin stream effect that is rejected
+    /// because its source activation still owns staged table writes.
+    pub async fn reject_admin_stream_effect_as_busy(
+        &self,
+        lease: WriterLease,
+        function: &'static str,
+        reference: Value,
+        reason: Option<String>,
+        invocation_id: [u8; 16],
+    ) -> Result<(), RuntimeError> {
+        if !matches!(
+            (function, reason.is_some()),
+            ("sys.admin.pause_stream", false)
+                | ("sys.admin.pause_stream_with_reason", true)
+                | ("sys.admin.resume_stream", false)
+        ) {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let descriptor = admin_reference_descriptor(
+            invocation_id,
+            function,
+            &reference,
+            reason.as_deref(),
+        );
+        match self
+            .record_failed_admin_descriptor(&descriptor, lease, &RuntimeError::AdminBusy)
+            .await
+        {
+            Ok(()) | Err(RuntimeError::OwnerLost) => Err(RuntimeError::AdminBusy),
+            Err(error) => Err(error),
+        }
     }
 
     /// Reads reset audits in admission order. This is intentionally a
@@ -3779,6 +5321,79 @@ impl RuntimeState {
         .await
         .and_then(admin_stream_result)
     }
+
+    /// Applies a resume with a caller-stable invocation identity, replaying
+    /// the durable outcome when the same request is submitted again.
+    pub async fn resume_stream_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let operation = AdminInvocationOperation::Resume { key };
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        self.apply_admin_invocation_with_descriptor(lease, None, operation, descriptor)
+            .await
+            .and_then(admin_stream_result)
+    }
+
+    /// Resolves and resumes one public stream reference under the captured
+    /// writer generation. Its durable receipt is keyed by the request ID.
+    pub async fn resume_stream_reference_at_capture_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        reference: Value,
+        expected_capture: &CwdCapture,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let descriptor = admin_reference_descriptor(
+            invocation_id,
+            "sys.admin.resume_stream",
+            &reference,
+            None,
+        );
+        if let Some(result) = self
+            .replay_admin_invocation_receipt(lease, None, &descriptor)
+            .await?
+        {
+            return admin_stream_result(result);
+        }
+        if activation::runtime_activation_active(self) {
+            return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
+        }
+        let row = decode_row_ref(
+            reference
+                .encode()
+                .map_err(|_| RuntimeError::InvalidObservationReference)?,
+        )?;
+        let requested = validate_stream_reference(row, expected_capture)
+            .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        let fence = self.runtime_observation_fence(lease).await?;
+        if fence.capture() != expected_capture {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(fence.capture().clone()),
+            });
+        }
+        let view = self.current_runtime_observations(&fence).await?;
+        let key = view
+            .streams
+            .iter()
+            .find_map(|stream| {
+                let run = view.runs.iter().find(|run| run.id == stream.run)?;
+                (stream.reference(run).ok().as_ref() == Some(&requested))
+                    .then(|| stream.checkpoint.clone())
+            })
+            .ok_or(RuntimeError::InvalidObservationReference)?;
+        let operation = AdminInvocationOperation::Resume { key };
+        self.apply_admin_invocation_with_descriptor(
+            lease,
+            Some(expected_capture),
+            operation,
+            descriptor,
+        )
+        .await
+        .and_then(admin_stream_result)
+    }
     async fn apply_admin_invocation(
         &self,
         lease: WriterLease,
@@ -3786,6 +5401,26 @@ impl RuntimeState {
         operation: AdminInvocationOperation,
     ) -> Result<AdminOperationResult, RuntimeError> {
         let descriptor = admin_invocation_descriptor(&operation);
+        self.apply_admin_invocation_with_descriptor(lease, expected_capture, operation, descriptor)
+            .await
+    }
+
+    async fn apply_admin_invocation_with_descriptor(
+        &self,
+        lease: WriterLease,
+        expected_capture: Option<&CwdCapture>,
+        operation: AdminInvocationOperation,
+        descriptor: AdminInvocationDescriptor,
+    ) -> Result<AdminOperationResult, RuntimeError> {
+        if let Some(result) = self
+            .replay_admin_invocation_receipt(lease, Some(&operation), &descriptor)
+            .await?
+        {
+            return Ok(result);
+        }
+        if activation::runtime_activation_active(self) {
+            return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3793,6 +5428,11 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let attempt = async {
             self.require_owner(&transaction, lease).await?;
+            if let Some(receipt) =
+                load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?
+            {
+                return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
+            }
             let current_capture = capture_tx(&transaction).await?;
             if let Some(expected_capture) = expected_capture {
                 if &current_capture != expected_capture {
@@ -3803,7 +5443,8 @@ impl RuntimeState {
             }
             let observed_generation = u64::try_from(bigint_to_i64(current_capture.generation())?)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let result = apply_admin_operation_tx(&transaction, &operation).await?;
+            let result =
+                apply_admin_operation_tx(&transaction, &operation, observed_generation).await?;
             store_admin_invocation_audit(
                 &transaction,
                 &descriptor,
@@ -3811,6 +5452,10 @@ impl RuntimeState {
                 observed_generation,
                 admin_operation_outcome(&result),
                 admin_operation_succeeded(&result),
+                match &result {
+                    AdminOperationResult::Checkpoint(checkpoint) => Some(checkpoint),
+                    AdminOperationResult::Stream(_) => None,
+                },
             )
             .await?;
             Ok::<_, RuntimeError>(result)
@@ -3826,7 +5471,16 @@ impl RuntimeState {
             }
             Err(error) => {
                 drop(transaction);
+<<<<<<< HEAD
 <<<<<<< Updated upstream
+=======
+                if let Some(receipt) =
+                    load_admin_invocation_receipt(&self.connection, descriptor.invocation_id)
+                        .await?
+                {
+                    return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
+                }
+>>>>>>> origin/w90zi-imp_merge
                 match self
                     .record_failed_admin_descriptor(&descriptor, lease, &error)
                     .await
@@ -3844,10 +5498,10 @@ impl RuntimeState {
         }
     }
 
-    async fn record_failed_admin_invocation(
+    async fn replay_admin_invocation_receipt(
         &self,
-        operation: &AdminInvocationOperation,
         lease: WriterLease,
+<<<<<<< HEAD
         error: &RuntimeError,
     ) -> Result<(), RuntimeError> {
         let descriptor = admin_invocation_descriptor(operation);
@@ -3855,6 +5509,42 @@ impl RuntimeState {
             .record_failed_admin_descriptor(&descriptor, lease, error)
             .await;
         Ok(())
+=======
+        operation: Option<&AdminInvocationOperation>,
+        descriptor: &AdminInvocationDescriptor,
+    ) -> Result<Option<AdminOperationResult>, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&transaction, lease).await?;
+        let receipt = load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?;
+        let result = receipt
+            .as_ref()
+            .map(|receipt| admin_result_from_receipt(operation, descriptor, receipt))
+            .transpose()?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(result)
+    }
+
+    async fn reentrant_admin_busy_error(
+        &self,
+        descriptor: &AdminInvocationDescriptor,
+        lease: WriterLease,
+    ) -> RuntimeError {
+        let error = RuntimeError::AdminBusy;
+        match self
+            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .await
+        {
+            Ok(()) | Err(RuntimeError::OwnerLost) => error,
+            Err(audit_error) => audit_error,
+        }
+>>>>>>> origin/w90zi-imp_merge
     }
 
     async fn record_failed_admin_descriptor(
@@ -3870,6 +5560,22 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&transaction, lease).await?;
+        if let Some(receipt) =
+            load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?
+        {
+            let same_invocation = receipt.function == descriptor.function
+                && receipt.safe_arguments == descriptor.safe_arguments
+                && receipt.redacted == descriptor.redacted;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            return if same_invocation {
+                Ok(())
+            } else {
+                Err(RuntimeError::AdminInvocationConflict)
+            };
+        }
         let observed_generation = capture_tx(&transaction)
             .await
             .ok()
@@ -3881,14 +5587,30 @@ impl RuntimeState {
             descriptor,
             lease,
             observed_generation,
-            format!("failure:{error}"),
+            format!("failure:{}", admin_failure_outcome(error)),
             false,
+            None,
         )
         .await?;
         transaction
             .commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    async fn record_failed_admin_and_return(
+        &self,
+        descriptor: &AdminInvocationDescriptor,
+        lease: WriterLease,
+        error: RuntimeError,
+    ) -> RuntimeError {
+        match self
+            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .await
+        {
+            Ok(()) | Err(RuntimeError::OwnerLost) => error,
+            Err(audit_error) => audit_error,
+        }
     }
 
     /// Captures the fixed CWD and activation time for one root activation.
@@ -4592,6 +6314,441 @@ impl RuntimeState {
         Ok(result)
     }
 
+    /// Selects one retained runtime checkpoint generation without changing the
+    /// live CWD or writer state. A generation is a data pin only: this runtime
+    /// layer does not select historical function code or silently substitute
+    /// current semantic assets when a caller evaluates a historical program.
+    pub async fn select_historical_snapshot(
+        &self,
+        generation: u64,
+    ) -> Result<HistoricalSnapshot, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
+            .query(
+                "SELECT database_id, runtime_id, generation FROM runtime_meta
+                 WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let meta = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let database_id = fixed(meta.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let runtime_id = fixed(meta.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let current_generation = decode_u64(
+            meta.get::<i64>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        if generation > current_generation {
+            return Err(RuntimeError::SnapshotNotFound);
+        }
+
+        let (floor_generation, floor_digest) = runtime_table_history_floor(&transaction).await?;
+        if generation < floor_generation {
+            return Err(RuntimeError::SnapshotIncomplete);
+        }
+        let (digest, mutation_sequence) = if generation == 0 {
+            if floor_generation != 0 {
+                return Err(RuntimeError::SnapshotIncomplete);
+            }
+            (floor_digest, 0)
+        } else {
+            let mut rows = transaction
+                .query(
+                    "SELECT digest, mutation_sequence FROM checkpoint WHERE generation = ?1",
+                    params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+            else {
+                return Err(RuntimeError::SnapshotNotFound);
+            };
+            (
+                fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                decode_u64(
+                    row.get::<i64>(1)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?,
+            )
+        };
+        let mut boundary_rows = transaction
+            .query(
+                "SELECT admin_audit_sequence, checkpoint_reset_audit_sequence
+                 FROM runtime_history_governance_boundary WHERE generation = ?1",
+                params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let boundary = boundary_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::SnapshotIncomplete)?;
+        let admin_audit_sequence = decode_u64(
+            boundary
+                .get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let checkpoint_reset_audit_sequence = decode_u64(
+            boundary
+                .get::<i64>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let capture = CwdCapture::new(
+            Snapshot::cwd(database_id, runtime_id, BigInt::from(generation))
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            digest,
+        )
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(HistoricalSnapshot {
+            capture,
+            generation,
+            mutation_sequence,
+            admin_audit_sequence,
+            checkpoint_reset_audit_sequence,
+        })
+    }
+
+    /// Resolves one already-pinned CWD snapshot descriptor to its retained
+    /// generation. Resolution validates the canonical ID and never substitutes
+    /// the current generation for an unknown, expired, or mismatched pin.
+    /// Committed snapshots are resolved by the repository layer, which owns
+    /// their Git object lifetime rather than this runtime history store.
+    pub async fn resolve_historical_snapshot(
+        &self,
+        selected: &CanonicalSnapshot,
+    ) -> Result<HistoricalSnapshot, RuntimeError> {
+        let Snapshot::Cwd {
+            database,
+            runtime,
+            generation,
+            id,
+        } = selected
+        else {
+            return Err(RuntimeError::SnapshotNotFound);
+        };
+
+        let canonical = Snapshot::cwd(*database, *runtime, generation.clone())
+            .map_err(|_| RuntimeError::SnapshotContextMismatch)?;
+        if &canonical != selected {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+
+        let current = self.capture().await?;
+        if *database != current.database_id() || *runtime != current.runtime_id() {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+
+        let (sign, digits) = generation.to_u64_digits();
+        if sign == Sign::Minus {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+        let generation = match digits.as_slice() {
+            [] => 0,
+            [generation] => *generation,
+            // The runtime history API stores and selects u64 generations. A
+            // wider, otherwise canonical descriptor cannot name a retained
+            // checkpoint here, so fail closed instead of narrowing it.
+            _ => return Err(RuntimeError::SnapshotNotFound),
+        };
+        let resolved = self.select_historical_snapshot(generation).await?;
+        if resolved.capture.snapshot() != &canonical || resolved.snapshot_id() != *id {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+        Ok(resolved)
+    }
+
+    /// Reads one table as it existed at an immutable runtime checkpoint pin.
+    /// Row keys and values remain in their canonical stored byte encodings;
+    /// callers must decode them using schema metadata from this same snapshot.
+    pub async fn read_table_at(
+        &self,
+        snapshot: &HistoricalSnapshot,
+        table: &str,
+    ) -> Result<HistoricalTableRows, RuntimeError> {
+        validate_table_name(table)?;
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
+            .query(
+                "SELECT database_id, runtime_id, generation FROM runtime_meta
+                 WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let meta = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let database_id = fixed(meta.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let runtime_id = fixed(meta.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let current_generation = decode_u64(
+            meta.get::<i64>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let capture = snapshot.capture();
+        let generation = capture
+            .generation()
+            .to_u64_digits()
+            .1
+            .first()
+            .copied()
+            .unwrap_or(0);
+        if capture.database_id() != database_id
+            || capture.runtime_id() != runtime_id
+            || generation > current_generation
+        {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+        let (floor_generation, floor_digest) = runtime_table_history_floor(&transaction).await?;
+        if generation < floor_generation {
+            return Err(RuntimeError::SnapshotIncomplete);
+        }
+        let (digest, mutation_sequence) = if generation == 0 {
+            if floor_generation != 0 {
+                return Err(RuntimeError::SnapshotIncomplete);
+            }
+            (floor_digest, 0)
+        } else {
+            let mut rows = transaction
+                .query(
+                    "SELECT digest, mutation_sequence FROM checkpoint WHERE generation = ?1",
+                    params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let Some(row) = rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+            else {
+                return Err(RuntimeError::SnapshotNotFound);
+            };
+            (
+                fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                decode_u64(
+                    row.get::<i64>(1)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?,
+            )
+        };
+        if digest != capture.generation_digest() || mutation_sequence != snapshot.mutation_sequence
+        {
+            return Err(RuntimeError::SnapshotContextMismatch);
+        }
+
+        let mut query = transaction
+            .query(
+                "SELECT history.row_key, history.row_value, history.row_digest
+                 FROM runtime_table_history AS history
+                 WHERE history.table_id = ?1
+                   AND history.mutation_sequence <= ?2
+                   AND history.deleted = 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runtime_table_history AS newer
+                       WHERE newer.table_id = history.table_id
+                         AND newer.row_key = history.row_key
+                         AND newer.mutation_sequence <= ?2
+                         AND newer.mutation_sequence > history.mutation_sequence
+                   )
+                 ORDER BY history.row_key",
+                params![table, i64::try_from(mutation_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut table_rows = Vec::new();
+        while let Some(row) = query
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let row_digest: [u8; 32] = fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            if <[u8; 32]>::from(Sha256::digest(&value)) != row_digest {
+                return Err(RuntimeError::SnapshotIncomplete);
+            }
+            table_rows.push((key, value));
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(HistoricalTableRows {
+            capture: capture.clone(),
+            table: table.to_owned(),
+            rows: table_rows,
+        })
+    }
+
+    /// Reads administrative invocation history through the immutable audit
+    /// sequence captured by this checkpoint generation.
+    pub async fn admin_invocation_audits_at(
+        &self,
+        snapshot: &HistoricalSnapshot,
+    ) -> Result<HistoricalAuditRows<AdminInvocationAudit>, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        validate_historical_snapshot_tx(&transaction, snapshot).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let rows = load_admin_invocation_audits_through(
+            &self.connection,
+            snapshot.admin_audit_sequence,
+        )
+        .await?;
+        Ok(HistoricalAuditRows {
+            capture: snapshot.capture.clone(),
+            rows,
+        })
+    }
+
+    /// Reads stream checkpoint-reset governance history through the immutable
+    /// audit sequence captured by this checkpoint generation. Legacy reset
+    /// audits with no recorded generation remain available only in the
+    /// unpinned audit read because their historical membership is unknown.
+    pub async fn checkpoint_reset_audits_at(
+        &self,
+        key: &CheckpointKey,
+        snapshot: &HistoricalSnapshot,
+    ) -> Result<HistoricalAuditRows<CheckpointResetAudit>, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        validate_historical_snapshot_tx(&transaction, snapshot).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let rows = load_stream_checkpoint_reset_audits_through(
+            &self.connection,
+            key,
+            snapshot.checkpoint_reset_audit_sequence,
+            false,
+        )
+        .await?;
+        Ok(HistoricalAuditRows {
+            capture: snapshot.capture.clone(),
+            rows,
+        })
+    }
+
+    /// Verifies that the pin is retained and that every visible row version
+    /// has its recorded SHA-256, then returns verified row counts and the
+    /// governance cut included in the pin. The summary attests runtime-retained
+    /// bytes, not function or package code; it deliberately withholds hashes
+    /// because this generic layer cannot distinguish secret row fields.
+    pub async fn attest_historical_snapshot(
+        &self,
+        snapshot: &HistoricalSnapshot,
+    ) -> Result<HistoricalSnapshotAttestation, RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        validate_historical_snapshot_tx(&transaction, snapshot).await?;
+        let mut rows = transaction
+            .query(
+                "SELECT history.table_id, history.row_value, history.row_digest, history.deleted
+                 FROM runtime_table_history AS history
+                 WHERE history.mutation_sequence <= ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runtime_table_history AS newer
+                       WHERE newer.table_id = history.table_id
+                         AND newer.row_key = history.row_key
+                         AND newer.mutation_sequence <= ?1
+                         AND newer.mutation_sequence > history.mutation_sequence
+                   )
+                 ORDER BY history.table_id, history.row_key",
+                params![i64::try_from(snapshot.mutation_sequence)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut row_count = 0_u64;
+        let mut table_count = 0_u64;
+        let mut previous_table: Option<String> = None;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let table: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            validate_table_name(&table)?;
+            let value: Option<Vec<u8>> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let digest: Option<Vec<u8>> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let deleted = row
+                .get::<i64>(3)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let (value, digest) = match (deleted, value, digest) {
+                (0, Some(value), Some(digest)) => (value, digest),
+                (1, None, None) => {
+                    // The latest tombstone is history bookkeeping, not part of
+                    // the logical row image described by this attestation.
+                    continue;
+                }
+                // Retained history is required to satisfy the same marker
+                // contract as the storage schema. A contradictory tombstone
+                // cannot be counted as either a live row or a complete delete.
+                _ => return Err(RuntimeError::SnapshotIncomplete),
+            };
+            let digest: [u8; 32] = fixed(digest).map_err(|_| RuntimeError::SnapshotIncomplete)?;
+            if <[u8; 32]>::from(Sha256::digest(&value)) != digest {
+                return Err(RuntimeError::SnapshotIncomplete);
+            }
+            if previous_table.as_deref() != Some(&table) {
+                table_count = table_count
+                    .checked_add(1)
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
+                previous_table = Some(table.clone());
+            }
+            row_count = row_count
+                .checked_add(1)
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(HistoricalSnapshotAttestation {
+            capture: snapshot.capture.clone(),
+            generation: snapshot.generation,
+            mutation_sequence: snapshot.mutation_sequence,
+            row_count,
+            table_count,
+            admin_audit_sequence: snapshot.admin_audit_sequence,
+            checkpoint_reset_audit_sequence: snapshot.checkpoint_reset_audit_sequence,
+        })
+    }
+
     /// Reads one durable stream checkpoint without exposing the runtime
     /// database connection or weakening the stream identity boundary.
     pub async fn stream_checkpoint(
@@ -4998,6 +7155,338 @@ impl RuntimeState {
         let _ = self.release_stream_lease(writer, lease).await;
     }
 
+    async fn dispatch_stream_provider_effects<H: StreamHandler>(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        handler: &mut H,
+        effects: &[StreamProviderEffect],
+    ) -> Result<(), ProviderEffectDispatchError> {
+        if effects.len() > MAX_STREAM_PROVIDER_EFFECTS {
+            return Err(ProviderEffectDispatchError::Provider(
+                ProviderEffectFailure::Permanent,
+            ));
+        }
+        for (ordinal, effect) in effects.iter().enumerate() {
+            if handler.provider_effect_contract(effect.provider())
+                != ProviderEffectDeliveryContract::IdempotentByKey
+            {
+                return Err(ProviderEffectDispatchError::Provider(
+                    ProviderEffectFailure::Unsupported,
+                ));
+            }
+
+            let delivery = lease.delivery.canonical();
+            let mut identity = b"ORNA-STREAM-PROVIDER-EFFECT/v1\0".to_vec();
+            for part in [
+                delivery.as_bytes(),
+                effect.provider().as_bytes(),
+                effect.operation().as_bytes(),
+            ] {
+                identity.extend_from_slice(&(part.len() as u64).to_be_bytes());
+                identity.extend_from_slice(part);
+            }
+            identity.extend_from_slice(&(ordinal as u64).to_be_bytes());
+
+            let request_digest: [u8; 32] = Sha256::digest(effect.request()).into();
+            let mut key_hash = Sha256::new();
+            key_hash.update(b"ORNA-STREAM-PROVIDER-EFFECT-KEY/v1\0");
+            key_hash.update((identity.len() as u64).to_be_bytes());
+            key_hash.update(&identity);
+            key_hash.update(request_digest);
+            let effect_key = ProviderEffectKey(key_hash.finalize().into());
+
+            loop {
+                let preparation = self
+                    .prepare_stream_provider_effect_attempt(
+                        writer,
+                        lease,
+                        &identity,
+                        request_digest,
+                        effect_key,
+                    )
+                    .await
+                    .map_err(ProviderEffectDispatchError::Runtime)?;
+                let attempt = match preparation {
+                    ProviderEffectPreparation::Cached => break,
+                    ProviderEffectPreparation::Started { attempt } => attempt,
+                    ProviderEffectPreparation::Rejected(failure) => {
+                        return Err(ProviderEffectDispatchError::Provider(failure));
+                    }
+                };
+
+                match handler
+                    .apply_provider_effect_once(effect_key, effect)
+                    .await
+                {
+                    Ok(receipt) if receipt.len() <= MAX_TERMINAL_OUTCOME_BYTES => {
+                        self.complete_stream_provider_effect(
+                            writer,
+                            lease,
+                            &identity,
+                            request_digest,
+                            effect_key,
+                            receipt,
+                        )
+                        .await
+                        .map_err(ProviderEffectDispatchError::Runtime)?;
+                        break;
+                    }
+                    Ok(_) => {
+                        self.fail_stream_provider_effect(
+                            writer,
+                            lease,
+                            &identity,
+                            false,
+                        )
+                        .await
+                        .map_err(ProviderEffectDispatchError::Runtime)?;
+                        return Err(ProviderEffectDispatchError::Provider(
+                            ProviderEffectFailure::Permanent,
+                        ));
+                    }
+                    Err(failure) => {
+                        let retryable = matches!(
+                            failure,
+                            ProviderEffectFailure::Retryable
+                                | ProviderEffectFailure::OutcomeUnknown
+                        );
+                        self.fail_stream_provider_effect(
+                            writer,
+                            lease,
+                            &identity,
+                            retryable,
+                        )
+                        .await
+                        .map_err(ProviderEffectDispatchError::Runtime)?;
+                        if retryable && attempt < MAX_STREAM_PROVIDER_EFFECT_ATTEMPTS {
+                            continue;
+                        }
+                        return Err(ProviderEffectDispatchError::Provider(failure));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn prepare_stream_provider_effect_attempt(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        identity: &[u8],
+        request_digest: [u8; 32],
+        effect_key: ProviderEffectKey,
+    ) -> Result<ProviderEffectPreparation, RuntimeError> {
+        if lease.purpose != LeasePurpose::Deliver {
+            return Ok(ProviderEffectPreparation::Rejected(
+                ProviderEffectFailure::Permanent,
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let stream_key = stream_key_id(&lease.delivery.checkpoint_key());
+        let mut leases = tx
+            .query(
+                "SELECT delivery_position, successor_position, fence, purpose \
+                 FROM stream_lease WHERE key_id = ?1",
+                params![stream_key],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(active_lease) = leases
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            return Err(RuntimeError::RequestStateConflict);
+        };
+        let position: String = active_lease
+            .get(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let successor: String = active_lease
+            .get(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let fence: i64 = active_lease
+            .get(2)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let purpose: i64 = active_lease
+            .get(3)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if position != lease.delivery.position.token.as_str()
+            || successor != lease.delivery.successor.token.as_str()
+            || fence != i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?
+            || purpose != 1
+        {
+            return Err(RuntimeError::RequestStateConflict);
+        }
+
+        let mut rows = tx
+            .query(
+                "SELECT request_digest, idempotency_key, lease_fence, \
+                        attempts_in_fence, total_attempts, status, receipt \
+                 FROM stream_provider_effect_receipt WHERE effect_identity = ?1",
+                params![identity],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let current_fence = i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let effect_key = effect_key.as_bytes().to_vec();
+        let preparation = if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let stored_digest: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let stored_key: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let stored_fence: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let attempts: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let total_attempts: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let status: i64 = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let receipt: Option<Vec<u8>> = row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if stored_digest != request_digest || stored_key != effect_key {
+                ProviderEffectPreparation::Rejected(ProviderEffectFailure::Permanent)
+            } else if status == 2 {
+                if receipt
+                    .as_ref()
+                    .is_none_or(|receipt| receipt.len() > MAX_TERMINAL_OUTCOME_BYTES)
+                {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+                tx.commit()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                return Ok(ProviderEffectPreparation::Cached);
+            } else if receipt.is_some() || !(1..=4).contains(&status) {
+                return Err(RuntimeError::RecoveryInvalid);
+            } else if stored_fence == current_fence && status == 1 {
+                ProviderEffectPreparation::Rejected(ProviderEffectFailure::OutcomeUnknown)
+            } else if stored_fence == current_fence
+                && (attempts >= i64::from(MAX_STREAM_PROVIDER_EFFECT_ATTEMPTS) || status == 4)
+            {
+                ProviderEffectPreparation::Rejected(if status == 4 {
+                    ProviderEffectFailure::Permanent
+                } else {
+                    ProviderEffectFailure::Retryable
+                })
+            } else {
+                let attempts_in_fence = if stored_fence == current_fence {
+                    attempts + 1
+                } else {
+                    1
+                };
+                let total_attempts = total_attempts
+                    .checked_add(1)
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
+                tx.execute(
+                    "UPDATE stream_provider_effect_receipt \
+                     SET lease_fence = ?1, attempts_in_fence = ?2, \
+                         total_attempts = ?3, status = 1, receipt = NULL \
+                     WHERE effect_identity = ?4",
+                    params![current_fence, attempts_in_fence, total_attempts, identity],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+                ProviderEffectPreparation::Started {
+                    attempt: u32::try_from(attempts_in_fence)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                }
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO stream_provider_effect_receipt \
+                 (effect_identity, request_digest, idempotency_key, lease_fence, \
+                  attempts_in_fence, total_attempts, status, receipt) \
+                 VALUES (?1, ?2, ?3, ?4, 1, 1, 1, NULL)",
+                params![identity, request_digest.to_vec(), effect_key, current_fence],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            ProviderEffectPreparation::Started { attempt: 1 }
+        };
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(preparation)
+    }
+
+    async fn complete_stream_provider_effect(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        identity: &[u8],
+        request_digest: [u8; 32],
+        effect_key: ProviderEffectKey,
+        receipt: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let changed = tx
+            .execute(
+                "UPDATE stream_provider_effect_receipt \
+                 SET status = 2, receipt = ?1 \
+                 WHERE effect_identity = ?2 AND request_digest = ?3 \
+                   AND idempotency_key = ?4 AND lease_fence = ?5 AND status = 1",
+                params![
+                    receipt,
+                    identity,
+                    request_digest.to_vec(),
+                    effect_key.as_bytes().to_vec(),
+                    i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    async fn fail_stream_provider_effect(
+        &self,
+        writer: WriterLease,
+        lease: &DeliveryLease,
+        identity: &[u8],
+        retryable: bool,
+    ) -> Result<(), RuntimeError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        self.require_owner(&tx, writer).await?;
+        let changed = tx
+            .execute(
+                "UPDATE stream_provider_effect_receipt \
+                 SET status = ?1, receipt = NULL \
+                 WHERE effect_identity = ?2 AND lease_fence = ?3 AND status = 1",
+                params![
+                    if retryable { 3 } else { 4 },
+                    identity,
+                    i64::try_from(lease.fence).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
     /// Runs at most one provider delivery. Polling, handler execution and
     /// durable publication stay separated: only a successful handler result
     /// reaches the atomic mutation/checkpoint boundary.
@@ -5034,7 +7523,15 @@ impl RuntimeState {
                 RuntimeError::StreamIdentityMismatch,
             ));
         }
+        if !source.descriptor().replayable {
+            return Err(StreamStepError::Runtime(
+                RuntimeError::StreamSourceNotReplayable,
+            ));
+        }
         self.require_owner(&self.connection, writer)
+            .await
+            .map_err(StreamStepError::Runtime)?;
+        ensure_stream_position_format_compatible(&self.connection, key)
             .await
             .map_err(StreamStepError::Runtime)?;
         let checkpoint = self
@@ -5154,19 +7651,15 @@ impl RuntimeState {
                     return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
                 }
             };
-            if control.cancelled() {
-                self.release_stream_lease(writer, lease.clone()).await?;
-                return Ok(StreamStep::Cancelled { checkpoint });
-            }
+            // Delivery admission is the inter-item cancellation boundary.
+            // Once admitted, start this activation and let the bounded
+            // execution check below roll it back if cancellation interrupts
+            // its open work.
             let failure_payload = source.failure_payload(&item);
             if matches!(&failure_payload, StreamFailurePayload::Unavailable) {
                 self.release_stream_lease_best_effort(writer, lease.clone())
                     .await;
                 return Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid));
-            }
-            if control.cancelled() {
-                self.release_stream_lease(writer, lease.clone()).await?;
-                return Ok(StreamStep::Cancelled { checkpoint });
             }
             (lease, failure_payload)
         };
@@ -5187,7 +7680,7 @@ impl RuntimeState {
             }
         };
 
-        let (handler_result, handler_panicked) =
+        let (mut handler_result, handler_panicked) =
             match catch_unwind(AssertUnwindSafe(|| handler.handle(&item))) {
                 Ok(result) => (result, false),
                 Err(_) => (
@@ -5199,6 +7692,7 @@ impl RuntimeState {
                 ),
             };
         if !handler_panicked && control.cancelled() {
+            let _ = handler.take_provider_effects();
             let result = match self
                 .stream_backend(writer)
                 .apply_async(CommitIntent::Cancel {
@@ -5228,6 +7722,48 @@ impl RuntimeState {
                     Err(StreamStepError::Runtime(RuntimeError::RecoveryInvalid))
                 }
             };
+        }
+
+        let effects = if handler_panicked {
+            Vec::new()
+        } else {
+            handler.take_provider_effects()
+        };
+        if matches!(
+            &handler_result,
+            StreamHandlerResult::Commit(_)
+                | StreamHandlerResult::CommitValidatedTable(_)
+        ) && !effects.is_empty()
+        {
+            match self
+                .dispatch_stream_provider_effects(
+                    writer,
+                    &lease_for_cleanup,
+                    handler,
+                    &effects,
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(ProviderEffectDispatchError::Runtime(error)) => {
+                    self.release_stream_lease_best_effort(writer, lease_for_cleanup.clone())
+                        .await;
+                    return Err(StreamStepError::Runtime(error));
+                }
+                Err(ProviderEffectDispatchError::Provider(failure)) => {
+                    let class = match failure {
+                        ProviderEffectFailure::Permanent | ProviderEffectFailure::Unsupported => {
+                            DiagnosticClass::Permanent
+                        }
+                        ProviderEffectFailure::Retryable
+                        | ProviderEffectFailure::OutcomeUnknown => DiagnosticClass::Transient,
+                    };
+                    handler_result = StreamHandlerResult::Fail(SafeDiagnostic {
+                        code: DiagnosticCode::ProviderUnavailable,
+                        class,
+                    });
+                }
+            }
         }
 
         match handler_result {
@@ -5569,6 +8105,14 @@ impl RuntimeState {
                 RuntimeError::StreamIdentityMismatch,
             ));
         }
+        if !source.descriptor().replayable {
+            return Err(StreamStepError::Runtime(
+                RuntimeError::StreamSourceNotReplayable,
+            ));
+        }
+        ensure_stream_position_format_compatible(&self.connection, key)
+            .await
+            .map_err(StreamStepError::Runtime)?;
         let mut checkpoint = self
             .stream_backend(writer)
             .checkpoint_async(key)
@@ -7527,6 +10071,106 @@ impl RuntimeState {
         Ok(out)
     }
 
+    /// Returns the number of durable mutations still in the unpublished CWD tail.
+    ///
+    /// This summary query avoids loading mutation payloads when a caller only
+    /// needs to report whether and how much local state remains unpublished.
+    pub async fn pending_count(&self) -> Result<usize, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query("SELECT COUNT(*) FROM pending_mutation", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let count: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        usize::try_from(count).map_err(|_| RuntimeError::RecoveryInvalid)
+    }
+
+    /// Reads effective publication policy and pending/published state from one
+    /// SQLite statement so maintenance and storage projections share a
+    /// coherent snapshot. Row and byte counts describe durable runtime
+    /// mutation payloads, not physical compact-file layout.
+    pub async fn set_publication_compressed_target_bytes(
+        &self,
+        compressed_target_bytes: u64,
+    ) -> Result<(), RuntimeError> {
+        if !(8 * 1024 * 1024..=32 * 1024 * 1024).contains(&compressed_target_bytes) {
+            return Err(RuntimeError::InvalidPublicationPolicy);
+        }
+        self.connection
+            .execute(
+                "UPDATE publication_metadata SET compressed_target_bytes = ?1 \
+                 WHERE singleton = 1",
+                [i64::try_from(compressed_target_bytes)
+                    .map_err(|_| RuntimeError::InvalidPublicationPolicy)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(())
+    }
+
+    pub async fn publication_metadata(&self) -> Result<RuntimePublicationMetadata, RuntimeError> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT (SELECT COUNT(*) FROM pending_mutation), \
+                 (SELECT COALESCE(SUM(length(payload)), 0) FROM pending_mutation), \
+                 compressed_target_bytes, published_mutations, published_payload_bytes, last_publication_ms \
+                 FROM publication_metadata WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let pending_rows: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let pending_bytes: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let compressed_target_bytes: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let compressed_target_bytes = u64::try_from(compressed_target_bytes)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if !(8 * 1024 * 1024..=32 * 1024 * 1024).contains(&compressed_target_bytes) {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let published_rows: i64 = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let published_bytes: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        Ok(RuntimePublicationMetadata {
+            publication_policy: RuntimePublicationPolicy {
+                compressed_target_bytes,
+                ..RuntimePublicationPolicy::default()
+            },
+            pending_rows: u64::try_from(pending_rows).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            pending_bytes: u64::try_from(pending_bytes)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            published_rows: u64::try_from(published_rows)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            published_bytes: u64::try_from(published_bytes)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            last_publication_ms: row
+                .get(5)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        })
+    }
+
+    /// Reads one durable snapshot and projects its publication fields into
+    /// records corresponding to the declared `sys.Storage` and
+    /// `sys.MaintenanceJob` views.
+    pub async fn publication_metadata_rows(
+        &self,
+    ) -> Result<RuntimePublicationMetadataRows, RuntimeError> {
+        let row = publication_metadata_record(&self.publication_metadata().await?)?;
+        Ok(RuntimePublicationMetadataRows {
+            sys_storage: row.clone(),
+            maintenance_job: row,
+        })
+    }
+
     /// Returns only the pending mutation prefix covered by a persisted freeze.
     /// Mutations appended after the freeze are intentionally excluded.
     pub async fn pending_through(
@@ -7931,6 +10575,30 @@ impl RuntimeState {
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
             return Ok(existing);
         }
+        let mut batch_rows = tx
+            .query(
+                "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
+                 FROM pending_mutation WHERE sequence <= ?1",
+                params![upper],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let batch = batch_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        tx.execute(
+            "UPDATE publication_metadata SET \
+             published_mutations = published_mutations + ?1, \
+             published_payload_bytes = published_payload_bytes + ?2, \
+             last_publication_ms = ?3 WHERE singleton = 1",
+            params![published_rows, published_bytes, now_ms()?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
         tx.execute(
             "INSERT INTO publication_commit (intent_id, commit_id, compact_receipt)
              VALUES (?1, ?2, ?3)",
@@ -8025,6 +10693,30 @@ impl RuntimeState {
             tx.execute(
                 "INSERT INTO publication_commit (intent_id, commit_id) VALUES (?1, ?2)",
                 params![freeze.intent_id.to_vec(), commit_id.as_bytes().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let mut batch_rows = tx
+                .query(
+                    "SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) \
+                     FROM pending_mutation WHERE sequence <= ?1",
+                    params![upper],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let batch = batch_rows
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+            let published_rows: i64 = batch.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let published_bytes: i64 = batch.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            tx.execute(
+                "UPDATE publication_metadata SET \
+                 published_mutations = published_mutations + ?1, \
+                 published_payload_bytes = published_payload_bytes + ?2, \
+                 last_publication_ms = ?3 WHERE singleton = 1",
+                params![published_rows, published_bytes, now_ms()?],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -9931,11 +12623,18 @@ impl RuntimeState {
                 return Err(RuntimeError::RecoveryInvalid);
             }
             if active_key.as_deref() != Some(key_id.as_str()) {
-                if active_key.is_some()
-                    && (previous_version != checkpoint_version
-                        || latest_position != checkpoint_position)
-                {
-                    return Err(RuntimeError::RecoveryInvalid);
+                if let Some(previous_key) = active_key.as_deref() {
+                    let final_position = validate_stream_checkpoint_reset_bridge(
+                        &self.connection,
+                        previous_key,
+                        previous_version,
+                        latest_position.as_deref(),
+                        checkpoint_version,
+                    )
+                    .await?;
+                    if final_position != checkpoint_position {
+                        return Err(RuntimeError::RecoveryInvalid);
+                    }
                 }
                 active_key = Some(key_id);
                 previous_version = 0;
@@ -9945,38 +12644,81 @@ impl RuntimeState {
             {
                 return Err(RuntimeError::RecoveryInvalid);
             }
+            if version > previous_version.saturating_add(1) {
+                let reset_through = version - 1;
+                let _reset_position = validate_stream_checkpoint_reset_bridge(
+                    &self.connection,
+                    active_key.as_deref().ok_or(RuntimeError::RecoveryInvalid)?,
+                    previous_version,
+                    latest_position.as_deref(),
+                    reset_through,
+                )
+                .await?;
+                previous_version = reset_through;
+            }
             if version != previous_version.saturating_add(1) {
                 return Err(RuntimeError::RecoveryInvalid);
             }
             previous_version = version;
             latest_position = Some(committed);
         }
-        if active_key.is_some()
-            && (previous_version != checkpoint_version || latest_position != checkpoint_position)
-        {
-            return Err(RuntimeError::RecoveryInvalid);
+        if let Some(active_key) = active_key.as_deref() {
+            let final_position = validate_stream_checkpoint_reset_bridge(
+                &self.connection,
+                active_key,
+                previous_version,
+                latest_position.as_deref(),
+                checkpoint_version,
+            )
+            .await?;
+            if final_position != checkpoint_position {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
-        let mut missing = self
+        let mut reset_only = self
             .connection
             .query(
-                "SELECT checkpoint.key_id
+                "SELECT checkpoint.key_id, checkpoint.version,
+                        checkpoint.committed_position
                  FROM stream_checkpoint AS checkpoint
-                 LEFT JOIN stream_checkpoint_history AS history
-                   ON history.key_id = checkpoint.key_id
-                  AND history.version = checkpoint.version
-                 WHERE checkpoint.version > 0 AND history.key_id IS NULL
-                 LIMIT 1",
+                 WHERE checkpoint.version > 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM stream_checkpoint_history AS history
+                       WHERE history.key_id = checkpoint.key_id
+                   )",
                 (),
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if missing
+        let mut reset_only_checkpoints = Vec::new();
+        while let Some(row) = reset_only
             .next()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
         {
-            return Err(RuntimeError::RecoveryInvalid);
+            let key_id: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let version = decode_u64(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            let position: Option<String> =
+                row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            reset_only_checkpoints.push((key_id, version, position));
+        }
+        drop(reset_only);
+        for (key_id, version, position) in reset_only_checkpoints {
+            if validate_stream_checkpoint_reset_bridge(
+                &self.connection,
+                &key_id,
+                0,
+                None,
+                version,
+            )
+            .await?
+                != position
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
         Ok(())
     }
@@ -10517,14 +13259,14 @@ fn bigint_to_i64(value: &BigInt) -> Result<i64, RuntimeError> {
 }
 
 fn encode_capture(capture: &CwdCapture) -> Result<Vec<u8>, RuntimeError> {
-    Value::new(capture.snapshot().raw())
-        .and_then(|value| value.encode())
+    capture
+        .snapshot()
+        .encode()
         .map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
 fn decode_capture(bytes: Vec<u8>, digest: [u8; 32]) -> Result<CwdCapture, RuntimeError> {
-    let value = Value::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let snapshot = Snapshot::decode(value.raw()).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let snapshot = Snapshot::decode_bytes(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
     CwdCapture::new(snapshot, digest).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
@@ -11534,6 +14276,49 @@ async fn ensure_stream_checkpoint(
     Ok(())
 }
 
+/// Position formats are part of the checkpoint encoding, while the natural
+/// stream identity is consumer/source/partition. Reusing that stream under a
+/// different position format would otherwise create a second empty row and
+/// silently restart provider progress. Require an explicit migration before
+/// the runner can poll such a provider.
+async fn ensure_stream_position_format_compatible(
+    connection: &Connection,
+    key: &CheckpointKey,
+) -> Result<(), RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM stream_checkpoint
+             WHERE consumer_principal = ?1 AND consumer_root = ?2
+               AND consumer_function = ?3 AND consumer_binding = ?4
+               AND source_format = ?5 AND source = ?6
+               AND partition_format = ?7 AND partition IS ?8
+               AND position_format != ?9
+             LIMIT 1",
+            params![
+                key.consumer.principal.as_str().to_owned(),
+                key.consumer.root.as_str().to_owned(),
+                key.consumer.function.as_str().to_owned(),
+                key.consumer.binding.as_str().to_owned(),
+                key.source_format.as_str().to_owned(),
+                key.source.as_str().to_owned(),
+                key.partition_format.as_str().to_owned(),
+                key.partition.as_ref().map(|value| value.as_str().to_owned()),
+                key.position_format.as_str().to_owned(),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Err(RuntimeError::StreamIdentityMismatch);
+    }
+    Ok(())
+}
+
 async fn load_stream_checkpoint_state(
     connection: &Connection,
     key: &CheckpointKey,
@@ -11748,6 +14533,7 @@ async fn store_stream_pause_reason(
 async fn apply_admin_operation_tx(
     connection: &Connection,
     operation: &AdminInvocationOperation,
+    observed_generation: u64,
 ) -> Result<AdminOperationResult, RuntimeError> {
     match operation {
         AdminInvocationOperation::Pause { key, reason } => {
@@ -11800,6 +14586,7 @@ async fn apply_admin_operation_tx(
                 expected,
                 &checkpoint,
                 &audit_reason,
+                observed_generation,
             )
             .await?;
             sync_stream_observation_tx(
@@ -11859,6 +14646,22 @@ fn admin_operation_succeeded(result: &AdminOperationResult) -> bool {
     )
 }
 
+fn decode_admin_lifecycle_effect(value: &str) -> Result<AdminLifecycleEffect, RuntimeError> {
+    Ok(match value {
+        "checkpoint_reset" => AdminLifecycleEffect::CheckpointReset,
+        "paused" => AdminLifecycleEffect::StreamPaused { changed: true },
+        "paused_noop" => AdminLifecycleEffect::StreamPaused { changed: false },
+        "pause_pending" => AdminLifecycleEffect::StreamPausePending { changed: true },
+        "pause_pending_noop" => AdminLifecycleEffect::StreamPausePending { changed: false },
+        "resumed" => AdminLifecycleEffect::StreamResumed { changed: true },
+        "resumed_noop" => AdminLifecycleEffect::StreamResumed { changed: false },
+        "busy" => AdminLifecycleEffect::Busy,
+        "blocking_failure" => AdminLifecycleEffect::BlockingFailure,
+        value if value.starts_with("failure:") => AdminLifecycleEffect::Failed,
+        _ => return Err(RuntimeError::RecoveryInvalid),
+    })
+}
+
 async fn store_admin_invocation_audit(
     connection: &Connection,
     descriptor: &AdminInvocationDescriptor,
@@ -11866,6 +14669,7 @@ async fn store_admin_invocation_audit(
     observed_generation: u64,
     terminal_outcome: String,
     succeeded: bool,
+    checkpoint_result: Option<&StreamCheckpoint>,
 ) -> Result<(), RuntimeError> {
     connection
         .execute(
@@ -11887,19 +14691,48 @@ async fn store_admin_invocation_audit(
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if let Some(checkpoint) = checkpoint_result {
+        let position = checkpoint
+            .committed
+            .as_ref()
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        connection
+            .execute(
+                "INSERT INTO admin_invocation_checkpoint_result
+                 (invocation_id, version, committed_position) VALUES (?1, ?2, ?3)",
+                params![
+                    descriptor.invocation_id.to_vec(),
+                    i64::try_from(checkpoint.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    position.token.as_str(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
     Ok(())
 }
 
 async fn load_admin_invocation_audits(
     connection: &Connection,
 ) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
+    load_admin_invocation_audits_through(connection, i64::MAX as u64).await
+}
+
+async fn load_admin_invocation_audits_through(
+    connection: &Connection,
+    through_sequence: u64,
+) -> Result<Vec<AdminInvocationAudit>, RuntimeError> {
     let mut rows = connection
         .query(
             "SELECT sequence, invocation_id, function_name, safe_arguments,
                     owner_id, owner_epoch, observed_generation,
-                    terminal_outcome, succeeded, redacted
-             FROM admin_invocation_audit ORDER BY sequence",
-            (),
+                    terminal_outcome, succeeded, redacted,
+                    (SELECT version FROM admin_invocation_checkpoint_result r
+                     WHERE r.invocation_id = a.invocation_id),
+                    (SELECT committed_position FROM admin_invocation_checkpoint_result r
+                     WHERE r.invocation_id = a.invocation_id)
+             FROM admin_invocation_audit a WHERE sequence <= ?1 ORDER BY sequence",
+            params![i64::try_from(through_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?],
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -11933,6 +14766,11 @@ async fn load_admin_invocation_audits(
         )?;
         let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&terminal_outcome)?;
+        let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
+        let checkpoint_reset_result = decode_admin_checkpoint_reset_result(&row, 10, 11)?;
+        if checkpoint_reset_result.is_some() && effect != AdminLifecycleEffect::CheckpointReset {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
         audits.push(AdminInvocationAudit {
             sequence,
             invocation_id,
@@ -11941,6 +14779,8 @@ async fn load_admin_invocation_audits(
             owner,
             observed_generation,
             terminal_outcome,
+            effect,
+            checkpoint_reset_result,
             succeeded: decode_bool(
                 row.get::<i64>(8)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
@@ -11954,7 +14794,256 @@ async fn load_admin_invocation_audits(
     Ok(audits)
 }
 
+<<<<<<< HEAD
 fn redact_reason(reason: &str) -> Result<(String, bool), RuntimeError> {
+=======
+async fn load_admin_invocation_receipt(
+    connection: &Connection,
+    invocation_id: [u8; 16],
+) -> Result<Option<AdminInvocationAudit>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT sequence, invocation_id, function_name, safe_arguments,
+                    owner_id, owner_epoch, observed_generation,
+                    terminal_outcome, succeeded, redacted,
+                    (SELECT version FROM admin_invocation_checkpoint_result r
+                     WHERE r.invocation_id = a.invocation_id),
+                    (SELECT committed_position FROM admin_invocation_checkpoint_result r
+                     WHERE r.invocation_id = a.invocation_id)
+             FROM admin_invocation_audit a WHERE a.invocation_id = ?1",
+            params![invocation_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let sequence = decode_u64(row.get::<i64>(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let invocation_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    validate_id(invocation_id)?;
+    let function: String = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    validate_observation_text(&function)?;
+    let safe_arguments: String = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    validate_observation_text(&safe_arguments)?;
+    let owner = WriterLease {
+        owner_id: fixed(row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        epoch: decode_u64(row.get::<i64>(5).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+    };
+    validate_writer_lease(owner)?;
+    let observed_generation =
+        decode_u64(row.get::<i64>(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    validate_observation_text(&terminal_outcome)?;
+    let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
+    let checkpoint_reset_result = decode_admin_checkpoint_reset_result(&row, 10, 11)?;
+    if checkpoint_reset_result.is_some() && effect != AdminLifecycleEffect::CheckpointReset {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(Some(AdminInvocationAudit {
+        sequence,
+        invocation_id,
+        function,
+        safe_arguments,
+        owner,
+        observed_generation,
+        terminal_outcome,
+        effect,
+        checkpoint_reset_result,
+        succeeded: decode_bool(row.get::<i64>(8).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        redacted: decode_bool(row.get::<i64>(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+    }))
+}
+
+fn decode_admin_checkpoint_reset_result(
+    row: &libsql::Row,
+    version_index: i32,
+    position_index: i32,
+) -> Result<Option<AdminCheckpointResetResult>, RuntimeError> {
+    let version: Option<i64> = row
+        .get(version_index)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let position: Option<String> = row
+        .get(position_index)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    match (version, position) {
+        (None, None) => Ok(None),
+        (Some(version), Some(position)) => Ok(Some(AdminCheckpointResetResult {
+            version: decode_u64(version)?,
+            committed_position: decode_position(position)?,
+        })),
+        _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+/// Reconstructs result payloads for successful reset receipts written before
+/// checkpoint reset results had their own receipt table. The old generic
+/// audit and specialized CAS audit share the key/version/position digests, so
+/// only a unique exact transition is eligible for backfill.
+async fn migrate_admin_checkpoint_reset_receipts(
+    connection: &Connection,
+) -> Result<(), RuntimeError> {
+    let mut receipt_rows = connection
+        .query(
+            "SELECT invocation_id, safe_arguments,
+                    (SELECT version FROM admin_invocation_checkpoint_result AS result
+                     WHERE result.invocation_id = audit.invocation_id),
+                    (SELECT committed_position FROM admin_invocation_checkpoint_result AS result
+                     WHERE result.invocation_id = audit.invocation_id)
+             FROM admin_invocation_audit AS audit
+             WHERE terminal_outcome = 'checkpoint_reset' AND succeeded = 1
+             ORDER BY sequence",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut receipts = Vec::new();
+    while let Some(row) = receipt_rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        receipts.push((
+            row.get::<Vec<u8>>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<Option<i64>>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<Option<String>>(3)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        ));
+    }
+    if receipts.is_empty() {
+        return Ok(());
+    }
+
+    let mut reset_rows = connection
+        .query(
+            "SELECT key_id, old_version, old_position, new_version, new_position
+             FROM stream_checkpoint_reset_audit ORDER BY sequence",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut resets = Vec::new();
+    while let Some(row) = reset_rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        resets.push((
+            row.get::<String>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<i64>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<Option<String>>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<i64>(3)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<String>(4)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        ));
+    }
+
+    for (invocation_id, safe_arguments, stored_version, stored_position) in receipts {
+        let stored_result = match (stored_version, stored_position) {
+            (None, None) => None,
+            (Some(version), Some(position)) => Some((
+                decode_u64(version)?,
+                decode_position(position)?,
+            )),
+            _ => return Err(RuntimeError::RecoveryInvalid),
+        };
+        let fields = safe_arguments
+            .split(';')
+            .filter_map(|field| field.split_once('='))
+            .collect::<BTreeMap<_, _>>();
+        let Some(key_digest) = fields.get("stream_key_digest") else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            continue;
+        };
+        let Some(expected_version) = fields.get("expected_version") else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            continue;
+        };
+        let Some(expected_position_digest) = fields.get("expected_position_digest") else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            continue;
+        };
+        let Some(target_digest) = fields.get("target_digest") else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            continue;
+        };
+        if key_digest.is_empty()
+            || expected_version.is_empty()
+            || expected_position_digest.is_empty()
+            || target_digest.is_empty()
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let mut matches = resets.iter().filter(|reset| {
+            let (key, old_version, old_position, _, new_position) = *reset;
+            let old_position_digest = old_position
+                .as_deref()
+                .map(|position| admin_digest(position.as_bytes()))
+                .unwrap_or_else(|| "none".into());
+            admin_digest(key.as_bytes()).as_str() == *key_digest
+                && old_version.to_string() == *expected_version
+                && old_position_digest == *expected_position_digest
+                && admin_digest(new_position.as_bytes()).as_str() == *target_digest
+        });
+        let Some((_, _, _, version, position)) = matches.next() else {
+            if stored_result.is_some() {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            continue;
+        };
+        if matches.next().is_some() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let reconciled_version = *version;
+        let reconciled_position = position.clone();
+        let reconciled = (
+            decode_u64(reconciled_version)?,
+            decode_position(reconciled_position.clone())?,
+        );
+        match stored_result {
+            Some(stored) if stored != reconciled => {
+                // The specification does not define repair for contradictory
+                // durable receipts. Fail closed so a replay cannot report a
+                // checkpoint transition different from the retained CAS audit.
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            Some(_) => {}
+            None => {
+                connection
+                    .execute(
+                        "INSERT INTO admin_invocation_checkpoint_result
+                         (invocation_id, version, committed_position) VALUES (?1, ?2, ?3)",
+                        params![invocation_id, reconciled_version, reconciled_position],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn redact_reset_reason(reason: String) -> Result<(String, bool), RuntimeError> {
+>>>>>>> origin/w90zi-imp_merge
     if reason.len() > 16_777_216 {
         return Err(RuntimeError::InvalidIdentity);
     }
@@ -11967,15 +15056,17 @@ async fn store_stream_checkpoint_reset_audit(
     expected: &CheckpointPrecondition,
     checkpoint: &StreamCheckpoint,
     audit_reason: &(String, bool),
+    observed_generation: u64,
 ) -> Result<(), RuntimeError> {
     connection
         .execute(
             "INSERT INTO stream_checkpoint_reset_audit
-             (key_id, old_version, old_position, new_version, new_position,
+             (key_id, observed_generation, old_version, old_position, new_version, new_position,
               reason, redacted)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 stream_key_id(key),
+                i64::try_from(observed_generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 i64::try_from(expected.version).map_err(|_| RuntimeError::RecoveryInvalid)?,
                 expected
                     .committed
@@ -12002,13 +15093,28 @@ async fn load_stream_checkpoint_reset_audits(
     connection: &Connection,
     key: &CheckpointKey,
 ) -> Result<Vec<CheckpointResetAudit>, RuntimeError> {
+    load_stream_checkpoint_reset_audits_through(connection, key, i64::MAX as u64, true).await
+}
+
+async fn load_stream_checkpoint_reset_audits_through(
+    connection: &Connection,
+    key: &CheckpointKey,
+    through_sequence: u64,
+    include_unpinned_legacy: bool,
+) -> Result<Vec<CheckpointResetAudit>, RuntimeError> {
     let mut rows = connection
         .query(
-            "SELECT old_version, old_position, new_version, new_position,
-                    reason, redacted
+            "SELECT sequence, observed_generation, old_version, old_position,
+                    new_version, new_position, reason, redacted
              FROM stream_checkpoint_reset_audit
-             WHERE key_id = ?1 ORDER BY sequence",
-            params![stream_key_id(key)],
+             WHERE key_id = ?1 AND sequence <= ?2
+               AND (?3 = 1 OR observed_generation >= 0)
+             ORDER BY sequence",
+            params![
+                stream_key_id(key),
+                i64::try_from(through_sequence).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                if include_unpinned_legacy { 1_i64 } else { 0_i64 }
+            ],
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -12018,30 +15124,44 @@ async fn load_stream_checkpoint_reset_audits(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?
     {
+        let sequence = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let raw_observed_generation = row
+            .get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let observed_generation = if raw_observed_generation < 0 {
+            None
+        } else {
+            Some(decode_u64(raw_observed_generation)?)
+        };
         let old_position = row
-            .get::<Option<String>>(1)
+            .get::<Option<String>>(3)
             .map_err(|_| RuntimeError::RecoveryInvalid)?
             .map(decode_position)
             .transpose()?;
         let new_position = decode_position(
-            row.get::<String>(3)
+            row.get::<String>(5)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?;
         audits.push(CheckpointResetAudit {
+            sequence,
+            observed_generation,
             key: key.clone(),
             old_version: decode_u64(
-                row.get::<i64>(0)
+                row.get::<i64>(2)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
             old_position,
             new_version: decode_u64(
-                row.get::<i64>(2)
+                row.get::<i64>(4)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
             new_position,
-            reason: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            reason: row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?,
             redacted: decode_bool(
-                row.get::<i64>(5)
+                row.get::<i64>(7)
                     .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?,
         });
@@ -12073,6 +15193,11 @@ fn stream_administration_outcome(
             if state.status == StreamStatus::Paused =>
         {
             Ok(StreamAdministrationOutcome::Paused { changed })
+        }
+        CommitResult::StreamStatusChanged { state, changed }
+            if state.status == StreamStatus::Running =>
+        {
+            Ok(StreamAdministrationOutcome::Running { changed })
         }
         CommitResult::PausePending { changed, .. } => {
             Ok(StreamAdministrationOutcome::PausePending { changed })
@@ -12405,33 +15530,7 @@ fn encode_row_ref(reference: &RowRef) -> Result<Vec<u8>, RuntimeError> {
 }
 
 fn decode_row_ref(bytes: Vec<u8>) -> Result<RowRef, RuntimeError> {
-    let value = Value::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let OvbRaw::Tag(60010, payload) = value.raw() else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    let OvbRaw::Array(parts) = payload.as_ref() else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    let [
-        OvbRaw::Tag(37, database),
-        OvbRaw::Tag(37, table),
-        key,
-        snapshot,
-    ] = parts.as_slice()
-    else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    let (OvbRaw::Bytes(database), OvbRaw::Bytes(table)) = (database.as_ref(), table.as_ref())
-    else {
-        return Err(RuntimeError::RecoveryInvalid);
-    };
-    RowRef::new(
-        fixed(database.clone())?,
-        fixed(table.clone())?,
-        key.clone(),
-        Snapshot::decode(snapshot).map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )
-    .map_err(|_| RuntimeError::RecoveryInvalid)
+    RowRef::decode(&bytes).map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
 fn encode_nonnegative_bigint(value: &BigInt) -> Result<Vec<u8>, RuntimeError> {
@@ -14176,6 +17275,30 @@ fn encode_table_mutation(mutation: &TableMutation) -> Result<Vec<u8>, RuntimeErr
     Ok(payload)
 }
 
+fn encode_v2_table_mutation(mutation: &TableMutation) -> Result<Vec<u8>, RuntimeError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"ORNA-TABLE-MUTATION-2\0");
+    append_length_prefixed(&mut payload, mutation.table().as_bytes())?;
+    append_length_prefixed(&mut payload, mutation.key())?;
+    if let Some(new_key) = mutation.rekey_to() {
+        payload.push(2);
+        append_length_prefixed(&mut payload, new_key)?;
+    } else if mutation.is_insert() {
+        payload.push(1);
+    } else {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    payload.push(1);
+    append_length_prefixed(
+        &mut payload,
+        mutation.value().ok_or(RuntimeError::InvalidTableMutation)?,
+    )?;
+    if payload.len() > MAX_TABLE_MUTATION_BYTES {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    Ok(payload)
+}
+
 fn append_length_prefixed(target: &mut Vec<u8>, value: &[u8]) -> Result<(), RuntimeError> {
     target.extend_from_slice(
         &u32::try_from(value.len())
@@ -14212,6 +17335,96 @@ async fn apply_table_mutation_tx(
     connection: &Connection,
     mutation: &TableMutation,
 ) -> Result<(), RuntimeError> {
+    if let Some(new_key) = mutation.rekey_to() {
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
+                params![mutation.table().to_owned(), mutation.key().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_none()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
+                params![mutation.table().to_owned(), new_key.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let value = mutation
+            .value()
+            .ok_or(RuntimeError::InvalidTableMutation)?;
+        let digest: [u8; 32] = Sha256::digest(value).into();
+        connection
+            .execute(
+                "DELETE FROM table_row WHERE table_id = ?1 AND row_key = ?2",
+                params![mutation.table().to_owned(), mutation.key().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        connection
+            .execute(
+                "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    mutation.table().to_owned(),
+                    new_key.to_vec(),
+                    value.to_vec(),
+                    digest.to_vec()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        return Ok(());
+    }
+    if mutation.is_insert() {
+        let value = mutation.value().ok_or(RuntimeError::InvalidTableMutation)?;
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
+                params![mutation.table().to_owned(), mutation.key().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let digest: [u8; 32] = Sha256::digest(value).into();
+        connection
+            .execute(
+                "INSERT INTO table_row (table_id, row_key, row_value, row_digest)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    mutation.table().to_owned(),
+                    mutation.key().to_vec(),
+                    value.to_vec(),
+                    digest.to_vec()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        return Ok(());
+    }
     match &mutation.value {
         Some(value) => {
             let digest: [u8; 32] = Sha256::digest(value).into();
@@ -14335,6 +17548,15 @@ async fn append_mutations_with_catalogue_tx(
         });
     }
     let mut sequence: Option<i64> = None;
+    let generation = current
+        .generation()
+        .to_u64_digits()
+        .1
+        .first()
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(RuntimeError::RecoveryInvalid)?;
     for mutation in mutations {
         connection
             .execute(
@@ -14359,18 +17581,69 @@ async fn append_mutations_with_catalogue_tx(
                 .get(0)
                 .map_err(|_| RuntimeError::RecoveryInvalid)?,
         );
+        if mutation.payload.starts_with(b"ORNA-TABLE-MUTATION\0")
+            || mutation.payload.starts_with(b"ORNA-TABLE-MUTATION-2\0")
+        {
+            let table_mutation = TableMutation::decode(mutation)?;
+            let sequence = sequence.ok_or(RuntimeError::RecoveryInvalid)?;
+            if let Some(new_key) = table_mutation.rekey_to() {
+                connection
+                    .execute(
+                        "INSERT INTO runtime_table_history
+                         (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                         VALUES (?1, ?2, ?3, NULL, NULL, 1)",
+                        params![sequence, table_mutation.table().to_owned(), table_mutation.key()],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                let value = table_mutation
+                    .value()
+                    .ok_or(RuntimeError::RecoveryInvalid)?;
+                connection
+                    .execute(
+                        "INSERT INTO runtime_table_history
+                         (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                        params![
+                            sequence,
+                            table_mutation.table().to_owned(),
+                            new_key,
+                            value,
+                            Sha256::digest(value).to_vec()
+                        ],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            } else {
+                let (value, row_digest, deleted) = match table_mutation.value() {
+                    Some(value) => (
+                        Some(value.to_vec()),
+                        Some(Sha256::digest(value).to_vec()),
+                        0_i64,
+                    ),
+                    None => (None, None, 1_i64),
+                };
+                connection
+                    .execute(
+                        "INSERT INTO runtime_table_history
+                         (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            sequence,
+                            table_mutation.table().to_owned(),
+                            table_mutation.key().to_vec(),
+                            value,
+                            row_digest,
+                            deleted,
+                        ],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            }
+        }
     }
     faults.check(FaultPoint::AfterMutation)?;
     let sequence = sequence.ok_or(RuntimeError::RecoveryInvalid)?;
-    let generation = current
-        .generation()
-        .to_u64_digits()
-        .1
-        .first()
-        .copied()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or(RuntimeError::RecoveryInvalid)?;
     connection
         .execute(
             "INSERT INTO checkpoint (generation, digest, mutation_sequence) VALUES (?1, ?2, ?3)",
@@ -14379,6 +17652,17 @@ async fn append_mutations_with_catalogue_tx(
                 next_digest.to_vec(),
                 sequence
             ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    connection
+        .execute(
+            "INSERT INTO runtime_history_governance_boundary
+             (generation, admin_audit_sequence, checkpoint_reset_audit_sequence)
+             SELECT ?1,
+                    COALESCE((SELECT MAX(sequence) FROM admin_invocation_audit), 0),
+                    COALESCE((SELECT MAX(sequence) FROM stream_checkpoint_reset_audit), 0)",
+            params![i64::try_from(generation).map_err(|_| RuntimeError::RecoveryInvalid)?],
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -14399,6 +17683,468 @@ async fn append_mutations_with_catalogue_tx(
         crate::catalogue::persist_capture_for_runtime_tx(connection, &current, &capture).await?;
     }
     Ok(capture)
+}
+
+/// Adds an honest temporal baseline when opening a database created before
+/// table history existed. Earlier generations cannot be reconstructed from
+/// the current table image, so the recorded floor prevents false empty reads.
+async fn migrate_runtime_table_history(connection: &Connection) -> Result<(), RuntimeError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut history_metadata = transaction
+        .query(
+            "SELECT floor_generation, floor_digest
+             FROM runtime_table_history_metadata WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if let Some(row) = history_metadata
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let floor_generation = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let floor_digest: [u8; 32] =
+            fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let mut runtime_meta = transaction
+            .query(
+                "SELECT generation FROM runtime_meta WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let current_generation = decode_u64(
+            runtime_meta
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+                .ok_or(RuntimeError::RecoveryInvalid)?
+                .get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        if floor_generation > current_generation {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        if floor_generation > 0 {
+            let mut checkpoint = transaction
+                .query(
+                    "SELECT digest FROM checkpoint WHERE generation = ?1",
+                    params![i64::try_from(floor_generation)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let checkpoint_digest: [u8; 32] = fixed(
+                checkpoint
+                    .next()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .ok_or(RuntimeError::RecoveryInvalid)?
+                    .get(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            if checkpoint_digest != floor_digest {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+    } else {
+        let mut runtime_meta = transaction
+            .query(
+                "SELECT generation, generation_digest FROM runtime_meta WHERE singleton = 1",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = runtime_meta
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let floor_generation = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let floor_digest: [u8; 32] =
+            fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        if floor_generation > 0 {
+            let mut checkpoint = transaction
+                .query(
+                    "SELECT digest FROM checkpoint WHERE generation = ?1",
+                    params![i64::try_from(floor_generation)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            let checkpoint_digest: [u8; 32] = fixed(
+                checkpoint
+                    .next()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .ok_or(RuntimeError::RecoveryInvalid)?
+                    .get(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?;
+            if checkpoint_digest != floor_digest {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO runtime_table_history_metadata
+                 (singleton, floor_generation, floor_digest) VALUES (1, ?1, ?2)",
+                params![
+                    i64::try_from(floor_generation)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    floor_digest.to_vec(),
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+
+        let mut current_rows = transaction
+            .query(
+                "SELECT table_id, row_key, row_value, row_digest FROM table_row",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = current_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let table: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let key: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let value: Vec<u8> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let digest: [u8; 32] = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            if <[u8; 32]>::from(Sha256::digest(&value)) != digest {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            transaction
+                .execute(
+                    "INSERT INTO runtime_table_history
+                     (mutation_sequence, table_id, row_key, row_value, row_digest, deleted)
+                     VALUES (0, ?1, ?2, ?3, ?4, 0)",
+                    params![table, key, value, digest.to_vec()],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)
+}
+
+/// Adds generation cuts for append-only governance records. Older generic
+/// audits already carry their observed generation, so legacy cuts include only
+/// earlier-generation events; old specialized reset rows have no such evidence
+/// and stay visible only through the unpinned audit API.
+async fn migrate_historical_governance(connection: &Connection) -> Result<(), RuntimeError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut columns = BTreeMap::new();
+    let mut rows = transaction
+        .query("PRAGMA table_info(stream_checkpoint_reset_audit)", ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        columns.insert(
+            row.get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            (),
+        );
+    }
+    if !columns.contains_key("observed_generation") {
+        transaction
+            .execute(
+                "ALTER TABLE stream_checkpoint_reset_audit
+                 ADD COLUMN observed_generation INTEGER NOT NULL DEFAULT -1
+                 CHECK (observed_generation >= -1)",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO runtime_history_governance_boundary
+             (generation, admin_audit_sequence, checkpoint_reset_audit_sequence)
+             VALUES (0, 0, 0)",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    // Prior versions did not persist exact audit sequence cuts beside a
+    // checkpoint. For those generations, observations from strictly earlier
+    // CWD generations are the conservative reconstructible prefix.
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO runtime_history_governance_boundary
+             (generation, admin_audit_sequence, checkpoint_reset_audit_sequence)
+             SELECT checkpoint.generation,
+                    COALESCE((SELECT MAX(audit.sequence)
+                              FROM admin_invocation_audit AS audit
+                              WHERE audit.observed_generation < checkpoint.generation), 0),
+                    COALESCE((SELECT MAX(audit.sequence)
+                              FROM stream_checkpoint_reset_audit AS audit
+                              WHERE audit.observed_generation >= 0
+                                AND audit.observed_generation < checkpoint.generation), 0)
+             FROM checkpoint WHERE checkpoint.generation > 0",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+             VALUES ('historical-governance-boundary-v1')",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)
+}
+
+async fn runtime_table_history_floor(
+    transaction: &Transaction,
+) -> Result<(u64, [u8; 32]), RuntimeError> {
+    let mut rows = transaction
+        .query(
+            "SELECT floor_generation, floor_digest
+             FROM runtime_table_history_metadata WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    Ok((
+        decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
+        fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+    ))
+}
+
+async fn validate_historical_snapshot_tx(
+    transaction: &Transaction,
+    snapshot: &HistoricalSnapshot,
+) -> Result<(), RuntimeError> {
+    let mut meta = transaction
+        .query(
+            "SELECT database_id, runtime_id, generation
+             FROM runtime_meta WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = meta
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let current_generation = decode_u64(
+        row.get::<i64>(2)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    let capture = snapshot.capture();
+    let generation = u64::try_from(bigint_to_i64(capture.generation())?)
+        .map_err(|_| RuntimeError::SnapshotContextMismatch)?;
+    if capture.database_id() != database_id
+        || capture.runtime_id() != runtime_id
+        || generation != snapshot.generation
+        || generation > current_generation
+    {
+        return Err(RuntimeError::SnapshotContextMismatch);
+    }
+    let (floor_generation, floor_digest) = runtime_table_history_floor(transaction).await?;
+    if generation < floor_generation {
+        return Err(RuntimeError::SnapshotIncomplete);
+    }
+    let (digest, mutation_sequence) = if generation == 0 {
+        if floor_generation != 0 {
+            return Err(RuntimeError::SnapshotIncomplete);
+        }
+        (floor_digest, 0)
+    } else {
+        let mut checkpoint = transaction
+            .query(
+                "SELECT digest, mutation_sequence FROM checkpoint WHERE generation = ?1",
+                params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let row = checkpoint
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .ok_or(RuntimeError::SnapshotNotFound)?;
+        (
+            fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            decode_u64(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
+        )
+    };
+    if digest != capture.generation_digest() || mutation_sequence != snapshot.mutation_sequence {
+        return Err(RuntimeError::SnapshotContextMismatch);
+    }
+    let mut boundary = transaction
+        .query(
+            "SELECT admin_audit_sequence, checkpoint_reset_audit_sequence
+             FROM runtime_history_governance_boundary WHERE generation = ?1",
+            params![i64::try_from(generation).map_err(|_| RuntimeError::SnapshotNotFound)?],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = boundary
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::SnapshotIncomplete)?;
+    let admin_audit_sequence = decode_u64(
+        row.get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    let checkpoint_reset_audit_sequence = decode_u64(
+        row.get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    if admin_audit_sequence != snapshot.admin_audit_sequence
+        || checkpoint_reset_audit_sequence != snapshot.checkpoint_reset_audit_sequence
+    {
+        return Err(RuntimeError::SnapshotContextMismatch);
+    }
+    Ok(())
+}
+
+/// Applies retained reset audits as explicit version transitions when
+/// validating stream history. A reset is governance history, not a delivery
+/// Complete/Skip watermark, but it still anchors the checkpoint version chain.
+async fn validate_stream_checkpoint_reset_bridge(
+    connection: &Connection,
+    key_id: &str,
+    start_version: u64,
+    start_position: Option<&str>,
+    end_version: u64,
+) -> Result<Option<String>, RuntimeError> {
+    if end_version < start_version {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    let mut version = start_version;
+    let mut position = start_position.map(str::to_owned);
+    if let Some(position) = position.as_deref() {
+        decode_position(position.to_owned())?;
+    }
+    let mut rows = connection
+        .query(
+            "SELECT old_version, old_position, new_version, new_position,
+                    reason, redacted, observed_generation
+             FROM stream_checkpoint_reset_audit
+             WHERE key_id = ?1 AND new_version > ?2 AND new_version <= ?3
+             ORDER BY new_version, sequence",
+            params![
+                key_id,
+                i64::try_from(start_version).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                i64::try_from(end_version).map_err(|_| RuntimeError::RecoveryInvalid)?
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let old_version = decode_u64(
+            row.get::<i64>(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let old_position = row
+            .get::<Option<String>>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if let Some(old_position) = &old_position {
+            decode_position(old_position.clone())?;
+        }
+        let new_version = decode_u64(
+            row.get::<i64>(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let new_position: String = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        decode_position(new_position.clone())?;
+        let reason: String = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        validate_observation_text(&reason)?;
+        decode_bool(
+            row.get::<i64>(5)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let observed_generation: i64 =
+            row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if observed_generation < -1
+            || old_version != version
+            || old_position != position
+            || new_version != version.saturating_add(1)
+        {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        version = new_version;
+        position = Some(new_position);
+    }
+    if version != end_version {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(position)
+}
+
+async fn migrate_publication_policy_schema(connection: &Connection) -> Result<(), RuntimeError> {
+    let mut columns = connection
+        .query("PRAGMA table_info(publication_metadata)", ())
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    while let Some(row) = columns
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let name: String = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if name == "compressed_target_bytes" {
+            return Ok(());
+        }
+    }
+    connection
+        .execute(
+            "ALTER TABLE publication_metadata ADD COLUMN compressed_target_bytes \
+             INTEGER NOT NULL DEFAULT 16777216 \
+             CHECK (compressed_target_bytes BETWEEN 8388608 AND 33554432)",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
 }
 
 async fn migrate_compact_receipt_schema(connection: &Connection) -> Result<(), RuntimeError> {
@@ -14722,13 +18468,21 @@ mod tests {
     use super::*;
     use std::{
         cell::Cell,
-        collections::VecDeque,
+        collections::{BTreeMap, VecDeque},
         future::{Ready, ready},
         path::Path,
         process::Command,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
     use tempfile::TempDir;
+
+    const PROVIDER_EFFECT_FIXTURE: &str =
+        include_str!("../tests/fixtures/provider-effect-once.orna");
+    const PROCEDURE_INVOCATION_FIXTURE: &str =
+        include_str!("../tests/fixtures/procedure-invocation-lifecycle.orna");
 
     fn checkpoint_snapshot_component(value: &str) -> Component {
         Component::new(value).expect("test checkpoint component is valid")
@@ -14946,6 +18700,189 @@ mod tests {
         );
     }
 
+    fn write_checkpoint_snapshot_file(repo: &Repository, name: &str, bytes: &[u8]) {
+        let directory = repo.worktree().join(".orna/checkpoints");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(name), bytes).unwrap();
+    }
+
+    fn commit_checkpoint_snapshot(repo: &Repository, message: &str) -> GitCommitRef {
+        git(repo.worktree(), &["add", "--", ".orna/checkpoints"]);
+        git(repo.worktree(), &["commit", "-m", message]);
+        repo.head().unwrap().unwrap()
+    }
+
+    #[test]
+    fn checkpoint_snapshot_reader_uses_selected_commit_and_full_nullable_key() {
+        let (_temp, repo) = repository();
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        let fixture_watermark = decode_checkpoint_snapshot_watermark(fixture).unwrap();
+        write_checkpoint_snapshot_file(&repo, "fixture.orna", fixture);
+
+        let nullable_record = encode_checkpoint_snapshot_watermark(&checkpoint_snapshot_watermark(
+            None,
+            9,
+            "opaque:nullable",
+            StreamCheckpointTransition::Skip,
+        ))
+        .unwrap();
+        let nullable_watermark = decode_checkpoint_snapshot_watermark(&nullable_record).unwrap();
+        write_checkpoint_snapshot_file(&repo, "nullable.orna", &nullable_record);
+        let selected_commit = commit_checkpoint_snapshot(&repo, "checkpoint snapshot");
+
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            )
+            .unwrap(),
+            Some(fixture_watermark.clone())
+        );
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(None),
+            )
+            .unwrap(),
+            Some(nullable_watermark)
+        );
+
+        let mut different_source = checkpoint_snapshot_key(Some("tenant:west/17"));
+        different_source.source = checkpoint_snapshot_component("orders/other");
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(&repo, &selected_commit, &different_source).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(Some("tenant:east/99")),
+            )
+            .unwrap(),
+            None
+        );
+
+        let newer_record = encode_checkpoint_snapshot_watermark(&checkpoint_snapshot_watermark(
+            Some("tenant:west/17"),
+            99,
+            "opaque:newer-head",
+            StreamCheckpointTransition::Complete,
+        ))
+        .unwrap();
+        write_checkpoint_snapshot_file(&repo, "fixture.orna", &newer_record);
+        let newer_head = commit_checkpoint_snapshot(&repo, "newer checkpoint snapshot");
+        assert_ne!(newer_head, selected_commit);
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &selected_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            )
+            .unwrap(),
+            Some(fixture_watermark)
+        );
+        assert_eq!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &newer_head,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            )
+            .unwrap()
+            .unwrap()
+            .checkpoint
+            .version,
+            99
+        );
+    }
+
+    #[test]
+    fn checkpoint_snapshot_reader_fails_closed_for_duplicate_and_malformed_records() {
+        let (_temp, repo) = repository();
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        write_checkpoint_snapshot_file(&repo, "first.orna", fixture);
+        write_checkpoint_snapshot_file(&repo, "second.orna", fixture);
+        let duplicate_commit = commit_checkpoint_snapshot(&repo, "duplicate checkpoint records");
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(
+                &repo,
+                &duplicate_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            ),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+
+        let (_malformed_temp, malformed_repo) = repository();
+        write_checkpoint_snapshot_file(&malformed_repo, "valid.orna", fixture);
+        write_checkpoint_snapshot_file(&malformed_repo, "malformed.orna", b"not a checkpoint");
+        let malformed_commit =
+            commit_checkpoint_snapshot(&malformed_repo, "malformed checkpoint record");
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(
+                &malformed_repo,
+                &malformed_commit,
+                &checkpoint_snapshot_key(Some("tenant:west/17")),
+            ),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_snapshot_reader_rejects_unsafe_entries_and_invalid_bounds() {
+        let (_temp, repo) = repository();
+        let fixture = include_bytes!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        write_checkpoint_snapshot_file(&repo, "fixture.orna", fixture);
+        let first_commit = commit_checkpoint_snapshot(&repo, "checkpoint snapshot base");
+        let key = checkpoint_snapshot_key(Some("tenant:west/17"));
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark_bounded(&repo, &first_commit, &key, 0, 64),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark_bounded(&repo, &first_commit, &key, 8, 0),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark_bounded(&repo, &first_commit, &key, 8, 1),
+            Err(RuntimeError::StorageUnavailable)
+        ));
+
+        std::os::unix::fs::symlink(
+            "fixture.orna",
+            repo.worktree().join(".orna/checkpoints/symlink.orna"),
+        )
+        .unwrap();
+        let symlink_commit = commit_checkpoint_snapshot(&repo, "checkpoint symlink");
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(&repo, &symlink_commit, &key),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+
+        let (_submodule_temp, submodule_repo) = repository();
+        write_checkpoint_snapshot_file(&submodule_repo, "fixture.orna", fixture);
+        let base_commit = commit_checkpoint_snapshot(&submodule_repo, "checkpoint snapshot base");
+        let gitlink = format!(
+            "160000,{},.orna/checkpoints/submodule",
+            base_commit.as_str()
+        );
+        git(
+            submodule_repo.worktree(),
+            &["update-index", "--add", "--cacheinfo", &gitlink],
+        );
+        git(
+            submodule_repo.worktree(),
+            &["commit", "-m", "checkpoint submodule"],
+        );
+        let submodule_commit = submodule_repo.head().unwrap().unwrap();
+        assert!(matches!(
+            read_checkpoint_snapshot_watermark(&submodule_repo, &submodule_commit, &key),
+            Err(RuntimeError::RecoveryInvalid)
+        ));
+    }
+
     struct Fail(FaultPoint);
     impl FaultInjector for Fail {
         fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
@@ -15001,11 +18938,8 @@ mod tests {
     fn repository() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         git(temp.path(), &["init"]);
-        git(
-            temp.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(temp.path(), &["config", "user.name", "test"]);
+        git(temp.path(), &["config", "user.email", "kieran@drewett.dev"]);
+        git(temp.path(), &["config", "user.name", "kierandrewett"]);
         git(temp.path(), &["config", "commit.gpgsign", "false"]);
         let repository = Repository::discover(temp.path()).unwrap();
         (temp, repository)
@@ -15037,6 +18971,141 @@ mod tests {
         assert_eq!(
             synchronous, 2,
             "RuntimeState must use SQLite FULL synchronous mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_links_required_baked_system_provider_roles_at_open() {
+        let (_temp, repository) = repository();
+        let state = open_state(&repository).await;
+        let invoke = state
+            .system_provider_roles()
+            .resolve("langitem.sys.invoke")
+            .unwrap();
+        assert_eq!(invoke.provider.as_str(), "orna.sys.v1");
+
+        let checkout = state
+            .system_operation_contract("sys.admin.checkout(SnapshotRef)")
+            .expect("runtime resolves operations from the generated dispatch table");
+        assert!(!checkout.preconditions.is_empty());
+        let mut checked = Vec::new();
+        let admitted = state
+            .check_system_operation_preconditions(checkout.id.as_str(), |precondition| {
+                checked.push(precondition.declaration.clone());
+                Ok(())
+            })
+            .expect("native handler may run after every registered precondition passes");
+        assert_eq!(checked.len(), checkout.preconditions.len());
+        assert_eq!(admitted.id, checkout.id);
+
+        let precondition_failure = orna_sys_v1::FailureCode::new("sys.abi.precondition_failed")
+            .expect("shared precondition failure code is valid");
+        assert!(state
+            .validate_system_failure(checkout.id.as_str(), &precondition_failure)
+            .is_ok());
+
+        let dispatched = state
+            .dispatch_system_operation(
+                checkout.id.as_str(),
+                |_| Ok(()),
+                |contract| {
+                    assert_eq!(contract.id, checkout.id);
+                    Ok(7)
+                },
+            )
+            .expect("runtime dispatch uses the selected generated contract");
+        assert_eq!(dispatched, orna_sys_v1::SystemDispatchResult::Returned(7));
+
+        let mut native_handler_ran = false;
+        let rejected = state
+            .dispatch_system_operation(
+                checkout.id.as_str(),
+                |_| Err(precondition_failure.clone()),
+                |_| {
+                    native_handler_ran = true;
+                    Ok(())
+                },
+            )
+            .expect("a declared precondition failure is returned at the boundary");
+        assert_eq!(
+            rejected,
+            orna_sys_v1::SystemDispatchResult::Failed(precondition_failure.clone())
+        );
+        assert!(!native_handler_ran, "failed checks must stop native dispatch");
+
+        let undeclared_failure = orna_sys_v1::FailureCode::new("sys.storage.corrupt")
+            .expect("failure code syntax is valid");
+        assert!(matches!(
+            state.dispatch_system_operation(
+                checkout.id.as_str(),
+                |_| Ok(()),
+                |_| Err::<(), _>(undeclared_failure.clone()),
+            ),
+            Err(orna_sys_v1::ProviderDiagnostic::UndeclaredFailure { .. })
+        ));
+        assert!(matches!(
+            state.validate_system_failure(checkout.id.as_str(), &undeclared_failure),
+            Err(orna_sys_v1::ProviderDiagnostic::UndeclaredFailure { .. })
+        ));
+        assert!(matches!(
+            state.check_system_operation_preconditions(checkout.id.as_str(), |_| {
+                Err(precondition_failure.clone())
+            }),
+            Err(orna_sys_v1::ProviderDiagnostic::PreconditionFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn history_migration_seeds_current_rows_and_marks_older_generations_incomplete() {
+        let (_temp, repository) = repository();
+        let state = open_state(&repository).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let first_context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                writer,
+                &first_context,
+                &[table_mutation(5, 1, Some(11)), table_mutation(6, 2, Some(22))],
+                digest(7),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let second_context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                writer,
+                &second_context,
+                &[table_mutation(8, 1, Some(33))],
+                digest(9),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        // Simulate an existing database from before the history migration.
+        // Its current row image is known, but generation 1's row image is not.
+        let transaction = state.connection.transaction().await.unwrap();
+        transaction
+            .execute("DELETE FROM runtime_table_history", ())
+            .await
+            .unwrap();
+        transaction
+            .execute("DELETE FROM runtime_table_history_metadata", ())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        drop(state);
+
+        let reopened = open_state(&repository).await;
+        assert_eq!(
+            reopened.select_historical_snapshot(1).await.unwrap_err(),
+            RuntimeError::SnapshotIncomplete
+        );
+        let latest = reopened.select_historical_snapshot(2).await.unwrap();
+        assert_eq!(
+            reopened.read_table_at(&latest, "books").await.unwrap().rows(),
+            &[(vec![1], vec![33]), (vec![2], vec![22])]
         );
     }
 
@@ -15571,6 +19640,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_rekey_is_atomic_and_retained_as_one_mutation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(5, 1, Some(9)), table_mutation(6, 2, Some(8))],
+                digest(7),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        let context = state.begin_activation().await.unwrap();
+        let duplicate_insert =
+            TableMutation::insert(id(12), "books", vec![1], vec![11]).unwrap();
+        let before = context.capture().clone();
+        assert_eq!(
+            state
+                .commit_table_activation(
+                    lease,
+                    &context,
+                    &[duplicate_insert],
+                    digest(12),
+                    &NoFault,
+                )
+                .await,
+            Err(RuntimeError::InvalidTableMutation)
+        );
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), Some(vec![9]));
+
+        let insert = TableMutation::insert(id(13), "books", vec![3], vec![7]).unwrap();
+        state
+            .commit_table_activation(lease, &context, &[insert], digest(13), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(state.committed_table_row("books", &[3]).await.unwrap(), Some(vec![7]));
+
+        let context = state.begin_activation().await.unwrap();
+        let occupied = TableMutation::rekey(id(8), "books", vec![1], vec![2], vec![10])
+            .unwrap();
+        let before = context.capture().clone();
+        assert_eq!(
+            state
+                .commit_table_activation(lease, &context, &[occupied], digest(9), &NoFault)
+                .await,
+            Err(RuntimeError::InvalidTableMutation)
+        );
+        assert_eq!(state.capture().await.unwrap(), before);
+        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), Some(vec![9]));
+        assert_eq!(state.committed_table_row("books", &[2]).await.unwrap(), Some(vec![8]));
+
+        let rekey = TableMutation::rekey(id(10), "books", vec![1], vec![4], vec![10]).unwrap();
+        state
+            .commit_table_activation(lease, &context, &[rekey], digest(11), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(state.committed_table_row("books", &[1]).await.unwrap(), None);
+        assert_eq!(state.committed_table_row("books", &[4]).await.unwrap(), Some(vec![10]));
+
+        let pending = state.pending().await.unwrap();
+        let retained = TableMutation::decode(pending.last().unwrap()).unwrap();
+        assert_eq!(retained.key(), &[1]);
+        assert_eq!(retained.rekey_to(), Some(&[4][..]));
+        assert!(pending.last().unwrap().payload.starts_with(b"ORNA-TABLE-MUTATION-2\0"));
+    }
+
+    #[tokio::test]
     async fn typed_table_activation_rejects_a_missing_delete_without_advancing_state() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -15705,6 +19846,5898 @@ mod tests {
         );
         assert_eq!(snapshot.table_rows().get("unused"), Some(&Vec::new()));
         assert_eq!(snapshot.table_rows().len(), 2);
+    }
+
+    struct QuerySessionEffects<'session, 'snapshot> {
+        session: &'session RuntimeQuerySession<'snapshot>,
+        lookups: usize,
+        scans: usize,
+    }
+
+    fn static_query_table(expression: &orna_syntax_v1::Expr) -> Option<String> {
+        match expression {
+            orna_syntax_v1::Expr::Name { text, .. } => Some(text.clone()),
+            orna_syntax_v1::Expr::Field { base, name, .. } => {
+                Some(format!("{}.{}", static_query_table(base)?, name))
+            }
+            _ => None,
+        }
+    }
+
+    impl orna_evaluator_v1::EffectHandler for QuerySessionEffects<'_, '_> {
+        fn validate_relation_source(
+            &mut self,
+            source: &str,
+        ) -> Result<(), orna_evaluator_v1::EvaluationError> {
+            self.session.ensure_table_admitted(source).map_err(|error| {
+                orna_evaluator_v1::EvaluationError::redacted(SafeText::new(match error {
+                    RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
+                    RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                    RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
+                }).expect("static diagnostic code"))
+            })
+        }
+
+        fn handle(
+            &mut self,
+            callee: &orna_syntax_v1::Expr,
+            arguments: &[CanonicalValue],
+        ) -> Result<Option<CanonicalValue>, orna_evaluator_v1::EvaluationError> {
+            let failure = |code| {
+                orna_evaluator_v1::EvaluationError::redacted(
+                    SafeText::new(code).expect("static diagnostic code"),
+                )
+            };
+            let orna_syntax_v1::Expr::Field { base, name, .. } = callee else {
+                return Ok(None);
+            };
+            let Some(table) = static_query_table(base) else {
+                return Ok(None);
+            };
+            if name != "lookup" {
+                return Ok(None);
+            }
+            self.lookups += 1;
+            let [key] = arguments else {
+                return Err(failure("ORNA-EVAL-TABLE-ARGUMENT"));
+            };
+            let encoded_key = key
+                .encode()
+                .map_err(|_| failure("ORNA-EVAL-TABLE-KEY"))?;
+            let row = self.session.lookup_exact(&table, &encoded_key).map_err(|error| {
+                // The reference leaves runtime diagnostic spelling open; use
+                // the table layer's established missing-row code and keep an
+                // unadmitted relation distinct from a present-but-empty one.
+                failure(match error {
+                    RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
+                    RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                    RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
+                })
+            })?;
+            CanonicalValue::decode(row)
+                .map(Some)
+                .map_err(|_| failure("ORNA-EVAL-QUERY-ROW"))
+        }
+
+        fn scan_relation_page(
+            &mut self,
+            source: &str,
+            after: Option<&[u8]>,
+            limit: usize,
+            budget: &mut orna_evaluator_v1::StepBudget,
+        ) -> Result<Option<orna_evaluator_v1::RelationPage>, orna_evaluator_v1::EvaluationError> {
+            let failure = |code| {
+                orna_evaluator_v1::EvaluationError::redacted(
+                    SafeText::new(code).expect("static diagnostic code"),
+                )
+            };
+            let page = self
+                .session
+                .query_page(source, after, limit)
+                .map_err(|error| {
+                    failure(match error {
+                        RuntimeQueryError::TableNotAdmitted => "ORNA-EVAL-QUERY-TABLE",
+                        RuntimeQueryError::RowNotFound => "ORNA-EVAL-TABLE-MISSING",
+                        RuntimeQueryError::InvalidPageSize => "ORNA-EVAL-QUERY-PAGE",
+                    })
+                })?;
+            self.scans += 1;
+            // One unit admits each runtime page plus its decoded rows to the
+            // evaluator's activation budget, including an empty relation scan.
+            budget.debit(1 + page.rows.len() as u64)?;
+            let rows = page
+                .rows
+                .into_iter()
+                .map(|(_, row)| {
+                    CanonicalValue::decode(&row)
+                        .map_err(|_| failure("ORNA-EVAL-QUERY-ROW"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Some(orna_evaluator_v1::RelationPage {
+                rows,
+                next: page.next,
+            }))
+        }
+    }
+
+    fn invoke_query_fixture(
+        session: &RuntimeQuerySession<'_>,
+        source: &str,
+    ) -> (
+        Result<CanonicalValue, orna_evaluator_v1::EvaluationError>,
+        usize,
+    ) {
+        let mut effects = QuerySessionEffects {
+            session,
+            lookups: 0,
+            scans: 0,
+        };
+        let result = invoke_with_query_effects(source, &mut effects);
+        (result, effects.lookups)
+    }
+
+    fn invoke_query_fixture_with_counts(
+        session: &RuntimeQuerySession<'_>,
+        source: &str,
+    ) -> (
+        Result<CanonicalValue, orna_evaluator_v1::EvaluationError>,
+        usize,
+        usize,
+    ) {
+        let mut effects = QuerySessionEffects {
+            session,
+            lookups: 0,
+            scans: 0,
+        };
+        let result = invoke_with_query_effects(source, &mut effects);
+        (result, effects.lookups, effects.scans)
+    }
+
+    fn invoke_with_query_effects(
+        source: &str,
+        effects: &mut QuerySessionEffects<'_, '_>,
+    ) -> Result<CanonicalValue, orna_evaluator_v1::EvaluationError> {
+        let parsed = orna_syntax_v1::parse_expression(source);
+        assert!(parsed.is_ok(), "the in-crate query fixture must parse: {source}");
+        let result = orna_evaluator_v1::invoke_named_with_effects(
+            "query",
+            &orna_evaluator_v1::Functions::from([(
+                "query".into(),
+                orna_evaluator_v1::PureFunction {
+                    parameters: Vec::new(),
+                    body: parsed.value,
+                    environment: BTreeMap::new(),
+                },
+            )]),
+            &BTreeMap::new(),
+            orna_evaluator_v1::Limits::default(),
+            effects,
+        );
+        result
+    }
+
+    fn query_test_key(value: u8) -> Vec<u8> {
+        CanonicalValue::new(OvbRaw::Int(BigInt::from(value)))
+            .unwrap()
+            .encode()
+            .unwrap()
+    }
+
+    fn query_test_row(id_value: u8, title: &str, target: u8) -> Vec<u8> {
+        CanonicalValue::new(publication_text_map(vec![
+            ("id", OvbRaw::Int(BigInt::from(id_value))),
+            ("title", OvbRaw::Text(title.to_owned())),
+            ("target", OvbRaw::Int(BigInt::from(target))),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap()
+    }
+
+    fn query_test_mutation(id_value: u8, key: u8, value: Option<Vec<u8>>) -> TableMutation {
+        TableMutation::new(id(id_value), "sys.Storage", query_test_key(key), value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn query_relation_projection_effects_read_staged_insert_update_and_delete() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let original = query_test_row(7, "old", 7);
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[
+                    query_test_mutation(40, 7, Some(original.clone())),
+                    query_test_mutation(41, 8, Some(query_test_row(8, "remove", 8))),
+                ],
+                digest(42),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage", "empty"])
+            .await
+            .unwrap();
+        let mut session = snapshot.query_session();
+        let replacement = query_test_row(7, "new", 7);
+        let inserted = query_test_row(9, "new", 9);
+        session
+            .stage_mutation(query_test_mutation(43, 7, Some(replacement.clone())))
+            .unwrap();
+        session
+            .stage_mutation(query_test_mutation(44, 8, None))
+            .unwrap();
+        session
+            .stage_mutation(query_test_mutation(45, 9, Some(inserted.clone())))
+            .unwrap();
+
+        let first = session.query_page("sys.Storage", None, 1).unwrap();
+        assert_eq!(first.rows, vec![(query_test_key(7), replacement.clone())]);
+        assert_eq!(first.next, Some(query_test_key(7)));
+        let second = session
+            .query_page("sys.Storage", first.next.as_deref(), 1)
+            .unwrap();
+        assert_eq!(second.rows, vec![(query_test_key(9), inserted)]);
+        assert_eq!(second.next, None);
+        assert_eq!(
+            session.query_page("sys.Storage", None, 0),
+            Err(RuntimeQueryError::InvalidPageSize)
+        );
+        assert_eq!(
+            session.query_page("sys.Storage", None, MAX_RUNTIME_QUERY_PAGE_ROWS + 1),
+            Err(RuntimeQueryError::InvalidPageSize)
+        );
+        assert_eq!(
+            session.query_page("empty", None, 1).unwrap(),
+            RuntimeQueryPage {
+                rows: Vec::new(),
+                next: None,
+            }
+        );
+        assert_eq!(
+            session.query_page("not-admitted", None, 1),
+            Err(RuntimeQueryError::TableNotAdmitted)
+        );
+
+        let (projected, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-project-effects.orna"),
+        );
+        assert_eq!(
+            projected.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(lookups, 4, "each projected callback re-runs both effects");
+        assert_eq!(scans, 2, "the scan sees the updated row and staged insert only");
+
+        let (taken, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-project-take.orna"),
+        );
+        assert_eq!(
+            taken.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (1, 1), "take stops projected effects at its boundary");
+
+        let behind_cursor = query_test_row(6, "behind", 6);
+        let beyond_cursor = query_test_row(10, "new", 10);
+        session
+            .stage_mutation(query_test_mutation(46, 6, Some(behind_cursor.clone())))
+            .unwrap();
+        session
+            .stage_mutation(query_test_mutation(47, 9, None))
+            .unwrap();
+        session
+            .stage_mutation(query_test_mutation(48, 10, Some(beyond_cursor.clone())))
+            .unwrap();
+        let continued = session
+            .query_page("sys.Storage", first.next.as_deref(), 1)
+            .unwrap();
+        assert_eq!(continued.rows, vec![(query_test_key(10), beyond_cursor.clone())]);
+        assert_eq!(continued.next, None);
+
+        let old_row_8 = query_test_row(8, "remove", 8);
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(7))
+                .await
+                .unwrap(),
+            Some(original.clone()),
+            "session writes remain private before commit"
+        );
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(8))
+                .await
+                .unwrap(),
+            Some(old_row_8)
+        );
+        assert_eq!(
+            snapshot
+                .query_exact("sys.Storage", &query_test_key(7))
+                .unwrap(),
+            Some(&original[..]),
+            "the captured snapshot stays pinned while the overlay advances"
+        );
+
+        state
+            .commit_table_activation(
+                lease,
+                snapshot.context(),
+                session.staged_mutations(),
+                digest(49),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(7))
+                .await
+                .unwrap(),
+            Some(replacement)
+        );
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(8))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            state
+                .committed_table_row("sys.Storage", &query_test_key(9))
+                .await
+                .unwrap(),
+            None,
+            "a later staged delete hides an earlier staged insert"
+        );
+        let fresh = state
+            .begin_table_activation(&["sys.Storage"])
+            .await
+            .unwrap();
+        let fresh_session = fresh.query_session();
+        assert_eq!(
+            fresh_session
+                .query_page("sys.Storage", None, MAX_RUNTIME_QUERY_PAGE_ROWS)
+                .unwrap()
+                .rows,
+            vec![
+                (query_test_key(6), behind_cursor),
+                (query_test_key(7), query_test_row(7, "new", 7)),
+                (query_test_key(10), query_test_row(10, "new", 10)),
+            ],
+            "a fresh activation sees committed rows and the old cursor does not leak"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_closes_after_six_leading_and_seven_intermatch_rejects_before_four_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=19)
+            .map(|row_id| {
+                let title = if row_id == 7 || row_id == 15 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(59), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this more balanced reject split implicit.
+        // After six leading and seven inter-match rejects, take(2) must
+        // close before four trailing rejects and the failing union source.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-thirteen-rejects-split-six-seven-four-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(15u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (15, 15),
+            "take(2) traverses six leading and seven inter-match rejects, then leaves the four-reject tail and failing union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_closes_after_six_leading_and_seven_intermatch_rejects_before_twenty_nine_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=45)
+            .map(|row_id| {
+                let title = if row_id == 7 || row_id == 15 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(119), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this more balanced reject split implicit.
+        // After six leading and seven inter-match rejects, take(2) must
+        // close before twenty-nine trailing rejects and the failing union source.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-thirteen-rejects-split-six-seven-twenty-nine-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(15u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (15, 15),
+            "take(2) traverses six leading and seven inter-match rejects, then leaves the twenty-nine-reject tail and failing union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_closes_after_seven_leading_and_six_intermatch_rejects_before_four_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=19)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(59), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // This complementary split is not specified by the reference: after
+        // seven leading and six inter-match rejects, take(2) closes before
+        // four trailing rejects and the failing union source.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-thirteen-rejects-split-seven-six-four-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(15u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (15, 15),
+            "take(2) traverses seven leading and six inter-match rejects, then leaves the four-reject tail and failing union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_three_continues_after_seven_six_split_through_four_tail_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=20)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(60), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this continuation implicit: unlike take(2),
+        // take(3) must traverse the four rejects after the second match to
+        // reach the third match after the seven/six reject split.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-thirteen-rejects-split-seven-six-four-intermatch-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(20u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "take(3) continues after seven leading and six inter-match rejects, crosses the four-reject tail to match three, and leaves the union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_three_closes_after_seven_six_third_match_before_four_tail_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=24)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(61), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves the third-match boundary with an explicit
+        // rejected tail implicit. Once take(3) accepts row 20, the four
+        // trailing rejects and failing union source must remain unopened.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-thirteen-rejects-split-seven-six-third-match-four-trailing-rejects.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(20u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "take(3) traverses the seven/six reject split, stops at match three, and leaves four trailing rejects and the union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_three_closes_after_seven_six_third_match_before_one_tail_reject() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=21)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(62), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves the shortest nonempty tail implicit. Once
+        // take(3) accepts row 20 after the seven/six reject split, row 21
+        // and the failing union source must remain unopened.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-thirteen-rejects-split-seven-six-third-match-one-trailing-reject.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(20u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "take(3) closes on match three and leaves the one-row reject tail and union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_three_stops_before_trailing_reject_and_fourth_match() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 || row_id == 22 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(63), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference does not specify continuation after match three.
+        // A rejecting row followed by a fourth match makes that boundary
+        // observable: take(3) must return row 20 without touching either.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-thirteen-rejects-split-seven-six-before-reject-fourth-match.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(20u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "take(3) closes at its third match before the following rejected row, fourth match, and failing union source"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_three_stops_before_immediate_fourth_match() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=21)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 || row_id == 21 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(64), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves take(3)'s immediate fourth-match boundary
+        // implicit. Stop on row 20 and keep the adjacent fourth match and
+        // the failing union source unevaluated.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-thirteen-rejects-split-seven-six-before-immediate-fourth-match.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(20u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "take(3) closes at row 20 before the immediate fourth match and failing union source"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_three_closes_before_tail_lookup_failure_after_seven_six_split() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=21)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 21 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(65), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves a same-stream lookup failure immediately
+        // beyond the third accepted row implicit. take(3) must close before
+        // attempting row 21's target, which has no matching storage row.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-seven-six-third-match-before-lookup-failure-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(20u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "take(3) closes on match three before the missing-row lookup in the tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_three_closes_before_reject_then_lookup_failure_after_seven_six_split() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 22 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(66), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves a rejected row followed by a failing lookup
+        // beyond match three implicit. take(3) must close before row 21's
+        // rejection and row 22's missing-target lookup.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-seven-six-third-match-reject-before-lookup-failure-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(20u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "take(3) closes after match three before the rejected row and subsequent missing-row lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_closes_before_reject_then_lookup_failure_after_seven_six_split() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 22 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(68), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this take-two tail. After the second
+        // match, close before the following rejects and missing lookup.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-seven-six-second-match-reject-then-lookup-failure-tail.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(15u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (15, 15),
+            "take(2) closes on match two before the rejected tail and missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_reaches_lookup_failure_after_reject_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 22 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(69), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this still-short take(2) tail. After
+        // its sole match, rejected candidates do not close the query; keep
+        // evaluating until the following missing lookup reports failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-reject-tail-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (22, 22),
+            "take(2) remains short after rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_one_reject() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 10 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(70), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this immediate failure edge. One
+        // accepted row and the following rejection leave take(2) short, so
+        // the next missing lookup must remain observable.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-one-match-reject-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (10, 10),
+            "take(2) remains short after one reject and reaches the next missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_two_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 11 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(71), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on the two-reject tail. Neither rejection
+        // fills take(2), so preserve the missing-lookup failure that follows.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-two-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (11, 11),
+            "take(2) remains short after two rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_three_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 12 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(72), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on the three-reject continuation. The
+        // short take(2) must cross all three rejects and preserve the next
+        // missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-three-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (12, 12),
+            "take(2) remains short after three rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 13 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(79), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this four-reject tail. One match and
+        // four rejected candidates leave take(2) short, preserving the next
+        // missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (13, 13),
+            "take(2) remains short after one match and four rejects, then reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_leading_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 5 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(80), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this initial edge: four rejects leave
+        // take(2) unfilled, so preserve the subsequent missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (5, 5),
+            "four leading rejects leave take(2) short and expose the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_twenty_nine_leading_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=47)
+            .map(|row_id| {
+                let title = "current";
+                let target = if row_id == 30 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(118), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this initial edge: twenty-nine rejects leave
+        // take(2) unfilled, so preserve the subsequent missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-twenty-nine-leading-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (30, 30),
+            "twenty-nine leading rejects leave take(2) short and expose the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_and_one_match() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(81), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this boundary: four rejects followed
+        // by one match still leave take(2) short, preserving the next lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-one-match-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (6, 6),
+            "four rejects and one match leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_reject() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 7 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(82), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four rejects, one match,
+        // and another reject leave take(2) short before the failing lookup.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-reject-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (7, 7),
+            "four rejects, one match and one reject leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_two_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 8 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(83), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and two further rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-two-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (8, 8),
+            "four rejects, one match and two rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_three_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 9 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(84), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and three trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-three-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (9, 9),
+            "four rejects, one match and three rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_four_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 10 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(85), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and four trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-four-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (10, 10),
+            "four rejects, one match and four rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_five_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 11 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(86), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and five trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-five-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (11, 11),
+            "four rejects, one match and five rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_six_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 12 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(116), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and six trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-six-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (12, 12),
+            "four rejects, one match and six rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_seven_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 13 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(117), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and seven trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-seven-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (13, 13),
+            "four rejects, one match and seven rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_eight_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 14 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(87), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and eight trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-eight-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (14, 14),
+            "four rejects, one match and eight rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_nine_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 15 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(88), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and nine trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-nine-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (15, 15),
+            "four rejects, one match and nine rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_ten_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 16 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(89), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and ten trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-ten-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (16, 16),
+            "four rejects, one match and ten rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_eleven_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 17 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(90), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and eleven trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-eleven-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (17, 17),
+            "four rejects, one match and eleven rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twelve_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 18 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(91), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twelve trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twelve-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (18, 18),
+            "four rejects, one match and twelve rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_thirteen_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 19 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(92), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and thirteen trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-thirteen-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (19, 19),
+            "four rejects, one match and thirteen rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_fourteen_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 20 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(93), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and fourteen trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-fourteen-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (20, 20),
+            "four rejects, one match and fourteen rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_fifteen_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 21 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(94), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and fifteen trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-fifteen-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (21, 21),
+            "four rejects, one match and fifteen rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_sixteen_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 22 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(95), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and sixteen trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-sixteen-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (22, 22),
+            "four rejects, one match and sixteen rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_seventeen_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=23)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 23 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(96), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and seventeen trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-seventeen-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (23, 23),
+            "four rejects, one match and seventeen rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_eighteen_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=24)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 24 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(97), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and eighteen trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-eighteen-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (24, 24),
+            "four rejects, one match and eighteen rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_nineteen_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=25)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 25 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(98), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and nineteen trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-nineteen-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (25, 25),
+            "four rejects, one match and nineteen rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=26)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 26 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(99), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (26, 26),
+            "four rejects, one match and twenty rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_one_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=27)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 27 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(100), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty-one trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-one-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (27, 27),
+            "four rejects, one match and twenty-one rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_two_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=28)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 28 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(101), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty-two trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-two-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (28, 28),
+            "four rejects, one match and twenty-two rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_three_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=29)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 29 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(102), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty-three trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-three-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (29, 29),
+            "four rejects, one match and twenty-three rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_four_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=30)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 30 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(103), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty-four trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-four-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (30, 30),
+            "four rejects, one match and twenty-four rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_five_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=31)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 31 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(104), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty-five trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-five-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (31, 31),
+            "four rejects, one match and twenty-five rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_six_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=32)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 32 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(105), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty-six trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-six-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (32, 32),
+            "four rejects, one match and twenty-six rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_seven_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=33)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 33 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(106), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty-seven trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-seven-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (33, 33),
+            "four rejects, one match and twenty-seven rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_eight_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=34)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 34 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(107), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty-eight trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-eight-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (34, 34),
+            "four rejects, one match and twenty-eight rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_nine_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=35)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 35 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(108), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this edge: four leading rejects, one
+        // match, and twenty-nine trailing rejects leave take(2) short before failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-after-four-leading-rejects-match-twenty-nine-rejects-before-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (35, 35),
+            "four rejects, one match and twenty-nine rejects leave take(2) short before missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_split_three_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 2 { "later" } else { "current" };
+                let target = if row_id == 5 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(73), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this split tail. One reject before the
+        // sole match and two after it still leave take(2) short, so preserve
+        // the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-split-three-rejects-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (5, 5),
+            "take(2) remains short across split rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_four_split_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 3 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(74), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this four-reject split. Two rejects on
+        // either side of the sole match leave take(2) short, so preserve the
+        // following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-two-two-reject-split-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (6, 6),
+            "take(2) remains short across the four-reject split and reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_five_split_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 4 { "later" } else { "current" };
+                let target = if row_id == 7 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(75), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this asymmetric split. Three rejects
+        // before and two after the sole match leave take(2) short, so retain
+        // the subsequent missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-three-two-reject-split-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (7, 7),
+            "take(2) stays short across three leading and two trailing rejects, then reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_six_split_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 8 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(76), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this six-reject split. Four rejects
+        // before and two after the sole match leave take(2) short, so retain
+        // the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-four-two-reject-split-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (8, 8),
+            "take(2) remains short across four leading and two trailing rejects, then reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_seven_split_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 6 { "later" } else { "current" };
+                let target = if row_id == 9 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(77), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this seven-reject split. Five rejects
+        // before and two after the sole match leave take(2) short, so retain
+        // the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-five-two-reject-split-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (9, 9),
+            "take(2) remains short across five leading and two trailing rejects, then reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_eight_split_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 7 { "later" } else { "current" };
+                let target = if row_id == 10 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(78), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this eight-reject split. Six rejects
+        // before and two after the sole match leave take(2) short, so retain
+        // the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-six-two-reject-split-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (10, 10),
+            "take(2) remains short across six leading and two trailing rejects, then reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_split_distribution_eight_rejects_2_6() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 3 { "later" } else { "current" };
+                let target = if row_id == 10 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(120), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this 8-reject split. 2 rejects
+        // before and 6 after the sole match leave take(2) short, so
+        // preserve the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-split-eight-rejects-2-6-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (10, 10),
+            "take(2) remains short across the 2/6 reject split and reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_split_distribution_eight_rejects_4_4() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 5 { "later" } else { "current" };
+                let target = if row_id == 10 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(121), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this 8-reject split. 4 rejects
+        // before and 4 after the sole match leave take(2) short, so
+        // preserve the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-split-eight-rejects-4-4-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (10, 10),
+            "take(2) remains short across the 4/4 reject split and reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_split_distribution_nine_rejects_2_7() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 3 { "later" } else { "current" };
+                let target = if row_id == 11 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(122), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this 9-reject split. 2 rejects
+        // before and 7 after the sole match leave take(2) short, so
+        // preserve the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-split-nine-rejects-2-7-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (11, 11),
+            "take(2) remains short across the 2/7 reject split and reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_split_distribution_nine_rejects_7_2() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 11 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(123), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this 9-reject split. 7 rejects
+        // before and 2 after the sole match leave take(2) short, so
+        // preserve the following missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-one-match-split-nine-rejects-7-2-then-lookup-failure.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (11, 11),
+            "take(2) remains short across the 7/2 reject split and reaches missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_assigned_union_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(76), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on an assignment feeding the union tail.
+        // Resolve its missing key before the query, then preserve the tail
+        // lookup failure because one match still leaves take(2) short.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-assigned-lookup-id-missing-union-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (23, 28),
+            "the assigned union-tail id reaches lookup after the single match leaves take(2) short"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_late_match_assigned_union_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 15 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(124), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this 14/7 split across the assigned
+        // union boundary. One late match leaves take(2) short, so preserve
+        // the missing lookup from the following operand.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-assigned-lookup-id-missing-union-tail-late-match.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (23, 28),
+            "the assigned union-tail id fails lookup after fourteen leading rejects, one match, and seven trailing rejects"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_filter_assignment_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(77), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on assignment inside the union-tail
+        // predicate. Its one matching row leaves take(2) short, so retain
+        // the following lookup failure after the predicate assigns the key.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-filter-assignment-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (23, 28),
+            "the union-tail assignment admits the missing id after the one match leaves take(2) short"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_after_prefiltered_match_and_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(78), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on a prefilter ahead of the fallible
+        // post-filter. It accepts one match, rejects the rest of the left
+        // source, then must preserve the right-tail lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-prefiltered-single-match-then-missing-lookup.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (2, 28),
+            "the prefilter's one match leaves take(2) short and the passing union tail reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_projected_union_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(79), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on the second projection before a failing
+        // filter. Projection shifts the candidate key, then the filter maps
+        // it back; one match still leaves take(2) short at the union tail.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-project-shifted-key-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (23, 28),
+            "projection preserves the missing lookup after the single match leaves take(2) short"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_through_nested_union_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(80), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on a missing lookup in a nested union
+        // tail. One left-source match plus a nested reject leaves take(2)
+        // short, so the final nested lookup error must be preserved.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-reject-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (24, 50),
+            "take(2) remains short across the nested reject and reaches the nested missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_deeper_nested_union_tail() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(81), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on successive rejects at nested union
+        // levels. Their rows do not fill take(2), so keep evaluating through
+        // the next nested level and preserve its missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-two-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (25, 72),
+            "take(2) stays short across two nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_three_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(82), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on three successive nested rejects. None
+        // satisfy take(2), so preserve the failure at the innermost lookup.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-three-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (26, 94),
+            "take(2) stays short across three nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_four_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(83), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on four successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-four-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (27, 116),
+            "take(2) stays short across four nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_five_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(84), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on five successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-five-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (28, 138),
+            "take(2) stays short across five nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_six_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(85), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on six successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-six-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (29, 160),
+            "take(2) stays short across six nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_seven_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(86), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on seven successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-seven-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (30, 182),
+            "take(2) stays short across seven nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_eight_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(87), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on eight successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-eight-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (31, 204),
+            "take(2) stays short across eight nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_nine_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(88), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on nine successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-nine-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (32, 226),
+            "take(2) stays short across nine nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_ten_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(89), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on ten successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-ten-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (33, 248),
+            "take(2) stays short across ten nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_eleven_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(90), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on eleven successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-eleven-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (34, 270),
+            "take(2) stays short across eleven nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_twelve_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(91), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on twelve successive nested rejects. None
+        // satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-twelve-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (35, 292),
+            "take(2) stays short across twelve nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_thirteen_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(92), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on thirteen successive nested rejects.
+        // None satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-thirteen-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (36, 314),
+            "take(2) stays short across thirteen nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_fourteen_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(93), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on fourteen successive nested rejects.
+        // None satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-fourteen-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (37, 336),
+            "take(2) stays short across fourteen nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_fifteen_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(94), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on fifteen successive nested rejects.
+        // None satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-fifteen-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (38, 358),
+            "take(2) stays short across fifteen nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_preserves_lookup_failure_across_sixteen_nested_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 { "later" } else { "current" };
+                let target = if row_id == 6 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(95), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on sixteen successive nested rejects.
+        // None satisfy take(2), so preserve the innermost missing-lookup failure.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-nested-sixteen-rejects-then-missing-lookup-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (39, 380),
+            "take(2) stays short across sixteen nested rejects and reaches the missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_four_reaches_lookup_failure_after_reject_after_seven_six_split() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=22)
+            .map(|row_id| {
+                let title = if row_id == 8 || row_id == 15 || row_id == 20 {
+                    "later"
+                } else {
+                    "current"
+                };
+                let target = if row_id == 22 { 99 } else { row_id };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, target)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(67), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference is silent on this one-match-short boundary. A reject
+        // does not satisfy take(4), so continue into the following missing
+        // lookup and preserve its failure after the seven/six reject split.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-four-seven-six-third-match-reject-then-lookup-failure-tail.orna"
+            ),
+        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (22, 22),
+            "take(4) visits the rejected candidate then fails at the following missing lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_closes_after_thirteen_split_rejects_before_four_tail_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=19)
+            .map(|row_id| {
+                let title = if row_id == 2 || row_id == 15 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(59), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this split implicit. Traverse one leading
+        // and twelve inter-match rejects, then close before the four-row
+        // rejected tail and failing union source.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-thirteen-split-rejects-four-trailing.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(15u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (15, 15),
+            "take(2) traverses one leading and twelve inter-match rejects, then leaves the four-reject tail and failing union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_take_two_closes_after_thirteen_intermatch_rejects_before_four_tail_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=19)
+            .map(|row_id| {
+                let title = if row_id == 1 || row_id == 15 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(59), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this two-match edge implicit. After thirteen
+        // rejects between the matches, take(2) must close before four more
+        // rejects and the failing union source.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-thirteen-intermatch-four-tail-rejects.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(15u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (15, 15),
+            "take(2) traverses thirteen inter-match rejects and leaves the four-reject tail and failing union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_four_tail_rejects_follow_thirteen_matches() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=29)
+            .map(|row_id| {
+                let title = if row_id <= 25 && row_id % 2 == 1 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(69), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this longer interleaving implicit. After
+        // twelve rejects between thirteen matches, the four-row trailing
+        // reject run and failing union source must remain unopened.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-thirteen-after-interleaving-four-trailing-rejects.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(25u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (25, 25),
+            "take(13) traverses twelve inter-match rejects, then leaves the four-reject tail and failing union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_four_trailing_rejects_follow_thirteen_interleaved_rejects() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        let mutations = (1u8..=31)
+            .map(|row_id| {
+                let title = if row_id <= 27 && row_id % 2 == 1 {
+                    "later"
+                } else {
+                    "current"
+                };
+                query_test_mutation(
+                    row_id + 40,
+                    row_id,
+                    Some(query_test_row(row_id, title, 99)),
+                )
+            })
+            .collect::<Vec<_>>();
+        state
+            .commit_table_activation(lease, &context, &mutations, digest(71), &NoFault)
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let session = snapshot.query_session();
+        // The reference leaves this longer interleaving implicit. The
+        // thirteenth rejection is followed by the four-row trailing reject
+        // run; filling take(14) must stop before either that run or union's
+        // failing right source is traversed.
+        let (result, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-fourteen-thirteen-interleaved-rejects-four-trailing.orna"
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(27u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (27, 27),
+            "take(14) traverses thirteen interleaved rejects, then leaves the four-reject tail and failing union source unopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_projection_failures_recover_at_the_outer_boundary() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[
+                    query_test_mutation(40, 7, Some(query_test_row(7, "current", 7))),
+                    query_test_mutation(41, 8, Some(query_test_row(8, "later", 99))),
+                ],
+                digest(41),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let snapshot = state
+            .begin_table_activation(&["sys.Storage", "sys.MaintenanceJob"])
+            .await
+            .unwrap();
+        let mut session = snapshot.query_session();
+
+        let (empty, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-take-zero-empty.orna"),
+        );
+        assert_eq!(
+            empty.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "admitted empty take(0) avoids row scans");
+        let unavailable_snapshot = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let unavailable_session = unavailable_snapshot.query_session();
+        let (unadmitted, lookups, scans) = invoke_query_fixture_with_counts(
+            &unavailable_session,
+            include_str!("../tests/fixtures/query-session-take-zero-unadmitted.orna"),
+        );
+        assert_eq!(
+            unadmitted.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "unadmitted take(0) reports visibility without enumerating rows"
+        );
+
+        // Even a sorted union must preserve each source's admission boundary
+        // before the zero-row shortcut skips scans and sort-key evaluation.
+        let (union_zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-take-zero-union-sorted.orna"),
+        );
+        assert_eq!(
+            union_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "admitted zero-take union does no query work");
+
+        // A later missing source in a nested union must remain visible after
+        // earlier nested sources pass admission, even though take(0) skips them.
+        let (nested_union_zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-take-zero-nested-union.orna"),
+        );
+        assert_eq!(
+            nested_union_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "admitted nested union does no query work");
+
+        let storage_only = state.begin_table_activation(&["sys.Storage"]).await.unwrap();
+        let storage_only = storage_only.query_session();
+        let (missing_right, lookups, scans) = invoke_query_fixture_with_counts(
+            &storage_only,
+            include_str!("../tests/fixtures/query-session-take-zero-union-sorted.orna"),
+        );
+        assert_eq!(
+            missing_right.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "unadmitted right source fails before scanning");
+
+        let (missing_nested_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &storage_only,
+            include_str!("../tests/fixtures/query-session-take-zero-nested-union.orna"),
+        );
+        assert_eq!(
+            missing_nested_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "a missing nested-union tail remains visible without row work"
+        );
+
+        let maintenance_only = state
+            .begin_table_activation(&["sys.MaintenanceJob"])
+            .await
+            .unwrap();
+        let maintenance_only = maintenance_only.query_session();
+        let (missing_left, lookups, scans) = invoke_query_fixture_with_counts(
+            &maintenance_only,
+            include_str!("../tests/fixtures/query-session-take-zero-union-sorted.orna"),
+        );
+        assert_eq!(
+            missing_left.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "unadmitted left source fails before scanning");
+
+        let (missing_nested_head, lookups, scans) = invoke_query_fixture_with_counts(
+            &maintenance_only,
+            include_str!("../tests/fixtures/query-session-take-zero-nested-union.orna"),
+        );
+        assert_eq!(
+            missing_nested_head.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "a missing nested-union head remains visible without row work"
+        );
+
+        // A zero-take child empties only its own union side. Preserve left to
+        // right execution, and surface a missing right relation after the
+        // left side has already produced its rows.
+        let (right_zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-right-take-zero.orna"),
+        );
+        assert_eq!(
+            right_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 2), "left rows run before the empty right branch");
+
+        let (right_zero_missing, lookups, scans) = invoke_query_fixture_with_counts(
+            &storage_only,
+            include_str!("../tests/fixtures/query-session-union-right-take-zero.orna"),
+        );
+        assert_eq!(
+            right_zero_missing.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 2),
+            "the missing zero-take right source fails after the left rows are observed"
+        );
+
+        // The symmetric case proves that an empty left child does not suppress
+        // the right side, and that the left source is still admission-checked.
+        let (left_zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-left-take-zero.orna"),
+        );
+        assert_eq!(
+            left_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 1), "right rows run after the empty left branch");
+
+        let (left_zero_missing, lookups, scans) = invoke_query_fixture_with_counts(
+            &maintenance_only,
+            include_str!("../tests/fixtures/query-session-union-left-take-zero.orna"),
+        );
+        assert_eq!(
+            left_zero_missing.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (0, 0),
+            "the missing right source remains visible after an admitted empty left child"
+        );
+
+        // When both union children take zero, each source still crosses its
+        // admission boundary while neither projection nor row scan executes.
+        let both_zero_fixture =
+            include_str!("../tests/fixtures/query-session-union-both-take-zero.orna");
+        let (both_zero, lookups, scans) =
+            invoke_query_fixture_with_counts(&session, both_zero_fixture);
+        assert_eq!(
+            both_zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "both admitted zero-take children do no row work");
+
+        let (both_zero_missing_right, lookups, scans) =
+            invoke_query_fixture_with_counts(&storage_only, both_zero_fixture);
+        assert_eq!(
+            both_zero_missing_right.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "zero-take right child retains visibility");
+
+        let (both_zero_missing_left, lookups, scans) =
+            invoke_query_fixture_with_counts(&maintenance_only, both_zero_fixture);
+        assert_eq!(
+            both_zero_missing_left.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-TABLE".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "zero-take left child retains visibility");
+
+        // An empty union child must not suppress an effectful sibling's
+        // projection failure, regardless of whether the failure is on the
+        // left (before the empty right child) or right (after the empty left).
+        let (left_projection_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-right-zero-left-projection-failure.orna"
+            ),
+        );
+        assert_eq!(
+            left_projection_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (2, 2), "left projection fails before the zero-take right child");
+
+        let (right_projection_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-left-zero-right-projection-failure.orna"
+            ),
+        );
+        assert_eq!(
+            right_projection_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (2, 2), "right projection runs after the zero-take left child");
+
+        // Union siblings are separate effectful projection calls, processed
+        // left to right. Identical projection source must not reuse results.
+        let (both_projected, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-both-siblings.orna"),
+        );
+        assert_eq!(
+            both_projected.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(4u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "each sibling projects both rows independently"
+        );
+
+        let (right_projection_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-right-failure.orna"),
+        );
+        assert_eq!(
+            right_projection_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "left projection completes before the right projection fails"
+        );
+
+        let (left_projection_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-left-failure.orna"),
+        );
+        assert_eq!(
+            left_projection_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "a left projection failure stops the right sibling before its effects"
+        );
+
+        // Taking across an ordered union consumes the left prefix before the
+        // right branch; bounded results must leave later right-side failures latent.
+        let (union_take_one, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-take-one.orna"),
+        );
+        assert_eq!(
+            union_take_one.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (1, 1), "take(1) never enters the right sibling");
+
+        let (union_take_two, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-take-two.orna"),
+        );
+        assert_eq!(
+            union_take_two.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "take(2) crosses into only the first right-side projection"
+        );
+
+        let (union_take_three, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-take-three.orna"),
+        );
+        assert_eq!(
+            union_take_three.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "take(3) reaches and reports the later right-side projection failure"
+        );
+
+        // Reaching the exact end of the complete left sibling is also a
+        // terminal boundary: the right sibling remains untouched until the
+        // requested result requires rows from it.
+        let (exact_left_bound, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-take-exact-left-bound.orna"
+            ),
+        );
+        assert_eq!(
+            exact_left_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(2u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the exact left-side bound does not enter the right sibling"
+        );
+
+        let (one_right_row, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-union-project-take-one-right.orna"),
+        );
+        assert_eq!(
+            one_right_row.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "one additional requested row evaluates one right-side projection"
+        );
+
+        let (right_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-take-right-failure.orna"
+            ),
+        );
+        assert_eq!(
+            right_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "the additional bound reaches and reports the second right-side projection"
+        );
+
+        // ORNA-ORDER-003 fixes union's left-to-right concatenation, and the
+        // query-operator table says take must not enumerate beyond what the
+        // result requires. It does not spell out child-local take versus a
+        // larger outer bound, so keep the child bound lazy: its discarded
+        // tail must not run effects.
+        let (child_bound_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-take-child-bound-tail.orna"
+            ),
+        );
+        assert_eq!(
+            child_bound_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "a right child's take(1) caps its effects even when outer take asks for more"
+        );
+
+        // The reference specifies bounded enumeration and left-to-right
+        // union order, but leaves effect visibility at a nested child cap
+        // implicit. With right take(2), outer demand three leaves its second
+        // (failing) projection latent; demand four requires it and reports it.
+        let (right_child_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-right-child-bound-outer-stops.orna"
+            ),
+        );
+        assert_eq!(
+            right_child_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "outer demand below the right child cap does not evaluate its failing tail"
+        );
+
+        let (right_child_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-right-child-bound-outer-reaches.orna"
+            ),
+        );
+        assert_eq!(
+            right_child_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "outer demand reaching the right child tail reports its failure"
+        );
+
+        // The reference defines filter and take bounds independently, but
+        // does not spell out failure visibility while a downstream take is
+        // searching through a right child. A rejected row does not satisfy
+        // take(1), so continue in stream order and surface the next projection
+        // failure instead of treating it as an excluded tail.
+        let (filtered_right_child_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-right-filter-demand-reaches-failure.orna"
+            ),
+        );
+        assert_eq!(
+            filtered_right_child_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "take(1) searches past the rejected right-child row and reaches its failure"
+        );
+
+        // The filter/take rules say to retain matches and stop once the
+        // requested result exists. The reference does not separately state
+        // that this also keeps a later effectful child tail latent. One
+        // matching right row satisfies take(1), so the following bad lookup
+        // must not run.
+        let (filtered_right_child_match, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-right-filter-demand-stops-after-match.orna"
+            ),
+        );
+        assert_eq!(
+            filtered_right_child_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "the first matching right-child row satisfies demand before its failing tail"
+        );
+
+        // The reference fixes union order and bounded results but does not
+        // detail stop propagation through a nested union after a later child
+        // row matches. After the first row is rejected, the second match
+        // satisfies take(1); do not enter the nested union's failing tail.
+        let (nested_right_match, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-nested-right-filter-second-match-stops.orna"
+            ),
+        );
+        assert_eq!(
+            nested_right_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the second nested-child row satisfies demand before its failing union tail"
+        );
+
+        // The reference specifies filter retention, union ordering and
+        // bounded enumeration, but does not detail propagation through a
+        // filter inside a nested union child. Its second source row matches
+        // after the first is rejected; once take(1) is satisfied, neither
+        // the child's remaining source nor its nested sibling is needed.
+        let (nested_child_filter_match, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-nested-child-filter-second-match-stops.orna"
+            ),
+        );
+        assert_eq!(
+            nested_child_filter_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "a nested child's second-row match stops before its sibling's failing projection"
+        );
+
+        // The reference does not detail how filter demand propagates through
+        // multiple nested unions after an earlier child is fully rejected.
+        // The next child finds one match, which satisfies the parent take and
+        // must leave the final nested projection failure latent.
+        let (nested_filter_stop, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-nested-filter-stop-after-second-child-match.orna"
+            ),
+        );
+        assert_eq!(
+            nested_filter_stop.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "the second nested child supplies one match without entering its failing sibling"
+        );
+
+        // The reference gives filters, union order and bounded enumeration,
+        // but not demand propagation when an outer filter rejects one nested
+        // child's match. Continue to the next child; once it supplies the
+        // outer match, stop before the deeper failing projection.
+        let (nested_filter_reject_then_stop, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-nested-filter-reject-child-then-stop.orna"
+                ),
+            );
+        assert_eq!(
+            nested_filter_reject_then_stop.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "a later nested child satisfies the outer filter before the failing tail"
+        );
+
+        // The reference specifies left-to-right union order and bounded
+        // filtering, but leaves demand propagation across a bounded sibling
+        // followed by a nested filter implicit. Reject the first sibling's
+        // bounded row, then reject the nested union's first child; the next
+        // child supplies the match and keeps its failing tail unevaluated.
+        let (nested_filter_after_bounded_sibling, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-nested-filter-after-bounded-sibling.orna"
+                ),
+            );
+        assert_eq!(
+            nested_filter_after_bounded_sibling.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "the nested later match satisfies demand before its failing sibling tail"
+        );
+
+        // The reference defines take and filter in pipeline order but does
+        // not spell out continuation after a post-take filter rejects a
+        // bounded sibling. Each of the first two siblings stops at its bound
+        // before filtering out its row; the next nested filter finds the
+        // match, so its failing sibling must remain untouched.
+        let (bounded_filter_after_nested_stop, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-nested-filter-after-take-bound.orna"
+                ),
+            );
+        assert_eq!(
+            bounded_filter_after_nested_stop.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "a nested filter match follows two bounded rejects without evaluating its tail"
+        );
+
+        // The reference fixes union order and order-preserving filter/take,
+        // but leaves a rejected outer take bound across nested siblings
+        // implicit. The first row consumes the outer bound before filtering;
+        // that rejection must stop the whole nested union before its bad tail.
+        let (outer_bounded_filter_stops_nested_siblings, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-take-filter-stops-nested-siblings.orna"
+                ),
+            );
+        assert_eq!(
+            outer_bounded_filter_stops_nested_siblings.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "the rejected outer bounded row prevents any nested sibling projection"
+        );
+
+        // With a larger take bound, one rejected row does not exhaust the
+        // parent relation. Continue in order until a later match consumes the
+        // bound, then stop before the following nested projection failure.
+        let (outer_take_two_filter_stops_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-take-two-filter-stops-tail.orna"
+                ),
+            );
+        assert_eq!(
+            outer_take_two_filter_stops_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the second in-bound match stops before the nested failing sibling"
+        );
+
+        // A downstream take can satisfy demand while the earlier outer take
+        // still has room. The reference does not spell out this demand
+        // propagation through a filter; keep the later nested failure latent
+        // after the first post-filter match.
+        let (filtered_consumer_bound_stops_larger_outer, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-take-filter-consumer-stop.orna"
+                ),
+            );
+        assert_eq!(
+            filtered_consumer_bound_stops_larger_outer.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "downstream take(1) stops after the first filtered match before the bad sibling"
+        );
+
+        // `first()` is itself a bounded consumer. After its filter finds a
+        // row within a still-open outer take, observation must stop the
+        // nested source before the following projection failure.
+        let (first_consumer_stops_filtered_outer_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-stops-tail.orna"
+                ),
+            );
+        assert_eq!(
+            first_consumer_stops_filtered_outer_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "first() stops after the filtered match without opening the failing sibling"
+        );
+
+        // The reference defines filter order and bounded enumeration but is
+        // silent on `first()` continuing through a rejected child into a
+        // nested union. Reject both direct rows, then stop on the nested
+        // child's match before its following missing target is evaluated.
+        let (first_after_rejected_child, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-stops-after-rejected-child.orna"
+                ),
+            );
+        assert_eq!(
+            first_after_rejected_child.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(107u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "first() crosses the rejected child, then stops before the nested failing tail"
+        );
+
+        // The reference does not spell out `first()` exhausting a filtered
+        // outer bound with no match. It returns the empty fallback after the
+        // third in-bound rejection, without projecting the excluded failure.
+        let (first_exhausts_filtered_outer_bound, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-exhausts-bound.orna"
+                ),
+            );
+        assert_eq!(
+            first_exhausts_filtered_outer_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "first() exhausts only the outer prefix when its filter has no match"
+        );
+
+        // The reference leaves the inclusive closure edge of a filtered
+        // outer take implicit. A match on its final row satisfies `first()`;
+        // the following missing projection lies outside the bound.
+        let (first_matches_at_filtered_outer_bound, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-last-bound-match.orna"
+                ),
+            );
+        assert_eq!(
+            first_matches_at_filtered_outer_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(107u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "first() includes a match at the outer boundary and leaves the tail unopened"
+        );
+
+        // The reference defines last(), filtering, and bounded take
+        // separately but leaves their nested-union closure interplay
+        // implicit. Unlike first(), last() must consume the whole three-row
+        // prefix to return its boundary match, while the failing fourth row
+        // remains outside the closed outer bound.
+        let (last_closes_filtered_outer_bound, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-closes-bound.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_filtered_outer_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(107u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "last() closes the filtered outer prefix without evaluating the failing tail"
+        );
+
+        // The reference leaves `last()`'s empty result at a filtered outer
+        // edge implicit. Consume the full three-row prefix, but keep its
+        // matching fourth row outside the bound so the result stays empty.
+        let (last_excludes_next_filtered_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-excludes-next-match.orna"
+                ),
+            );
+        assert_eq!(
+            last_excludes_next_filtered_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "last() returns empty after the bounded prefix without scanning its next match"
+        );
+
+        // The reference defines take, filter, and last independently but
+        // leaves this nested-union closure edge implicit. The fourth row's
+        // filter lookup would fail; last() consumes only the three admitted
+        // rows and returns their final match without evaluating that predicate.
+        let (last_skips_next_filtered_predicate, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-skips-next-predicate.orna"
+                ),
+            );
+        assert_eq!(
+            last_skips_next_filtered_predicate.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (5, 3),
+            "last() evaluates predicates within the outer prefix and skips the failing next predicate"
+        );
+
+        // The reference leaves filter-predicate failure at the inclusive
+        // outer edge implicit. This fourth row is admitted, so last() must
+        // observe the predicate's missing lookup even after an earlier match.
+        let (last_includes_bound_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-includes-bound-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = last_includes_bound_predicate_failure.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (6, 4),
+            "last() observes the failing predicate on the outer bound's final admitted row"
+        );
+
+        // The reference defines last(), predicate evaluation, and bounded
+        // enumeration separately but leaves a failure on the first admitted
+        // row implicit. A later in-bound row would match, but last() must
+        // surface the initial predicate error without continuing the tail.
+        let (last_surfaces_initial_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-initial-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = last_surfaces_initial_predicate_failure.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (1, 2),
+            "last() returns the first-row predicate failure before evaluating the later match"
+        );
+
+        // The reference leaves last()'s handling of an early predicate
+        // failure after a nonmatching row implicit. A later row in the
+        // bounded union would match, but the missing lookup on row two stops
+        // last() before it evaluates that tail.
+        let (last_stops_at_middle_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-middle-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = last_stops_at_middle_predicate_failure.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "last() returns a middle-row predicate failure before evaluating the later match"
+        );
+
+        // The reference leaves failure after an already-matching predicate
+        // inside last()'s bounded union implicit. Propagate the later missing
+        // lookup instead of returning that earlier match, without evaluating
+        // the final in-bound match after the failure.
+        let (last_propagates_middle_failure_after_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-middle-predicate-failure-after-match.orna"
+                ),
+            );
+        let predicate_failure = last_propagates_middle_failure_after_match.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() propagates a middle-row failure after a match before evaluating the tail predicate"
+        );
+
+        // The reference leaves the inclusive outer edge after the final
+        // matching row implicit when that next predicate fails. Even though
+        // row three matches, last() consumes row four and propagates its
+        // missing lookup rather than returning the earlier match.
+        let (last_surfaces_failure_after_last_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-match-tail-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = last_surfaces_failure_after_last_match.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (6, 6),
+            "last() propagates the inclusive tail failure after the final match"
+        );
+
+        // The reference is silent when a nonmatching tail row separates
+        // last()'s final match from an admitted failing predicate. Consume
+        // through that tail and propagate the fifth-row error rather than
+        // returning the row-three match.
+        let (last_surfaces_failure_after_final_match_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-final-match-tail-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = last_surfaces_failure_after_final_match_tail.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (7, 6),
+            "last() propagates a final tail failure after its last match"
+        );
+
+        // The reference leaves closure just after a nonmatching row
+        // following last()'s match implicit. The next row would fail its
+        // lookup, but it is outside the four-row prefix and must stay unseen.
+        let (last_closes_after_final_match_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-final-match-edge-excludes-next-failure.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_final_match_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (6, 5),
+            "last() returns its final match after the bounded nonmatch without evaluating the failing next row"
+        );
+
+        // The reference specifies ordered union, bounded take, and callback
+        // failure propagation separately, but leaves this last() boundary
+        // edge implicit. The prefix ends on its final match; the next union
+        // branch would emit a missing lookup and must remain unopened.
+        let (last_closes_on_final_match_before_failing_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-final-match-at-bound-excludes-failure.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_on_final_match_before_failing_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "last() closes on its final matching row without evaluating the failing union tail"
+        );
+
+        // The reference specifies filter order, bounded take, and callback
+        // failure propagation separately, but leaves this post-filter
+        // boundary interaction with last() implicit. Once take(1) receives
+        // its match, the later failing predicate is outside the demanded
+        // prefix and must remain unevaluated.
+        let (last_closes_after_post_filter_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-closes-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_post_filter_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "last() returns the post-filter boundary match without evaluating the failing tail"
+        );
+
+        // The reference leaves failure while filling a post-filter take
+        // bound implicit. With take(2), one match is not enough to close the
+        // prefix, so last() continues in order and propagates the next
+        // predicate failure instead of returning that partial tail.
+        let (last_surfaces_failure_before_post_filter_bound, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-needs-failing-tail.orna"
+                ),
+            );
+        let predicate_failure = last_surfaces_failure_before_post_filter_bound.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() continues after one post-filter match until the second-row predicate fails"
+        );
+
+        // The reference requires bounded take not to enumerate beyond its
+        // demand, but leaves last() closing immediately after the second
+        // post-filter match implicit. The later missing lookup is outside
+        // the filled prefix and must stay unopened.
+        let (last_closes_after_second_post_filter_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-closes-after-second-match.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_second_post_filter_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes after two post-filter matches before opening the failing tail"
+        );
+
+        // The reference is silent when a post-filter take naturally exhausts
+        // below its requested count. Preserve the available final match
+        // after a trailing nonmatch instead of treating a short prefix as a
+        // failure or discarding its result.
+        let (last_returns_short_post_filter_take_after_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-exhausts-after-nonmatch.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_short_post_filter_take_after_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 4),
+            "last() returns the partial post-filter prefix after a nonmatching tail exhausts"
+        );
+
+        // The reference is silent when take(2) naturally exhausts with one
+        // accepted row bracketed by rejected rows. Preserve that partial
+        // prefix through both the leading and trailing nonmatch.
+        let (last_returns_bracketed_single_match_short_take_two, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-short-bracketed-match.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_bracketed_single_match_short_take_two.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() returns the sole accepted row after take(2) exhausts between nonmatches"
+        );
+
+        // The reference leaves repeated trailing rejects after a bracketed
+        // match implicit. A short take(2) must preserve its accepted value
+        // while both tail candidates are tested and the source exhausts.
+        let (last_returns_bracketed_match_after_repeated_trailing_nonmatches, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-short-bracketed-match-repeated-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_bracketed_match_after_repeated_trailing_nonmatches.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() preserves the bracketed match across two trailing nonmatches"
+        );
+
+        // The reference leaves a bracketed stream that fills take(2)
+        // before its final rejected row implicit. Preserve both accepted
+        // matches across the leading and interleaved rejects, then close
+        // without evaluating the trailing reject.
+        let (last_closes_full_bracketed_take_two_before_trailing_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-matches-close-before-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_full_bracketed_take_two_before_trailing_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() closes the bracketed take(2) after its second match before the trailing nonmatch"
+        );
+
+        // The reference leaves a rejected row followed by a failing source
+        // beyond the completed bracketed take(2) implicit. Once the second
+        // match closes the prefix, neither tail candidate is evaluated.
+        let (last_closes_bracketed_take_two_before_rejected_and_failing_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-reject-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_before_rejected_and_failing_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes the bracketed take(2) before both rejected and failing tail sources"
+        );
+
+        // The reference leaves the longer tail after a completed filtered
+        // take implicit. Two consecutive rejects and a failing source must
+        // all remain beyond the boundary after the second bracketed match.
+        let (last_closes_bracketed_take_two_before_repeated_rejects_and_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-repeated-rejects-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_before_repeated_rejects_and_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes before repeated rejected branches and the failing tail"
+        );
+
+        // The reference leaves progressively longer closed tails implicit.
+        // Three consecutive rejected branches and a failing source must all
+        // stay unevaluated after the bracketed take(2) receives its second
+        // match.
+        let (last_closes_bracketed_take_two_before_three_rejects_and_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-three-rejects-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_before_three_rejects_and_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes before three rejected branches and the failing tail"
+        );
+
+        // The reference leaves this longer completed-prefix tail implicit.
+        // A fourth consecutive reject and the failing source remain
+        // unevaluated after the bracketed take(2) receives its second match.
+        let (last_closes_bracketed_take_two_before_four_rejects_and_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-four-rejects-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_before_four_rejects_and_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes before four rejected branches and the failing tail"
+        );
+
+        // The reference gives no cutoff detail for a still longer closed
+        // tail. Keep the fifth consecutive reject and following failure
+        // outside the completed bracketed take(2) prefix.
+        let (last_closes_bracketed_take_two_before_five_rejects_and_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-five-rejects-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_before_five_rejects_and_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes before five rejected branches and the failing tail"
+        );
+
+        // The reference is silent when this completed-prefix tail grows
+        // again. Keep all six rejects and the failing source outside the
+        // bracketed take(2) prefix once its second match has arrived.
+        let (last_closes_bracketed_take_two_before_six_rejects_and_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-six-rejects-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_before_six_rejects_and_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 4),
+            "last() closes before six rejected branches and the failing tail"
+        );
+
+        // The reference is silent on six rejected rows interleaved between
+        // the accepted rows. Traverse those rejects to reach match two, then
+        // close before the failing source beyond the completed take(2).
+        let (last_closes_bracketed_take_two_after_six_interleaved_rejects, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-bracketed-six-interleaved-rejects-then-failing-tail.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_bracketed_take_two_after_six_interleaved_rejects.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (10, 16),
+            "last() traverses six rejects between matches and closes before the failing tail"
+        );
+
+        // The reference is silent when six rejected rows surround only one
+        // accepted row. Since take(2) is still short, continue through the
+        // tail and preserve its predicate failure.
+        let (last_preserves_failure_after_six_rejects_around_one_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-six-rejects-around-one-match-then-failing-tail.orna"
+                ),
+            );
+        let predicate_failure =
+            last_preserves_failure_after_six_rejects_around_one_match.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (8, 16),
+            "last() reaches the failing tail because six rejects leave take(2) short"
+        );
+
+        // The reference is silent when six rejects are split around the
+        // first accepted row. Traverse the leading and interleaved rejects
+        // to complete take(2), then close before the failing tail.
+        let (last_closes_after_six_rejects_split_around_first_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-six-rejects-split-around-first-match.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_six_rejects_split_around_first_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (8, 16),
+            "last() traverses six split rejects, fills take(2), then closes before failure"
+        );
+
+        // The reference leaves a wider split tail implicit. Traverse two
+        // leading rejects and two between matches; once take(2) fills, the
+        // final two rejects and failing source stay unopened.
+        let (last_closes_after_split_six_rejects_and_leaves_tail_closed, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-six-rejects-split-leading-interleaved-trailing.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_split_six_rejects_and_leaves_tail_closed.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (6, 12),
+            "last() closes after four traversed rejects and leaves the split tail unopened"
+        );
+
+        // The reference is silent on the asymmetric one/four/one split.
+        // Traverse the leading reject and long inter-match run, then leave
+        // the final reject and failing source unopened after match two.
+        let (last_closes_after_asymmetric_six_reject_split, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-six-rejects-split-one-four-one.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_after_asymmetric_six_reject_split.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (7, 14),
+            "last() traverses one leading and four inter-match rejects, then closes before the split tail"
+        );
+
+        // The reference is silent on a tail-heavy asymmetric split. Traverse
+        // one leading and two inter-match rejects; after match two, leave the
+        // three trailing rejects and failing source unopened.
+        let (last_closes_before_tail_heavy_six_reject_split, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-six-rejects-split-one-two-three.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_before_tail_heavy_six_reject_split.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (5, 10),
+            "last() traverses three rejects before match two and leaves three trailing rejects unopened"
+        );
+
+        // The reference leaves a still heavier trailing split implicit.
+        // Traverse one leading and one inter-match reject; after match two,
+        // four trailing rejects and the failing source must remain unopened.
+        let (last_closes_before_four_reject_tail, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-six-rejects-split-one-one-four.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_before_four_reject_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 8),
+            "last() traverses two rejects before match two and leaves four trailing rejects unopened"
+        );
+
+        // The reference is silent when two inter-match rejects lead directly
+        // into a four-row trailing tail. Complete take(2), then leave all
+        // four trailing rejects and the failing source unopened.
+        let (last_closes_before_four_reject_tail_after_two_interleaved, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-four-trailing-rejects-after-two-interleaved.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_before_four_reject_tail_after_two_interleaved.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 8),
+            "last() traverses two inter-match rejects, then leaves the four-reject tail unopened"
+        );
+
+        // The reference leaves the same interleaving with a third accepted
+        // row implicit. Fill take(3), then prove four later rejects and the
+        // failing source remain unopened.
+        let (last_closes_before_four_reject_tail_after_three_matches, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-three-four-trailing-rejects-after-interleaved.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_before_four_reject_tail_after_three_matches.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (5, 10),
+            "last() fills take(3) across two inter-match rejects and leaves the four-reject tail unopened"
+        );
+
+        // The reference leaves a longer accepted/rejected interleaving
+        // implicit. Fill take(7) across thirteen interleaved candidates, then
+        // prove all four trailing rejects and the failing source stay closed.
+        let (last_closes_before_four_reject_tail_after_thirteen_interactions, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-seven-four-trailing-rejects-after-thirteen-interplay.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_before_four_reject_tail_after_thirteen_interactions.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (13, 26),
+            "last() fills take(7) across thirteen interleaved candidates and leaves the four-reject tail unopened"
+        );
+
+        // The reference is silent when the entire bracketed candidate tail
+        // is rejected before take(2) naturally exhausts. The empty last()
+        // result keeps its explicit coalesce fallback.
+        let (last_uses_fallback_after_bracketed_empty_short_take_two, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-two-short-bracketed-empty.orna"
+                ),
+            );
+        assert_eq!(
+            last_uses_fallback_after_bracketed_empty_short_take_two.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() uses its fallback after all bracketed candidates are rejected"
+        );
+
+        // A short post-filter take may contain several matches before its
+        // final nonmatch exhausts the source. The reference leaves that
+        // closure with last() implicit; retain the final available match.
+        let (last_returns_multirow_short_post_filter_take, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-multiple-matches.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_multirow_short_post_filter_take.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() returns the last of two available matches after the short take's nonmatching tail"
+        );
+
+        // The reference is silent when a short post-filter take reaches
+        // natural exhaustion after a rejected row between matches. Keep the
+        // accepted prefix and return its final match across that interleave.
+        let (last_returns_interleaved_multirow_short_post_filter_take, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-interleaved-matches-exhausts.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_interleaved_multirow_short_post_filter_take.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() retains both matches across an interleaved nonmatch on short exhaustion"
+        );
+
+        // The reference specifies take's bound but leaves its interaction
+        // with an interleaved outer filter and last() implicit. Once two
+        // accepted rows fill take(2), do not open the trailing rejected
+        // branch or lose the final match.
+        let (last_closes_before_interleaved_trailing_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-closes-before-interleaved-trailing-nonmatch.orna"
+                ),
+            );
+        assert_eq!(
+            last_closes_before_interleaved_trailing_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 4),
+            "last() closes after two matches and leaves the trailing nonmatch branch unopened"
+        );
+
+        // Natural exhaustion may follow another rejected row after the
+        // interleaved matches. Keep the last accepted value through both
+        // rejections instead of treating the final one as a lost boundary.
+        let (last_returns_interleaved_multirow_short_post_filter_take_with_trailing_nonmatch, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-interleaved-matches-trailing-nonmatch.orna"
+                ),
+            );
+        assert_eq!(
+            last_returns_interleaved_multirow_short_post_filter_take_with_trailing_nonmatch.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() retains the final match across an interleaved and trailing nonmatch"
+        );
+
+        // The reference is silent when a short post-filter take has already
+        // collected multiple matches before its next predicate fails. Since
+        // the requested prefix is still incomplete, preserve that failure
+        // rather than returning the partial last() value.
+        let (last_surfaces_failure_after_multirow_short_post_filter_take, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-multiple-matches-failing-tail.orna"
+                ),
+            );
+        let predicate_failure =
+            last_surfaces_failure_after_multirow_short_post_filter_take.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (3, 6),
+            "last() propagates the third predicate failure after two matches leave the take short"
+        );
+
+        // A rejected row between matches must not make the short prefix look
+        // complete: continue in source order and preserve a later predicate
+        // failure while take(3) still lacks its third match.
+        let (last_surfaces_interleaved_failure_after_multirow_short_post_filter_take, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-post-filter-take-short-multi-match-interleaved-nonmatch-failing-tail.orna"
+                ),
+            );
+        let predicate_failure =
+            last_surfaces_interleaved_failure_after_multirow_short_post_filter_take.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (4, 6),
+            "last() skips an interleaved nonmatch and propagates the next predicate failure"
+        );
+
+        // The reference is silent when the bounded tail continues past a
+        // nonmatch to a predicate failure, with another match after that
+        // failure. Preserve the error instead of allowing last() to evaluate
+        // or return the later match.
+        let (last_stops_at_final_tail_failure_before_later_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-last-final-match-tail-failure-before-later-match.orna"
+                ),
+            );
+        let predicate_failure = last_stops_at_final_tail_failure_before_later_match.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (7, 6),
+            "last() propagates the tail failure and skips the later match predicate"
+        );
+
+        // The reference specifies first-match short-circuiting and bounded
+        // enumeration separately, leaving their interaction with a later
+        // failing filter predicate implicit. first() matches within the
+        // prefix before that predicate is demanded, so the failure stays
+        // unevaluated even though the outer take includes its row.
+        let (first_stops_before_bounded_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-stops-before-predicate-failure.orna"
+                ),
+            );
+        assert_eq!(
+            first_stops_before_bounded_predicate_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (4, 2),
+            "first() stops after its match without evaluating a later in-bound failing predicate"
+        );
+
+        // The reference specifies first-match short-circuiting and bounded
+        // enumeration separately, leaving a predicate failure on the final
+        // admitted row implicit. With no earlier match, first() evaluates
+        // each predicate through the bound and surfaces that failure.
+        let (first_includes_bounded_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-includes-bound-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = first_includes_bounded_predicate_failure.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (6, 4),
+            "first() reaches the failing predicate on the outer bound's final admitted row"
+        );
+
+        // The reference describes first() short-circuiting and bounded
+        // filtered enumeration separately, but leaves a failing predicate
+        // before a later in-bound match implicit. The second row fails;
+        // first() returns that error without evaluating the fourth-row match.
+        let (first_surfaces_failure_before_later_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-errors-before-later-match.orna"
+                ),
+            );
+        let predicate_failure = first_surfaces_failure_before_later_match.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "first() stops at the in-bound predicate error before a later matching row"
+        );
+
+        // The reference defines first(), filter failures, and bounded
+        // enumeration separately but leaves an error on the first admitted
+        // row implicit. The later in-bound row would match, but first() must
+        // surface the initial predicate failure without opening that tail.
+        let (first_surfaces_initial_predicate_failure, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-initial-predicate-failure.orna"
+                ),
+            );
+        let predicate_failure = first_surfaces_initial_predicate_failure.unwrap_err();
+        assert_eq!(predicate_failure.code(), "ORNA-EVAL-TABLE-MISSING");
+        assert_eq!(
+            (lookups, scans),
+            (1, 2),
+            "first() returns the first-row predicate failure before evaluating the later match"
+        );
+
+        // The reference leaves the first matching row immediately beyond a
+        // filtered outer bound implicit. The three-row prefix has no match;
+        // do not scan its fourth row, which would satisfy `first()`.
+        let (first_excludes_next_filtered_match, lookups, scans) =
+            invoke_query_fixture_with_counts(
+                &session,
+                include_str!(
+                    "../tests/fixtures/query-session-union-outer-filter-first-excludes-next-match.orna"
+                ),
+            );
+        assert_eq!(
+            first_excludes_next_filtered_match.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 3),
+            "first() does not scan the matching row just outside its filtered outer prefix"
+        );
+
+        // The reference fixes left-to-right union order and bounded
+        // enumeration but leaves projection failures across a child-local
+        // take boundary implicit. Keep the left child lazy: its excluded
+        // failing row stays unevaluated, then the right sibling can run.
+        let (left_child_bound_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-left-child-bound-tail.orna"
+            ),
+        );
+        assert_eq!(
+            left_child_bound_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "the left child caps its failing tail before the right sibling's two projections"
+        );
+
+        // The reference requires bounded enumeration and ordered union, but
+        // does not separately describe equal child and outer take bounds.
+        // Once both limits are met, neither the child's failing tail nor the
+        // right sibling is needed to produce the result.
+        let (left_exact_bound, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-left-child-exact-outer-bound.orna"
+            ),
+        );
+        assert_eq!(
+            left_exact_bound.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "equal child and outer bounds skip both the left tail and right sibling"
+        );
+
+        // The operator rule bounds enumeration by result demand, while the
+        // reference leaves a smaller outer take composed with a larger child
+        // cap implicit. Stop at the outer demand: do not project the failing
+        // second left row or enter the right sibling.
+        let (outer_tighter_than_left, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-left-child-larger-than-outer-bound.orna"
+            ),
+        );
+        assert_eq!(
+            outer_tighter_than_left.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (1, 1),
+            "outer demand below the child cap skips the failing left tail and right sibling"
+        );
+
+        // Bounded enumeration hides effects beyond the demanded prefix, not
+        // a failure needed to produce its final row. Reaching two rows pulls
+        // the failing second left projection into the prefix before union can
+        // advance to the right sibling.
+        let (outer_demand_reaches_tail, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!(
+                "../tests/fixtures/query-session-union-project-left-child-demand-reaches-tail.orna"
+            ),
+        );
+        assert_eq!(
+            outer_demand_reaches_tail.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "demand for the second left row exposes its failure before the right sibling"
+        );
+
+        let (missing, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-missing.orna"),
+        );
+        assert_eq!(
+            missing.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!((lookups, scans), (2, 2), "the later-page miss stops projection");
+
+        // A downstream filter cannot erase an effectful projection failure;
+        // pipeline stage order remains observable even when no row survives.
+        let (filtered_failure, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-filter-after.orna"),
+        );
+        assert_eq!(
+            filtered_failure.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the later projected failure occurs before the downstream filter"
+        );
+
+        // A zero-row result must not enter the source at all, so even a
+        // failing first-row projection remains unevaluated.
+        let (zero, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-project-take-zero.orna"),
+        );
+        assert_eq!(
+            zero.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(0u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (0, 0), "take(0) does no query work");
+
+        // Relation `take` need not enumerate its remainder, so the later
+        // missing lookup must stay latent when its row is outside the result.
+        let (taken, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-project-take.orna"),
+        );
+        assert_eq!(
+            taken.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(1u8))).unwrap()
+        );
+        assert_eq!((lookups, scans), (1, 1), "take does not evaluate a later failing projection");
+
+        // A failed read does not pin a result: the next invocation sees a
+        // repair staged into this same activation session.
+        session
+            .stage_mutation(query_test_mutation(
+                42,
+                99,
+                Some(query_test_row(99, "repaired", 99)),
+            ))
+            .unwrap();
+        let (repaired, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-missing.orna"),
+        );
+        assert_eq!(
+            repaired.unwrap(),
+            CanonicalValue::new(OvbRaw::Int(BigInt::from(3u8))).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (3, 3),
+            "a later invocation observes the repaired lookup and newly visible row"
+        );
+
+        session
+            .stage_mutation(TableMutation::new(id(43), "sys.Storage", query_test_key(9), Some(vec![0xff])).unwrap())
+            .unwrap();
+        let (corrupt, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-corrupt-row.orna"),
+        );
+        assert_eq!(
+            corrupt.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-ROW".into())).unwrap()
+        );
+        assert_eq!(lookups, 0);
+        assert_eq!(scans, 3, "the decode failure stops the following page");
+
+        // A corrupt exact-lookup target is distinct from a corrupt scanned
+        // row: the later projection fails at the lookup boundary and must not
+        // request the third source page, which contains the staged bad value.
+        session
+            .stage_mutation(
+                TableMutation::new(id(44), "sys.Storage", query_test_key(9), None).unwrap(),
+            )
+            .unwrap();
+        session
+            .stage_mutation(
+                TableMutation::new(
+                    id(45),
+                    "sys.Storage",
+                    query_test_key(99),
+                    Some(vec![0xff]),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (corrupt_lookup, lookups, scans) = invoke_query_fixture_with_counts(
+            &session,
+            include_str!("../tests/fixtures/query-session-projection-corrupt-lookup.orna"),
+        );
+        assert_eq!(
+            corrupt_lookup.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-QUERY-ROW".into())).unwrap()
+        );
+        assert_eq!(
+            (lookups, scans),
+            (2, 2),
+            "the lookup decode failure stops before the following source page"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_query_session_reads_its_staged_writes_and_keeps_them_private_until_commit() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let key = CanonicalValue::new(OvbRaw::Int(BigInt::from(7u8)))
+            .unwrap()
+            .encode()
+            .unwrap();
+        let original = CanonicalValue::new(OvbRaw::Text("original".into())).unwrap();
+        let original_bytes = original.encode().unwrap();
+        let context = state.begin_activation().await.unwrap();
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[TableMutation::new(
+                    id(40),
+                    "books",
+                    key.clone(),
+                    Some(original_bytes.clone()),
+                )
+                .unwrap()],
+                digest(41),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = state.begin_table_activation(&["books", "unused"]).await.unwrap();
+        assert_eq!(
+            snapshot.query_exact("books", &key).unwrap(),
+            Some(&original_bytes[..])
+        );
+        assert_eq!(snapshot.query_exact("unused", &key).unwrap(), None);
+        let absent_key = CanonicalValue::new(OvbRaw::Int(BigInt::from(8u8)))
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert_eq!(snapshot.query_exact("books", &absent_key).unwrap(), None);
+        assert_eq!(
+            snapshot.query_exact("not-admitted", &key),
+            Err(RuntimeQueryError::TableNotAdmitted)
+        );
+
+        let mut session = snapshot.query_session();
+        let replacement = CanonicalValue::new(OvbRaw::Text("replacement".into())).unwrap();
+        let replacement_bytes = replacement.encode().unwrap();
+        session
+            .stage_mutation(
+                TableMutation::new(
+                    id(42),
+                    "books",
+                    key.clone(),
+                    Some(replacement_bytes.clone()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.query_exact("books", &key).unwrap(),
+            Some(&replacement_bytes[..])
+        );
+
+        let (result, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-session.orna"),
+        );
+        let result = result.expect("an exact query sees the staged replacement");
+        assert_eq!(result, replacement);
+        assert_eq!(lookup_calls, 1);
+
+        let (repeated, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-repeat.orna"),
+        );
+        assert_eq!(
+            repeated.expect("repeated exact queries both resolve"),
+            CanonicalValue::new(OvbRaw::Array(vec![
+                replacement.raw().clone(),
+                replacement.raw().clone(),
+            ]))
+            .unwrap()
+        );
+        assert_eq!(lookup_calls, 2, "matching calls are evaluated independently");
+
+        session
+            .stage_mutation(
+                TableMutation::new(id(43), "books", key.clone(), None).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(session.query_exact("books", &key).unwrap(), None);
+        let (missing, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-missing.orna"),
+        );
+        assert_eq!(
+            missing.unwrap_err().code(),
+            "ORNA-EVAL-TABLE-MISSING",
+            "a staged delete is a failed required lookup"
+        );
+        assert_eq!(lookup_calls, 1);
+
+        let (recovered, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-missing-recovery.orna"),
+        );
+        assert_eq!(
+            recovered.unwrap(),
+            CanonicalValue::new(OvbRaw::Text("ORNA-EVAL-TABLE-MISSING".into())).unwrap()
+        );
+        assert_eq!(lookup_calls, 1, "one failure reaches one recovery boundary");
+
+        let (unadmitted, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-unadmitted.orna"),
+        );
+        assert_eq!(unadmitted.unwrap_err().code(), "ORNA-EVAL-QUERY-TABLE");
+        assert_eq!(lookup_calls, 1);
+
+        let (invalid_arity, lookup_calls) = invoke_query_fixture(
+            &session,
+            include_str!("../tests/fixtures/exact-query-invalid-arity.orna"),
+        );
+        assert_eq!(invalid_arity.unwrap_err().code(), "ORNA-EVAL-TABLE-ARGUMENT");
+        assert_eq!(lookup_calls, 1);
+
+        assert_eq!(
+            snapshot.query_exact("books", &key).unwrap(),
+            Some(&original_bytes[..])
+        );
+        assert_eq!(
+            state.committed_table_row("books", &key).await.unwrap(),
+            Some(original_bytes)
+        );
+
+        state
+            .commit_table_activation(
+                lease,
+                snapshot.context(),
+                session.staged_mutations(),
+                digest(44),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.committed_table_row("books", &key).await.unwrap(), None);
+        let fresh = state.begin_table_activation(&["books"]).await.unwrap();
+        assert_eq!(fresh.query_exact("books", &key).unwrap(), None);
     }
 
     #[tokio::test]
@@ -17065,6 +27098,42 @@ mod tests {
         }
     }
 
+    struct FirstPollCheckpointSource {
+        key: CheckpointKey,
+        observed: Option<StreamCheckpoint>,
+    }
+
+    impl StreamSource for FirstPollCheckpointSource {
+        type NextFuture<'a>
+            = Ready<Result<StreamSourcePoll, SafeDiagnostic>>
+        where
+            Self: 'a;
+        type WaitFuture<'a>
+            = Ready<Result<(), SafeDiagnostic>>
+        where
+            Self: 'a;
+
+        fn descriptor(&self) -> StreamSourceDescriptor {
+            StreamSourceDescriptor {
+                kind: StreamSourceKind::Finite,
+                replayable: true,
+            }
+        }
+
+        fn checkpoint_key(&self) -> CheckpointKey {
+            self.key.clone()
+        }
+
+        fn next<'a>(&'a mut self, checkpoint: &'a StreamCheckpoint) -> Self::NextFuture<'a> {
+            self.observed = Some(checkpoint.clone());
+            ready(Ok(StreamSourcePoll::Waiting))
+        }
+
+        fn wait<'a>(&'a mut self, _: &'a dyn StreamRunControl) -> Self::WaitFuture<'a> {
+            ready(Ok(()))
+        }
+    }
+
     struct TestHandler {
         result: Option<StreamHandlerResult>,
         calls: usize,
@@ -17074,6 +27143,114 @@ mod tests {
         fn handle(&mut self, _: &StreamItem) -> StreamHandlerResult {
             self.calls += 1;
             self.result.take().unwrap_or(StreamHandlerResult::Cancelled)
+        }
+    }
+
+    #[derive(Default)]
+    struct MockIdempotentProvider {
+        calls: AtomicUsize,
+        applied_effects: AtomicUsize,
+        fail_responses_until: usize,
+        receipts: Mutex<BTreeMap<[u8; 32], Vec<u8>>>,
+    }
+
+    impl MockIdempotentProvider {
+        fn new(fail_responses_until: usize) -> Self {
+            Self {
+                fail_responses_until,
+                ..Self::default()
+            }
+        }
+
+        fn apply_once(
+            &self,
+            key: ProviderEffectKey,
+            effect: &StreamProviderEffect,
+        ) -> Result<Vec<u8>, ProviderEffectFailure> {
+            assert_eq!(effect.request(), PROVIDER_EFFECT_FIXTURE.as_bytes());
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let receipt = {
+                let mut receipts = self.receipts.lock().expect("provider receipt lock");
+                receipts
+                    .entry(*key.as_bytes())
+                    .or_insert_with(|| {
+                        self.applied_effects.fetch_add(1, Ordering::SeqCst);
+                        b"fixture-provider-receipt-v1".to_vec()
+                    })
+                    .clone()
+            };
+            if call < self.fail_responses_until {
+                Err(ProviderEffectFailure::OutcomeUnknown)
+            } else {
+                Ok(receipt)
+            }
+        }
+    }
+
+    struct ProviderEffectCandidateValidator {
+        tables: Vec<String>,
+        reject: bool,
+    }
+
+    impl StreamTableCandidateValidator for ProviderEffectCandidateValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            if self.reject {
+                Err(SafeDiagnostic {
+                    code: DiagnosticCode::Internal,
+                    class: DiagnosticClass::Permanent,
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct ProviderEffectTestHandler {
+        calls: usize,
+        provider: Arc<MockIdempotentProvider>,
+        reject_candidate: bool,
+        effects: Vec<StreamProviderEffect>,
+    }
+
+    impl StreamHandler for ProviderEffectTestHandler {
+        fn handle(&mut self, item: &StreamItem) -> StreamHandlerResult {
+            self.calls += 1;
+            self.effects = vec![
+                StreamProviderEffect::new(
+                    "fixture.provider",
+                    "archive_event",
+                    item.payload.clone(),
+                )
+                .expect("valid fixture provider effect"),
+            ];
+            StreamHandlerResult::CommitValidatedTable(StreamValidatedTableMutationBatch {
+                mutations: vec![table_mutation(89, 8, Some(9))],
+                next_digest: digest(88),
+                validator: Box::new(ProviderEffectCandidateValidator {
+                    tables: vec!["books".into()],
+                    reject: self.reject_candidate && self.calls == 1,
+                }),
+            })
+        }
+
+        fn take_provider_effects(&mut self) -> Vec<StreamProviderEffect> {
+            std::mem::take(&mut self.effects)
+        }
+
+        fn provider_effect_contract(&self, _: &str) -> ProviderEffectDeliveryContract {
+            ProviderEffectDeliveryContract::IdempotentByKey
+        }
+
+        fn apply_provider_effect_once<'a>(
+            &'a mut self,
+            key: ProviderEffectKey,
+            effect: &'a StreamProviderEffect,
+        ) -> ProviderEffectFuture<'a> {
+            Box::pin(std::future::ready(self.provider.apply_once(key, effect)))
         }
     }
 
@@ -18007,6 +28184,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_runner_rejects_position_format_change_before_provider_poll() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let original = stream_delivery("format-guard", "format-guard-next").checkpoint_key();
+        assert!(matches!(
+            state
+                .stream_backend(writer)
+                .apply_async(CommitIntent::Pause {
+                    key: original.clone(),
+                })
+                .await
+                .unwrap(),
+            CommitResult::StreamStatusChanged { changed: true, .. }
+        ));
+        let changed = CheckpointKey {
+            position_format: Component::new("position-format-v2").unwrap(),
+            ..original
+        };
+        let mut source = TestSource {
+            key: changed.clone(),
+            item: None,
+            polls: 0,
+        };
+        let mut handler = CommitHandler { calls: 0 };
+
+        let result = state
+            .run_stream_once(writer, &changed, &mut source, &mut handler)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StreamStepError::Runtime(RuntimeError::StreamIdentityMismatch))
+        );
+        assert_eq!(source.polls, 0);
+        assert_eq!(handler.calls, 0);
+        let mut rows = state
+            .connection
+            .query("SELECT COUNT(*) FROM stream_checkpoint", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn runtime_stream_runner_repeats_until_exhaustion_and_fences_cancellation() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -18268,6 +28491,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_stream_runner_rejects_non_replayable_sources_before_polling() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("non-replayable:one", "non-replayable:two").checkpoint_key();
+        let descriptor = StreamSourceDescriptor {
+            kind: StreamSourceKind::Unbounded,
+            replayable: false,
+        };
+        let mut once_source = SequenceSource {
+            key: key.clone(),
+            descriptor,
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::from([StreamSourcePoll::Waiting]),
+        };
+        let mut once_handler = CommitHandler { calls: 0 };
+
+        assert_eq!(
+            state
+                .run_stream_once(writer, &key, &mut once_source, &mut once_handler)
+                .await,
+            Err(StreamStepError::Runtime(
+                RuntimeError::StreamSourceNotReplayable
+            ))
+        );
+        assert_eq!(once_source.polls, 0);
+        assert_eq!(once_handler.calls, 0);
+
+        let mut run_source = SequenceSource {
+            key: key.clone(),
+            descriptor,
+            polls: 0,
+            waits: 0,
+            steps: VecDeque::from([StreamSourcePoll::Waiting]),
+        };
+        let mut run_handler = CommitHandler { calls: 0 };
+        assert_eq!(
+            state
+                .run_stream(
+                    writer,
+                    &key,
+                    &mut run_source,
+                    &mut run_handler,
+                    &NeverCancelled,
+                )
+                .await,
+            Err(StreamStepError::Runtime(
+                RuntimeError::StreamSourceNotReplayable
+            ))
+        );
+        assert_eq!(run_source.polls, 0);
+        assert_eq!(run_source.waits, 0);
+        assert_eq!(run_handler.calls, 0);
+        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn list_stream_source_reopens_from_the_durable_successor() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -18405,6 +28686,2264 @@ mod tests {
                 .expect("typed delivery checkpoint")
                 .digest,
             digest(9)
+        );
+    }
+
+    async fn materialize_echo_procedure(
+        state: &RuntimeState,
+        writer: WriterLease,
+    ) -> MaterializedProcedure {
+        let capture = state.capture().await.unwrap();
+        let admission = CatalogueAdmission {
+            predecessor_capture: None,
+            types: vec![CatalogueTypeDeclaration {
+                declaration: CatalogueDeclaration {
+                    qualified_name: "Str".into(),
+                    kind: CatalogueObjectKind::Type,
+                    revision_id: digest(61),
+                    semantic_hash: digest(62),
+                    rename_from: None,
+                },
+                form: CatalogueTypeSpec::Named,
+            }],
+            functions: vec![CatalogueFunctionDeclaration {
+                declaration: CatalogueDeclaration {
+                    qualified_name: "app.echo".into(),
+                    kind: CatalogueObjectKind::Function,
+                    revision_id: digest(63),
+                    semantic_hash: digest(64),
+                    rename_from: None,
+                },
+                parameters: vec![CatalogueParameterDeclaration {
+                    name: "message".into(),
+                    position: 0,
+                    type_name: "Str".into(),
+                }],
+                result_type_name: "Str".into(),
+            }],
+        };
+        let admitted = state
+            .admit_catalogue_at(writer, &capture, admission)
+            .await
+            .unwrap();
+        state
+            .materialize_procedure_at(writer, "app.echo", &admitted.capture)
+            .await
+            .unwrap()
+            .expect("admitted function materializes as a procedure")
+    }
+
+    fn echo_invocation_input(procedure: &MaterializedProcedure) -> InvocationArgumentInput {
+        InvocationArgumentInput {
+            name: "message".into(),
+            type_reference: procedure.parameters()[0].type_reference.clone(),
+            value_digest: Some(digest(65)),
+            redacted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn sys_lifecycle_procedure_materialization_admits_durable_invocation() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(66)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        assert_eq!(procedure.qualified_name(), "app.echo");
+        assert_eq!(procedure.parameters()[0].name, "message");
+        assert_eq!(procedure.parameters()[0].position, 0);
+        assert_eq!(
+            state
+                .materialize_procedure_at(writer, "app.echo", procedure.capture())
+                .await
+                .unwrap(),
+            Some(procedure.clone())
+        );
+
+        let invocation_id = id(67);
+        let started = state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(68)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: Some(digest(69)),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status, InvocationObservationStatus::Running);
+        assert!(started.live);
+        assert_eq!(started.arguments.len(), 1);
+        assert_eq!(started.arguments[0].value_digest, Some(digest(65)));
+        assert!(!started.arguments[0].redacted);
+
+        let terminal = state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        assert_eq!(terminal.status, InvocationObservationStatus::Succeeded);
+        assert!(terminal.ended_ms.is_some());
+        assert!(!terminal.live);
+        assert_eq!(
+            state
+                .finish_invocation_observation(
+                    writer,
+                    invocation_id,
+                    InvocationCompletion::Succeeded,
+                )
+                .await,
+            Err(RuntimeError::InvocationStateConflict)
+        );
+        let mut protected_argument = echo_invocation_input(&procedure);
+        protected_argument.value_digest = None;
+        protected_argument.redacted = true;
+        let cancelled = state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: id(75),
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(68)),
+                    run: None,
+                    arguments: vec![protected_argument],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(cancelled.arguments[0].redacted);
+        assert_eq!(cancelled.arguments[0].value_digest, None);
+        let cancelled = state
+            .finish_invocation_observation(
+                writer,
+                cancelled.id,
+                InvocationCompletion::Cancelled {
+                    diagnostic_code: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status, InvocationObservationStatus::Cancelled);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let retained = reopened
+            .invocation_observation(invocation_id)
+            .await
+            .unwrap()
+            .expect("terminal invocation survives reopening runtime state");
+        assert_eq!(retained.status, InvocationObservationStatus::Succeeded);
+        assert_eq!(retained.procedure.function(), procedure.function());
+        assert_eq!(retained.arguments[0].value_digest, Some(digest(65)));
+        let all = reopened.invocation_observations().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.contains(&retained));
+        let cancelled = all.iter().find(|row| row.id == id(75)).unwrap();
+        assert_eq!(cancelled.status, InvocationObservationStatus::Cancelled);
+        assert!(cancelled.arguments[0].redacted);
+        assert_eq!(cancelled.arguments[0].value_digest, None);
+
+        let first_tail = reopened
+            .invocation_observation_tail(None, 2)
+            .await
+            .unwrap();
+        assert_eq!(first_tail.entries.len(), 2);
+        assert!(first_tail.has_more);
+        assert_eq!(
+            first_tail.entries[0].status,
+            InvocationObservationStatus::Running
+        );
+        assert_eq!(
+            first_tail.entries[0].observation.status,
+            InvocationObservationStatus::Succeeded,
+            "tail event records the transition while its linked row is current state"
+        );
+        let cursor = first_tail.next_cursor.expect("non-empty tail has a cursor");
+        let second_tail = reopened
+            .invocation_observation_tail(Some(cursor.clone()), 2)
+            .await
+            .unwrap();
+        assert_eq!(second_tail.entries.len(), 2);
+        assert!(!second_tail.has_more);
+        assert_eq!(
+            second_tail.entries[1].status,
+            InvocationObservationStatus::Cancelled
+        );
+        assert!(second_tail
+            .entries
+            .windows(2)
+            .all(|pair| pair[0].sequence < pair[1].sequence));
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(cursor.clone()), 0)
+                .await,
+            Err(RuntimeError::InvocationTailLimit)
+        );
+        let capture = reopened.capture().await.unwrap();
+        reopened
+            .commit(writer, &capture, &mutation(77), digest(78), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "continuations cannot splice pages across CWD captures"
+        );
+        drop(reopened);
+        let reopened_again = open_state(&repo).await;
+        let durable_tail = reopened_again
+            .invocation_observation_tail(None, 8)
+            .await
+            .unwrap();
+        assert_eq!(
+            durable_tail.entries.len(),
+            4,
+            "startup reconciliation must not duplicate already-retained tail events"
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_tail_empty_end_poll_survives_admin_receipt_and_sees_later_event() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(90)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(91);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(92)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let first = state
+            .invocation_observation_tail(None, 1)
+            .await
+            .unwrap();
+        assert_eq!(first.entries.len(), 1);
+        assert!(!first.has_more, "the page ends exactly at the current tail");
+        assert_eq!(first.entries[0].sequence, 1);
+        assert_eq!(first.entries[0].status, InvocationObservationStatus::Running);
+        let cursor = first.next_cursor.expect("the page boundary is resumable");
+
+        let empty = state
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert!(empty.entries.is_empty());
+        assert!(!empty.has_more);
+        assert_eq!(empty.next_cursor, Some(cursor.clone()));
+
+        let key = stream_delivery("tail-empty-poll-receipt", "tail-empty-poll-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-empty-poll:reset").unwrap(),
+            },
+            reason: "tail empty-poll receipt boundary".into(),
+        };
+        let receipt_id = id(93);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt),
+            "replaying the admin receipt has no invocation-tail transition"
+        );
+        let after_receipt = state
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert!(after_receipt.entries.is_empty());
+        assert_eq!(after_receipt.next_cursor, Some(cursor.clone()));
+
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let later = state
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(later.entries.len(), 1);
+        assert!(!later.has_more);
+        assert_eq!(later.entries[0].sequence, 2);
+        assert_eq!(later.entries[0].invocation_id, invocation_id);
+        assert_eq!(later.entries[0].status, InvocationObservationStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_tail_end_cursor_observes_admission_after_reset_replay() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(193)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let first_invocation_id = id(194);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: first_invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(195)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(
+                writer,
+                first_invocation_id,
+                InvocationCompletion::Succeeded,
+            )
+            .await
+            .unwrap();
+
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(
+            end_page
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(!end_page.has_more);
+        let cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("tail-admission-reset", "tail-admission-reset-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-admission:reset").unwrap(),
+            },
+            reason: "invocation tail cursor admission boundary".into(),
+        };
+        let receipt_id = id(196);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        let empty = state
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert!(empty.entries.is_empty());
+        assert_eq!(empty.next_cursor, Some(cursor.clone()));
+
+        let registration = InvocationObservationRegistration {
+            id: id(197),
+            procedure: procedure.clone(),
+            owner: InvocationLaunchOwner::OwnerSession(id(198)),
+            run: None,
+            arguments: vec![echo_invocation_input(&procedure)],
+            idempotency_key_hash: None,
+        };
+        state
+            .begin_invocation_observation(writer, registration.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .begin_invocation_observation(writer, registration.clone())
+                .await,
+            Err(RuntimeError::InvocationObservationConflict),
+            "a duplicate admission does not append another lifecycle event"
+        );
+        let admitted = state
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(admitted.entries.len(), 1);
+        assert!(!admitted.has_more);
+        assert_eq!(admitted.entries[0].sequence, 3);
+        assert_eq!(admitted.entries[0].invocation_id, registration.id);
+        assert_eq!(admitted.entries[0].status, InvocationObservationStatus::Running);
+
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt)
+        );
+        let after_replay = state
+            .invocation_observation_tail(admitted.next_cursor, 1)
+            .await
+            .unwrap();
+        assert!(after_replay.entries.is_empty());
+        let whole_tail = state.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_admission_shares_admin_receipt_id_without_tail_collision() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(210)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let first_invocation_id = id(211);
+        let shared_id = id(213);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: first_invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(212)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let first_page = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(first_page.entries[0].sequence, 1);
+        let cursor = first_page.next_cursor.expect("end cursor after initial admission");
+
+        let key = stream_delivery("shared-admission-receipt", "shared-admission-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("shared-admission:reset").unwrap(),
+            },
+            reason: "separate admin and invocation tracking journals".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+            .await
+            .unwrap();
+        assert!(state
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        let no_admin_tail = state
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert!(no_admin_tail.entries.is_empty());
+
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: shared_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(214)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(state
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            state
+                .invocation_observation(shared_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            InvocationObservationStatus::Running
+        );
+        let admission = state
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(admission.entries.len(), 1);
+        assert!(!admission.has_more);
+        assert_eq!(admission.entries[0].sequence, 2);
+        assert_eq!(admission.entries[0].invocation_id, shared_id);
+        assert_eq!(admission.entries[0].status, InvocationObservationStatus::Running);
+
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, shared_id)
+                .await,
+            Ok(receipt)
+        );
+        let after_receipt_replay = state
+            .invocation_observation_tail(admission.next_cursor, 1)
+            .await
+            .unwrap();
+        assert!(after_receipt_replay.entries.is_empty());
+        let whole_tail = state.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_terminal_tracking_survives_same_id_admin_receipt_reopen() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(215)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let shared_id = id(216);
+        let idempotency_hash = digest(218);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: shared_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(217)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: Some(idempotency_hash),
+                },
+            )
+            .await
+            .unwrap();
+        let admitted = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(admitted.entries[0].sequence, 1);
+        assert_eq!(admitted.entries[0].invocation_id, shared_id);
+        let cursor = admitted.next_cursor.expect("admission has a tail cursor");
+
+        let key = stream_delivery("terminal-shared-receipt", "terminal-shared-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("terminal-shared:reset").unwrap(),
+            },
+            reason: "terminal invocation and admin receipt ID remain independent".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+            .await
+            .unwrap();
+        assert!(state
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        state
+            .finish_invocation_observation(writer, shared_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert!(reopened
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        let retained = reopened
+            .invocation_observation(shared_id)
+            .await
+            .unwrap()
+            .expect("terminal sys.Invocation survives reopen independently");
+        assert_eq!(retained.status, InvocationObservationStatus::Succeeded);
+        assert_eq!(retained.idempotency_key_hash, Some(idempotency_hash));
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, request, shared_id)
+                .await,
+            Ok(receipt)
+        );
+
+        let terminal = reopened
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(terminal.entries.len(), 1);
+        assert!(!terminal.has_more);
+        assert_eq!(terminal.entries[0].sequence, 2);
+        assert_eq!(terminal.entries[0].invocation_id, shared_id);
+        assert_eq!(terminal.entries[0].status, InvocationObservationStatus::Succeeded);
+        let whole_tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            whole_tail.entries[0].observation.status,
+            InvocationObservationStatus::Succeeded,
+            "the admission event retains its transition while linking the current tracking row"
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_orphan_tail_survives_same_id_admin_receipt_reopen() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(225)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let shared_id = id(226);
+        let idempotency_hash = digest(227);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: shared_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(228)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: Some(idempotency_hash),
+                },
+            )
+            .await
+            .unwrap();
+        let admission = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(admission.entries[0].sequence, 1);
+        let cursor = admission.next_cursor.expect("running admission has a cursor");
+
+        let key = stream_delivery("orphan-shared-receipt", "orphan-shared-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("orphan-shared:reset").unwrap(),
+            },
+            reason: "orphan transition and admin receipt share an ID".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+            .await
+            .unwrap();
+        let replacement = state.takeover_lease(writer, id(229)).await.unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        let replacement = reopened.acquire_lease(replacement.owner_id).await.unwrap();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(replacement, request.clone(), shared_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        assert_eq!(
+            reopened.orphan_abandoned_invocations(replacement).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(replacement, request, shared_id)
+                .await,
+            Ok(receipt)
+        );
+
+        assert!(reopened
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        let retained = reopened
+            .invocation_observation(shared_id)
+            .await
+            .unwrap()
+            .expect("orphaned sys.Invocation remains tracked");
+        assert_eq!(retained.status, InvocationObservationStatus::Orphaned);
+        assert_eq!(retained.idempotency_key_hash, Some(idempotency_hash));
+        let terminal = reopened
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(terminal.entries.len(), 1);
+        assert!(!terminal.has_more);
+        assert_eq!(terminal.entries[0].sequence, 2);
+        assert_eq!(terminal.entries[0].invocation_id, shared_id);
+        assert_eq!(terminal.entries[0].status, InvocationObservationStatus::Orphaned);
+        let whole_tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_cancel_tail_survives_same_id_admin_receipt_replay() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(240)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let shared_id = id(241);
+        let idempotency_hash = digest(242);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: shared_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(243)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: Some(idempotency_hash),
+                },
+            )
+            .await
+            .unwrap();
+        let admission = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(admission.entries[0].sequence, 1);
+        let cursor = admission.next_cursor.expect("admission has a tail cursor");
+
+        let key = stream_delivery("cancel-shared-receipt", "cancel-shared-next").checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("cancel-shared:reset").unwrap(),
+            },
+            reason: "cancelled invocation and admin receipt share an ID".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+            .await
+            .unwrap();
+        let diagnostic_code = "sys.invoke.cancelled".to_owned();
+        let cancelled = state
+            .finish_invocation_observation(
+                writer,
+                shared_id,
+                InvocationCompletion::Cancelled {
+                    diagnostic_code: Some(diagnostic_code.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status, InvocationObservationStatus::Cancelled);
+        assert_eq!(cancelled.failure_code.as_deref(), Some(diagnostic_code.as_str()));
+        assert_eq!(
+            state
+                .finish_invocation_observation(
+                    writer,
+                    shared_id,
+                    InvocationCompletion::Cancelled {
+                        diagnostic_code: Some(diagnostic_code.clone()),
+                    },
+                )
+                .await,
+            Err(RuntimeError::InvocationStateConflict)
+        );
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        assert!(reopened
+            .admin_invocation_receipt(shared_id)
+            .await
+            .unwrap()
+            .is_some());
+        let retained = reopened
+            .invocation_observation(shared_id)
+            .await
+            .unwrap()
+            .expect("cancelled sys.Invocation remains tracked after reopen");
+        assert_eq!(retained.status, InvocationObservationStatus::Cancelled);
+        assert_eq!(retained.failure_code.as_deref(), Some(diagnostic_code.as_str()));
+        assert_eq!(retained.idempotency_key_hash, Some(idempotency_hash));
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+                .await,
+            Ok(receipt.clone())
+        );
+
+        let terminal = reopened
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert_eq!(terminal.entries.len(), 1);
+        assert!(!terminal.has_more);
+        assert_eq!(terminal.entries[0].sequence, 2);
+        assert_eq!(terminal.entries[0].invocation_id, shared_id);
+        assert_eq!(terminal.entries[0].status, InvocationObservationStatus::Cancelled);
+        assert_eq!(
+            terminal.entries[0].observation.failure_code.as_deref(),
+            Some(diagnostic_code.as_str())
+        );
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), shared_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        let terminal_after_replay = reopened
+            .invocation_observation_tail(Some(cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            terminal_after_replay, terminal,
+            "receipt replay after reading the terminal event leaves that tail page unchanged"
+        );
+        let terminal_cursor = terminal
+            .next_cursor
+            .clone()
+            .expect("terminal event pins the continuation phase");
+        let after_replay = reopened
+            .invocation_observation_tail(Some(terminal_cursor.clone()), 1)
+            .await
+            .unwrap();
+        assert!(after_replay.entries.is_empty());
+        assert_eq!(after_replay.next_cursor, Some(terminal_cursor.clone()));
+
+        let later_invocation_id = id(244);
+        reopened
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: later_invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(245)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, request, shared_id)
+                .await,
+            Ok(receipt)
+        );
+        let later_admission = reopened
+            .invocation_observation_tail(Some(terminal_cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(later_admission.entries.len(), 1);
+        assert_eq!(later_admission.entries[0].sequence, 3);
+        assert_eq!(later_admission.entries[0].invocation_id, later_invocation_id);
+        assert_eq!(
+            later_admission.entries[0].status,
+            InvocationObservationStatus::Running
+        );
+        reopened
+            .finish_invocation_observation(
+                writer,
+                later_invocation_id,
+                InvocationCompletion::Succeeded,
+            )
+            .await
+            .unwrap();
+        let later_terminal = reopened
+            .invocation_observation_tail(later_admission.next_cursor, 1)
+            .await
+            .unwrap();
+        assert_eq!(later_terminal.entries.len(), 1);
+        assert_eq!(later_terminal.entries[0].sequence, 4);
+        assert_eq!(later_terminal.entries[0].invocation_id, later_invocation_id);
+        assert_eq!(
+            later_terminal.entries[0].status,
+            InvocationObservationStatus::Succeeded
+        );
+        let after_later_terminal = reopened
+            .invocation_observation_tail(later_terminal.next_cursor, 1)
+            .await
+            .unwrap();
+        assert!(after_later_terminal.entries.is_empty());
+        let whole_tail = reopened.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(whole_tail.entries[0].status, InvocationObservationStatus::Running);
+        assert_eq!(whole_tail.entries[1].status, InvocationObservationStatus::Cancelled);
+        assert_eq!(whole_tail.entries[2].status, InvocationObservationStatus::Running);
+        assert_eq!(whole_tail.entries[3].status, InvocationObservationStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_tail_partial_cursor_tracks_admission_between_polls() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(201)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let earlier_invocations = [id(202), id(203)];
+        for (invocation_id, session_id) in earlier_invocations.into_iter().zip([id(204), id(205)]) {
+            state
+                .begin_invocation_observation(
+                    writer,
+                    InvocationObservationRegistration {
+                        id: invocation_id,
+                        procedure: procedure.clone(),
+                        owner: InvocationLaunchOwner::OwnerSession(session_id),
+                        run: None,
+                        arguments: vec![echo_invocation_input(&procedure)],
+                        idempotency_key_hash: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let first_page = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert!(first_page.has_more);
+        assert_eq!(first_page.entries[0].sequence, 1);
+        assert_eq!(first_page.entries[0].invocation_id, earlier_invocations[0]);
+        let cursor = first_page.next_cursor.expect("partial page has a cursor");
+
+        let key = stream_delivery("tail-page-admission-reset", "tail-page-admission-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-page-admission:reset").unwrap(),
+            },
+            reason: "partial invocation tail page across admission".into(),
+        };
+        let receipt_id = id(206);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+                .await,
+            Ok(receipt.clone())
+        );
+
+        let admitted_invocation_id = id(207);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: admitted_invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(208)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let middle_page = state
+            .invocation_observation_tail(Some(cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(middle_page.entries.len(), 1);
+        assert_eq!(middle_page.entries[0].sequence, 2);
+        assert_eq!(middle_page.entries[0].invocation_id, earlier_invocations[1]);
+        assert!(middle_page.has_more, "new admission extends the partial tail");
+        let middle_cursor = middle_page.next_cursor.expect("middle page has a cursor");
+
+        let admission_page = state
+            .invocation_observation_tail(Some(middle_cursor), 1)
+            .await
+            .unwrap();
+        assert_eq!(admission_page.entries.len(), 1);
+        assert_eq!(admission_page.entries[0].sequence, 3);
+        assert_eq!(admission_page.entries[0].invocation_id, admitted_invocation_id);
+        assert_eq!(
+            admission_page.entries[0].status,
+            InvocationObservationStatus::Running
+        );
+        assert!(!admission_page.has_more);
+
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt)
+        );
+        let after_replay = state
+            .invocation_observation_tail(admission_page.next_cursor, 1)
+            .await
+            .unwrap();
+        assert!(after_replay.entries.is_empty());
+        let whole_tail = state.invocation_observation_tail(None, 4).await.unwrap();
+        assert_eq!(
+            whole_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_tail_end_cursor_rejects_cwd_write_after_receipt_replay() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(100)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(101);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(102)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more, "the cursor is exactly at the tail end");
+        assert_eq!(
+            end_page
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let stale_cursor = end_page
+            .next_cursor
+            .expect("the tail-end page provides a continuation");
+
+        let key = stream_delivery("tail-cursor-reconcile", "tail-cursor-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-cursor:reset").unwrap(),
+            },
+            reason: "tail cursor receipt reconciliation boundary".into(),
+        };
+        let receipt_id = id(103);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(writer, &capture, &mutation(104), digest(105), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt),
+            "a receipt replay after the CWD write preserves its original result"
+        );
+        assert_eq!(
+            state
+                .invocation_observation_tail(Some(stale_cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "a receipt replay cannot make a prior CWD cursor valid again"
+        );
+        let retained = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            retained
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "receipt reconciliation does not consume or append lifecycle tail sequence"
+        );
+        assert_eq!(
+            retained.entries[1].status,
+            InvocationObservationStatus::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_stale_tail_cursor_stays_invalid_across_reset_replay_chain() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(110)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(111);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(109)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let stale_cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("stale-tail-reset-chain", "stale-tail-reset-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let first_request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("stale-tail:first-reset").unwrap(),
+            },
+            reason: "first stale-tail reset boundary".into(),
+        };
+        let first_receipt_id = id(112);
+        let first_reset = state
+            .reset_checkpoint_with_invocation_id(
+                writer,
+                first_request.clone(),
+                first_receipt_id,
+            )
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(writer, &capture, &mutation(113), digest(114), &NoFault)
+            .await
+            .unwrap();
+        let second_request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition::from(&first_reset),
+            to: Position {
+                token: Component::new("stale-tail:second-reset").unwrap(),
+            },
+            reason: "second stale-tail reset boundary".into(),
+        };
+        let second_receipt_id = id(115);
+        let second_reset = state
+            .reset_checkpoint_with_invocation_id(
+                writer,
+                second_request.clone(),
+                second_receipt_id,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(
+                    writer,
+                    first_request,
+                    first_receipt_id,
+                )
+                .await,
+            Ok(first_reset),
+            "replaying the older receipt keeps its original result"
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), second_reset);
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(
+                    writer,
+                    second_request,
+                    second_receipt_id,
+                )
+                .await,
+            Ok(second_reset),
+            "replaying the newer receipt preserves the latest checkpoint"
+        );
+        assert_eq!(
+            state
+                .invocation_observation_tail(Some(stale_cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "neither receipt replay revives a cursor from the old CWD capture"
+        );
+        let tail = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "reset receipts and their replays do not allocate invocation-tail sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_tail_cursor_invalidates_only_after_committed_cwd_write() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(120)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(121);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(122)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("tail-cursor-commit-boundary", "tail-cursor-commit-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("tail-cursor:before-write").unwrap(),
+            },
+            reason: "tail cursor commit boundary reset".into(),
+        };
+        let receipt_id = id(123);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        let capture = state.capture().await.unwrap();
+
+        assert_eq!(
+            state
+                .commit(
+                    writer,
+                    &capture,
+                    &mutation(124),
+                    digest(125),
+                    &Fail(FaultPoint::AfterMutation),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::AfterMutation))
+        );
+        assert_eq!(state.capture().await.unwrap(), capture);
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        let after_rollback = state
+            .invocation_observation_tail(Some(cursor.clone()), 2)
+            .await
+            .unwrap();
+        assert!(after_rollback.entries.is_empty());
+        assert!(!after_rollback.has_more);
+        assert_eq!(after_rollback.next_cursor, Some(cursor.clone()));
+
+        state
+            .commit(writer, &capture, &mutation(126), digest(127), &NoFault)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .invocation_observation_tail(Some(cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "only the committed CWD generation invalidates the cursor"
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), receipt);
+        let tail = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_tail_cursor_pins_committed_generation_when_digest_repeats() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(130)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(131);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(132)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("cursor-same-digest-reset", "cursor-same-digest-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("cursor-same-digest:reset").unwrap(),
+            },
+            reason: "same-digest cursor generation boundary".into(),
+        };
+        let receipt_id = id(133);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        let next = state
+            .commit(
+                writer,
+                &capture,
+                &mutation(134),
+                capture.generation_digest(),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            next.generation_digest(),
+            capture.generation_digest(),
+            "the committed write intentionally retains the prior digest"
+        );
+        assert_ne!(next.generation(), capture.generation());
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request, receipt_id)
+                .await,
+            Ok(receipt.clone()),
+            "reset replay does not change the committed CWD pin"
+        );
+        assert_eq!(state.stream_checkpoint(&key).await.unwrap(), receipt);
+        assert_eq!(
+            state
+                .invocation_observation_tail(Some(cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "cursor invalidation follows the committed generation even when the digest repeats"
+        );
+        let tail = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the CWD commit and reset receipt do not enter the lifecycle tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_tail_generation_cursor_stays_stale_after_reopen() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(140)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(141);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(142)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let stale_cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("generation-cursor-reopen", "generation-cursor-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("generation-cursor:reset").unwrap(),
+            },
+            reason: "generation cursor reopen boundary".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request, id(143))
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        assert_eq!(stale_cursor.capture(), &capture);
+        let next = state
+            .commit(
+                writer,
+                &capture,
+                &mutation(144),
+                capture.generation_digest(),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.generation_digest(), capture.generation_digest());
+        assert_ne!(next.generation(), capture.generation());
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(stale_cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "reopening preserves the committed generation mismatch"
+        );
+        let current_tail = reopened
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            current_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the lifecycle tail remains durable while its old generation cursor expires"
+        );
+        let fresh_cursor = current_tail.next_cursor.expect("non-empty tail has a cursor");
+        let empty = reopened
+            .invocation_observation_tail(Some(fresh_cursor.clone()), 2)
+            .await
+            .unwrap();
+        assert!(empty.entries.is_empty());
+        assert_eq!(empty.next_cursor, Some(fresh_cursor));
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_tail_cursor_stays_stale_after_digest_aba_and_reopen() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(150)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(151);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(152)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .finish_invocation_observation(writer, invocation_id, InvocationCompletion::Succeeded)
+            .await
+            .unwrap();
+        let end_page = state.invocation_observation_tail(None, 2).await.unwrap();
+        assert_eq!(end_page.entries.len(), 2);
+        assert!(!end_page.has_more);
+        let stale_cursor = end_page.next_cursor.expect("tail end has a cursor");
+
+        let key = stream_delivery("cursor-digest-aba", "cursor-digest-aba-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("cursor-digest-aba:reset").unwrap(),
+            },
+            reason: "generation cursor digest ABA boundary".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request, id(153))
+            .await
+            .unwrap();
+
+        let initial = state.capture().await.unwrap();
+        let initial_digest = initial.generation_digest();
+        let intermediate = state
+            .commit(
+                writer,
+                &initial,
+                &mutation(154),
+                digest(155),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_ne!(intermediate.generation_digest(), initial_digest);
+        let restored = state
+            .commit(
+                writer,
+                &intermediate,
+                &mutation(156),
+                initial_digest,
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored.generation_digest(), initial_digest);
+        assert_ne!(restored.generation(), initial.generation());
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let persisted = reopened.capture().await.unwrap();
+        assert_eq!(persisted, restored);
+        assert_eq!(persisted.generation_digest(), initial_digest);
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(stale_cursor), 2)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "restoring the old digest and reopening cannot revive the old generation cursor"
+        );
+        let tail = reopened
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "digest ABA does not affect durable lifecycle sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_stale_cursor_rejects_post_reopen_terminal_tail() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(160)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let invocation_id = id(161);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: invocation_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(162)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let initial_page = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(initial_page.entries.len(), 1);
+        assert!(!initial_page.has_more);
+        assert_eq!(initial_page.entries[0].sequence, 1);
+        assert_eq!(
+            initial_page.entries[0].status,
+            InvocationObservationStatus::Running
+        );
+        let stale_cursor = initial_page.next_cursor.expect("running event has a cursor");
+
+        let key = stream_delivery("stale-cursor-post-reopen", "stale-cursor-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("stale-cursor:receipt").unwrap(),
+            },
+            reason: "stale cursor restart receipt boundary".into(),
+        };
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request, id(163))
+            .await
+            .unwrap();
+
+        let capture = state.capture().await.unwrap();
+        state
+            .commit(
+                writer,
+                &capture,
+                &mutation(164),
+                capture.generation_digest(),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let replacement = state.takeover_lease(writer, id(165)).await.unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        let replacement = reopened.acquire_lease(replacement.owner_id).await.unwrap();
+        assert_eq!(
+            reopened.orphan_abandoned_invocations(replacement).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(Some(stale_cursor), 1)
+                .await,
+            Err(RuntimeError::InvocationTailInvalid),
+            "a cursor from before commit cannot splice in a terminal event appended after reopen"
+        );
+        let tail = reopened
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            tail.entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_invocation_cursor_survives_reset_replay_and_reopen_for_later_tail() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(180)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let first_invocation_id = id(181);
+        let second_invocation_id = id(182);
+        for (invocation_id, session_id) in
+            [(first_invocation_id, id(183)), (second_invocation_id, id(184))]
+        {
+            state
+                .begin_invocation_observation(
+                    writer,
+                    InvocationObservationRegistration {
+                        id: invocation_id,
+                        procedure: procedure.clone(),
+                        owner: InvocationLaunchOwner::OwnerSession(session_id),
+                        run: None,
+                        arguments: vec![echo_invocation_input(&procedure)],
+                        idempotency_key_hash: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let first_page = state.invocation_observation_tail(None, 1).await.unwrap();
+        assert_eq!(first_page.entries.len(), 1);
+        assert!(first_page.has_more);
+        assert_eq!(first_page.entries[0].sequence, 1);
+        assert_eq!(first_page.entries[0].invocation_id, first_invocation_id);
+        let cursor = first_page.next_cursor.expect("partial page has a cursor");
+
+        let key = stream_delivery("cursor-reset-reopen", "cursor-reset-reopen-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("cursor-reset-reopen:receipt").unwrap(),
+            },
+            reason: "invocation tail continuation across reset and reopen".into(),
+        };
+        let receipt_id = id(185);
+        let receipt = state
+            .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .reset_checkpoint_with_invocation_id(writer, request.clone(), receipt_id)
+                .await,
+            Ok(receipt.clone())
+        );
+        let replacement = state.takeover_lease(writer, id(186)).await.unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), receipt);
+        let replacement = reopened.acquire_lease(replacement.owner_id).await.unwrap();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(replacement, request, receipt_id)
+                .await,
+            Ok(receipt)
+        );
+        assert_eq!(
+            reopened.orphan_abandoned_invocations(replacement).await.unwrap(),
+            2
+        );
+
+        let continued = reopened
+            .invocation_observation_tail(Some(cursor), 4)
+            .await
+            .unwrap();
+        assert!(!continued.has_more);
+        assert_eq!(
+            continued
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4],
+            "reset receipts do not consume cursor positions across restart"
+        );
+        assert_eq!(
+            continued
+                .entries
+                .iter()
+                .map(|entry| entry.invocation_id)
+                .collect::<Vec<_>>(),
+            vec![
+                second_invocation_id,
+                first_invocation_id,
+                second_invocation_id,
+            ]
+        );
+        assert_eq!(
+            continued
+                .entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sys_lifecycle_parent_waits_for_children_and_replacement_orphans_old_owner() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(70)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let parent_id = id(71);
+        let child_id = id(72);
+        let grandchild_id = id(75);
+        let parent = state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: parent_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(73)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let child = state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: child_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::Parent(parent_id),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(child.owner, InvocationLaunchOwner::Parent(parent_id));
+        let grandchild = state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: grandchild_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::Parent(child_id),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(grandchild.owner, InvocationLaunchOwner::Parent(child_id));
+        assert_eq!(
+            state
+                .finish_invocation_observation(
+                    writer,
+                    parent_id,
+                    InvocationCompletion::Succeeded,
+                )
+                .await,
+            Err(RuntimeError::InvocationChildrenActive)
+        );
+
+        let replacement = state.takeover_lease(writer, id(74)).await.unwrap();
+        assert_eq!(state.orphan_abandoned_invocations(replacement).await.unwrap(), 3);
+        assert_eq!(
+            state
+                .invocation_observation(parent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            InvocationObservationStatus::Orphaned
+        );
+        let orphaned_child = state
+            .invocation_observation(child.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphaned_child.status, InvocationObservationStatus::Orphaned);
+        assert_eq!(orphaned_child.failure_code.as_deref(), Some("sys.invoke.orphaned"));
+        assert!(!orphaned_child.live);
+        assert_eq!(
+            state
+                .invocation_observation(grandchild.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            InvocationObservationStatus::Orphaned
+        );
+
+        let first_tail = state
+            .invocation_observation_tail(None, 8)
+            .await
+            .unwrap();
+        assert_eq!(first_tail.entries.len(), 6);
+        assert_eq!(
+            first_tail
+                .entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+            ],
+            "replacement emits child terminal tail events before their parent"
+        );
+        assert_eq!(
+            first_tail.entries[0].observation.status,
+            InvocationObservationStatus::Orphaned,
+            "a historical lifecycle event links to the latest durable observation"
+        );
+        assert_eq!(
+            first_tail.entries[3..]
+                .iter()
+                .map(|entry| entry.invocation_id)
+                .collect::<Vec<_>>(),
+            vec![grandchild_id, child_id, parent_id]
+        );
+        assert_eq!(state.orphan_abandoned_invocations(replacement).await.unwrap(), 0);
+        assert_eq!(
+            state
+                .invocation_observation_tail(None, 8)
+                .await
+                .unwrap()
+                .entries,
+            first_tail.entries,
+            "reconciling an already-terminal procedure does not append duplicate tail events"
+        );
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .invocation_observation_tail(None, 8)
+                .await
+                .unwrap()
+                .entries,
+            first_tail.entries,
+            "procedure tail history and its latest observation survive reopening"
+        );
+    }
+
+    #[test]
+    fn sys_lifecycle_admin_effect_projection_keeps_terminal_effects_typed() {
+        assert_eq!(
+            decode_admin_lifecycle_effect("paused"),
+            Ok(AdminLifecycleEffect::StreamPaused { changed: true })
+        );
+        assert_eq!(
+            decode_admin_lifecycle_effect("pause_pending_noop"),
+            Ok(AdminLifecycleEffect::StreamPausePending { changed: false })
+        );
+        assert_eq!(
+            decode_admin_lifecycle_effect("resumed"),
+            Ok(AdminLifecycleEffect::StreamResumed { changed: true })
+        );
+        assert_eq!(
+            decode_admin_lifecycle_effect("failure:runtime writer is held"),
+            Ok(AdminLifecycleEffect::Failed)
+        );
+        assert_eq!(
+            decode_admin_lifecycle_effect("unrecognized-effect"),
+            Err(RuntimeError::RecoveryInvalid)
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_provider_effect_retry_is_bounded_and_reuses_provider_receipt() {
+        assert!(orna_syntax_v1::parse_module(PROVIDER_EFFECT_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let key = stream_delivery("provider-effect-retry", "provider-effect-next").checkpoint_key();
+        let provider = Arc::new(MockIdempotentProvider::new(
+            MAX_STREAM_PROVIDER_EFFECT_ATTEMPTS as usize,
+        ));
+        let failure = {
+            let state = open_state(&repo).await;
+            let writer = state.acquire_lease(id(91)).await.unwrap();
+            let checkpoint_before = state.stream_checkpoint(&key).await.unwrap();
+            let mut source = ListStreamSource::new(
+                key.clone(),
+                vec![PROVIDER_EFFECT_FIXTURE.as_bytes().to_vec()],
+            );
+            let mut handler = ProviderEffectTestHandler {
+                calls: 0,
+                provider: Arc::clone(&provider),
+                reject_candidate: false,
+                effects: Vec::new(),
+            };
+            let failure = match state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap()
+            {
+                StreamStep::Failed { failure } => failure,
+                other => panic!("retry budget must retain the failed delivery: {other:?}"),
+            };
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
+            assert_eq!(failure.attempts, 1);
+            assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint_before);
+            failure
+        };
+
+        // A new owner performs the explicit retry. The provider saw an
+        // uncertain response three times, but its durable key receipt makes
+        // the fourth call return the same effect result without applying it
+        // again. Replayable delivery alone does not provide this property.
+        let state = open_state(&repo).await;
+        let writer = state.recover_abandoned(id(91), id(92)).await.unwrap();
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        let retry = match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Retry {
+                failure: failure.identity.clone(),
+                expected_version: failure.version,
+                expected: CheckpointPrecondition::from(&checkpoint),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { failure } => failure,
+            other => panic!("failed provider effect must be explicitly retried: {other:?}"),
+        };
+        assert_eq!(retry.attempts, 2);
+        let mut source = ListStreamSource::new(
+            key.clone(),
+            vec![PROVIDER_EFFECT_FIXTURE.as_bytes().to_vec()],
+        );
+        let mut handler = ProviderEffectTestHandler {
+            calls: 0,
+            provider: Arc::clone(&provider),
+            reject_candidate: false,
+            effects: Vec::new(),
+        };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap(),
+            StreamStep::Committed {
+                checkpoint: StreamCheckpoint { version: 1, .. }
+            }
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.committed_table_row("books", &[8]).await.unwrap(),
+            Some(vec![9])
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_provider_receipt_survives_restart_after_later_commit_rejection() {
+        assert!(orna_syntax_v1::parse_module(PROVIDER_EFFECT_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let key = stream_delivery("provider-effect-receipt", "provider-effect-next")
+            .checkpoint_key();
+        let provider = Arc::new(MockIdempotentProvider::new(0));
+        let failure = {
+            let state = open_state(&repo).await;
+            let writer = state.acquire_lease(id(93)).await.unwrap();
+            let checkpoint_before = state.stream_checkpoint(&key).await.unwrap();
+            let mut source = ListStreamSource::new(
+                key.clone(),
+                vec![PROVIDER_EFFECT_FIXTURE.as_bytes().to_vec()],
+            );
+            let mut handler = ProviderEffectTestHandler {
+                calls: 0,
+                provider: Arc::clone(&provider),
+                reject_candidate: true,
+                effects: Vec::new(),
+            };
+            let failure = match state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap()
+            {
+                StreamStep::Failed { failure } => failure,
+                other => panic!("candidate rejection must retain the delivery: {other:?}"),
+            };
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
+            assert_eq!(state.stream_checkpoint(&key).await.unwrap(), checkpoint_before);
+            failure
+        };
+
+        let state = open_state(&repo).await;
+        let writer = state.recover_abandoned(id(93), id(94)).await.unwrap();
+        let checkpoint = state.stream_checkpoint(&key).await.unwrap();
+        match state
+            .stream_backend(writer)
+            .apply_async(CommitIntent::Retry {
+                failure: failure.identity.clone(),
+                expected_version: failure.version,
+                expected: CheckpointPrecondition::from(&checkpoint),
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::RetryScheduled { .. } => {}
+            other => panic!("durable provider receipt retry was rejected: {other:?}"),
+        }
+        let mut source = ListStreamSource::new(
+            key.clone(),
+            vec![PROVIDER_EFFECT_FIXTURE.as_bytes().to_vec()],
+        );
+        let mut handler = ProviderEffectTestHandler {
+            calls: 0,
+            provider: Arc::clone(&provider),
+            reject_candidate: false,
+            effects: Vec::new(),
+        };
+        assert!(matches!(
+            state
+                .run_stream_once(writer, &key, &mut source, &mut handler)
+                .await
+                .unwrap(),
+            StreamStep::Committed {
+                checkpoint: StreamCheckpoint { version: 1, .. }
+            }
+        ));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.applied_effects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.committed_table_row("books", &[8]).await.unwrap(),
+            Some(vec![9])
         );
     }
 
@@ -19900,6 +32439,227 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_request_replay_returns_its_durable_receipt_without_reapplying() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("admin-receipt", "admin-receipt-next").checkpoint_key();
+        let invocation_id = id(71);
+        let first = state
+            .pause_stream_with_reason_and_invocation_id(
+                writer,
+                key.clone(),
+                "maintenance boundary".into(),
+                invocation_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, StreamAdministrationOutcome::Paused { changed: true });
+        assert_eq!(
+            state.resume_stream(writer, key.clone()).await.unwrap(),
+            StreamAdministrationOutcome::Running { changed: true },
+        );
+
+        let replay = state
+            .pause_stream_with_reason_and_invocation_id(
+                writer,
+                key.clone(),
+                "maintenance boundary".into(),
+                invocation_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay, first);
+        assert_eq!(
+            state.resume_stream(writer, key.clone()).await.unwrap(),
+            StreamAdministrationOutcome::Running { changed: false },
+            "replaying the old pause receipt must not pause the live stream again",
+        );
+        assert_eq!(
+            state
+                .pause_stream_with_reason_and_invocation_id(
+                    writer,
+                    key,
+                    "different request arguments".into(),
+                    invocation_id,
+                )
+                .await,
+            Err(RuntimeError::AdminInvocationConflict),
+        );
+
+        let receipt = state
+            .admin_invocation_receipt(invocation_id)
+            .await
+            .unwrap()
+            .expect("the terminal admin receipt is durable");
+        assert_eq!(receipt.function, "sys.admin.pause_stream_with_reason");
+        assert_eq!(receipt.terminal_outcome, "paused");
+        assert_eq!(
+            receipt.effect,
+            AdminLifecycleEffect::StreamPaused { changed: true }
+        );
+        assert!(receipt.succeeded);
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .admin_invocation_receipt(invocation_id)
+                .await
+                .unwrap(),
+            Some(receipt),
+        );
+    }
+
+    #[tokio::test]
+    async fn reentrant_stream_reference_pause_retains_failed_invocation_audit() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("busy-audit", "busy-audit-next").checkpoint_key();
+        let request = request(41, 42);
+        state.reserve_request(request, digest(42)).await.unwrap();
+        let run = state
+            .register_run_observation(RunObservationRegistration {
+                request,
+                consumer_identity: key.consumer.clone(),
+                function: "pkg.consume".into(),
+                source_identity: None,
+                invocation_id: id(43),
+            })
+            .await
+            .unwrap();
+        let stream = state
+            .register_stream_observation(StreamObservationRegistration {
+                run: run.id,
+                producer: "source-object".into(),
+                consumer: Some("pkg.consume".into()),
+                checkpoint: key,
+            })
+            .await
+            .unwrap();
+        let stream_reference = stream.reference(&run).unwrap();
+        let capture_before = state.capture().await.unwrap();
+        let table_before = state.committed_table_row("books", &[1]).await.unwrap();
+        let fence = state.runtime_observation_fence(writer).await.unwrap();
+        let streams_before = state
+            .current_runtime_observations(&fence)
+            .await
+            .unwrap()
+            .streams;
+        let reference = Value::new(row_reference_raw(stream_reference.as_row_ref())).unwrap();
+
+        let callback_result = with_activation_scope(&state, writer, || async {
+            state
+                .pause_stream_reference_at_capture(
+                    writer,
+                    reference.clone(),
+                    Some("maintenance boundary".into()),
+                    &capture_before,
+                )
+                .await
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(callback_result, Err(RuntimeError::AdminBusy));
+        assert_eq!(state.capture().await.unwrap(), capture_before);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            table_before
+        );
+        let fence = state.runtime_observation_fence(writer).await.unwrap();
+        assert_eq!(
+            state
+                .current_runtime_observations(&fence)
+                .await
+                .unwrap()
+                .streams,
+            streams_before
+        );
+
+        let rejected_invocation_id = id(50);
+        assert_eq!(
+            state
+                .reject_admin_stream_effect_as_busy(
+                    writer,
+                    "sys.admin.pause_stream",
+                    reference.clone(),
+                    None,
+                    rejected_invocation_id,
+                )
+                .await,
+            Err(RuntimeError::AdminBusy),
+        );
+        assert_eq!(
+            state
+                .reject_admin_stream_effect_as_busy(
+                    writer,
+                    "sys.admin.pause_stream",
+                    reference.clone(),
+                    None,
+                    rejected_invocation_id,
+                )
+                .await,
+            Err(RuntimeError::AdminBusy),
+            "retrying a terminal busy receipt must replay the same outcome",
+        );
+
+        let invocation_id = id(49);
+        let terminal_effect = with_activation_scope(&state, writer, || async {
+            with_terminal_admin_effect(&state, writer, || async {
+                state
+                    .pause_stream_reference_at_capture_with_invocation_id(
+                        writer,
+                        reference,
+                        Some("maintenance boundary".into()),
+                        &capture_before,
+                        invocation_id,
+                    )
+                    .await
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            terminal_effect,
+            Ok(StreamAdministrationOutcome::Paused { changed: true }),
+        );
+        drop(state);
+        let reopened = open_state(&repo).await;
+        let audits = reopened.admin_invocation_audits().await.unwrap();
+        assert_eq!(audits.len(), 3);
+        let failed = audits
+            .iter()
+            .find(|audit| !audit.succeeded)
+            .expect("the direct reentrant attempt retains a failure receipt");
+        assert_eq!(failed.function, "sys.admin.pause_stream_with_reason");
+        assert!(failed.safe_arguments.contains("stream_ref_digest="));
+        assert!(failed.safe_arguments.contains("reason_digest="));
+        assert!(failed.terminal_outcome.starts_with("failure:"));
+        let receipt = reopened
+            .admin_invocation_receipt(invocation_id)
+            .await
+            .unwrap()
+            .expect("the terminal effect retains its request receipt");
+        assert!(receipt.succeeded);
+        assert_eq!(receipt.terminal_outcome, "paused");
+        assert_eq!(
+            receipt.effect,
+            AdminLifecycleEffect::StreamPaused { changed: true }
+        );
+        let rejected_receipt = reopened
+            .admin_invocation_receipt(rejected_invocation_id)
+            .await
+            .unwrap()
+            .expect("the staged-write rejection retains the request receipt");
+        assert!(!rejected_receipt.succeeded);
+        assert_eq!(rejected_receipt.terminal_outcome, "failure:admin_busy");
+        assert_eq!(rejected_receipt.effect, AdminLifecycleEffect::Failed);
+    }
+
+    #[tokio::test]
     async fn pending_pause_reason_survives_cancellation_terminal_boundary() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -20112,6 +32872,8 @@ mod tests {
         assert_eq!(
             state.checkpoint_reset_audits(&key).await.unwrap(),
             vec![CheckpointResetAudit {
+                sequence: 1,
+                observed_generation: Some(0),
                 key: key.clone(),
                 old_version: 0,
                 old_position: None,
@@ -20161,6 +32923,427 @@ mod tests {
                 token: Component::new("opaque/provider-position").unwrap(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reset_receipt_reconciles_after_later_reset_and_reopen() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("reset-receipt", "reset-receipt-next").checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+
+        let invocation_id = id(86);
+        let first_request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("receipt:first").unwrap(),
+            },
+            reason: "initial receipt reset".into(),
+        };
+        let first_result = state
+            .reset_checkpoint_with_invocation_id(writer, first_request.clone(), invocation_id)
+            .await
+            .unwrap();
+        assert_eq!(first_result.version, 1);
+
+        let second_result = state
+            .reset_checkpoint_with_invocation_id(
+                writer,
+                CheckpointResetRequest {
+                    key: key.clone(),
+                    expected: CheckpointPrecondition::from(&first_result),
+                    to: Position {
+                        token: Component::new("receipt:second").unwrap(),
+                    },
+                    reason: "later reset".into(),
+                },
+                id(87),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_result.version, 2);
+        state
+            .connection
+            .execute(
+                "DELETE FROM admin_invocation_checkpoint_result WHERE invocation_id = ?1",
+                params![invocation_id.to_vec()],
+            )
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(4)).await.unwrap();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, first_request.clone(), invocation_id)
+                .await,
+            Ok(first_result.clone()),
+            "a lost reset response replays its committed result after restart"
+        );
+        assert_eq!(
+            reopened.stream_checkpoint(&key).await.unwrap(),
+            second_result,
+            "receipt reconciliation does not apply the old reset a second time"
+        );
+
+        let mut changed_request = first_request;
+        changed_request.reason = "different request under same ID".into();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(writer, changed_request, invocation_id)
+                .await,
+            Err(RuntimeError::AdminInvocationConflict),
+            "stable IDs reject argument drift"
+        );
+        let receipt = reopened
+            .admin_invocation_receipt(invocation_id)
+            .await
+            .unwrap()
+            .expect("replayable result remains retained in its generic audit receipt");
+        assert_eq!(receipt.checkpoint_reset_result, Some(AdminCheckpointResetResult {
+            version: first_result.version,
+            committed_position: first_result.committed.unwrap(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn sys_admin_reset_receipt_replay_preserves_lifecycle_tail_order_across_reopen() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(80)).await.unwrap();
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let parent_id = id(81);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: parent_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::OwnerSession(id(87)),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let child_id = id(82);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: child_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::Parent(parent_id),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let grandchild_id = id(83);
+        state
+            .begin_invocation_observation(
+                writer,
+                InvocationObservationRegistration {
+                    id: grandchild_id,
+                    procedure: procedure.clone(),
+                    owner: InvocationLaunchOwner::Parent(child_id),
+                    run: None,
+                    arguments: vec![echo_invocation_input(&procedure)],
+                    idempotency_key_hash: None,
+                },
+            )
+            .await
+            .unwrap();
+        let replacement = state.takeover_lease(writer, id(74)).await.unwrap();
+        assert_eq!(state.orphan_abandoned_invocations(replacement).await.unwrap(), 3);
+        let first_tail = state
+            .invocation_observation_tail(None, 4)
+            .await
+            .unwrap();
+        assert_eq!(first_tail.entries.len(), 4);
+        assert!(first_tail.has_more);
+        assert_eq!(
+            first_tail
+                .entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+            ]
+        );
+        assert_eq!(first_tail.entries[3].invocation_id, grandchild_id);
+        assert_eq!(
+            first_tail.entries[3].observation.status,
+            InvocationObservationStatus::Orphaned
+        );
+        let cursor = first_tail
+            .next_cursor
+            .expect("partial lifecycle page provides a cursor");
+
+        let key = stream_delivery("receipt-tail-interplay", "receipt-tail-next")
+            .checkpoint_key();
+        state.pause_stream(replacement, key.clone()).await.unwrap();
+        let first_request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("receipt-tail:first").unwrap(),
+            },
+            reason: "first tail-interplay reset".into(),
+        };
+        let first_reset_id = id(84);
+        let first_reset = state
+            .reset_checkpoint_with_invocation_id(
+                replacement,
+                first_request.clone(),
+                first_reset_id,
+            )
+            .await
+            .unwrap();
+        let second_request = CheckpointResetRequest {
+            key: key.clone(),
+            expected: CheckpointPrecondition::from(&first_reset),
+            to: Position {
+                token: Component::new("receipt-tail:second").unwrap(),
+            },
+            reason: "second tail-interplay reset".into(),
+        };
+        let second_reset_id = id(85);
+        let second_reset = state
+            .reset_checkpoint_with_invocation_id(
+                replacement,
+                second_request.clone(),
+                second_reset_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_reset.version, 2);
+        let receipts_before_reopen = state.admin_invocation_audits().await.unwrap();
+        let reset_receipt_order = receipts_before_reopen
+            .iter()
+            .filter(|receipt| {
+                receipt.invocation_id == first_reset_id
+                    || receipt.invocation_id == second_reset_id
+            })
+            .map(|receipt| (receipt.invocation_id, receipt.sequence))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reset_receipt_order
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![first_reset_id, second_reset_id],
+            "reset receipts retain their independent admission order"
+        );
+        assert!(reset_receipt_order
+            .windows(2)
+            .all(|pair| pair[0].1 < pair[1].1));
+        let reset_audits_before_reopen = state.checkpoint_reset_audits(&key).await.unwrap();
+        assert_eq!(
+            reset_audits_before_reopen
+                .iter()
+                .map(|audit| audit.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        // Exercise startup reconstruction of a missing successful reset
+        // result while invocation lifecycle events remain independently durable.
+        // Admin reset receipts live in their own audit journal and must not
+        // synthesize, reorder, or consume sys.Invocation tail events.
+        state
+            .connection
+            .execute(
+                "DELETE FROM admin_invocation_checkpoint_result WHERE invocation_id = ?1",
+                params![first_reset_id.to_vec()],
+            )
+            .await
+            .unwrap();
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        let writer = reopened.acquire_lease(id(74)).await.unwrap();
+        assert_eq!(
+            reopened.admin_invocation_audits().await.unwrap(),
+            receipts_before_reopen,
+            "receipt reconstruction preserves audit identities, results and ordering"
+        );
+        assert_eq!(
+            reopened.checkpoint_reset_audits(&key).await.unwrap(),
+            reset_audits_before_reopen
+        );
+        let terminal_tail = reopened
+            .invocation_observation_tail(Some(cursor), 4)
+            .await
+            .unwrap();
+        assert_eq!(terminal_tail.entries.len(), 2);
+        assert!(!terminal_tail.has_more);
+        assert_eq!(
+            terminal_tail
+                .entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+            ]
+        );
+        assert_eq!(
+            terminal_tail
+                .entries
+                .iter()
+                .map(|entry| entry.invocation_id)
+                .collect::<Vec<_>>(),
+            vec![child_id, parent_id],
+            "the page boundary continues from the orphaned grandchild to its ancestors"
+        );
+
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(
+                    writer,
+                    first_request.clone(),
+                    first_reset_id,
+                )
+                .await,
+            Ok(first_reset.clone()),
+            "a replayed old reset receipt keeps its original result after a later reset"
+        );
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(
+                    writer,
+                    second_request,
+                    second_reset_id,
+                )
+                .await,
+            Ok(second_reset.clone())
+        );
+        assert_eq!(reopened.stream_checkpoint(&key).await.unwrap(), second_reset);
+        let mut changed_request = first_request;
+        changed_request.reason = "different request under the retained ID".into();
+        assert_eq!(
+            reopened
+                .reset_checkpoint_with_invocation_id(
+                    writer,
+                    changed_request,
+                    first_reset_id,
+                )
+                .await,
+            Err(RuntimeError::AdminInvocationConflict),
+            "argument drift conflicts before changing either ordered journal"
+        );
+        assert_eq!(
+            reopened.admin_invocation_audits().await.unwrap(),
+            receipts_before_reopen,
+            "replays and conflicts do not allocate new audit sequence entries"
+        );
+        assert_eq!(reopened.orphan_abandoned_invocations(writer).await.unwrap(), 0);
+        let full_tail = reopened
+            .invocation_observation_tail(None, 8)
+            .await
+            .unwrap();
+        assert_eq!(full_tail.entries.len(), 6);
+        assert_eq!(
+            full_tail
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6],
+            "admin receipt reconciliation leaves the invocation tail sequence contiguous"
+        );
+        assert_eq!(
+            full_tail
+                .entries
+                .iter()
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>(),
+            vec![
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Running,
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+                InvocationObservationStatus::Orphaned,
+            ],
+            "reset receipt reconciliation does not duplicate or rewind procedure tails"
+        );
+        assert_eq!(
+            full_tail.entries[3..]
+                .iter()
+                .map(|entry| entry.invocation_id)
+                .collect::<Vec<_>>(),
+            vec![grandchild_id, child_id, parent_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reset_receipt_reconciliation_rejects_conflicting_result_payload() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("conflicting-reset-receipt", "conflicting-reset-next")
+            .checkpoint_key();
+        state.pause_stream(writer, key.clone()).await.unwrap();
+        let invocation_id = id(88);
+        let request = CheckpointResetRequest {
+            key,
+            expected: CheckpointPrecondition {
+                version: 0,
+                committed: None,
+            },
+            to: Position {
+                token: Component::new("receipt:committed").unwrap(),
+            },
+            reason: "reconcile retained result".into(),
+        };
+        let result = state
+            .reset_checkpoint_with_invocation_id(writer, request, invocation_id)
+            .await
+            .unwrap();
+        assert_eq!(result.version, 1);
+        state
+            .connection
+            .execute(
+                "UPDATE admin_invocation_checkpoint_result
+                 SET version = version + 1 WHERE invocation_id = ?1",
+                params![invocation_id.to_vec()],
+            )
+            .await
+            .unwrap();
+        drop(state);
+
+        assert!(matches!(
+            RuntimeState::open(
+                &repo,
+                RuntimeIdentity {
+                    database_id: id(1),
+                    repository_id: id(2),
+                },
+                digest(3),
+            )
+            .await,
+            Err(RuntimeError::RecoveryInvalid)
+        ));
     }
 
     #[tokio::test]
@@ -28912,6 +42095,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_projection_rejects_nonterminal_stream_after_parent_run_terminal() {
+        let parsed = orna_syntax_v1::parse_module(include_str!(
+            "../tests/fixtures/parent_run_active_stream.orna"
+        ));
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "stream consumer fixture must parse: {:?}",
+            parsed.diagnostics
+        );
+
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(234)).await.unwrap();
+        let request = request(235, 236);
+        let fingerprint = digest(237);
+        let key = stream_delivery("terminal-parent", "active-child").checkpoint_key();
+        let run = state
+            .begin_observed_request(
+                RunObservationRegistration {
+                    request,
+                    consumer_identity: key.consumer.clone(),
+                    function: "pkg.ingest".into(),
+                    source_identity: Some(key.source.as_str().to_owned()),
+                    invocation_id: id(238),
+                },
+                fingerprint,
+                writer,
+            )
+            .await
+            .unwrap()
+            .run
+            .unwrap();
+        let stream = state
+            .register_stream_observation_with_owner(
+                writer,
+                StreamObservationRegistration {
+                    run: run.id,
+                    producer: "source-object".into(),
+                    consumer: None,
+                    checkpoint: key,
+                },
+            )
+            .await
+            .unwrap();
+
+        state
+            .complete_observed_request_with_owner(request, fingerprint, writer, outcome(239))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .stream_observation(stream.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            StreamObservationStatus::Orphaned
+        );
+        state
+            .connection
+            .execute(
+                "UPDATE sys_stream_observation SET status = ?1 WHERE stream_id = ?2",
+                params![
+                    stream_observation_status_code(StreamObservationStatus::Running),
+                    stream.id.0.to_vec()
+                ],
+            )
+            .await
+            .unwrap();
+
+        let parent = state.run_observation(run.id).await.unwrap().unwrap();
+        assert_eq!(parent.status, RunObservationStatus::Completed);
+        assert_eq!(
+            state.retained_sys_observation_projections().await,
+            Err(RuntimeError::RecoveryInvalid)
+        );
+    }
+
+    #[tokio::test]
     async fn stream_observation_loader_fails_closed_on_persisted_invariant_mismatch() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -29944,6 +43206,87 @@ mod tests {
             Err(RuntimeError::RecoveryInvalid)
         );
     }
+    #[tokio::test]
+    async fn stream_bootstrap_uses_selected_snapshot_before_first_provider_poll() {
+        let (_temp, repo) = repository();
+        let fixture = include_str!("../tests/fixtures/checkpoint_snapshot_v1.orna");
+        write_checkpoint_snapshot_file(&repo, "selected.orna", fixture.as_bytes());
+        let selected_commit = commit_checkpoint_snapshot(&repo, "selected checkpoint snapshot");
+        let state = open_state(&repo).await;
+        let key = checkpoint_snapshot_key(Some("tenant:west/17"));
+        let writer = state.acquire_lease(id(222)).await.unwrap();
+
+        ensure_stream_checkpoint(&state.connection, &key).await.unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint SET version = 91, committed_position = 'stale-local-tail'
+                 WHERE key_id = ?1",
+                params![stream_key_id(&key)],
+            )
+            .await
+            .unwrap();
+
+        let seeded = state
+            .bootstrap_stream_from_selected_snapshot(writer, &repo, &selected_commit, &key)
+            .await
+            .unwrap();
+        assert_eq!(seeded.version, 42);
+        assert_eq!(
+            seeded
+                .committed
+                .as_ref()
+                .map(|position| position.token.as_str()),
+            Some("offset:0001/β")
+        );
+
+        let mut source = FirstPollCheckpointSource {
+            key: key.clone(),
+            observed: None,
+        };
+        let mut handler = TestHandler {
+            result: None,
+            calls: 0,
+        };
+        assert_eq!(
+            state
+                .run_stream_once_from_selected_snapshot(
+                    writer,
+                    &repo,
+                    &selected_commit,
+                    &key,
+                    &mut source,
+                    &mut handler,
+                )
+                .await
+                .unwrap(),
+            StreamStep::Waiting
+        );
+        assert_eq!(source.observed, Some(seeded));
+
+        state
+            .connection
+            .execute(
+                "UPDATE stream_checkpoint SET version = 43, committed_position = 'local-progress'
+                 WHERE key_id = ?1",
+                params![stream_key_id(&key)],
+            )
+            .await
+            .unwrap();
+        let repeated = state
+            .bootstrap_stream_from_selected_snapshot(writer, &repo, &selected_commit, &key)
+            .await
+            .unwrap();
+        assert_eq!(repeated.version, 43);
+        assert_eq!(
+            repeated
+                .committed
+                .as_ref()
+                .map(|position| position.token.as_str()),
+            Some("local-progress")
+        );
+    }
+
     #[tokio::test]
     async fn staged_table_activation_keeps_one_context_and_source_work_unit() {
         let (_temp, repository) = repository();

@@ -1,0 +1,7 @@
+CREATE EXTERNAL CLIENT FUNCTION inspector.render(p_snapshot sys.inspect.snapshot)
+RETURNS std.ui.UI
+RUNTIME CONTRACT 'std.inspect.render@1'
+REQUIRES CAPABILITY sys.inspect.render('snapshot');
+CREATE CLIENT FUNCTION inspector.local()
+RETURNS BOOLEAN
+AS TRUE;

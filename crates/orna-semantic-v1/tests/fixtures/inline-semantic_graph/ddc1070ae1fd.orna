@@ -1,0 +1,7 @@
+
+            table EmailAddress {
+                value: Str,
+                impl From<Str> { fn from(value) = { value: value }; }
+                impl From<Int> { fn from(value) = { value: "converted" }; }
+            }
+        

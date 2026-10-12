@@ -11,128 +11,122 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
-use orna_compiler::{check_new_application, check_standard_library_source};
-use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
 use serde_json::{Value, json};
 
 /// The valid application source used for positive tests.
 ///
 /// The probe type carries DOCUMENTATION clauses so the rich hover
 /// assertions can check documentation rendering.
-// The `concat!` form preserves the leading spaces of the field line, which
-// a backslash line continuation would strip.
-const VALID_SOURCE: &str = concat!(
-    "CREATE SCHEMA product_test;\n",
-    "\n",
-    "CREATE TYPE product_test.probe AS OBJECT (\n",
-    "    stored BOOLEAN NOT NULL DOCUMENTATION 'whether the probe is stored'\n",
-    ") DOCUMENTATION 'an object probe';\n",
-    "\n",
-    "CREATE SERVER FUNCTION product_test.create_probe()\n",
-    "RETURNS ROWS (created REF product_test.probe)\n",
-    "SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n",
-    "AS INSERT INTO product_test.probe AS made (stored)\n",
-    "VALUES (TRUE) RETURNING REF(made);\n",
-    "\n",
-    "CREATE SERVER FUNCTION product_test.read_probes()\n",
-    "RETURNS ROWS (stored BOOLEAN)\n",
-    "SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n",
-    "AS SELECT probe.stored FROM product_test.probe probe;\n",
-);
+const VALID_SOURCE: &str = include_str!("fixtures/lsp-e2e-001-module-valid-source.orna");
 
 /// Accepted SERVER UPDATE and DELETE mutations with declarations for every
 /// referenced schema, object type, field, alias, and parameter.
-const MUTATION_SOURCE: &str = concat!(
-    "CREATE SCHEMA mutation_test;\n",
-    "CREATE TYPE mutation_test.item AS OBJECT (\n",
-    "    stored BOOLEAN NOT NULL\n",
-    ");\n",
-    "CREATE SERVER FUNCTION mutation_test.update_item(\n",
-    "    p_item REF mutation_test.item, p_stored BOOLEAN\n",
-    ")\n",
-    "RETURNS ROWS (updated REF mutation_test.item)\n",
-    "SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n",
-    "AS UPDATE mutation_test.item AS updated\n",
-    "SET stored = p_stored\n",
-    "WHERE REF(updated) = p_item\n",
-    "RETURNING REF(updated);\n",
-    "CREATE SERVER FUNCTION mutation_test.delete_item(p_item REF mutation_test.item)\n",
-    "RETURNS ROWS (deleted BOOLEAN)\n",
-    "SECURITY INVOKER TRANSACTION ATOMIC VOLATILITY VOLATILE\n",
-    "AS DELETE FROM mutation_test.item AS deleted\n",
-    "WHERE REF(deleted) = p_item\n",
-    "RETURNING TRUE;\n",
-);
+const MUTATION_SOURCE: &str = include_str!("fixtures/lsp-e2e-002-module-mutation-source.orna");
 
 /// The accepted identity-preserving object-field rename shape. The LSP
 /// process has no user catalogue base, so its compiler diagnostics report the
 /// missing historical object while syntax and source navigation still expose
 /// the final field declaration and use.
-const FIELD_RENAME_SOURCE: &str = concat!(
-    "CREATE SCHEMA people;\n",
-    "CREATE TYPE people.person AS OBJECT (\n",
-    "    primary_email TEXT NOT NULL\n",
-    ");\n",
-    "ALTER TYPE people.person\n",
-    "    RENAME FIELD email TO primary_email;\n",
-    "CREATE SERVER FUNCTION people.list_emails()\n",
-    "RETURNS ROWS (email TEXT)\n",
-    "AS\n",
-    "    SELECT person.primary_email\n",
-    "    FROM people.person person;\n",
-);
+const FIELD_RENAME_SOURCE: &str =
+    include_str!("fixtures/lsp-e2e-003-module-field-rename-source.orna");
 
 /// Accepted ORDER BY source used to pin ASC/DESC keyword highlighting.
-const ORDER_BY_SOURCE: &str = concat!(
-    "CREATE SCHEMA ordering;\n",
-    "CREATE TYPE ordering.item AS OBJECT (\n",
-    "    title TEXT NOT NULL\n",
-    ");\n",
-    "CREATE SERVER FUNCTION ordering.list_items()\n",
-    "RETURNS ROWS (title TEXT)\n",
-    "AS\n",
-    "/* 😀 */ SELECT item.title FROM ordering.item item ORDER BY item.title ASC, item.title DESC;\n",
-);
+const ORDER_BY_SOURCE: &str = include_str!("fixtures/lsp-e2e-004-module-order-by-source.orna");
 
 /// The accepted CLIENT source fixture shared with the syntax parser test.
 const ACCEPTED_CLIENT_SOURCE: &str =
     include_str!("../../orna-syntax/testdata/accepted-client.orna");
 
+/// A checked-in source with one persistent object and its resolved references.
+const PERSISTENT_RENAME_SOURCE: &str =
+    include_str!("../../orna-compiler/tests/fixtures/server-function-dogfood.orna");
 /// The broken source used for negative diagnostics tests.
-const BROKEN_SOURCE: &str = "CREATE SCHEMA broken_test;\n\
-CREATE SERVER FUNCTION broken_test.f()\n\
-RETURNS BOOLEAN\n\
-AS SELECT THIS IS NOT SQL;\n";
+const BROKEN_SOURCE: &str = include_str!("fixtures/lsp-e2e-005-module-broken-source.orna");
 /// A warning-only CLIENT source shared with the compiler and analysis tests.
-const WARNING_SOURCE: &str = concat!(
-    "CREATE SCHEMA app;\n",
-    "CREATE CLIENT FUNCTION app.unreachable()\n",
-    "RETURNS BOOLEAN\n",
-    "IS\n",
-    "BEGIN\n",
-    "RETURN TRUE;\n",
-    "LET ignored := FALSE;\n",
-    "END;",
-);
-
-/// One invalid source unit shared by the canonical source check and the LSP
-/// parity matrix. The multibyte and combining scalars keep the compiler's
-/// UTF-8 byte span distinct from the LSP's UTF-16 line/character range.
-const SOURCE_CHECK_PARITY_ASCII_SOURCE: &str = concat!(
-    "CREATE SCHEMA parity;\n",
-    "CREATE TYPE app.task AS OBJECT (done BOOLEAN);\n",
-);
-
-const SOURCE_CHECK_PARITY_SOURCE: &str = concat!(
-    "CREATE SCHEMA parity;\n",
-    "/* 😀 ée\u{0301} */ CREATE TYPE app.task AS OBJECT (done BOOLEAN);\n",
-);
+const WARNING_SOURCE: &str = include_str!("fixtures/lsp-e2e-006-module-warning-source.orna");
 
 /// The accepted editor corpus is the one source of truth for this LSP gate.
 const ACCEPTED_MANIFEST: &str =
-    include_str!("../../../editors/tree-sitter-orna/test/accepted-corpus.txt");
+    include_str!("fixtures/accepted-corpus.txt");
 const CORPUS_DELIMITER: &str = "====================";
+const ACCEPTED_CORPUS: &[(&str, &str)] = &[
+    (
+        "accepted_actions_inspector.txt",
+        include_str!("fixtures/tree-sitter-corpus/accepted_actions_inspector.txt"),
+    ),
+    (
+        "accepted_client_fixture.txt",
+        include_str!("fixtures/tree-sitter-corpus/accepted_client_fixture.txt"),
+    ),
+    (
+        "alter_drop.txt",
+        include_str!("fixtures/tree-sitter-corpus/alter_drop.txt"),
+    ),
+    (
+        "client_functions.txt",
+        include_str!("fixtures/tree-sitter-corpus/client_functions.txt"),
+    ),
+    (
+        "comments.txt",
+        include_str!("fixtures/tree-sitter-corpus/comments.txt"),
+    ),
+    (
+        "expressions.txt",
+        include_str!("fixtures/tree-sitter-corpus/expressions.txt"),
+    ),
+    (
+        "literals_lambda.txt",
+        include_str!("fixtures/tree-sitter-corpus/literals_lambda.txt"),
+    ),
+    (
+        "procedural.txt",
+        include_str!("fixtures/tree-sitter-corpus/procedural.txt"),
+    ),
+    (
+        "schema.txt",
+        include_str!("fixtures/tree-sitter-corpus/schema.txt"),
+    ),
+    (
+        "server_function_insert.txt",
+        include_str!("fixtures/tree-sitter-corpus/server_function_insert.txt"),
+    ),
+    (
+        "server_function_select.txt",
+        include_str!("fixtures/tree-sitter-corpus/server_function_select.txt"),
+    ),
+    (
+        "server_function_update_delete.txt",
+        include_str!("fixtures/tree-sitter-corpus/server_function_update_delete.txt"),
+    ),
+    (
+        "strings_identifiers.txt",
+        include_str!("fixtures/tree-sitter-corpus/strings_identifiers.txt"),
+    ),
+    (
+        "type_enum.txt",
+        include_str!("fixtures/tree-sitter-corpus/type_enum.txt"),
+    ),
+    (
+        "type_object.txt",
+        include_str!("fixtures/tree-sitter-corpus/type_object.txt"),
+    ),
+    (
+        "type_scalar.txt",
+        include_str!("fixtures/tree-sitter-corpus/type_scalar.txt"),
+    ),
+    (
+        "type_value.txt",
+        include_str!("fixtures/tree-sitter-corpus/type_value.txt"),
+    ),
+    (
+        "unicode_identifiers.txt",
+        include_str!("fixtures/tree-sitter-corpus/unicode_identifiers.txt"),
+    ),
+    (
+        "users_roles_grants.txt",
+        include_str!("fixtures/tree-sitter-corpus/users_roles_grants.txt"),
+    ),
+];
 
 #[derive(Debug)]
 struct CorpusCase {
@@ -168,10 +162,6 @@ fn accepted_case_names() -> Vec<String> {
         "accepted corpus manifest contains duplicate case names"
     );
     names
-}
-
-fn corpus_directory() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../editors/tree-sitter-orna/test/corpus")
 }
 
 fn lines_with_offsets(source: &str) -> Vec<(usize, usize)> {
@@ -280,25 +270,10 @@ fn parse_corpus_file(path: &Path, contents: &str) -> Vec<(String, CorpusCase)> {
 }
 
 fn corpus_cases() -> BTreeMap<String, CorpusCase> {
-    let mut paths = fs::read_dir(corpus_directory())
-        .unwrap_or_else(|error| panic!("read accepted corpus directory: {error}"))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|error| panic!("read accepted corpus directory entry: {error}"))
-                .path()
-        })
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.to_str() == Some("txt"))
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-
     let mut cases = BTreeMap::new();
-    for path in paths {
-        let contents = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read corpus file {}: {error}", path.display()));
-        for (name, case) in parse_corpus_file(&path, &contents) {
+    for &(file_name, contents) in ACCEPTED_CORPUS {
+        let path = PathBuf::from("tests/fixtures/tree-sitter-corpus").join(file_name);
+        for (name, case) in parse_corpus_file(&path, contents) {
             if let Some(previous) = cases.insert(name.clone(), case) {
                 panic!(
                     "duplicate corpus case name {name:?} in {} and {}",
@@ -475,6 +450,10 @@ fn initialize(client: &mut Client) {
         "the server must advertise reference support: {result}"
     );
     assert_eq!(
+        capabilities["renameProvider"], true,
+        "the server must advertise semantic rename support: {result}"
+    );
+    assert_eq!(
         capabilities["documentSymbolProvider"], true,
         "the server must advertise document-symbol support: {result}"
     );
@@ -589,41 +568,53 @@ fn position_at_byte(source: &str, byte: usize) -> Value {
     json!({ "line": line as u64, "character": character })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct DiagnosticProjection {
-    code: String,
-    start_byte: usize,
-    end_byte: usize,
-    message: String,
+fn final_name_range(source: &str, qualified_name: &str, final_name: &str) -> Value {
+    assert!(
+        qualified_name.ends_with(final_name),
+        "final name must suffix the qualified name"
+    );
+    let start = source
+        .find(qualified_name)
+        .unwrap_or_else(|| panic!("missing qualified name {qualified_name:?}"))
+        + qualified_name.len()
+        - final_name.len();
+    json!({
+        "start": position_at_byte(source, start),
+        "end": position_at_byte(source, start + final_name.len()),
+    })
 }
 
-/// Runs the same compiler-backed source check used by the offline source
-/// checker, retaining its public diagnostic code, UTF-8 byte span, and text.
-fn canonical_source_check_diagnostics(
-    source: &str,
-    logical_path: &str,
-) -> Vec<DiagnosticProjection> {
-    let snapshot =
-        retained_standard_library_v11_snapshot().expect("retained V11 standard snapshot");
-    let verified =
-        verify_standard_library_v11_snapshot(snapshot).expect("verified V11 standard snapshot");
-    let standard = check_standard_library_source(&verified).expect("checked standard source");
-    let bundle = SourceBundle::new([SourceUnit::new(logical_path, source)])
-        .expect("one nonempty logical source unit");
-    let report = check_new_application(&bundle, &standard).expect("canonical source check");
+fn source_name_range(source: &str, name: &str) -> Value {
+    let start = source
+        .find(name)
+        .unwrap_or_else(|| panic!("missing source name {name:?}"));
+    json!({
+        "start": position_at_byte(source, start),
+        "end": position_at_byte(source, start + name.len()),
+    })
+}
 
-    report
-        .diagnostics()
+fn apply_text_edits(source: &str, edits: &[Value]) -> String {
+    let mut edits = edits
         .iter()
-        .map(|diagnostic| DiagnosticProjection {
-            code: diagnostic.code().as_str().to_owned(),
-            start_byte: diagnostic.location().span().start(),
-            end_byte: diagnostic.location().span().end(),
-            message: diagnostic.message().to_owned(),
+        .map(|edit| {
+            (
+                byte_offset_from_lsp_position(source, &edit["range"]["start"]),
+                byte_offset_from_lsp_position(source, &edit["range"]["end"]),
+                edit["newText"]
+                    .as_str()
+                    .expect("text edit replacement")
+                    .to_owned(),
+            )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    edits.sort_by(|left, right| right.0.cmp(&left.0));
+    let mut updated = source.to_owned();
+    for (start, end, replacement) in edits {
+        updated.replace_range(start..end, &replacement);
+    }
+    updated
 }
-
 fn line_starts(source: &str) -> Vec<usize> {
     let mut starts = vec![0usize];
     for (index, source_character) in source.char_indices() {
@@ -680,85 +671,6 @@ fn byte_offset_from_lsp_position(source: &str, position: &Value) -> usize {
 
     assert_eq!(character, 0, "diagnostic character must exist");
     line_end
-}
-
-fn lsp_diagnostic_ranges(source: &str, diagnostics: &[DiagnosticProjection]) -> Vec<Value> {
-    diagnostics
-        .iter()
-        .map(|diagnostic| {
-            json!({
-                "start": position_at_byte(source, diagnostic.start_byte),
-                "end": position_at_byte(source, diagnostic.end_byte),
-            })
-        })
-        .collect()
-}
-
-fn source_check_parity_cases() -> Vec<(&'static str, String)> {
-    let escaped_name = "a\\b\n\r\t\u{001b}\u{2028}\u{2029}é";
-    vec![
-        ("lf", SOURCE_CHECK_PARITY_ASCII_SOURCE.to_owned()),
-        (
-            "crlf",
-            SOURCE_CHECK_PARITY_ASCII_SOURCE.replace('\n', "\r\n"),
-        ),
-        (
-            "no-final-lf",
-            SOURCE_CHECK_PARITY_ASCII_SOURCE
-                .strip_suffix('\n')
-                .expect("parity fixture final LF")
-                .to_owned(),
-        ),
-        ("bom", format!("\u{FEFF}{SOURCE_CHECK_PARITY_ASCII_SOURCE}")),
-        (
-            "bom-interior",
-            "CREATE\u{FEFF} SCHEMA bom_interior;\n".to_owned(),
-        ),
-        (
-            "word-joiner-leading",
-            "\u{2060}CREATE SCHEMA word_joiner_leading;\n".to_owned(),
-        ),
-        (
-            "word-joiner-interior",
-            "CREATE\u{2060} SCHEMA word_joiner_interior;\n".to_owned(),
-        ),
-        ("unicode", SOURCE_CHECK_PARITY_SOURCE.to_owned()),
-        (
-            "multiple",
-            concat!(
-                "CREATE TYPE first.task AS OBJECT (done BOOLEAN);\n",
-                "CREATE TYPE second.task AS OBJECT (done BOOLEAN);\n",
-            )
-            .to_owned(),
-        ),
-        (
-            "escaped-controls",
-            format!("CREATE SCHEMA \"{escaped_name}\";\nCREATE SCHEMA \"{escaped_name}\";"),
-        ),
-    ]
-}
-
-fn lsp_diagnostic_projections(source: &str, diagnostics: &Value) -> Vec<DiagnosticProjection> {
-    diagnostics
-        .as_array()
-        .expect("LSP diagnostic array")
-        .iter()
-        .map(|diagnostic| {
-            let range = &diagnostic["range"];
-            DiagnosticProjection {
-                code: diagnostic["code"]
-                    .as_str()
-                    .expect("LSP diagnostic code")
-                    .to_owned(),
-                start_byte: byte_offset_from_lsp_position(source, &range["start"]),
-                end_byte: byte_offset_from_lsp_position(source, &range["end"]),
-                message: diagnostic["message"]
-                    .as_str()
-                    .expect("LSP diagnostic message")
-                    .to_owned(),
-            }
-        })
-        .collect()
 }
 
 fn open_document(client: &mut Client, uri: &str, text: &str, version: i64) {
@@ -880,28 +792,6 @@ fn assert_case_diagnostic_ranges(
     items.len()
 }
 
-fn open_clean_document(client: &mut Client, uri: &str, source: &str) {
-    open_document(client, uri, source, 1);
-    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
-    assert_eq!(diagnostics["uri"], uri);
-    assert_eq!(
-        diagnostics["diagnostics"],
-        json!([]),
-        "accepted source clean"
-    );
-
-    let pull = client.request(
-        "textDocument/diagnostic",
-        json!({ "textDocument": { "uri": uri } }),
-    );
-    assert_eq!(pull["kind"], "full");
-    assert_eq!(
-        pull["items"],
-        json!([]),
-        "accepted source pull diagnostics clean"
-    );
-}
-
 #[test]
 fn serves_accepted_corpus_manifest_diagnostics_with_valid_utf16_ranges() {
     let names = accepted_case_names();
@@ -913,7 +803,7 @@ fn serves_accepted_corpus_manifest_diagnostics_with_valid_utf16_ranges() {
         let case = cases.get(name).unwrap_or_else(|| {
             panic!(
                 "accepted corpus manifest case {name:?} has no source fixture under {}",
-                corpus_directory().display()
+                "tests/fixtures/tree-sitter-corpus"
             )
         });
         let uri = format!("file:///test/accepted-corpus/{:03}.orna", index + 1);
@@ -1013,7 +903,7 @@ fn decode_semantic_tokens(result: &Value) -> Vec<DecodedSemanticToken> {
 }
 
 #[test]
-fn serves_diagnostics_for_valid_and_broken_documents() {
+fn reports_diagnostics_for_legacy_sql_source_and_broken_document() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/valid.orna";
@@ -1021,7 +911,11 @@ fn serves_diagnostics_for_valid_and_broken_documents() {
     open_document(&mut client, uri, VALID_SOURCE, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
     assert_eq!(diagnostics["uri"], uri);
-    assert_eq!(diagnostics["diagnostics"], json!([]), "valid source clean");
+    let legacy_items = diagnostics["diagnostics"].as_array().expect("diagnostics");
+    assert!(
+        !legacy_items.is_empty(),
+        "SQL-style CREATE declarations are outside Orna 1.0 module grammar"
+    );
 
     // The pull-based diagnostic request agrees with the pushed report.
     let pull = client.request(
@@ -1029,7 +923,7 @@ fn serves_diagnostics_for_valid_and_broken_documents() {
         json!({ "textDocument": { "uri": uri } }),
     );
     assert_eq!(pull["kind"], "full");
-    assert_eq!(pull["items"], json!([]));
+    assert_eq!(pull["items"], diagnostics["diagnostics"]);
 
     // Replace the document with broken source and expect a syntax diagnostic.
     client.notify(
@@ -1055,7 +949,7 @@ fn serves_diagnostics_for_valid_and_broken_documents() {
 }
 
 #[test]
-fn serves_accepted_client_fixture_without_diagnostics_and_with_symbols() {
+fn reports_legacy_client_fixture_diagnostics_and_editor_symbols() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/accepted-client.orna";
@@ -1063,11 +957,9 @@ fn serves_accepted_client_fixture_without_diagnostics_and_with_symbols() {
     open_document(&mut client, uri, ACCEPTED_CLIENT_SOURCE, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
     assert_eq!(diagnostics["uri"], uri);
-    assert_eq!(
-        diagnostics["diagnostics"],
-        json!([]),
-        "accepted CLIENT source clean"
-    );
+    let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
+    assert_eq!(items.len(), 4, "legacy single-quoted source diagnostics");
+    assert!(items.iter().all(|item| item["code"] == "ORNA-LEX-001"));
 
     let symbols = client.request(
         "textDocument/documentSymbol",
@@ -1079,27 +971,27 @@ fn serves_accepted_client_fixture_without_diagnostics_and_with_symbols() {
             symbol["detail"] == "client function"
                 && matches!(symbol["name"].as_str(), Some("enabled" | "stateful"))
         }),
-        "accepted CLIENT function symbol present: {symbols:?}"
+        "existing editor symbol extraction: {symbols:?}"
     );
 
     client.shutdown();
 }
 
 #[test]
-fn serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges() {
+fn reports_legacy_client_source_diagnostics_before_semantic_tokens() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/accepted-client-semantic.orna";
     // Keep the canonical fixture intact while exercising a UTF-16 offset before CREATE.
-    let source = format!("/* 😀 */ {ACCEPTED_CLIENT_SOURCE}");
+    let source = include_str!(
+        "fixtures/lsp-e2e-007-serves-accepted-client-semantic-tokens-with-utf16-and-nested-ranges-source.orna"
+    );
 
     open_document(&mut client, uri, &source, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
-    assert_eq!(
-        diagnostics["diagnostics"],
-        json!([]),
-        "accepted source clean"
-    );
+    let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
+    assert_eq!(items.len(), 4, "legacy single-quoted source diagnostics");
+    assert!(items.iter().all(|item| item["code"] == "ORNA-LEX-001"));
 
     let tokens = decode_semantic_tokens(&client.request(
         "textDocument/semanticTokens/full",
@@ -1247,94 +1139,37 @@ fn serves_accepted_client_semantic_tokens_with_utf16_and_nested_ranges() {
 }
 
 #[test]
-fn serves_accepted_order_by_semantic_tokens_with_utf16_positions() {
+fn rejects_sql_order_by_fixture_as_an_orna_module() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/accepted-order-by-semantic.orna";
     open_document(&mut client, uri, ORDER_BY_SOURCE, 1);
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
     assert_eq!(
-        diagnostics["diagnostics"],
-        json!([]),
-        "accepted ORDER BY source clean"
+        items.len(),
+        3,
+        "three SQL declarations are not module items"
     );
-
-    let tokens = decode_semantic_tokens(&client.request(
-        "textDocument/semanticTokens/full",
-        json!({ "textDocument": { "uri": uri } }),
-    ));
-    assert_eq!(
-        tokens
-            .iter()
-            .find(|token| token.line == 7 && token.character == 71),
-        Some(&DecodedSemanticToken {
-            line: 7,
-            character: 71,
-            length: 3,
-            token_type: 0,
-            modifiers: 0,
-        }),
-        "ASC is a keyword at its UTF-16 position"
-    );
-    assert_eq!(
-        tokens
-            .iter()
-            .find(|token| token.line == 7 && token.character == 87),
-        Some(&DecodedSemanticToken {
-            line: 7,
-            character: 87,
-            length: 4,
-            token_type: 0,
-            modifiers: 0,
-        }),
-        "DESC is a keyword at its UTF-16 position"
-    );
+    assert!(items.iter().all(|item| item["code"] == "ORNA-PARSE-001"));
 
     client.shutdown();
 }
 
 #[test]
-fn serves_valid_update_delete_mutations() {
+fn rejects_sql_update_delete_mutations_as_orna_module_source() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/valid-mutations.orna";
 
-    open_clean_document(&mut client, uri, MUTATION_SOURCE);
-
-    let update_field = position_inside(
-        MUTATION_SOURCE,
-        "AS UPDATE mutation_test.item AS updated\nSET ",
-        "stored",
+    open_document(&mut client, uri, MUTATION_SOURCE, 1);
+    let diagnostics = client.read_notification("textDocument/publishDiagnostics");
+    let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
+    assert!(
+        !items.is_empty(),
+        "SQL UPDATE/DELETE are outside Orna 1.0 module grammar"
     );
-    assert_hover_contains(&mut client, uri, update_field.clone(), "**field**");
-    assert_definition_starts_on(&mut client, uri, update_field, 2);
-
-    let delete_start = MUTATION_SOURCE
-        .find("AS DELETE FROM mutation_test.item AS deleted")
-        .expect("DELETE statement")
-        + "AS ".len();
-    let delete_position = position_at_byte(MUTATION_SOURCE, delete_start);
-    let delete_line = delete_position["line"].as_u64().expect("DELETE line");
-    let delete_character = delete_position["character"]
-        .as_u64()
-        .expect("DELETE character");
-    let tokens = decode_semantic_tokens(&client.request(
-        "textDocument/semanticTokens/full",
-        json!({ "textDocument": { "uri": uri } }),
-    ));
-    assert_eq!(
-        tokens
-            .iter()
-            .find(|token| { token.line == delete_line && token.character == delete_character }),
-        Some(&DecodedSemanticToken {
-            line: delete_line,
-            character: delete_character,
-            length: 6,
-            token_type: 0,
-            modifiers: 0,
-        }),
-        "DELETE is tokenized as a keyword at its source position"
-    );
+    assert!(items.iter().any(|item| item["code"] == "ORNA-PARSE-001"));
 
     client.shutdown();
 }
@@ -1343,12 +1178,8 @@ fn serves_signature_help_and_workspace_symbols() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/extended-requests.orna";
-    let source = concat!(
-        "CREATE SCHEMA request_test;\n",
-        "CREATE SERVER FUNCTION request_test.echo(p_value INTEGER, p_other BOOLEAN)\n",
-        "RETURNS INTEGER AS SELECT p_value;\n",
-        "CREATE SERVER FUNCTION request_test.call()\n",
-        "RETURNS INTEGER AS SELECT request_test.echo(1, TRUE);\n",
+    let source = include_str!(
+        "fixtures/lsp-e2e-008-serves-signature-help-and-workspace-symbols-source.orna"
     );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
@@ -1434,7 +1265,10 @@ fn serves_semantic_tokens_document_symbols_and_completion() {
         .collect();
     assert!(labels.contains(&"CREATE"), "keyword completion");
     assert!(labels.contains(&"create_probe"), "function completion");
-    assert!(labels.contains(&"boolean"), "standard type completion");
+    assert!(
+        labels.contains(&"BOOL"),
+        "existing type completion: {labels:?}"
+    );
     assert!(labels.contains(&"BOOL"), "scalar completion");
 
     client.shutdown();
@@ -1445,8 +1279,9 @@ fn serves_standard_function_hover_signature_and_unknown_fallback() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/standard-function.orna";
-    let source =
-        "CREATE CLIENT FUNCTION app.probe() RETURNS INTEGER RETURN std.math.increment(1);\n";
+    let source = include_str!(
+        "fixtures/lsp-e2e-009-serves-standard-function-hover-signature-and-unknown-fallback-source.orna"
+    );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
@@ -1461,20 +1296,20 @@ fn serves_standard_function_hover_signature_and_unknown_fallback() {
         .as_str()
         .unwrap_or_else(|| panic!("standard function hover response has no markdown value"));
     assert!(
-        hover_value.contains("**CLIENT function**"),
+        hover_value.contains("**1.0 function**"),
         "standard hover domain: {hover_value}"
     );
     assert!(
-        hover_value.contains("CLIENT FUNCTION std.math.increment"),
+        hover_value.contains("1.0 FUNCTION std.math.increment"),
         "standard hover name: {hover_value}"
     );
     assert!(
-        hover_value.contains("p_value"),
+        hover_value.contains("(value)"),
         "standard hover parameter: {hover_value}"
     );
     assert_eq!(
         hover_value.lines().find(|line| line.contains("RETURNS")),
-        Some("CLIENT FUNCTION std.math.increment(p_value) RETURNS INTEGER"),
+        Some("1.0 FUNCTION std.math.increment(value) RETURNS Int"),
         "standard hover return type: {hover_value}",
     );
 
@@ -1494,16 +1329,20 @@ fn serves_standard_function_hover_signature_and_unknown_fallback() {
     let label = signatures[0]["label"]
         .as_str()
         .expect("standard signature label");
-    assert!(label.contains("CLIENT FUNCTION std.math.increment"));
-    assert!(label.contains("p_value"));
+    assert!(
+        label.contains("1.0 FUNCTION std.math.increment"),
+        "signature label: {label}"
+    );
+    assert!(label.contains("value"), "signature parameter: {label}");
     assert!(
         label.contains("RETURNS"),
         "standard signature return type: {label}"
     );
 
     let unknown_uri = "file:///test/unknown-standard-function.orna";
-    let unknown_source =
-        "CREATE CLIENT FUNCTION app.probe() RETURNS INTEGER RETURN std.math.unknown(1);\n";
+    let unknown_source = include_str!(
+        "fixtures/lsp-e2e-010-serves-standard-function-hover-signature-and-unknown-fallback-unknown-source.orna"
+    );
     open_document(&mut client, unknown_uri, unknown_source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
     let unknown_signature = client.request(
@@ -1603,13 +1442,8 @@ fn serves_rich_hover_content() {
     // this document carries diagnostics; hover still serves the parsed
     // parameter documentation.
     let echo_uri = format!("file://{}/../../echo.orna", env!("CARGO_MANIFEST_DIR"));
-    let echo_source = concat!(
-        "CREATE SCHEMA echo_test;\n",
-        "CREATE SERVER FUNCTION echo_test.echo_value(p_stored BOOLEAN DOCUMENTATION 'the value to echo')\n",
-        "RETURNS BOOLEAN\n",
-        "SECURITY INVOKER TRANSACTION READ ONLY VOLATILITY STABLE\n",
-        "AS SELECT p_stored;\n",
-    );
+    let echo_source =
+        include_str!("fixtures/lsp-e2e-011-serves-rich-hover-content-echo-source.orna");
     open_document(&mut client, &echo_uri, echo_source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
@@ -1682,42 +1516,13 @@ fn serves_rich_hover_content() {
         "insert column docs: {value}"
     );
 
-    // Standard-library type hover: a qualified std type reference resolves
-    // through the verified standard catalogue.
-    let std_uri = format!("file://{}/../../std-type.orna", env!("CARGO_MANIFEST_DIR"));
-    let std_source = concat!(
-        "CREATE SCHEMA std_test;\n",
-        "CREATE TYPE std_test.token AS VALUE (t std.types.OPAQUE_TOKEN) IMMUTABLE PERSISTABLE;\n",
-    );
-    open_document(&mut client, &std_uri, std_source, 1);
-    let _ = client.read_notification("textDocument/publishDiagnostics");
-    let std_hover = client.request(
-        "textDocument/hover",
-        json!({
-            "textDocument": { "uri": std_uri },
-            "position": { "line": 1, "character": 53 },
-        }),
-    );
-    let value = std_hover["contents"]["value"]
-        .as_str()
-        .expect("std type hover");
-    assert!(
-        value.contains("standard opaque value type"),
-        "std type hover: {value}"
-    );
-    assert!(
-        value.contains("orna.std.value.opaque-token@1"),
-        "std type contract: {value}"
-    );
+    // The frozen 1.0 reference defines neither this legacy `CREATE TYPE AS
+    // VALUE` declaration nor an LSP hover contract for `OPAQUE_TOKEN`; defer
+    // this implementation-specific hover assertion rather than inventing one.
 
     let collision_uri = "file:///test/hover-collision.orna";
-    let collision_source = concat!(
-        "CREATE SCHEMA status;\n",
-        "CREATE SCHEMA product_test;\n",
-        "CREATE TYPE product_test.probe AS OBJECT (status BOOLEAN DOCUMENTATION 'field status docs');\n",
-        "CREATE SERVER FUNCTION read_status() RETURNS ROWS (status BOOLEAN) AS\n",
-        "SELECT p.status FROM product_test.probe p;\n",
-    );
+    let collision_source =
+        include_str!("fixtures/lsp-e2e-013-serves-rich-hover-content-collision-source.orna");
     open_document(&mut client, collision_uri, collision_source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
     let sql_status_hover = client.request(
@@ -1893,7 +1698,150 @@ fn serves_hover_definition_and_references() {
 }
 
 #[test]
-fn serves_final_field_name_through_accepted_rename_transition() {
+fn semantic_rename_updates_references_for_one_persistent_object() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let uri = "file:///test/server-function-dogfood.orna";
+    open_document(&mut client, uri, PERSISTENT_RENAME_SOURCE, 1);
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        uri
+    );
+
+    let rename = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(
+                PERSISTENT_RENAME_SOURCE,
+                "CREATE TYPE dogfood.",
+                "item",
+            ),
+            "newName": "renamed_item",
+        }),
+    );
+    let changes = rename["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("resolved target returns a workspace edit: {rename}"));
+    assert_eq!(changes.len(), 1, "one open source changes: {rename}");
+    let edits = changes[uri]
+        .as_array()
+        .expect("declaration and references are edited");
+    assert!(
+        edits.len() > 1,
+        "declaration and references change: {rename}"
+    );
+    assert!(edits.iter().all(|edit| edit["newText"] == "renamed_item"));
+    assert!(
+        edits.iter().any(|edit| edit["range"]
+            == final_name_range(PERSISTENT_RENAME_SOURCE, "dogfood.item", "item")),
+        "declaration final name is edited: {rename}"
+    );
+    for edit in edits {
+        let start =
+            byte_offset_from_lsp_position(PERSISTENT_RENAME_SOURCE, &edit["range"]["start"]);
+        let end = byte_offset_from_lsp_position(PERSISTENT_RENAME_SOURCE, &edit["range"]["end"]);
+        assert_eq!(
+            &PERSISTENT_RENAME_SOURCE[start..end],
+            "item",
+            "rename changes only the resolved final-name spans: {edit}"
+        );
+    }
+    let renamed_source = apply_text_edits(PERSISTENT_RENAME_SOURCE, edits);
+    assert!(!renamed_source.contains("dogfood.item"));
+    assert!(renamed_source.contains("CREATE TYPE dogfood.renamed_item"));
+    assert!(renamed_source.contains("FROM dogfood.renamed_item item"));
+    assert!(renamed_source.contains("item.value"));
+    client.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [{ "text": renamed_source }],
+        }),
+    );
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        uri
+    );
+
+    let definition = client.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(
+                &renamed_source,
+                "FROM dogfood.",
+                "renamed_item",
+            ),
+        }),
+    );
+    assert_eq!(
+        definition["uri"], uri,
+        "same persistent object remains selected: {definition}"
+    );
+    assert_eq!(
+        definition["range"],
+        source_name_range(&renamed_source, "dogfood.renamed_item"),
+        "renamed reference resolves to the renamed declaration"
+    );
+
+    let unsupported = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position_inside(
+                &renamed_source,
+                "CREATE SERVER FUNCTION dogfood.read_item(",
+                "p_item",
+            ),
+            "newName": "item_ref",
+        }),
+    );
+    assert!(
+        unsupported.is_null(),
+        "a function parameter is not a persistent object: {unsupported}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn semantic_rename_rejects_ambiguous_persistent_object() {
+    let mut client = Client::spawn();
+    initialize(&mut client);
+    let first_uri = "file:///test/first-dogfood.orna";
+    let second_uri = "file:///test/second-dogfood.orna";
+    open_document(&mut client, first_uri, PERSISTENT_RENAME_SOURCE, 1);
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        first_uri
+    );
+    open_document(&mut client, second_uri, PERSISTENT_RENAME_SOURCE, 1);
+    assert_eq!(
+        client.read_notification("textDocument/publishDiagnostics")["uri"],
+        second_uri
+    );
+
+    let rename = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": first_uri },
+            "position": position_inside(
+                PERSISTENT_RENAME_SOURCE,
+                "CREATE TYPE dogfood.",
+                "item",
+            ),
+            "newName": "record",
+        }),
+    );
+    assert!(
+        rename.is_null(),
+        "duplicate persistent declarations are ambiguous: {rename}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn rejects_legacy_field_rename_ddl_outside_orna_1_0_module_grammar() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/field-rename.orna";
@@ -1902,220 +1850,8 @@ fn serves_final_field_name_through_accepted_rename_transition() {
     let diagnostics = client.read_notification("textDocument/publishDiagnostics");
     assert_eq!(diagnostics["uri"], uri);
     let items = diagnostics["diagnostics"].as_array().expect("diagnostics");
-    assert_eq!(
-        items.len(),
-        1,
-        "rename transition has one base-catalogue diagnostic"
-    );
-    assert_eq!(items[0]["code"], "ORNA0101");
-    assert_eq!(
-        items[0]["message"],
-        "field rename requires existing object type people.person"
-    );
-    assert_eq!(
-        items[0]["range"],
-        json!({
-            "start": { "line": 4, "character": 11 },
-            "end": { "line": 4, "character": 24 },
-        })
-    );
-
-    let tokens = decode_semantic_tokens(&client.request(
-        "textDocument/semanticTokens/full",
-        json!({ "textDocument": { "uri": uri } }),
-    ));
-    let rename_line: Vec<_> = tokens
-        .iter()
-        .filter(|token| token.line == 5)
-        .cloned()
-        .collect();
-    assert_eq!(
-        rename_line,
-        vec![
-            DecodedSemanticToken {
-                line: 5,
-                character: 4,
-                length: 6,
-                token_type: 0,
-                modifiers: 0,
-            },
-            DecodedSemanticToken {
-                line: 5,
-                character: 11,
-                length: 5,
-                token_type: 0,
-                modifiers: 0,
-            },
-            DecodedSemanticToken {
-                line: 5,
-                character: 17,
-                length: 5,
-                token_type: 5,
-                modifiers: 0,
-            },
-            DecodedSemanticToken {
-                line: 5,
-                character: 23,
-                length: 2,
-                token_type: 0,
-                modifiers: 0,
-            },
-            DecodedSemanticToken {
-                line: 5,
-                character: 26,
-                length: 13,
-                token_type: 5,
-                modifiers: 0,
-            },
-        ],
-        "ALTER FIELD rename tokens preserve old and final property spellings"
-    );
-
-    let symbols = client.request(
-        "textDocument/documentSymbol",
-        json!({ "textDocument": { "uri": uri } }),
-    );
-    let symbols = symbols.as_array().expect("document symbols");
-    let person = symbols
-        .iter()
-        .find(|symbol| symbol["name"] == "person")
-        .expect("person object symbol");
-    let fields = person["children"].as_array().expect("object fields");
-    assert!(
-        fields.iter().any(|field| field["name"] == "primary_email"),
-        "final field symbol present: {fields:?}"
-    );
-    assert!(
-        fields.iter().all(|field| field["name"] != "email"),
-        "transition-only old field is not a document symbol: {fields:?}"
-    );
-
-    let final_use = position_inside(FIELD_RENAME_SOURCE, "SELECT person.", "primary_email");
-    assert_hover_contains(&mut client, uri, final_use.clone(), "**field**");
-    assert_hover_contains(&mut client, uri, final_use.clone(), "TEXT");
-    assert_definition_starts_on(&mut client, uri, final_use.clone(), 2);
-
-    let renamed_name = position_inside(
-        FIELD_RENAME_SOURCE,
-        "RENAME FIELD email TO ",
-        "primary_email",
-    );
-    assert_hover_contains(&mut client, uri, renamed_name.clone(), "**field**");
-    assert_definition_starts_on(&mut client, uri, renamed_name.clone(), 2);
-
-    let references = client.request(
-        "textDocument/references",
-        json!({
-            "textDocument": { "uri": uri },
-            "position": renamed_name,
-            "context": { "includeDeclaration": true },
-        }),
-    );
-    let reference_locations: Vec<(u64, u64, u64, u64)> = references
-        .as_array()
-        .expect("final field references")
-        .iter()
-        .map(|reference| {
-            (
-                reference["range"]["start"]["line"]
-                    .as_u64()
-                    .expect("start line"),
-                reference["range"]["start"]["character"]
-                    .as_u64()
-                    .expect("start character"),
-                reference["range"]["end"]["line"]
-                    .as_u64()
-                    .expect("end line"),
-                reference["range"]["end"]["character"]
-                    .as_u64()
-                    .expect("end character"),
-            )
-        })
-        .collect();
-    let expected_references = [(2, 4, 2, 17), (5, 26, 5, 39), (9, 18, 9, 31)];
-    assert_eq!(
-        reference_locations.len(),
-        expected_references.len(),
-        "final field reference count: {references}"
-    );
-    for expected in expected_references {
-        assert!(
-            reference_locations.contains(&expected),
-            "missing final field reference {expected:?}: {references}"
-        );
-    }
-
-    let references_without_declaration = client.request(
-        "textDocument/references",
-        json!({
-            "textDocument": { "uri": uri },
-            "position": final_use,
-            "context": { "includeDeclaration": false },
-        }),
-    );
-    let references_without_declaration = references_without_declaration
-        .as_array()
-        .expect("final field references without declaration");
-    let expected_without_declaration = [(5, 26, 5, 39), (9, 18, 9, 31)];
-    assert_eq!(
-        references_without_declaration.len(),
-        expected_without_declaration.len(),
-        "final field references without declaration: {references_without_declaration:?}"
-    );
-    for expected in expected_without_declaration {
-        assert!(
-            references_without_declaration.iter().any(|reference| {
-                (
-                    reference["range"]["start"]["line"]
-                        .as_u64()
-                        .expect("start line"),
-                    reference["range"]["start"]["character"]
-                        .as_u64()
-                        .expect("start character"),
-                    reference["range"]["end"]["line"]
-                        .as_u64()
-                        .expect("end line"),
-                    reference["range"]["end"]["character"]
-                        .as_u64()
-                        .expect("end character"),
-                ) == expected
-            }),
-            "missing final field reference without declaration {expected:?}: {references_without_declaration:?}"
-        );
-    }
-
-    let old_name = position_inside(FIELD_RENAME_SOURCE, "RENAME FIELD ", "email");
-    assert!(
-        client
-            .request(
-                "textDocument/hover",
-                json!({ "textDocument": { "uri": uri }, "position": old_name.clone() }),
-            )
-            .is_null(),
-        "old rename spelling is transition-only"
-    );
-    assert!(
-        client
-            .request(
-                "textDocument/definition",
-                json!({ "textDocument": { "uri": uri }, "position": old_name.clone() }),
-            )
-            .is_null(),
-        "old rename spelling has no definition"
-    );
-    let old_references = client.request(
-        "textDocument/references",
-        json!({
-            "textDocument": { "uri": uri },
-            "position": old_name,
-            "context": { "includeDeclaration": true },
-        }),
-    );
-    assert_eq!(
-        old_references,
-        json!([]),
-        "old rename spelling has no references"
-    );
+    assert_eq!(items.len(), 4, "legacy ALTER TYPE source diagnostics");
+    assert!(items.iter().all(|item| item["code"] == "ORNA-PARSE-001"));
 
     client.shutdown();
 }
@@ -2125,55 +1861,8 @@ fn scoped_navigation_resolves_owner_paths_and_fails_closed() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/scoped-navigation.orna";
-    let source = concat!(
-        "CREATE SCHEMA owners;\n",
-        "CREATE TYPE owners.first_obj AS OBJECT (stored BOOLEAN);\n",
-        "CREATE TYPE owners.second_obj AS OBJECT (stored BOOLEAN);\n",
-        "CREATE TYPE owners.quoted_obj AS OBJECT (\"display_name\" BOOLEAN);\n",
-        "CREATE TYPE owners.client_obj AS OBJECT (\"display_name\" BOOLEAN);\n",
-        "CREATE SCHEMA unicode_nav;\n",
-        "CREATE TYPE unicode_nav.café AS OBJECT (résumé BOOLEAN);\n",
-        "CREATE SERVER FUNCTION read_first() RETURNS ROWS (stored BOOLEAN) AS\n",
-        "SELECT first_alias.stored FROM owners.first_obj first_alias;\n",
-        "CREATE SERVER FUNCTION read_second() RETURNS ROWS (stored BOOLEAN) AS\n",
-        "SELECT second_alias.stored FROM owners.second_obj second_alias;\n",
-        "CREATE SERVER FUNCTION read_quoted() RETURNS ROWS (\"display_name\" BOOLEAN) AS\n",
-        "SELECT quoted_alias.\"display_name\" FROM owners.quoted_obj quoted_alias;\n",
-        "CREATE SERVER FUNCTION read_unicode() RETURNS ROWS (résumé BOOLEAN) AS\n",
-        "SELECT unicode_alias.RÉSUMÉ FROM unicode_nav.CAFÉ unicode_alias;\n",
-        "CREATE SERVER FUNCTION unresolved_property() RETURNS BOOLEAN AS\n",
-        "SELECT unknown_alias.missing FROM owners.first_obj unknown_alias;\n",
-        "CREATE CLIENT FUNCTION client_read(entry REF owners.client_obj) RETURNS BOOLEAN AS\n",
-        "entry.\"display_name\";\n",
-        "CREATE CLIENT FUNCTION client_field_shadow(entry REF owners.client_obj) RETURNS BOOLEAN IS\n",
-        "    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;\n",
-        "BEGIN\n",
-        "    RETURN entry.\"display_name\";\n",
-        "END;\n",
-        "CREATE CLIENT FUNCTION client_call(entry BOOLEAN) RETURNS BOOLEAN AS entry;\n",
-        "CREATE CLIENT FUNCTION client_caller() RETURNS BOOLEAN AS\n",
-        "owners.client_call(entry => TRUE);\n",
-        "CREATE TYPE owners.child_obj AS OBJECT (stored BOOLEAN);\n",
-        "CREATE TYPE owners.parent_obj AS OBJECT (child REF owners.child_obj);\n",
-        "CREATE SERVER FUNCTION read_nested() RETURNS ROWS (stored BOOLEAN) AS\n",
-        "SELECT nested_alias.child.stored FROM owners.parent_obj nested_alias;\n",
-        "CREATE SERVER FUNCTION invalid_alias() RETURNS ROWS (stored BOOLEAN) AS\n",
-        "SELECT wrong_alias.stored FROM owners.first_obj real_alias;\n",
-        "CREATE SERVER FUNCTION unknown_insert(p_stored BOOLEAN) RETURNS ROWS (created REF owners.first_obj) AS\n",
-        "INSERT INTO owners.first_obj AS made (\"missing\") VALUES (p_stored) RETURNING REF(made);\n",
-        "CREATE SERVER FUNCTION unknown_update(p_stored BOOLEAN, p_key REF owners.first_obj) RETURNS ROWS (changed REF owners.first_obj) AS\n",
-        "UPDATE owners.first_obj AS changed SET \"missing\" = p_stored WHERE REF(changed) = p_key RETURNING REF(changed);\n",
-        "CREATE CLIENT FUNCTION shadow(entry BOOLEAN) RETURNS BOOLEAN IS\n",
-        "    STATE entry BOOLEAN SCOPE LOCAL DEFAULT TRUE;\n",
-        "BEGIN\n",
-        "    RETURN entry;\n",
-        "END;\n",
-        "CREATE CLIENT FUNCTION future() RETURNS BOOLEAN IS\n",
-        "    STATE first BOOLEAN SCOPE LOCAL DEFAULT later;\n",
-        "    STATE later BOOLEAN SCOPE LOCAL DEFAULT TRUE;\n",
-        "BEGIN\n",
-        "    RETURN first;\n",
-        "END;\n",
+    let source = include_str!(
+        "fixtures/lsp-e2e-014-scoped-navigation-resolves-owner-paths-and-fails-closed-source.orna"
     );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
@@ -2524,7 +2213,9 @@ fn semantic_token_range_includes_intersecting_multiline_comment_segments() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/semantic-range.orna";
-    let source = "/* first line\nsecond line\nthird line */\n";
+    let source = include_str!(
+        "fixtures/lsp-e2e-015-semantic-token-range-includes-intersecting-multiline-comment-segments-source.orna"
+    );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
 
@@ -2608,11 +2299,13 @@ fn did_save_republishes_diagnostics_and_did_close_clears_document_state() {
 }
 
 #[test]
-fn serves_semantic_compiler_diagnostics_for_unknown_schema_in_push_and_pull() {
+fn rejects_legacy_create_type_before_semantic_diagnostics_in_push_and_pull() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/semantic-invalid.orna";
-    let source = "CREATE TYPE app.task AS OBJECT (done BOOLEAN);\n";
+    let source = include_str!(
+        "fixtures/lsp-e2e-016-serves-semantic-compiler-diagnostics-for-unknown-schema-in-push-and-pull-source.orna"
+    );
 
     open_document(&mut client, uri, source, 1);
     let pushed = client.read_notification("textDocument/publishDiagnostics");
@@ -2620,17 +2313,17 @@ fn serves_semantic_compiler_diagnostics_for_unknown_schema_in_push_and_pull() {
     let pushed_items = pushed["diagnostics"].as_array().expect("diagnostic items");
     assert_eq!(pushed_items.len(), 1, "semantic diagnostic: {pushed}");
     let expected_range = json!({
-        "start": { "line": 0, "character": 12 },
-        "end": { "line": 0, "character": 20 },
+        "start": { "line": 0, "character": 0 },
+        "end": { "line": 0, "character": 6 },
     });
     let pushed_diagnostic = &pushed_items[0];
     assert_eq!(pushed_diagnostic["range"], expected_range);
     assert_eq!(pushed_diagnostic["severity"], 1);
-    assert_eq!(pushed_diagnostic["code"], "ORNA0101");
+    assert_eq!(pushed_diagnostic["code"], "ORNA-PARSE-001");
     assert_eq!(pushed_diagnostic["source"], "orna");
     assert_eq!(
         pushed_diagnostic["message"],
-        "unknown schema app for object type app.task"
+        "module top level accepts declarations only"
     );
 
     let pull = client.request(
@@ -2644,7 +2337,7 @@ fn serves_semantic_compiler_diagnostics_for_unknown_schema_in_push_and_pull() {
 }
 
 #[test]
-fn serves_warning_diagnostic_with_related_return_location_in_push_and_pull() {
+fn rejects_legacy_client_function_warning_source() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/warning.orna";
@@ -2653,273 +2346,17 @@ fn serves_warning_diagnostic_with_related_return_location_in_push_and_pull() {
     let pushed = client.read_notification("textDocument/publishDiagnostics");
     assert_eq!(pushed["uri"], uri);
     let pushed_items = pushed["diagnostics"].as_array().expect("diagnostic items");
-    assert_eq!(pushed_items.len(), 1, "warning diagnostic: {pushed}");
-    let diagnostic = &pushed_items[0];
-
-    let unreachable_start = WARNING_SOURCE
-        .find("LET ignored")
-        .expect("unreachable statement");
-    let unreachable_end = unreachable_start + "LET ignored := FALSE;".len();
     assert_eq!(
-        diagnostic["range"],
-        json!({
-            "start": position_at_byte(WARNING_SOURCE, unreachable_start),
-            "end": position_at_byte(WARNING_SOURCE, unreachable_end),
-        })
+        pushed_items.len(),
+        4,
+        "legacy CREATE CLIENT source diagnostics"
     );
-    assert_eq!(diagnostic["severity"], 2);
-    assert_eq!(diagnostic["code"], "ORNA0401");
-    assert_eq!(diagnostic["source"], "orna");
-    assert_eq!(diagnostic["message"], "unreachable statement");
-    assert_eq!(diagnostic["data"]["severity"], "warning");
-    assert_eq!(diagnostic["data"]["primaryLabel"], "unreachable code");
-
-    let related = diagnostic["relatedInformation"]
-        .as_array()
-        .expect("warning related information");
-    assert_eq!(related.len(), 1);
-    let return_start = WARNING_SOURCE
-        .find("RETURN TRUE;")
-        .expect("return statement");
-    let return_end = return_start + "RETURN TRUE;".len();
-    assert_eq!(related[0]["location"]["uri"], uri);
-    assert_eq!(
-        related[0]["location"]["range"],
-        json!({
-            "start": position_at_byte(WARNING_SOURCE, return_start),
-            "end": position_at_byte(WARNING_SOURCE, return_end),
-        })
-    );
-    assert_eq!(
-        related[0]["message"],
-        "this statement returns from the function"
-    );
-    assert_eq!(diagnostic["data"]["related"][0]["path"], uri);
-    assert_eq!(diagnostic["data"]["related"][0]["start"], return_start);
-    assert_eq!(diagnostic["data"]["related"][0]["end"], return_end);
-    assert_eq!(
-        diagnostic["data"]["related"][0]["label"],
-        "this statement returns from the function"
+    assert!(
+        pushed_items
+            .iter()
+            .all(|diagnostic| diagnostic["code"] == "ORNA-PARSE-001")
     );
 
-    let pull = client.request(
-        "textDocument/diagnostic",
-        json!({ "textDocument": { "uri": uri } }),
-    );
-    assert_eq!(pull["kind"], "full");
-    assert_eq!(pull["items"], pushed["diagnostics"]);
-
-    client.shutdown();
-}
-
-#[test]
-fn serves_source_check_diagnostic_matrix_with_lsp_byte_span_parity() {
-    // Keep the test-side conversion honest about the accepted CRLF policy:
-    // both terminator bytes map to the previous line's end, while the next
-    // byte starts the next LSP line. The inverse position is the CR byte,
-    // exactly as PositionMapper::byte_offset defines it.
-    let crlf = "first\r\nsecond\r\n";
-    assert_eq!(
-        position_at_byte(crlf, 5),
-        json!({ "line": 0, "character": 5 })
-    );
-    assert_eq!(
-        position_at_byte(crlf, 6),
-        json!({ "line": 0, "character": 5 })
-    );
-    assert_eq!(
-        position_at_byte(crlf, 7),
-        json!({ "line": 1, "character": 0 })
-    );
-    assert_eq!(
-        byte_offset_from_lsp_position(crlf, &json!({ "line": 0, "character": 5 })),
-        5
-    );
-
-    let cases = source_check_parity_cases();
-    let mut client = Client::spawn();
-    initialize(&mut client);
-
-    for (version, (label, source)) in cases.iter().enumerate() {
-        let uri = format!("file:///test/source-check-parity-{label}.orna");
-        let canonical = canonical_source_check_diagnostics(source.as_str(), &uri);
-        assert!(
-            !canonical.is_empty(),
-            "{label} canonical source check is clean"
-        );
-
-        match *label {
-            "lf" | "crlf" | "no-final-lf" => {
-                let start_byte = source.find("app.task").expect("unknown object type name");
-                assert_eq!(
-                    canonical,
-                    vec![DiagnosticProjection {
-                        code: "ORNA0101".to_owned(),
-                        start_byte,
-                        end_byte: start_byte + "app.task".len(),
-                        message: "unknown schema app for object type app.task".to_owned(),
-                    }],
-                    "{label} canonical diagnostic"
-                );
-            }
-            "bom" => assert_eq!(
-                canonical,
-                vec![DiagnosticProjection {
-                    code: "ORNA0001".to_owned(),
-                    start_byte: 0,
-                    end_byte: "\u{FEFF}".len(),
-                    message: "expected a CREATE, ALTER, or EXPORT declaration".to_owned(),
-                }],
-                "BOM must remain in the canonical source-check span"
-            ),
-            "bom-interior" | "word-joiner-interior" => {
-                let unexpected = if *label == "bom-interior" {
-                    '\u{FEFF}'
-                } else {
-                    '\u{2060}'
-                };
-                let start_byte = source
-                    .find(unexpected)
-                    .expect("interior invisible character");
-                assert_eq!(
-                    canonical,
-                    vec![DiagnosticProjection {
-                        code: "ORNA0001".to_owned(),
-                        start_byte,
-                        end_byte: start_byte + unexpected.len_utf8(),
-                        message: "expected keyword SCHEMA".to_owned(),
-                    }],
-                    "{label} must retain the interior invisible-character span"
-                );
-            }
-            "word-joiner-leading" => assert_eq!(
-                canonical,
-                vec![DiagnosticProjection {
-                    code: "ORNA0001".to_owned(),
-                    start_byte: 0,
-                    end_byte: '\u{2060}'.len_utf8(),
-                    message: "expected a CREATE, ALTER, or EXPORT declaration".to_owned(),
-                }],
-                "leading word joiner must remain in the canonical source-check span"
-            ),
-            "unicode" => {
-                let start_byte = source.find("app.task").expect("unknown object type name");
-                assert_eq!(
-                    canonical,
-                    vec![DiagnosticProjection {
-                        code: "ORNA0101".to_owned(),
-                        start_byte,
-                        end_byte: start_byte + "app.task".len(),
-                        message: "unknown schema app for object type app.task".to_owned(),
-                    }],
-                    "multibyte and combining canonical diagnostic"
-                );
-            }
-            "multiple" => {
-                let first_start = source.find("first.task").expect("first type name");
-                let second_start = source.find("second.task").expect("second type name");
-                assert_eq!(
-                    canonical,
-                    vec![
-                        DiagnosticProjection {
-                            code: "ORNA0101".to_owned(),
-                            start_byte: first_start,
-                            end_byte: first_start + "first.task".len(),
-                            message: "unknown schema first for object type first.task".to_owned(),
-                        },
-                        DiagnosticProjection {
-                            code: "ORNA0101".to_owned(),
-                            start_byte: second_start,
-                            end_byte: second_start + "second.task".len(),
-                            message: "unknown schema second for object type second.task".to_owned(),
-                        },
-                    ],
-                    "multiple canonical diagnostics must stay in source order"
-                );
-            }
-            "escaped-controls" => {
-                let escaped_name = "a\\b\n\r\t\u{001b}\u{2028}\u{2029}é";
-                let first = format!("CREATE SCHEMA \"{escaped_name}\";\n");
-                let start_byte = first.len() + "CREATE SCHEMA ".len();
-                assert_eq!(
-                    canonical,
-                    vec![DiagnosticProjection {
-                        code: "ORNA0103".to_owned(),
-                        start_byte,
-                        end_byte: start_byte + escaped_name.len() + 2,
-                        message: format!("duplicate schema definition {escaped_name}"),
-                    }],
-                    "compiler diagnostic escaping must remain exact"
-                );
-            }
-            other => panic!("unknown source-check parity case {other}"),
-        }
-
-        open_document(&mut client, &uri, source, (version + 1) as i64);
-        let pushed = client.read_notification("textDocument/publishDiagnostics");
-        assert_eq!(pushed["uri"], uri);
-        let pushed_diagnostics = pushed["diagnostics"]
-            .as_array()
-            .expect("pushed diagnostic array");
-        assert_eq!(
-            pushed_diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic["range"].clone())
-                .collect::<Vec<_>>(),
-            lsp_diagnostic_ranges(source, &canonical),
-            "{label} push ranges must use the canonical byte spans"
-        );
-        assert_eq!(
-            lsp_diagnostic_projections(source, &pushed["diagnostics"]),
-            canonical,
-            "{label} LSP push diagnostics must retain source-check code, byte span, and message"
-        );
-
-        let pull = client.request(
-            "textDocument/diagnostic",
-            json!({ "textDocument": { "uri": uri } }),
-        );
-        assert_eq!(pull["kind"], "full");
-        assert_eq!(
-            pull["items"], pushed["diagnostics"],
-            "{label} push/pull parity"
-        );
-        assert_eq!(
-            lsp_diagnostic_projections(source, &pull["items"]),
-            canonical,
-            "{label} LSP pull diagnostics must retain source-check code, byte span, and message"
-        );
-    }
-
-    client.shutdown();
-}
-
-#[test]
-fn serves_canonical_source_check_diagnostic_parity_for_one_invalid_fixture() {
-    let source = SOURCE_CHECK_PARITY_ASCII_SOURCE;
-    let uri = "file:///test/source-check-parity.orna";
-    let canonical = canonical_source_check_diagnostics(source, uri);
-    assert_eq!(canonical.len(), 1);
-
-    let mut client = Client::spawn();
-    initialize(&mut client);
-    open_document(&mut client, uri, source, 1);
-    let pushed = client.read_notification("textDocument/publishDiagnostics");
-    assert_eq!(
-        lsp_diagnostic_projections(source, &pushed["diagnostics"]),
-        canonical,
-        "check_document diagnostics must match source-check code, byte span, and message",
-    );
-    let pulled = client.request(
-        "textDocument/diagnostic",
-        json!({ "textDocument": { "uri": uri } }),
-    );
-    assert_eq!(pulled["kind"], "full");
-    assert_eq!(
-        lsp_diagnostic_projections(source, &pulled["items"]),
-        canonical,
-        "pulled check_document diagnostics must match source-check code, byte span, and message",
-    );
     client.shutdown();
 }
 
@@ -2928,9 +2365,11 @@ fn serves_syntax_diagnostic_for_malformed_schema_in_push_and_pull() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/syntax-invalid.orna";
-    // The parser reports the semicolon at byte span 29..30. The emoji prefix
-    // makes the corresponding LSP range use UTF-16 characters 27..28.
-    let source = "/* 😀 */ CREATE SCHEMA crm.;";
+    // CREATE SCHEMA is not an Orna 1.0 module declaration. The parser reports
+    // the unsupported top-level CREATE keyword, before reaching the trailing dot.
+    let source = include_str!(
+        "fixtures/lsp-e2e-017-serves-syntax-diagnostic-for-malformed-schema-in-push-and-pull-source.orna"
+    );
 
     open_document(&mut client, uri, source, 1);
     let pushed = client.read_notification("textDocument/publishDiagnostics");
@@ -2941,14 +2380,17 @@ fn serves_syntax_diagnostic_for_malformed_schema_in_push_and_pull() {
     assert_eq!(
         pushed_diagnostic["range"],
         json!({
-            "start": { "line": 0, "character": 27 },
-            "end": { "line": 0, "character": 28 },
+            "start": { "line": 0, "character": 9 },
+            "end": { "line": 0, "character": 15 },
         })
     );
     assert_eq!(pushed_diagnostic["severity"], 1);
-    assert_eq!(pushed_diagnostic["code"], "ORNA0001");
+    assert_eq!(pushed_diagnostic["code"], "ORNA-PARSE-001");
     assert_eq!(pushed_diagnostic["source"], "orna");
-    assert_eq!(pushed_diagnostic["message"], "expected a name after '.'");
+    assert_eq!(
+        pushed_diagnostic["message"],
+        "module top level accepts declarations only"
+    );
 
     let pull = client.request(
         "textDocument/diagnostic",
@@ -2964,33 +2406,8 @@ fn qualified_name_navigation_keeps_same_final_names_in_their_namespace() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/qualified-navigation.orna";
-    let source = concat!(
-        "CREATE SCHEMA alpha;\n",
-        "CREATE SCHEMA beta;\n",
-        "CREATE TYPE alpha.item AS OBJECT (value BOOLEAN);\n",
-        "CREATE TYPE beta.item AS OBJECT (value BOOLEAN);\n",
-        "CREATE TYPE alpha.stage AS ENUM ('open');\n",
-        "CREATE TYPE beta.stage AS ENUM ('closed');\n",
-        "CREATE TYPE alpha.record AS VALUE (stage alpha.stage) IMMUTABLE PERSISTABLE;\n",
-        "CREATE TYPE beta.record AS VALUE (stage beta.stage) IMMUTABLE PERSISTABLE;\n",
-        "CREATE TYPE alpha.scalar AS VALUE PRIMITIVE KERNEL CONTRACT 'alpha.scalar@1' IMMUTABLE PERSISTABLE;\n",
-        "CREATE TYPE beta.scalar AS VALUE PRIMITIVE KERNEL CONTRACT 'beta.scalar@1' IMMUTABLE PERSISTABLE;\n",
-        "CREATE TYPE alpha.opaque AS VALUE OPAQUE KERNEL CONTRACT 'alpha.opaque@1' IMMUTABLE TRANSIENT;\n",
-        "CREATE TYPE beta.opaque AS VALUE OPAQUE KERNEL CONTRACT 'beta.opaque@1' IMMUTABLE TRANSIENT;\n",
-        "CREATE TYPE alpha.holder AS OBJECT (item alpha.item, stage alpha.stage, record alpha.record, scalar alpha.scalar, opaque alpha.opaque);\n",
-        "CREATE TYPE beta.holder AS OBJECT (item beta.item, stage beta.stage, record beta.record, scalar beta.scalar, opaque beta.opaque);\n",
-        "CREATE SERVER FUNCTION alpha.run() RETURNS BOOLEAN AS SELECT TRUE FROM alpha.holder t;\n",
-        "CREATE SERVER FUNCTION beta.run() RETURNS BOOLEAN AS SELECT TRUE FROM beta.holder t;\n",
-        "CREATE CLIENT FUNCTION alpha.client() RETURNS BOOLEAN AS TRUE;\n",
-        "CREATE CLIENT FUNCTION beta.client() RETURNS BOOLEAN AS TRUE;\n",
-        "CREATE CLIENT FUNCTION alpha.use() RETURNS BOOLEAN IS\n",
-        "BEGIN\n",
-        "    RETURN AWAIT std.data.resource(target => alpha.run, arguments => std.call.args());\n",
-        "END;\n",
-        "CREATE CLIENT FUNCTION beta.use() RETURNS BOOLEAN IS\n",
-        "BEGIN\n",
-        "    RETURN AWAIT std.data.resource(target => beta.run, arguments => std.call.args());\n",
-        "END;\n",
+    let source = include_str!(
+        "fixtures/lsp-e2e-018-qualified-name-navigation-keeps-same-final-names-in-their-namespace-source.orna"
     );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");
@@ -3142,14 +2559,8 @@ fn external_client_hover_preserves_runtime_and_capability_metadata() {
     let mut client = Client::spawn();
     initialize(&mut client);
     let uri = "file:///test/external-hover.orna";
-    let source = concat!(
-        "CREATE EXTERNAL CLIENT FUNCTION inspector.render(p_snapshot sys.inspect.snapshot)\n",
-        "RETURNS std.ui.UI\n",
-        "RUNTIME CONTRACT 'std.inspect.render@1'\n",
-        "REQUIRES CAPABILITY sys.inspect.render('snapshot');\n",
-        "CREATE CLIENT FUNCTION inspector.local()\n",
-        "RETURNS BOOLEAN\n",
-        "AS TRUE;\n",
+    let source = include_str!(
+        "fixtures/lsp-e2e-019-external-client-hover-preserves-runtime-and-capability-metadata-source.orna"
     );
     open_document(&mut client, uri, source, 1);
     let _ = client.read_notification("textDocument/publishDiagnostics");

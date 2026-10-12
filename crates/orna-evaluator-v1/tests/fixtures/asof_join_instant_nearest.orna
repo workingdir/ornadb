@@ -1,0 +1,9 @@
+std.collection.asof_join(
+    left: [{ group: "g", at: 1970-01-01T00:00:00Z, label: "left" }],
+    right: [
+        { group: "g", at: 1970-01-01T00:00:00.000000002Z, label: "two-nanoseconds" },
+        { group: "g", at: 1970-01-01T00:00:00.000000001Z, label: "one-nanosecond" }
+    ],
+    time: row => row.at,
+    by: row => row.group
+)

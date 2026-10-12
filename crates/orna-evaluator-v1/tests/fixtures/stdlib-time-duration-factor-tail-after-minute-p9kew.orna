@@ -1,0 +1,6 @@
+[
+    compact_fmt.format((60.seconds * 1.0000000001) - 0.000000005.seconds),
+    clock_fmt.format((60.seconds * 1.0000000001) - 0.000000005.seconds),
+    words_fmt.format((60.seconds * 1.0000000001) - 0.000000005.seconds),
+    iso_fmt.format((60.seconds * 1.0000000001) - 0.000000005.seconds),
+]

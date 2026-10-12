@@ -1,0 +1,18 @@
+
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub table Audit { message: Str, }
+            pub table Note(id: Int) {
+                value: Str,
+                impl Display {
+                    fn display(self): Str {
+                        let render = () => {
+                            return self.value;
+                            Audit.insert({ message: "after lambda return" });
+                        };
+                        render()
+                    }
+                }
+            }
+        

@@ -1,0 +1,1 @@
+pub table Person(id: Int) { label: Str, }

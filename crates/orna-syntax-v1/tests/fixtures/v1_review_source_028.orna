@@ -1,0 +1,1 @@
+pub table User(id: Uuid) { assert id > 0; constraints { unique(id); } }

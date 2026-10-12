@@ -1,0 +1,6 @@
+
+        pub fn square(value: Int) = value * value;
+        pub fn count_is_positive(values: [Int]) = values | count > 0;
+        pub fn square_sum(a: Int, b: Int) = a + b | square;
+        pub fn increment_count(values: [Int]) = (values | count) + 1;
+    

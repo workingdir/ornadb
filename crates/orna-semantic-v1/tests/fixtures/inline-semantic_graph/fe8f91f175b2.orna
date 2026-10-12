@@ -1,0 +1,1 @@
+pub fn pinned(snapshot: sys.SnapshotRef = sys.snapshot("HEAD")){annotation} = snapshot;

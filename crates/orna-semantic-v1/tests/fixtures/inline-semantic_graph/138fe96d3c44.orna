@@ -1,0 +1,4 @@
+
+            pub fn abort(failure: Error): Int = fail(failure);
+            pub fn reemit(value: Int): Int = value |? (failure => fail(failure));
+        

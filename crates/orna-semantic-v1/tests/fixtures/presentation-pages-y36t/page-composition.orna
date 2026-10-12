@@ -1,0 +1,7 @@
+use std.ui.*;
+
+fn heading() = text("Records");
+fn heading_row() = row(heading());
+fn body() = panel(column(heading_row()));
+
+pub fn records_page() = Page("/records", _ => body());

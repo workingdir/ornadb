@@ -1,0 +1,6 @@
+fn incremented() = increment(41);
+fn decremented() = decrement(0);
+fn zero() = is_zero(0);
+fn minimum() = min(3, 5);
+fn maximum() = max(3, 5);
+fn clamped() = clamp(9, 0, 5);

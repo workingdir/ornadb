@@ -1,0 +1,1 @@
+table Reading(id: Int) { time: Instant, } table Other(id: Int) { time: Str, } fn bucket(period: Duration) = {body};

@@ -1,0 +1,1 @@
+use alpha; use beta; pub fn forge(): beta.Vault = beta.Vault { beta: "ok" };

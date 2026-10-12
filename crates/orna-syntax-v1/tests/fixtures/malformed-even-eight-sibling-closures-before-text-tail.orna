@@ -1,0 +1,44 @@
+pub fn bad(flag: Bool): Int { case flag {
+true: "one {first => { let saved_first = first; case first {
+true: saved_first,
+false: flag,
+};
+after_first => { case after_first { true: saved_first, false: "tail {flag}" } }
+}} two {second => { let saved_second = second; case second {
+true: saved_second,
+false 1 { value: 1 },
+};
+after_second => { case after_second { true: saved_second, false: "tail {flag}" } }
+}} three {third => { let saved_third = third; case third {
+true: saved_third,
+false: flag,
+};
+after_third => { case after_third { true: saved_third, false: "tail {flag}" } }
+}} four {fourth => { let saved_fourth = fourth; case fourth {
+true: saved_fourth,
+false 3 { value: 3 },
+};
+after_fourth => { case after_fourth { true: saved_fourth, false: "tail {flag}" } }
+}} five {fifth => { let saved_fifth = fifth; case fifth {
+true: saved_fifth,
+false: flag,
+};
+after_fifth => { case after_fifth { true: saved_fifth, false: "tail {flag}" } }
+}} six {sixth => { let saved_sixth = sixth; case sixth {
+true: saved_sixth,
+false 5 { value: 5 },
+};
+after_sixth => { case after_sixth { true: saved_sixth, false: "tail {flag}" } }
+}} seven {seventh => { let saved_seventh = seventh; case seventh {
+true: saved_seventh,
+false: flag,
+};
+after_seventh => { case after_seventh { true: saved_seventh, false: "tail {flag}" } }
+}} eight {eighth => { let saved_eighth = eighth; case eighth {
+true: saved_eighth,
+false 7 { value: 7 },
+};
+after_eighth => { case after_eighth { true: saved_eighth, false: "tail {flag}" } }
+}} end",
+false: "fallback {flag}"
+}}

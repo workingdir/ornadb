@@ -1,0 +1,6 @@
+
+            table Reading(id: Int) { value: Int, }
+            table Child(id: Int) { value: Int, }
+            pub fn list_inner() = Reading | flat_map(reading => [reading.value]);
+            pub fn relation_inner() = Reading | flat_map(transform: reading => Child | map(child => child.value));
+        

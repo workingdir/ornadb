@@ -1,0 +1,11 @@
+pub fn describe_value(value: Int): sys.ValueMetadata<Int> = sys.meta(value);
+pub fn resolve_snapshot(snapshot: sys.SnapshotRef): sys.SnapshotRef = sys.snapshot(snapshot);
+pub fn resolve_commit(commit: sys.CommitRef): sys.SnapshotRef = sys.snapshot(commit);
+pub fn invoke_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.Value = sys.invoke(function, arguments);
+pub fn invoke_typed<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, output: T): T = sys.invoke(function, arguments, output);
+pub fn start_erased(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.InvocationHandle<sys.Value> = sys.start(function, arguments);
+pub fn start_typed<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, output: T): sys.InvocationHandle<T> = sys.start(function, arguments, output);
+pub fn snapshot_default(): sys.SnapshotRef = sys.snapshot();
+pub fn resolve_default(name: Str): sys.ObjectRef = sys.resolve(name);
+pub fn history_of(object: sys.ObjectRef): Relation<sys.Revision> = sys.history(object);
+pub fn diff_entries(from: sys.SnapshotRef, to: sys.SnapshotRef): Relation<sys.DiffEntry> = sys.diff(from, to);

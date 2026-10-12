@@ -1,0 +1,9 @@
+// Deterministic workload source used to bind submitted compact-throughput
+// evidence to a concrete fixture. The validator hashes these exact bytes.
+pub table ThroughputSample {
+    service: Str,
+    sequence: Int,
+    observed_at: Int,
+}
+
+pub fn main() = ThroughputSample | count();

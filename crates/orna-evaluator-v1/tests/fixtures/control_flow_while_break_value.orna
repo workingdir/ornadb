@@ -1,0 +1,6 @@
+if true {
+    let result = while true {
+        break 1;
+    };
+    result
+}

@@ -1,0 +1,1 @@
+fn input() = Stream.from_list([1], identity: "fixture");

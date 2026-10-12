@@ -1,0 +1,7 @@
+CREATE SCHEMA a;
+CREATE SCHEMA b;
+CREATE TYPE a.item AS OBJECT (a_value BOOLEAN);
+CREATE TYPE b.item AS OBJECT (b_value TEXT);
+CREATE SERVER FUNCTION use_b() RETURNS b
+-- keep the qualified path intact
+.item AS SELECT TRUE;

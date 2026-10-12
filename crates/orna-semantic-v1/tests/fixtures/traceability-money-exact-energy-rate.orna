@@ -1,0 +1,13 @@
+pub protocol Currency {
+    static code: Str;
+    static minor_digits: Int;
+}
+
+pub type GBP {
+    impl Currency {
+        static code = "GBP";
+        static minor_digits = 2;
+    }
+}
+
+pub fn cost(energy: Decimal<kWh>, rate: Money<GBP> / kWh): Money<GBP> = energy * rate;

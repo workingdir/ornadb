@@ -1,0 +1,1 @@
+fn between(value: Int, min: Int, max: Int) = value >= min && value <= max; fn test() = {expression};

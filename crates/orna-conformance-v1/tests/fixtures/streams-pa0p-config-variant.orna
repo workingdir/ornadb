@@ -1,0 +1,7 @@
+pub table Reading(id: Int) { value: Int, }
+pub fn main() {
+    Stream.from_list([3, 4], source_identity: "fixture:streams-pa0p-finite")
+        | for_each(value => {
+            Reading.insert({ id: value, value: value });
+        });
+}

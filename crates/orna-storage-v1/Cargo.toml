@@ -18,5 +18,6 @@ parquet = { version = "59.3.0", default-features = false, features = ["crc", "zs
 sha2 = "0.10.9"
 
 [dev-dependencies]
+orna-syntax-v1 = { path = "../orna-syntax-v1" }
 tempfile = "3.23.0"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }

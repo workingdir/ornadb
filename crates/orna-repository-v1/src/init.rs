@@ -725,14 +725,7 @@ mod tests {
     fn leaves_existing_head_index_and_user_worktree_content_unchanged() {
         let target = tempfile::tempdir().unwrap();
         git(target.path(), &["init", "-b", "main"]);
-        git(
-            target.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(
-            target.path(),
-            &["config", "user.name", "Repository init test"],
-        );
+        crate::test_support::configure_fixture_git_identity(target.path());
         git(target.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(target.path().join("ordinary.txt"), "base\n").unwrap();
         fs::write(target.path().join("main.orna"), "module main;\n").unwrap();
@@ -792,11 +785,7 @@ mod tests {
         let foreign = fixture.path().join("foreign");
         fs::create_dir(&foreign).unwrap();
         git(&foreign, &["init", "--quiet", "-b", "foreign"]);
-        git(
-            &foreign,
-            &["config", "user.email", "repository-init@example.invalid"],
-        );
-        git(&foreign, &["config", "user.name", "Repository init test"]);
+        crate::test_support::configure_fixture_git_identity(&foreign);
         fs::write(foreign.join("foreign.txt"), "foreign\n").unwrap();
         git(&foreign, &["add", "foreign.txt"]);
         let foreign_head = fs::read(foreign.join(".git/HEAD")).unwrap();

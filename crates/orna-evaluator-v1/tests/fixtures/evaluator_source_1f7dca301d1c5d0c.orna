@@ -1,0 +1,1 @@
+std.math.clamp(max: 5, value: 9, min: 0)

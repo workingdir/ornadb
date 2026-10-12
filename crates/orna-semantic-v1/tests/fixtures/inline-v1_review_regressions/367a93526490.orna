@@ -1,0 +1,16 @@
+
+            pub protocol Display {
+                fn display(self): Str;
+            }
+            pub protocol Order {
+                fn compare(self, other: Self): Int;
+            }
+            pub type DisplayOnly {
+                value: Int,
+                impl Display {
+                    fn display(self): Str = "display-only";
+                }
+            }
+            pub fn keep<T impl Display + Order>(value: T): T = value;
+            pub fn rejected(): DisplayOnly = keep(DisplayOnly { value: 1 });
+        

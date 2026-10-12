@@ -1,0 +1,1 @@
+fn label(): Str = "value: {1}";

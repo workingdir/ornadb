@@ -1,0 +1,2 @@
+pub fn pause(stream: sys.StreamRef) = sys.admin.pause_stream(stream);
+pub fn main(stream: sys.StreamRef) = pause(stream);

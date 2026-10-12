@@ -1,0 +1,2 @@
+pub table Note { text: Str, }
+pub table Reading(sensor: Str, sequence: Int) { value: Decimal, }

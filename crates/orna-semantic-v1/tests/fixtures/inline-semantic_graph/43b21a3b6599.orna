@@ -1,0 +1,1 @@
+fn positional_after_named(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, arguments: arguments, as: Int, null);

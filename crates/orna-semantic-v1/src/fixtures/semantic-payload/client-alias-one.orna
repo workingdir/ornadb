@@ -1,0 +1,1 @@
+use library as one; fn call(): Int = one.value();

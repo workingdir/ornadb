@@ -1,0 +1,1 @@
+type T = Int { assert self > 0; } fn where() = 1;

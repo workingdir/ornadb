@@ -1,0 +1,1 @@
+use vault; pub fn forge() { let vault = 1; vault.Vault { value: 1 } }

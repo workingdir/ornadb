@@ -30,6 +30,8 @@ pub use uuid::Uuid;
 mod compact;
 mod init;
 mod transport;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
@@ -3589,15 +3591,104 @@ impl Repository {
         path: impl AsRef<Path>,
         max_bytes: usize,
     ) -> Result<Vec<u8>, RepositoryError> {
-        let path = ManagedPath::new(path)?;
         let resolved = self.commit_required(&format!("{}^{{commit}}", commit.as_str()))?;
         if resolved != *commit {
             return Err(RepositoryError::GitOperationFailed);
         }
+        self.read_tree_file(commit.as_str(), path, max_bytes)
+    }
 
+    /// Returns the exact commit recorded by one gitlink in a committed tree.
+    /// The returned ID belongs to the attached repository; callers must open
+    /// that repository and resolve the object there before reading its files.
+    pub fn committed_submodule_commit(
+        &self,
+        commit: &GitCommitRef,
+        path: impl AsRef<Path>,
+    ) -> Result<GitCommitRef, RepositoryError> {
+        let resolved = self.commit_required(&format!("{}^{{commit}}", commit.as_str()))?;
+        if resolved != *commit {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        self.read_submodule_commit(commit.as_str(), path)
+    }
+
+    /// Returns the gitlink commit from a private publication candidate.
+    pub fn private_candidate_submodule_commit(
+        &self,
+        candidate: &PrivateCommit,
+        path: impl AsRef<Path>,
+    ) -> Result<GitCommitRef, RepositoryError> {
+        self.verify_private_candidate(candidate)?;
+        self.read_submodule_commit(candidate.tree.as_str(), path)
+    }
+
+    fn read_submodule_commit(
+        &self,
+        treeish: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<GitCommitRef, RepositoryError> {
+        let path = ManagedPath::new(path)?;
+        let mut command = self.command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["ls-tree", "-z", "--full-tree", treeish, "--"])
+            .arg(path.as_path());
+        let output = self.run(command)?;
+        let mut entries = output.stdout.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
+        let entry = entries
+            .next()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if entries.next().is_some() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let tab = entry
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if &entry[tab + 1..] != path.as_path().as_os_str().as_encoded_bytes() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let mut fields = entry[..tab].split(|byte| *byte == b' ');
+        let mode = fields.next().unwrap_or_default();
+        let kind = fields.next().unwrap_or_default();
+        let object = fields.next().unwrap_or_default();
+        if fields.next().is_some()
+            || mode != b"160000"
+            || kind != b"commit"
+            || object.len() != self.native_object_id_length()?
+            || !object.iter().all(u8::is_ascii_hexdigit)
+        {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let object =
+            String::from_utf8(object.to_vec()).map_err(|_| RepositoryError::GitOperationFailed)?;
+        GitCommitRef::from_verified_commit(object, self.native_object_id_length()?)
+    }
+
+    /// Reads one bounded regular file from the exact immutable tree carried by
+    /// a private candidate. The opaque `PrivateCommit` capability is required:
+    /// raw unreachable commit IDs do not become valid committed snapshots.
+    pub fn read_private_candidate_file(
+        &self,
+        candidate: &PrivateCommit,
+        path: impl AsRef<Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        self.verify_private_candidate(candidate)?;
+        self.read_tree_file(candidate.tree.as_str(), path, max_bytes)
+    }
+
+    fn read_tree_file(
+        &self,
+        treeish: &str,
+        path: impl AsRef<Path>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let path = ManagedPath::new(path)?;
         let mut tree = self.command();
         tree.env("GIT_NO_LAZY_FETCH", "1")
-            .args(["ls-tree", "-z", "--full-tree", commit.as_str(), "--"])
+            .args(["ls-tree", "-z", "--full-tree", treeish, "--"])
             .arg(path.as_path());
         let tree_output = self.run(tree)?;
         let entry = tree_output
@@ -3673,17 +3764,60 @@ impl Repository {
         commit: &GitCommitRef,
         max_entries: usize,
     ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
-        const MAX_ENTRY_BYTES: usize = 4 * 1024;
-
         let resolved = self.commit_required(&format!("{}^{{commit}}", commit.as_str()))?;
         if resolved != *commit {
             return Err(RepositoryError::GitOperationFailed);
         }
+        self.list_tree_entries(commit.as_str(), max_entries)
+    }
+
+    /// Lists the exact immutable tree carried by a private candidate without
+    /// consulting the worktree, index, or refs. The candidate capability is
+    /// bound to both its unreachable commit and root tree; callers cannot
+    /// authorize arbitrary unreachable objects by selecting an object ID.
+    pub fn list_private_candidate_tree(
+        &self,
+        candidate: &PrivateCommit,
+        max_entries: usize,
+    ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        self.verify_private_candidate(candidate)?;
+        self.list_tree_entries(candidate.tree.as_str(), max_entries)
+    }
+
+    fn verify_private_candidate(
+        &self,
+        candidate: &PrivateCommit,
+    ) -> Result<(), RepositoryError> {
+        let commit_expression = format!("{}^{{commit}}", candidate.commit.as_str());
+        let resolved = self
+            .commit_optional(&commit_expression)?
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if resolved != candidate.commit {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+
+        let tree_expression = format!("{}^{{tree}}", candidate.commit.as_str());
+        let mut tree_command = self.command();
+        tree_command.args(["rev-parse", "--verify", &tree_expression]);
+        let resolved_tree =
+            self.index_tree_from_native_oid(trim_output(&self.run(tree_command)?.stdout))?;
+        if resolved_tree != candidate.tree {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(())
+    }
+
+    fn list_tree_entries(
+        &self,
+        treeish: &str,
+        max_entries: usize,
+    ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        const MAX_ENTRY_BYTES: usize = 4 * 1024;
 
         let mut command = self.command();
         command
             .env("GIT_NO_LAZY_FETCH", "1")
-            .args(["ls-tree", "-r", "-z", "--full-tree", commit.as_str()])
+            .args(["ls-tree", "-r", "-z", "--full-tree", treeish])
             .stdout(Stdio::piped());
         let mut child = command
             .spawn()
@@ -4925,7 +5059,24 @@ impl Repository {
             valid_branch_name(selector) && self.ref_exists(&format!("refs/heads/{selector}"))?;
         let tag =
             valid_branch_name(selector) && self.ref_exists(&format!("refs/tags/{selector}"))?;
-        if branch && tag {
+        let other_ref = if branch {
+            [
+                format!("refs/{selector}"),
+                format!("refs/remotes/{selector}"),
+                format!("refs/remotes/{selector}/HEAD"),
+            ]
+            .into_iter()
+            .try_fold(false, |found, reference| {
+                if found || reference == format!("refs/heads/{selector}") {
+                    Ok(found)
+                } else {
+                    self.ref_exists(&reference)
+                }
+            })?
+        } else {
+            false
+        };
+        if branch && (tag || other_ref) {
             return Err(RepositoryError::InvalidSelector);
         }
         // A full object ID and a local branch name are both valid selectors,
@@ -6903,11 +7054,7 @@ mod tests {
     fn runtime_owner_lock_excludes_a_second_owner_until_drop() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "owner-lock@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Owner lock test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7253,11 +7400,7 @@ mod tests {
     fn recovery_reclaims_a_dead_publisher_index_lock() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         fs::write(root.path().join("ordinary.txt"), "base\n").unwrap();
@@ -7348,11 +7491,7 @@ mod tests {
     fn fresh_recovery_resumes_persisted_index_and_completion_phases() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "."]);
@@ -7472,11 +7611,7 @@ mod tests {
     fn recovery_fences_runtime_completion_after_head_moves() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         fs::write(root.path().join("ordinary.txt"), "base\n").unwrap();
@@ -7549,11 +7684,7 @@ mod tests {
     fn checkout_preflight_rejects_same_commit_branch_attachment_drift() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7592,11 +7723,7 @@ mod tests {
     fn checkout_force_witness_rejects_same_status_content_drift() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join(".gitignore"), "ignored.txt\n").unwrap();
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
@@ -7668,11 +7795,7 @@ mod tests {
     fn journaled_materialization_replaces_and_deletes_without_quarantine_leaks() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7757,11 +7880,7 @@ mod tests {
     fn journaled_materialization_preserves_quarantine_on_install_conflict_and_deletion_cleanup() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7869,11 +7988,7 @@ mod tests {
     fn final_quarantine_replacement_is_preserved_and_reports_conflict() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7918,11 +8033,7 @@ mod tests {
     fn journaled_materialization_recovers_a_persisted_quarantine_phase() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -7999,11 +8110,7 @@ mod tests {
     fn replacement_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8052,11 +8159,7 @@ mod tests {
     fn quarantine_restore_preserves_newer_editor_race_after_absence_check() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8089,11 +8192,7 @@ mod tests {
     fn quarantine_replacement_race_preserves_both_files() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8133,11 +8232,7 @@ mod tests {
     fn quarantine_deletion_race_preserves_both_files() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8176,11 +8271,7 @@ mod tests {
     fn fresh_materialization_invokes_before_install_once_at_absence_boundary() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8213,11 +8304,7 @@ mod tests {
     fn deletion_revalidates_editor_race_and_retries_idempotently() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
@@ -8261,11 +8348,7 @@ mod tests {
     fn deletion_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
-        git(
-            root.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        git(root.path(), &["config", "user.name", "Repository test"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
         git(root.path(), &["add", "main.orna"]);

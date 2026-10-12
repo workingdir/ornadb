@@ -1,0 +1,3 @@
+pub table Pair(tenant: Str, id: Int) {
+    label: Str,
+}

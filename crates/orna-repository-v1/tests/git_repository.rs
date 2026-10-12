@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -71,13 +74,13 @@ fn repository_with_object_format(format: &str) -> Option<TempDir> {
     if !output.status.success() {
         return None;
     }
-    git(
-        temp.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(temp.path(), &["config", "user.name", "Repository test"]);
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+    fs::write(
+        temp.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
     git(temp.path(), &["add", "main.orna"]);
     git(temp.path(), &["commit", "-m", "initial"]);
     Some(temp)
@@ -86,13 +89,13 @@ fn repository_with_object_format(format: &str) -> Option<TempDir> {
 fn repository() -> TempDir {
     let temp = TempDir::new().unwrap();
     git(temp.path(), &["init", "-b", "main"]);
-    git(
-        temp.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(temp.path(), &["config", "user.name", "Repository test"]);
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
-    fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
+    fs::write(
+        temp.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
     fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
@@ -104,8 +107,7 @@ fn repository() -> TempDir {
 fn repository_with_checked_in_orna_fixture() -> TempDir {
     let temp = TempDir::new().unwrap();
     git(temp.path(), &["init", "-b", "main"]);
-    git(temp.path(), &["config", "user.email", "kieran@drewett.dev"]);
-    git(temp.path(), &["config", "user.name", "kierandrewett"]);
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(
         temp.path().join("main.orna"),
@@ -1107,8 +1109,7 @@ fn filtered_clone() -> Option<(TempDir, PathBuf, String)> {
     let clone = fixture.path().join("partial");
     git(fixture.path(), &["init", "--bare", "origin.git"]);
     git(fixture.path(), &["clone", "origin.git", "seed"]);
-    git(&seed, &["config", "user.email", "test@example.invalid"]);
-    git(&seed, &["config", "user.name", "Repository test"]);
+    test_support::configure_fixture_git_identity(&seed);
     git(&seed, &["config", "commit.gpgsign", "false"]);
     fs::write(seed.join("visible.txt"), "visible\n").ok()?;
     fs::write(seed.join("promised.txt"), "promised\n").ok()?;
@@ -1171,8 +1172,7 @@ fn filtered_compact_clone() -> Option<FilteredCompactClone> {
     let clone = fixture.path().join("partial");
     git(fixture.path(), &["init", "--bare", "origin.git"]);
     git(fixture.path(), &["init", "-b", "main", "seed"]);
-    git(&seed, &["config", "user.email", "test@example.invalid"]);
-    git(&seed, &["config", "user.name", "Repository test"]);
+    test_support::configure_fixture_git_identity(&seed);
     git(&seed, &["config", "commit.gpgsign", "false"]);
     fs::write(seed.join("main.orna"), "module main;\n").ok()?;
     fs::write(seed.join("ordinary.txt"), "base\n").ok()?;
@@ -1689,7 +1689,7 @@ fn committed_tree_listing_is_bounded_and_does_not_mutate_repository_state() {
     fs::create_dir_all(root.path().join("nested")).unwrap();
     fs::write(
         root.path().join("nested/tool.orna"),
-        "module nested.tool;\n",
+        include_str!("fixtures/git-repository-nested-tool.orna"),
     )
     .unwrap();
     git(root.path(), &["add", "nested/tool.orna"]);
@@ -1820,6 +1820,28 @@ fn checkout_preflight_classifies_a_commit_as_detached_and_rejects_ambiguity() {
         repo.cwd_generation(RuntimeGeneration::new(18)).unwrap(),
         before_ambiguous
     );
+}
+
+#[test]
+fn checkout_preflight_rejects_local_branch_ambiguous_with_remote_tracking_ref() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "origin/topic"]);
+    git(
+        root.path(),
+        &["update-ref", "refs/remotes/origin/topic", "HEAD"],
+    );
+    let runtime = RuntimeGeneration::new(182);
+    let before = git_state(&repo, root.path());
+    let before_cwd = repo.cwd_generation(runtime).unwrap();
+
+    assert!(matches!(
+        repo.plan_checkout("origin/topic", runtime),
+        Err(orna_repository_v1::RepositoryError::InvalidSelector)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(repo.cwd_generation(runtime).unwrap(), before_cwd);
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
 }
 
 #[test]
@@ -3181,6 +3203,64 @@ fn explicit_snapshot_branch_and_remote_preserve_cwd() {
         ],
     );
     assert_eq!(repo.remote_names().unwrap(), vec!["origin"]);
+}
+
+#[test]
+fn create_branch_at_unborn_head_fails_without_mutating_repository_state() {
+    let root = TempDir::new().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+
+    fs::create_dir_all(root.path().join(".orna")).unwrap();
+    fs::write(root.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(root.path().join("ordinary.txt"), "untracked\n").unwrap();
+    git(root.path(), &["add", ".orna/format.orna"]);
+
+    let repo = Repository::discover(root.path()).unwrap();
+    let head_before = git(root.path(), &["symbolic-ref", "HEAD"]);
+    let refs_before = git(
+        root.path(),
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    let index_before = fs::read(root.path().join(".git/index")).unwrap();
+    let status_before = git(
+        root.path(),
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    );
+    let staged_source_before = fs::read(root.path().join(".orna/format.orna")).unwrap();
+    let untracked_file_before = fs::read(root.path().join("ordinary.txt")).unwrap();
+
+    assert!(matches!(
+        repo.create_branch_at_head("experiment"),
+        Err(orna_repository_v1::RepositoryError::UnbornHead)
+    ));
+
+    assert_eq!(git(root.path(), &["symbolic-ref", "HEAD"]), head_before);
+    assert_eq!(
+        git(
+            root.path(),
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        ),
+        refs_before
+    );
+    assert_eq!(
+        fs::read(root.path().join(".git/index")).unwrap(),
+        index_before
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        ),
+        status_before
+    );
+    assert_eq!(
+        fs::read(root.path().join(".orna/format.orna")).unwrap(),
+        staged_source_before
+    );
+    assert_eq!(
+        fs::read(root.path().join("ordinary.txt")).unwrap(),
+        untracked_file_before
+    );
 }
 
 #[test]

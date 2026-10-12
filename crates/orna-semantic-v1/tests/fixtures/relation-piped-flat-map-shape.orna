@@ -1,0 +1,2 @@
+pub table Note(id: Int) { value: Int, }
+pub fn invalid(rows: Relation<Note>) = rows | flat_map(predicate: note => [note.value]);

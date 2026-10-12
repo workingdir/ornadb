@@ -1,0 +1,7 @@
+sys.Storage
+    | take(0)
+    | union(sys.Storage | project(storage => sys.Storage.lookup(storage.id).id) | union(sys.Storage | project(storage => sys.Storage.lookup(storage.target).id)))
+    | take(3)
+    | filter(id => id == 8)
+    | first() ?? 0
+    |? (failure => failure.code)

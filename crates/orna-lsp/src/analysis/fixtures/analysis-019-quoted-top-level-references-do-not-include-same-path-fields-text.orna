@@ -1,0 +1,4 @@
+CREATE SCHEMA "b";
+CREATE TYPE "b"."item" AS OBJECT ("item" BOOLEAN);
+CREATE SERVER FUNCTION use_b() RETURNS BOOLEAN AS
+SELECT "b"."item" FROM "b"."item" "b";

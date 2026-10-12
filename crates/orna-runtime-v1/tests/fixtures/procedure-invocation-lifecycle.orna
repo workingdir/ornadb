@@ -1,0 +1,1 @@
+pub fn echo(message: Str): Str = message;

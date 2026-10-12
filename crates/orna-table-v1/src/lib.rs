@@ -6,6 +6,7 @@
 //! their parent's writes but cannot publish independently. Only the root
 //! [`Activation`] can publish its overlay.
 
+use num_bigint::BigInt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     iter::Peekable,
@@ -25,12 +26,14 @@ fn next_activation_id() -> u64 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableRuntime<Key, Row> {
     committed: BTreeMap<Key, Row>,
+    required_references: BTreeMap<Key, BTreeSet<Key>>,
 }
 
 impl<Key, Row> Default for TableRuntime<Key, Row> {
     fn default() -> Self {
         Self {
             committed: BTreeMap::new(),
+            required_references: BTreeMap::new(),
         }
     }
 }
@@ -52,6 +55,8 @@ where
         Activation {
             runtime: self,
             overlay: BTreeMap::new(),
+            rekey_changes: Vec::new(),
+            required_reference_overlay: BTreeMap::new(),
             state: ActivationState::Open,
             activation_id: next_activation_id(),
             helper_managed: false,
@@ -177,6 +182,8 @@ pub enum TableError {
     UseAfterClose,
     /// A statement savepoint belongs to a different activation root.
     ForeignSavepoint,
+    /// Publishing would leave a non-optional reference without its target row.
+    ReferencedRow,
 }
 
 /// The result of an activation closure or its root publication.
@@ -193,10 +200,30 @@ enum ActivationState {
     RolledBack,
 }
 
+/// The logical identity of one successful explicit primary-key change.
+///
+/// This remains one change even though the candidate row overlay contains a
+/// deletion at `old_key` and an insertion at `new_key`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RekeyChange<Key> {
+    pub old_key: Key,
+    pub new_key: Key,
+}
+
+/// The logical identity of one successful explicit re-key in a named table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatabaseRekeyChange<Table, Key> {
+    pub table: Table,
+    pub old_key: Key,
+    pub new_key: Key,
+}
+
 /// A private copy of one activation overlay used for statement recovery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Savepoint<Key, Row> {
     overlay: BTreeMap<Key, Option<Row>>,
+    rekey_changes: Vec<RekeyChange<Key>>,
+    required_reference_overlay: BTreeMap<Key, BTreeSet<Key>>,
     activation_id: u64,
 }
 
@@ -204,6 +231,8 @@ pub struct Savepoint<Key, Row> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatabaseSavepoint<Table, Key, Row> {
     overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
+    rekey_changes: Vec<DatabaseRekeyChange<Table, Key>>,
+    required_reference_overlay: BTreeMap<(Table, Key), BTreeSet<(Table, Key)>>,
     activation_id: u64,
 }
 
@@ -227,6 +256,28 @@ pub enum CardinalityError {
 pub enum WindowError {
     ZeroSize,
     ZeroStep,
+}
+
+/// Failure to complete a bounded relation count within its item budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelationCountError {
+    ResourceLimitExceeded,
+}
+
+fn count_with_limit<I>(source: I, maximum_items: usize) -> Result<BigInt, RelationCountError>
+where
+    I: IntoIterator,
+{
+    let mut observed = 0usize;
+    let mut count = BigInt::from(0);
+    for _ in source {
+        if observed == maximum_items {
+            return Err(RelationCountError::ResourceLimitExceeded);
+        }
+        observed += 1;
+        count += 1;
+    }
+    Ok(count)
 }
 
 impl<'a, Item: 'a> Relation<'a, Item> {
@@ -302,6 +353,20 @@ impl<'a, Item: 'a> Relation<'a, Item> {
         } else {
             Ok(first)
         }
+    }
+
+    /// Counts every finite relation item exactly as an arbitrary-precision integer.
+    pub fn count(self) -> BigInt {
+        self.source.fold(BigInt::from(0), |mut count, _| {
+            count += 1;
+            count
+        })
+    }
+
+    /// Counts exactly when the relation fits within `maximum_items`, otherwise
+    /// reports the resource limit without returning a truncated count.
+    pub fn count_with_limit(self, maximum_items: usize) -> Result<BigInt, RelationCountError> {
+        count_with_limit(self.source, maximum_items)
     }
 
     /// Returns the smallest value, or `None` when the relation is empty.
@@ -550,6 +615,8 @@ pub struct Activation<'runtime, Key, Row> {
     runtime: &'runtime mut TableRuntime<Key, Row>,
     /// `Some(row)` is an insert or replacement; `None` is a deletion.
     overlay: BTreeMap<Key, Option<Row>>,
+    rekey_changes: Vec<RekeyChange<Key>>,
+    required_reference_overlay: BTreeMap<Key, BTreeSet<Key>>,
     state: ActivationState,
     activation_id: u64,
     helper_managed: bool,
@@ -568,23 +635,74 @@ where
         Ok(ChildScope { activation: self })
     }
 
-    /// Stages an insert. The committed relation remains unchanged until commit.
+    /// Stages a reference-free insert. Use `insert_with_required_references`
+    /// for a row with non-optional stored references.
     pub fn insert(&mut self, key: Key, row: Row) -> Result<(), TableError> {
         self.require_open()?;
         if self.candidate(&key).is_some() {
             return Err(TableError::DuplicateKey);
         }
-        self.overlay.insert(key, Some(row));
+        self.overlay.insert(key.clone(), Some(row));
+        self.required_reference_overlay
+            .insert(key.clone(), BTreeSet::new());
         Ok(())
     }
 
-    /// Stages a replacement of an existing candidate row.
+    /// Stages a row with its non-optional reference targets.
+    pub fn insert_with_required_references<I>(
+        &mut self,
+        key: Key,
+        row: Row,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = Key>,
+    {
+        self.insert(key.clone(), row)?;
+        self.set_required_references(key, references)
+    }
+
+    /// Stages a replacement while preserving its registered required-reference
+    /// targets. Use `update_with_required_references` when those targets change.
     pub fn update(&mut self, key: Key, row: Row) -> Result<(), TableError> {
         self.require_open()?;
         if self.candidate(&key).is_none() {
             return Err(TableError::MissingRow);
         }
-        self.overlay.insert(key, Some(row));
+        self.overlay.insert(key.clone(), Some(row));
+        Ok(())
+    }
+
+    /// Replaces a row with its non-optional reference targets.
+    pub fn update_with_required_references<I>(
+        &mut self,
+        key: Key,
+        row: Row,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = Key>,
+    {
+        self.update(key.clone(), row)?;
+        self.set_required_references(key, references)
+    }
+
+    /// Replaces the required target keys recorded for an existing row.
+    /// Optional or absent references are omitted.
+    pub fn set_required_references<I>(
+        &mut self,
+        source_key: Key,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = Key>,
+    {
+        self.require_open()?;
+        if self.candidate(&source_key).is_none() {
+            return Err(TableError::MissingRow);
+        }
+        self.required_reference_overlay
+            .insert(source_key, references.into_iter().collect());
         Ok(())
     }
 
@@ -594,7 +712,9 @@ where
         if self.candidate(&key).is_none() {
             return Err(TableError::MissingRow);
         }
-        self.overlay.insert(key, None);
+        self.overlay.insert(key.clone(), None);
+        self.required_reference_overlay
+            .insert(key.clone(), BTreeSet::new());
         Ok(())
     }
 
@@ -607,12 +727,29 @@ where
         let Some(row) = self.candidate(&old_key).cloned() else {
             return Err(TableError::MissingRow);
         };
+        let references = self
+            .required_references_candidate(&old_key)
+            .cloned()
+            .unwrap_or_default();
         if self.candidate(&new_key).is_some() {
             return Err(TableError::DuplicateKey);
         }
-        self.overlay.insert(old_key, None);
-        self.overlay.insert(new_key, Some(row));
+        self.rekey_changes.push(RekeyChange {
+            old_key: old_key.clone(),
+            new_key: new_key.clone(),
+        });
+        self.overlay.insert(old_key.clone(), None);
+        self.overlay.insert(new_key.clone(), Some(row));
+        self.required_reference_overlay
+            .insert(old_key, BTreeSet::new());
+        self.required_reference_overlay.insert(new_key, references);
         Ok(())
+    }
+
+    /// Returns one logical entry for each successful explicit re-key staged
+    /// in this activation, independently of its row-overlay representation.
+    pub fn rekey_changes(&self) -> &[RekeyChange<Key>] {
+        &self.rekey_changes
     }
 
     /// Reads the candidate relation, including this activation's own writes.
@@ -679,6 +816,8 @@ where
         self.require_open()?;
         Ok(Savepoint {
             overlay: self.overlay.clone(),
+            rekey_changes: self.rekey_changes.clone(),
+            required_reference_overlay: self.required_reference_overlay.clone(),
             activation_id: self.activation_id,
         })
     }
@@ -690,6 +829,8 @@ where
             return Err(TableError::ForeignSavepoint);
         }
         self.overlay = savepoint.overlay;
+        self.rekey_changes = savepoint.rekey_changes;
+        self.required_reference_overlay = savepoint.required_reference_overlay;
         Ok(())
     }
 
@@ -718,7 +859,17 @@ where
                 }
             }
         }
+        let mut references = self.runtime.required_references.clone();
+        references.extend(self.required_reference_overlay.clone());
+        references.retain(|source, _| committed.contains_key(source));
+        if references
+            .values()
+            .any(|targets| targets.iter().any(|target| !committed.contains_key(target)))
+        {
+            return Err(TableError::ReferencedRow);
+        }
         self.runtime.committed = committed;
+        self.runtime.required_references = references;
         self.state = ActivationState::Committed;
         Ok(())
     }
@@ -727,6 +878,8 @@ where
     pub fn rollback(&mut self) {
         if self.state == ActivationState::Open {
             self.overlay.clear();
+            self.rekey_changes.clear();
+            self.required_reference_overlay.clear();
             self.state = ActivationState::RolledBack;
         }
     }
@@ -747,6 +900,12 @@ where
                 self.runtime.committed.get(key)
             }
         })
+    }
+
+    fn required_references_candidate(&self, key: &Key) -> Option<&BTreeSet<Key>> {
+        self.required_reference_overlay
+            .get(key)
+            .or_else(|| self.runtime.required_references.get(key))
     }
 }
 
@@ -771,8 +930,46 @@ where
         self.activation.insert(key, row)
     }
 
+    pub fn insert_with_required_references<I>(
+        &mut self,
+        key: Key,
+        row: Row,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = Key>,
+    {
+        self.activation
+            .insert_with_required_references(key, row, references)
+    }
+
     pub fn update(&mut self, key: Key, row: Row) -> Result<(), TableError> {
         self.activation.update(key, row)
+    }
+
+    pub fn update_with_required_references<I>(
+        &mut self,
+        key: Key,
+        row: Row,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = Key>,
+    {
+        self.activation
+            .update_with_required_references(key, row, references)
+    }
+
+    pub fn set_required_references<I>(
+        &mut self,
+        source_key: Key,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = Key>,
+    {
+        self.activation
+            .set_required_references(source_key, references)
     }
 
     pub fn delete(&mut self, key: Key) -> Result<(), TableError> {
@@ -832,12 +1029,14 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatabaseRuntime<Table, Key, Row> {
     committed: BTreeMap<Table, BTreeMap<Key, Row>>,
+    required_references: BTreeMap<(Table, Key), BTreeSet<(Table, Key)>>,
 }
 
 impl<Table, Key, Row> Default for DatabaseRuntime<Table, Key, Row> {
     fn default() -> Self {
         Self {
             committed: BTreeMap::new(),
+            required_references: BTreeMap::new(),
         }
     }
 }
@@ -860,6 +1059,8 @@ where
         DatabaseActivation {
             runtime: self,
             overlay: BTreeMap::new(),
+            rekey_changes: Vec::new(),
+            required_reference_overlay: BTreeMap::new(),
             state: ActivationState::Open,
             activation_id: next_activation_id(),
             helper_managed: false,
@@ -1004,6 +1205,8 @@ where
 pub struct DatabaseActivation<'runtime, Table, Key, Row> {
     runtime: &'runtime mut DatabaseRuntime<Table, Key, Row>,
     overlay: BTreeMap<Table, BTreeMap<Key, Option<Row>>>,
+    rekey_changes: Vec<DatabaseRekeyChange<Table, Key>>,
+    required_reference_overlay: BTreeMap<(Table, Key), BTreeSet<(Table, Key)>>,
     state: ActivationState,
     activation_id: u64,
     helper_managed: bool,
@@ -1023,12 +1226,15 @@ where
         Ok(DatabaseChildScope { activation: self })
     }
 
-    /// Stages a new row in one relation.
+    /// Stages a reference-free row in one relation. Use
+    /// `insert_with_required_references` for non-optional references.
     pub fn insert(&mut self, table: Table, key: Key, row: Row) -> Result<(), TableError> {
         self.require_open()?;
         if self.candidate(&table, &key).is_some() {
             return Err(TableError::DuplicateKey);
         }
+        self.required_reference_overlay
+            .insert((table.clone(), key.clone()), BTreeSet::new());
         self.overlay
             .entry(table)
             .or_default()
@@ -1036,7 +1242,23 @@ where
         Ok(())
     }
 
-    /// Stages a replacement of one existing candidate row.
+    /// Stages a row together with its non-optional reference targets.
+    pub fn insert_with_required_references<I>(
+        &mut self,
+        table: Table,
+        key: Key,
+        row: Row,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = (Table, Key)>,
+    {
+        self.insert(table.clone(), key.clone(), row)?;
+        self.set_required_references(table, key, references)
+    }
+
+    /// Stages a replacement while preserving its registered required-reference
+    /// targets. Use `update_with_required_references` when those targets change.
     pub fn update(&mut self, table: Table, key: Key, row: Row) -> Result<(), TableError> {
         self.require_open()?;
         if self.candidate(&table, &key).is_none() {
@@ -1049,12 +1271,51 @@ where
         Ok(())
     }
 
+    /// Replaces a row together with its non-optional reference targets.
+    pub fn update_with_required_references<I>(
+        &mut self,
+        table: Table,
+        key: Key,
+        row: Row,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = (Table, Key)>,
+    {
+        self.update(table.clone(), key.clone(), row)?;
+        self.set_required_references(table, key, references)
+    }
+
+    /// Replaces one candidate row's set of non-optional reference targets.
+    /// Optional or absent references are omitted. The complete candidate graph
+    /// is checked at activation commit so dependent updates may be staged in
+    /// any order in the same activation.
+    pub fn set_required_references<I>(
+        &mut self,
+        source_table: Table,
+        source_key: Key,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = (Table, Key)>,
+    {
+        self.require_open()?;
+        if self.candidate(&source_table, &source_key).is_none() {
+            return Err(TableError::MissingRow);
+        }
+        self.required_reference_overlay
+            .insert((source_table, source_key), references.into_iter().collect());
+        Ok(())
+    }
+
     /// Stages deletion of one existing candidate row.
     pub fn delete(&mut self, table: Table, key: Key) -> Result<(), TableError> {
         self.require_open()?;
         if self.candidate(&table, &key).is_none() {
             return Err(TableError::MissingRow);
         }
+        self.required_reference_overlay
+            .insert((table.clone(), key.clone()), BTreeSet::new());
         self.overlay.entry(table).or_default().insert(key, None);
         Ok(())
     }
@@ -1068,13 +1329,32 @@ where
         let Some(row) = self.candidate(&table, &old_key).cloned() else {
             return Err(TableError::MissingRow);
         };
+        let references = self
+            .required_references_candidate(&table, &old_key)
+            .cloned()
+            .unwrap_or_default();
         if self.candidate(&table, &new_key).is_some() {
             return Err(TableError::DuplicateKey);
         }
-        let overlay = self.overlay.entry(table).or_default();
-        overlay.insert(old_key, None);
-        overlay.insert(new_key, Some(row));
+        self.rekey_changes.push(DatabaseRekeyChange {
+            table: table.clone(),
+            old_key: old_key.clone(),
+            new_key: new_key.clone(),
+        });
+        let overlay = self.overlay.entry(table.clone()).or_default();
+        overlay.insert(old_key.clone(), None);
+        overlay.insert(new_key.clone(), Some(row));
+        self.required_reference_overlay
+            .insert((table.clone(), old_key), BTreeSet::new());
+        self.required_reference_overlay
+            .insert((table, new_key), references);
         Ok(())
+    }
+
+    /// Returns one logical entry for each successful explicit re-key staged
+    /// in this activation, independently of its row-overlay representation.
+    pub fn rekey_changes(&self) -> &[DatabaseRekeyChange<Table, Key>] {
+        &self.rekey_changes
     }
 
     /// Reads the candidate relation, including all writes staged by this root.
@@ -1170,6 +1450,8 @@ where
         self.require_open()?;
         Ok(DatabaseSavepoint {
             overlay: self.overlay.clone(),
+            rekey_changes: self.rekey_changes.clone(),
+            required_reference_overlay: self.required_reference_overlay.clone(),
             activation_id: self.activation_id,
         })
     }
@@ -1184,6 +1466,8 @@ where
             return Err(TableError::ForeignSavepoint);
         }
         self.overlay = savepoint.overlay;
+        self.rekey_changes = savepoint.rekey_changes;
+        self.required_reference_overlay = savepoint.required_reference_overlay;
         Ok(())
     }
 
@@ -1215,7 +1499,24 @@ where
                 }
             }
         }
+        let mut references = self.runtime.required_references.clone();
+        references.extend(self.required_reference_overlay.clone());
+        references.retain(|(source_table, source_key), _| {
+            committed
+                .get(source_table)
+                .is_some_and(|rows| rows.contains_key(source_key))
+        });
+        if references.iter().any(|(_, targets)| {
+            targets.iter().any(|(target_table, target_key)| {
+                !committed
+                    .get(target_table)
+                    .is_some_and(|rows| rows.contains_key(target_key))
+            })
+        }) {
+            return Err(TableError::ReferencedRow);
+        }
         self.runtime.committed = committed;
+        self.runtime.required_references = references;
         self.state = ActivationState::Committed;
         Ok(())
     }
@@ -1224,6 +1525,8 @@ where
     pub fn rollback(&mut self) {
         if self.state == ActivationState::Open {
             self.overlay.clear();
+            self.rekey_changes.clear();
+            self.required_reference_overlay.clear();
             self.state = ActivationState::RolledBack;
         }
     }
@@ -1246,6 +1549,20 @@ where
             Some(None) => None,
             None => self.runtime.committed.get(table)?.get(key),
         }
+    }
+
+    fn required_references_candidate(
+        &self,
+        table: &Table,
+        key: &Key,
+    ) -> Option<&BTreeSet<(Table, Key)>> {
+        self.required_reference_overlay
+            .get(&(table.clone(), key.clone()))
+            .or_else(|| {
+                self.runtime
+                    .required_references
+                    .get(&(table.clone(), key.clone()))
+            })
     }
 }
 
@@ -1271,8 +1588,49 @@ where
         self.activation.insert(table, key, row)
     }
 
+    pub fn insert_with_required_references<I>(
+        &mut self,
+        table: Table,
+        key: Key,
+        row: Row,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = (Table, Key)>,
+    {
+        self.activation
+            .insert_with_required_references(table, key, row, references)
+    }
+
     pub fn update(&mut self, table: Table, key: Key, row: Row) -> Result<(), TableError> {
         self.activation.update(table, key, row)
+    }
+
+    pub fn update_with_required_references<I>(
+        &mut self,
+        table: Table,
+        key: Key,
+        row: Row,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = (Table, Key)>,
+    {
+        self.activation
+            .update_with_required_references(table, key, row, references)
+    }
+
+    pub fn set_required_references<I>(
+        &mut self,
+        source_table: Table,
+        source_key: Key,
+        references: I,
+    ) -> Result<(), TableError>
+    where
+        I: IntoIterator<Item = (Table, Key)>,
+    {
+        self.activation
+            .set_required_references(source_table, source_key, references)
     }
 
     pub fn delete(&mut self, table: Table, key: Key) -> Result<(), TableError> {
@@ -1335,7 +1693,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivationError, CardinalityError, DatabaseRuntime, TableError, TableRuntime, WindowError,
+        ActivationError, CardinalityError, DatabaseRuntime, RelationCountError, TableError,
+        TableRuntime, WindowError,
     };
     use std::{cell::Cell, panic::AssertUnwindSafe, rc::Rc};
 
@@ -1372,7 +1731,20 @@ mod tests {
         assert_eq!(root.rekey(1, 2), Err(TableError::DuplicateKey));
         assert_eq!(root.rekey(1, 1), Err(TableError::DuplicateKey));
         assert_eq!(root.candidate_rows().unwrap(), original);
+        assert!(root.rekey_changes().is_empty());
+        let savepoint = root.savepoint().unwrap();
         root.rekey(1, 3).unwrap();
+        assert_eq!(
+            root.rekey_changes(),
+            &[super::RekeyChange {
+                old_key: 1,
+                new_key: 3,
+            }]
+        );
+        root.rollback_to(savepoint).unwrap();
+        assert!(root.rekey_changes().is_empty());
+        root.rekey(1, 3).unwrap();
+        assert_eq!(root.rekey_changes().len(), 1);
         assert_eq!(root.read(&1).unwrap(), None);
         assert_eq!(root.read(&3).unwrap(), Some(&"one"));
         root.commit().unwrap();
@@ -1394,15 +1766,128 @@ mod tests {
         assert_eq!(root.rekey("orders", 1, 2), Err(TableError::DuplicateKey));
         assert_eq!(root.rekey("orders", 1, 1), Err(TableError::DuplicateKey));
         assert_eq!(root.candidate_rows(&"orders").unwrap(), original);
+        assert!(root.rekey_changes().is_empty());
+        let savepoint = root.savepoint().unwrap();
         {
             let mut child = root.child().unwrap();
             child.rekey("orders", 1, 3).unwrap();
             assert_eq!(child.read(&"orders", &1).unwrap(), None);
             assert_eq!(child.read(&"orders", &3).unwrap(), Some(&"one"));
         }
+        assert_eq!(
+            root.rekey_changes(),
+            &[super::DatabaseRekeyChange {
+                table: "orders",
+                old_key: 1,
+                new_key: 3,
+            }]
+        );
+        root.rollback_to(savepoint).unwrap();
+        assert!(root.rekey_changes().is_empty());
+        {
+            let mut child = root.child().unwrap();
+            child.rekey("orders", 1, 3).unwrap();
+        }
+        assert_eq!(root.rekey_changes().len(), 1);
         root.commit().unwrap();
         assert_eq!(database.committed(&"orders", &1), None);
         assert_eq!(database.committed(&"orders", &3), Some(&"one"));
+    }
+
+    #[test]
+    fn required_references_restrict_single_table_delete_until_activation_commit() {
+        let mut table = TableRuntime::<u8, &'static str>::default();
+        table
+            .activate(|activation| {
+                activation.insert(1, "target")?;
+                activation.insert_with_required_references(2, "dependent", [1])?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            table.activate(|activation| activation.delete(1)),
+            Err(ActivationError::Commit(TableError::ReferencedRow))
+        );
+        assert_eq!(table.committed(&1), Some(&"target"));
+
+        table
+            .activate(|activation| {
+                activation.update_with_required_references(2, "dependent", [])?;
+                activation.delete(1)?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+        assert_eq!(table.committed(&1), None);
+        assert_eq!(table.committed(&2), Some(&"dependent"));
+    }
+
+    #[test]
+    fn required_references_restrict_database_delete_and_rekey_at_commit() {
+        let mut database = DatabaseRuntime::<&'static str, u8, &'static str>::default();
+        database
+            .activate(|activation| {
+                activation.insert("Contact", 1, "Ada")?;
+                activation.insert("Contact", 2, "Grace")?;
+                activation.insert_with_required_references(
+                    "Vehicle",
+                    7,
+                    "car",
+                    [("Contact", 1)],
+                )?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            database.activate(|activation| activation.delete("Contact", 1)),
+            Err(ActivationError::Commit(TableError::ReferencedRow))
+        );
+        assert_eq!(
+            database.activate(|activation| activation.rekey("Contact", 1, 3)),
+            Err(ActivationError::Commit(TableError::ReferencedRow))
+        );
+        assert_eq!(database.committed(&"Contact", &1), Some(&"Ada"));
+
+        database
+            .activate(|activation| {
+                activation.update_with_required_references(
+                    "Vehicle",
+                    7,
+                    "car",
+                    [("Contact", 2)],
+                )?;
+                activation.rekey("Contact", 1, 3)?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+        assert_eq!(database.committed(&"Contact", &1), None);
+        assert_eq!(database.committed(&"Contact", &3), Some(&"Ada"));
+        assert_eq!(database.committed(&"Vehicle", &7), Some(&"car"));
+    }
+
+    #[test]
+    fn required_reference_updates_follow_database_savepoints() {
+        let mut database = DatabaseRuntime::<&'static str, u8, &'static str>::default();
+        database
+            .activate(|activation| {
+                activation.insert("Contact", 1, "Ada")?;
+                activation.insert("Vehicle", 7, "car")?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+
+        database
+            .activate(|activation| {
+                let savepoint = activation.savepoint()?;
+                activation.set_required_references("Vehicle", 7, [("Contact", 1)])?;
+                activation.rollback_to(savepoint)?;
+                activation.delete("Contact", 1)?;
+                Ok::<_, TableError>(())
+            })
+            .unwrap();
+        assert_eq!(database.committed(&"Contact", &1), None);
+        assert_eq!(database.committed(&"Vehicle", &7), Some(&"car"));
     }
 
     #[test]
@@ -2264,6 +2749,30 @@ mod tests {
             .zip(super::Relation::new(["unused"].into_iter()))
             .collect::<Vec<_>>();
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn relation_count_is_exact_for_empty_and_finite_inputs() {
+        assert_eq!(
+            super::Relation::new(std::iter::empty::<u8>()).count(),
+            0.into()
+        );
+        assert_eq!(
+            super::Relation::new([4, 5, 6].into_iter()).count(),
+            3.into()
+        );
+    }
+
+    #[test]
+    fn relation_count_reports_resource_limit_without_truncation() {
+        assert_eq!(
+            super::Relation::new([0, 1, 2].into_iter()).count_with_limit(2),
+            Err(RelationCountError::ResourceLimitExceeded)
+        );
+        assert_eq!(
+            super::Relation::new([0, 1, 2].into_iter()).count_with_limit(3),
+            Ok(3.into())
+        );
     }
 
     #[test]

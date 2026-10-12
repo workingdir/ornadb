@@ -1,0 +1,1 @@
+use vault.{Vault}; pub fn forge(): Vault = Vault { value: 1 };

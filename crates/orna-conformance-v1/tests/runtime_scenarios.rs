@@ -1,3 +1,6 @@
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use orna_conformance_v1::{
     BoundedEvaluator, ConformanceAdapter, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
     Harness, ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeAdapter,
@@ -120,11 +123,7 @@ fn git(path: &Path, args: &[&str]) {
 fn durable_repository() -> (TempDir, Repository) {
     let temp = TempDir::new_in("/var/tmp").expect("temporary repository");
     git(temp.path(), &["init", "--quiet"]);
-    git(
-        temp.path(),
-        &["config", "user.email", "test@example.invalid"],
-    );
-    git(temp.path(), &["config", "user.name", "conformance test"]);
+    test_support::configure_fixture_git_identity(temp.path());
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(temp.path().join("main.orna"), "module main;\n").expect("source");
     git(temp.path(), &["add", "main.orna"]);
@@ -380,7 +379,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
             [44; 32],
             &durable_source(
                 "TXN-001",
-                "pub table Note(id: Int) { text: Str, } fn child() { Note.insert({ id: 7, text: \"nested\" }); } fn parent() { child(); assert false; }",
+                include_str!("fixtures/durable-transaction-rollback.orna"),
             ),
         )
         .await
@@ -403,7 +402,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
     };
     let project = durable_project(
         "TXN-002",
-        "pub table Order(id: Int) { text: Str, } pub table Payment(id: Int) { text: Str, } pub table Audit(id: Int) { text: Str, } fn main() { Order.insert({ id: 1, text: \"order\" }); Payment.insert({ id: 1, text: \"payment\" }); Audit.insert({ id: 1, text: \"audit\" }); assert Order.count() == 1; assert Payment.count() == 1; assert Audit.count() == 1; }",
+        include_str!("fixtures/durable-transaction-commit.orna"),
     );
     let outcome = evaluator
         .execute_project(
@@ -429,18 +428,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
 async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate_rows() {
     let valid_source = durable_source(
         "ASSERT-FUNCTION-VALUE-VALID",
-        r#"
-            pub table Note(id: Int) {
-                value: Int,
-                assert valid_notes;
-            }
-            fn valid_notes(rows: Relation<Note>): Bool =
-                rows | filter(note => note.value > 0) | count == 2;
-            fn parent() {
-                Note.insert({ id: 1, value: 10 });
-                Note.insert({ id: 2, value: 20 });
-            }
-        "#,
+        include_str!("fixtures/durable-function-value-valid.orna"),
     );
     let (_temp, repository) = durable_repository();
     let identity = RuntimeIdentity {
@@ -482,18 +470,7 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
 
     let invalid_source = durable_source(
         "ASSERT-FUNCTION-VALUE-INVALID",
-        r#"
-            pub table Note(id: Int) {
-                value: Int,
-                assert valid_notes;
-            }
-            fn valid_notes(rows: Relation<Note>): Bool =
-                rows | filter(note => note.value > 0) | count == 2;
-            fn parent() {
-                Note.insert({ id: 3, value: 30 });
-                Note.insert({ id: 4, value: -40 });
-            }
-        "#,
+        include_str!("fixtures/durable-function-value-invalid.orna"),
     );
     let invalid_outcome = evaluator
         .execute_source(&repository, identity, [95; 16], [94; 32], &invalid_source)
@@ -608,11 +585,11 @@ async fn eval_003_replays_the_terminal_outcome_without_a_second_row() {
     };
     let source = durable_source(
         "EVAL-003",
-        "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 7, text: \"once\" }); }",
+        include_str!("fixtures/durable-eval-replay-original.orna"),
     );
     let changed_source = durable_source(
         "EVAL-003",
-        "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 8, text: \"twice\" }); }",
+        include_str!("fixtures/durable-eval-replay-changed.orna"),
     );
     let fingerprint = canonical_eval_fingerprint(&source, request, [71; 16]);
     let changed_fingerprint = canonical_eval_fingerprint(&changed_source, request, [71; 16]);
@@ -688,7 +665,7 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
     };
     let source = durable_source(
         "PUB-001",
-        "pub table Note(id: Int) { text: Str, } fn main() { Note.insert({ id: 7, text: \"published\" }); }",
+        include_str!("fixtures/durable-publication.orna"),
     );
     assert!(matches!(
         evaluator
@@ -759,18 +736,18 @@ fn published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_e
     assert_eq!(
         declared,
         [
-            "REPL-001",
-            "TXN-001",
-            "TXN-002",
+            "ASSERT-CHECKPOINT-091",
             "CP-001",
+            "EVAL-003",
+            "FAIL-001",
             "LIVE-001",
             "LIVE-002",
             "LIVE-003",
             "LIVE-004",
+            "REPL-001",
             "SYS-RT-RENAME-100",
-            "ASSERT-CHECKPOINT-091",
-            "FAIL-001",
-            "EVAL-003"
+            "TXN-001",
+            "TXN-002"
         ]
     );
     let scenarios = report["scenarios"]

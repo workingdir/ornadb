@@ -1,0 +1,2 @@
+fn keep_even(value: Int) = value % 2 == 0;
+fn run() = std.collection.filter([1, 2, 3, 4], keep_even);

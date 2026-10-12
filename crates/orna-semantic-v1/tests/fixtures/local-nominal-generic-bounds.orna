@@ -1,0 +1,18 @@
+type Ordering = Int;
+pub protocol Display {
+    fn display(self): Str;
+}
+pub protocol Order {
+    fn compare(self, other: Self): Ordering;
+}
+pub type Ranked {
+    value: Int,
+    impl Display {
+        fn display(self): Str = "ranked";
+    }
+    impl Order {
+        fn compare(self, other: Self): Int = self.value - other.value;
+    }
+}
+pub fn keep<T impl Display + Order>(value: T): T = value;
+pub fn accepted(): Ranked = keep(Ranked { value: 1 });

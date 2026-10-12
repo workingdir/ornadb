@@ -1,0 +1,12 @@
+pub table Reading(id: Int) { value: Int, }
+pub table Marker(id: Int) { note: Str, }
+assert every(Reading, reading =>
+    exists(Marker, marker => marker.id == reading.id)
+);
+assert every(Reading, reading =>
+    exists(Marker, marker => marker.id != reading.id)
+);
+pub fn input() = Stream.from_list([1], source_identity: "example:ordering");
+pub fn ingest() { input() | for_each(value => {
+    Reading.insert({ id: value, value: value });
+}); }

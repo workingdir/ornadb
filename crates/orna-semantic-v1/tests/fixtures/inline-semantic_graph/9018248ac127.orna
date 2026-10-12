@@ -1,0 +1,4 @@
+
+            type Window = Range<Instant>;
+            pub table Bad(period: Window) { value: Str, }
+        

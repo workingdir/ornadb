@@ -1,0 +1,1 @@
+if true { let total = 0; let result = for value in [1, 2, 3] { if value == 2 { break value * 10; }; total += value; }; [result, total] }

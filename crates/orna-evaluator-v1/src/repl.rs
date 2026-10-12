@@ -28,6 +28,8 @@ pub struct ReplSession {
     wildcard_ambiguities: BTreeMap<String, BTreeSet<String>>,
     session_functions: BTreeSet<String>,
     namespace_bindings: BTreeSet<String>,
+    table_names: BTreeSet<String>,
+    table_bindings: BTreeSet<String>,
     last_success: Option<CanonicalValue>,
     last_status: Option<CanonicalValue>,
 }
@@ -57,6 +59,8 @@ impl ReplSession {
             wildcard_ambiguities: BTreeMap::new(),
             session_functions: BTreeSet::new(),
             namespace_bindings: BTreeSet::new(),
+            table_names: BTreeSet::new(),
+            table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
         }
@@ -92,9 +96,18 @@ impl ReplSession {
             wildcard_ambiguities: BTreeMap::new(),
             session_functions: BTreeSet::new(),
             namespace_bindings: BTreeSet::new(),
+            table_names: BTreeSet::new(),
+            table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
         })
+    }
+
+    /// Configures statically admitted table paths which may be imported into
+    /// the session for transaction-aware effect dispatch.
+    pub fn with_table_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.table_names.extend(names);
+        self
     }
 
     /// Submits one REPL expression or declaration. Declarations return `None`.
@@ -119,6 +132,24 @@ impl ReplSession {
         let result = candidate.submit_checked(input, None)?;
         *self = candidate;
         Ok(result)
+    }
+
+    /// Executes one already admitted effectful expression against a candidate
+    /// session. The candidate is published only after every effect handler
+    /// call and the expression complete successfully.
+    pub fn submit_admitted_with_effects(
+        &mut self,
+        input: &ReplInput,
+        effects: &mut dyn crate::EffectHandler,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        let ReplInput::Expression(expression) = input else {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        };
+        let mut candidate = self.clone();
+        let value = candidate.evaluate_with_effects(expression, effects)?;
+        candidate.last_success = Some(value.clone());
+        *self = candidate;
+        Ok(Some(value))
     }
 
     /// Executes one already-admitted input with an explicit operation token.
@@ -197,6 +228,23 @@ impl ReplSession {
         expression: &Expr,
         cancellation: Option<&CancellationToken>,
     ) -> Result<CanonicalValue, EvaluationError> {
+        self.evaluate_inner(expression, cancellation, None)
+    }
+
+    fn evaluate_with_effects(
+        &self,
+        expression: &Expr,
+        effects: &mut dyn crate::EffectHandler,
+    ) -> Result<CanonicalValue, EvaluationError> {
+        self.evaluate_inner(expression, None, Some(effects))
+    }
+
+    fn evaluate_inner(
+        &self,
+        expression: &Expr,
+        cancellation: Option<&CancellationToken>,
+        effects: Option<&mut dyn crate::EffectHandler>,
+    ) -> Result<CanonicalValue, EvaluationError> {
         self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
@@ -217,7 +265,7 @@ impl ReplSession {
             repl_bindings: true,
             restrict_function_names: true,
             reject_unhandled_field_calls: true,
-            effects: None,
+            effects,
             namespace: None,
             transfer: None,
             cancellation,
@@ -225,6 +273,7 @@ impl ReplSession {
         context.items(self.functions.len())?;
         let mut scope = Scope::from_environment(&environment, &mut context)?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
+        scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -347,6 +396,7 @@ impl ReplSession {
         };
         let mut scope = Scope::from_environment(&environment, &mut context)?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
+        scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -396,6 +446,17 @@ impl ReplSession {
 
     fn import_alias(&mut self, canonical: &str, alias: &str) -> Result<(), EvaluationError> {
         self.remove_wildcard_binding(alias);
+        if self.table_names.contains(canonical) {
+            if self.binding_taken(alias) {
+                return Err(error("ORNA-EVAL-NAME"));
+            }
+            self.environment.insert(
+                alias.into(),
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical"),
+            );
+            self.table_bindings.insert(alias.into());
+            return self.check_retained();
+        }
         if self.functions.contains_key(canonical) {
             if self.binding_taken(alias) {
                 return Err(error("ORNA-EVAL-NAME"));
@@ -480,11 +541,31 @@ impl ReplSession {
                     .map(|suffix| (suffix.to_owned(), value.clone()))
             })
             .collect::<Vec<_>>();
-        if functions.is_empty() && values.is_empty() {
+        let tables = self
+            .table_names
+            .iter()
+            .filter_map(|name| {
+                name.strip_prefix(&prefix)
+                    .filter(|suffix| !suffix.contains('.'))
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        if functions.is_empty() && values.is_empty() && tables.is_empty() {
             return Err(error("ORNA-EVAL-NAME"));
         }
         for (alias, canonical) in functions {
             self.import_wildcard_alias(path, &canonical, &alias)?;
+        }
+        for alias in tables {
+            if !self.prepare_wildcard_binding(path, &alias) {
+                continue;
+            }
+            self.environment.insert(
+                alias.clone(),
+                CanonicalValue::new(orna_foundation_v1::OvbRaw::Null).expect("null is canonical"),
+            );
+            self.table_bindings.insert(alias.clone());
+            self.wildcard_bindings.insert(alias, path.into());
         }
         for (alias, value) in values {
             self.import_wildcard_value(path, alias, value)?;
@@ -543,6 +624,7 @@ impl ReplSession {
         if self.wildcard_bindings.remove(name).is_some() {
             self.aliases.remove(name);
             self.environment.remove(name);
+            self.table_bindings.remove(name);
         }
         self.wildcard_ambiguities.remove(name);
     }
@@ -550,6 +632,7 @@ impl ReplSession {
     fn release_wildcard_for_local(&mut self, name: &str) {
         if self.wildcard_bindings.remove(name).is_some() {
             self.aliases.remove(name);
+            self.table_bindings.remove(name);
         }
         self.wildcard_ambiguities.remove(name);
     }
@@ -802,9 +885,7 @@ mod tests {
     use orna_value_v1::Value;
 
     fn library_functions() -> Functions {
-        let parsed = parse_module(
-            "fn twice(value) = add(value, value); fn add(left, right) = left + right;",
-        );
+        let parsed = parse_module(include_str!("fixtures/repl-library-functions.orna"));
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
         let mut functions: Functions = parsed
             .value
@@ -854,15 +935,26 @@ mod tests {
                 .expect("admitted library");
 
         assert_eq!(
-            session.submit("use library.twice as double;").unwrap(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-twice-as-double-bb2ec912.orna"
+                ))
+                .unwrap(),
             None
         );
         assert_eq!(
-            session.submit("double(21)").unwrap(),
+            session
+                .submit(include_str!("fixtures/repl-inline-double-21-1203dfc9.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
         assert_eq!(
-            session.submit("library.twice(21)").unwrap_err().code(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-library-twice-21-b9c7be40.orna"
+                ))
+                .unwrap_err()
+                .code(),
             "ORNA-EVAL-UNSUPPORTED"
         );
     }
@@ -872,14 +964,37 @@ mod tests {
         let mut session =
             ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
                 .expect("admitted library");
-        assert_eq!(session.submit("use library as lib;").unwrap(), None);
         assert_eq!(
-            session.submit("lib.twice(21)").unwrap(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-as-lib-a1cf9d8a.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-lib-twice-21-d010fde2.orna"
+                ))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
-        assert_eq!(session.submit("let lib = { twice: 0 };").unwrap(), None);
         assert_eq!(
-            session.submit("lib.twice(21)").unwrap_err().code(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-let-lib-twice-0-b1ab24d1.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-lib-twice-21-d010fde2.orna"
+                ))
+                .unwrap_err()
+                .code(),
             "ORNA-EVAL-UNSUPPORTED"
         );
     }
@@ -889,9 +1004,20 @@ mod tests {
         let mut session =
             ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
                 .expect("admitted library");
-        assert_eq!(session.submit("use library;").unwrap(), None);
         assert_eq!(
-            session.submit("library.twice(21)").unwrap(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-a84bcc62.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-library-twice-21-b9c7be40.orna"
+                ))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
     }
@@ -901,38 +1027,90 @@ mod tests {
         let mut library_first =
             ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
                 .expect("admitted library");
-        assert_eq!(library_first.submit("use library.*;").unwrap(), None);
-        assert_eq!(library_first.submit("use other.*;").unwrap(), None);
         assert_eq!(
-            library_first.submit("add(1, 2)").unwrap_err().code(),
+            library_first
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-6ae90093.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            library_first
+                .submit(include_str!("fixtures/repl-inline-use-other-b384a583.orna"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            library_first
+                .submit(include_str!("fixtures/repl-inline-add-1-2-a56efe1f.orna"))
+                .unwrap_err()
+                .code(),
             "ORNA-EVAL-AMBIGUOUS"
         );
         assert_eq!(
-            library_first.submit("twice(21)").unwrap(),
+            library_first
+                .submit(include_str!("fixtures/repl-inline-twice-21-bd43ed81.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
-        assert_eq!(library_first.submit("use library.add;").unwrap(), None);
         assert_eq!(
-            library_first.submit("add(1, 2)").unwrap(),
+            library_first
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-add-b6403e9b.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            library_first
+                .submit(include_str!("fixtures/repl-inline-add-1-2-a56efe1f.orna"))
+                .unwrap(),
             Some(Value::int(3.into()))
         );
 
         let mut other_first =
             ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
                 .expect("admitted library");
-        assert_eq!(other_first.submit("use other.*;").unwrap(), None);
-        assert_eq!(other_first.submit("use library.*;").unwrap(), None);
         assert_eq!(
-            other_first.submit("add(1, 2)").unwrap_err().code(),
+            other_first
+                .submit(include_str!("fixtures/repl-inline-use-other-b384a583.orna"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            other_first
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-6ae90093.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            other_first
+                .submit(include_str!("fixtures/repl-inline-add-1-2-a56efe1f.orna"))
+                .unwrap_err()
+                .code(),
             "ORNA-EVAL-AMBIGUOUS"
         );
         assert_eq!(
-            other_first.submit("twice(21)").unwrap(),
+            other_first
+                .submit(include_str!("fixtures/repl-inline-twice-21-bd43ed81.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
-        assert_eq!(other_first.submit("use other.add;").unwrap(), None);
         assert_eq!(
-            other_first.submit("add(1, 2)").unwrap(),
+            other_first
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-other-add-20f53886.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            other_first
+                .submit(include_str!("fixtures/repl-inline-add-1-2-a56efe1f.orna"))
+                .unwrap(),
             Some(Value::int(103.into()))
         );
     }
@@ -942,19 +1120,66 @@ mod tests {
         let mut local =
             ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
                 .expect("admitted library");
-        assert_eq!(local.submit("let add = 42;").unwrap(), None);
-        assert_eq!(local.submit("use library.*;").unwrap(), None);
-        assert_eq!(local.submit("use other.*;").unwrap(), None);
-        assert_eq!(local.submit("add").unwrap(), Some(Value::int(42.into())));
+        assert_eq!(
+            local
+                .submit(include_str!(
+                    "fixtures/repl-inline-let-add-42-ec4eaa20.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            local
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-6ae90093.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            local
+                .submit(include_str!("fixtures/repl-inline-use-other-b384a583.orna"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            local
+                .submit(include_str!("fixtures/repl-inline-add-7e9e5ac3.orna"))
+                .unwrap(),
+            Some(Value::int(42.into()))
+        );
 
         let mut explicit =
             ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
                 .expect("admitted library");
-        assert_eq!(explicit.submit("use library.*;").unwrap(), None);
-        assert_eq!(explicit.submit("use other.add;").unwrap(), None);
-        assert_eq!(explicit.submit("use library.*;").unwrap(), None);
         assert_eq!(
-            explicit.submit("add(1, 2)").unwrap(),
+            explicit
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-6ae90093.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            explicit
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-other-add-20f53886.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            explicit
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-6ae90093.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            explicit
+                .submit(include_str!("fixtures/repl-inline-add-1-2-a56efe1f.orna"))
+                .unwrap(),
             Some(Value::int(103.into()))
         );
     }
@@ -964,13 +1189,25 @@ mod tests {
         let mut session =
             ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
                 .expect("admitted library");
-        assert_eq!(session.submit("use library.*;").unwrap(), None);
-        assert_eq!(session.submit("use other.*;").unwrap(), None);
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-6ae90093.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-use-other-b384a583.orna"))
+                .unwrap(),
+            None
+        );
 
         for source in [
-            "let value = add(1, 2);",
-            "let f = () => add(1, 2);",
-            "let f = () => { let nested = () => add(1, 2); nested() };",
+            include_str!("fixtures/repl-inline-let-value-add-1-2-abdf2d82.orna"),
+            include_str!("fixtures/repl-inline-let-f-add-1-2-d42b2efc.orna"),
+            include_str!("fixtures/repl-inline-let-f-let-nested-add-1-2-nested-d09b06db.orna"),
         ] {
             assert_eq!(
                 session.submit(source).unwrap_err().code(),
@@ -979,15 +1216,23 @@ mod tests {
             );
         }
         assert_eq!(
-            session.submit("twice(21)").unwrap(),
+            session
+                .submit(include_str!("fixtures/repl-inline-twice-21-bd43ed81.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
         assert_eq!(
-            session.submit("let value = (add => add + 1)(41);").unwrap(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-let-value-add-add-1-41-b2900ee5.orna"
+                ))
+                .unwrap(),
             None
         );
         assert_eq!(
-            session.submit("value").unwrap(),
+            session
+                .submit(include_str!("fixtures/repl-inline-value-cd42404d.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
     }
@@ -1000,13 +1245,28 @@ mod tests {
             library_functions(),
         )
         .expect("admitted library value");
-        assert_eq!(session.submit("use library as lib;").unwrap(), None);
         assert_eq!(
-            session.submit("lib.answer").unwrap(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-as-lib-a1cf9d8a.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-lib-answer-5eebd29c.orna"
+                ))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
         assert_eq!(
-            session.submit("lib.twice(21)").unwrap(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-lib-twice-21-d010fde2.orna"
+                ))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
     }
@@ -1016,13 +1276,26 @@ mod tests {
         let mut session =
             ReplSession::with_bindings(Limits::default(), Environment::new(), library_functions())
                 .expect("admitted library");
-        assert_eq!(session.submit("use other.add;").unwrap(), None);
         assert_eq!(
-            session.submit("use library.twice as double;").unwrap(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-other-add-20f53886.orna"
+                ))
+                .unwrap(),
             None
         );
         assert_eq!(
-            session.submit("double(21)").unwrap(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-twice-as-double-bb2ec912.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-double-21-1203dfc9.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
     }
@@ -1030,36 +1303,77 @@ mod tests {
     #[test]
     fn declarations_results_and_failures_are_transactional() {
         let mut session = ReplSession::new(Limits::default());
-        assert_eq!(session.submit("let n = 20;").unwrap(), None);
         assert_eq!(
-            session.submit("fn twice(value) = value + value;").unwrap(),
+            session
+                .submit(include_str!("fixtures/repl-inline-let-n-20-51d2bc4b.orna"))
+                .unwrap(),
             None
         );
         assert_eq!(
-            session.submit("twice(n + 1)").unwrap(),
-            Some(Value::int(42.into()))
-        );
-        assert_eq!(session.submit("$_").unwrap(), Some(Value::int(42.into())));
-        assert_eq!(session.submit("fn last() = $_;").unwrap(), None);
-        assert_eq!(session.submit("fn echo(value) = value;").unwrap(), None);
-        assert_eq!(
-            session.submit("\"text\"").unwrap(),
-            Some(Value::new(Raw::Text("text".into())).unwrap())
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-fn-twice-value-value-value-303b1146.orna"
+                ))
+                .unwrap(),
+            None
         );
         assert_eq!(
-            session.submit("echo($_)").unwrap(),
-            Some(Value::new(Raw::Text("text".into())).unwrap())
-        );
-        assert_eq!(
-            session.submit("last()").unwrap(),
+            session
+                .submit(include_str!("fixtures/repl-inline-twice-n-1-3c289fdf.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
         assert_eq!(
-            session.submit("let broken = missing;").unwrap_err().code(),
+            session
+                .submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna"))
+                .unwrap(),
+            Some(Value::int(42.into()))
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-fn-last-45d0d77e.orna"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-fn-echo-value-value-da0be3af.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-text-1e1d0f25.orna"))
+                .unwrap(),
+            Some(Value::new(Raw::Text("text".into())).unwrap())
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-echo-80c2afa7.orna"))
+                .unwrap(),
+            Some(Value::new(Raw::Text("text".into())).unwrap())
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-last-9a282d9e.orna"))
+                .unwrap(),
+            Some(Value::int(42.into()))
+        );
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-let-broken-missing-94d25d6f.orna"
+                ))
+                .unwrap_err()
+                .code(),
             "ORNA-EVAL-NAME"
         );
         assert_eq!(
-            session.submit("twice(n + 1)").unwrap(),
+            session
+                .submit(include_str!("fixtures/repl-inline-twice-n-1-3c289fdf.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
     }
@@ -1067,10 +1381,25 @@ mod tests {
     #[test]
     fn a_function_declared_before_a_result_cannot_capture_it_later() {
         let mut session = ReplSession::new(Limits::default());
-        assert_eq!(session.submit("fn previous() = $_;").unwrap(), None);
-        assert_eq!(session.submit("42").unwrap(), Some(Value::int(42.into())));
         assert_eq!(
-            session.submit("previous()").unwrap_err().code(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-fn-previous-95c9ccff.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-42-73475cb4.orna"))
+                .unwrap(),
+            Some(Value::int(42.into()))
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-previous-e17ec878.orna"))
+                .unwrap_err()
+                .code(),
             "ORNA-EVAL-NAME"
         );
     }
@@ -1079,48 +1408,84 @@ mod tests {
     fn previews_and_unsupported_submissions_do_not_change_session_state() {
         let mut session = ReplSession::new(Limits::default());
         assert_eq!(
-            session.submit("40 + 2").unwrap(),
+            session
+                .submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
-        assert_eq!(session.preview("1 + 1").unwrap(), Value::int(2.into()));
         assert_eq!(
-            session.submit("Note.insert(1)").unwrap_err().code(),
+            session
+                .preview(include_str!("fixtures/repl-inline-1-1-72fce594.orna"))
+                .unwrap(),
+            Value::int(2.into())
+        );
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-note-insert-1-17cd3595.orna"
+                ))
+                .unwrap_err()
+                .code(),
             "ORNA-EVAL-UNSUPPORTED"
         );
-        assert_eq!(session.submit("$_").unwrap(), Some(Value::int(42.into())));
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna"))
+                .unwrap(),
+            Some(Value::int(42.into()))
+        );
     }
 
     #[test]
     fn annotations_are_rejected_until_the_bounded_evaluator_has_type_admission() {
         let mut session = ReplSession::new(Limits::default());
         assert_eq!(
-            session.submit("let n: Int = \"text\";").unwrap_err().code(),
-            "ORNA-EVAL-UNSUPPORTED"
-        );
-        assert_eq!(
             session
-                .submit("fn f(): Int = \"text\";")
+                .submit(include_str!(
+                    "fixtures/repl-inline-let-n-int-text-6fd49f71.orna"
+                ))
                 .unwrap_err()
                 .code(),
             "ORNA-EVAL-UNSUPPORTED"
         );
         assert_eq!(
             session
-                .submit("fn generic<T>(value) = value;")
+                .submit(include_str!(
+                    "fixtures/repl-inline-fn-f-int-text-c1b5b853.orna"
+                ))
                 .unwrap_err()
                 .code(),
             "ORNA-EVAL-UNSUPPORTED"
         );
-        assert_eq!(session.submit("n").unwrap_err().code(), "ORNA-EVAL-NAME");
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-fn-generic-t-value-value-25ca40f0.orna"
+                ))
+                .unwrap_err()
+                .code(),
+            "ORNA-EVAL-UNSUPPORTED"
+        );
+        assert_eq!(
+            session
+                .submit(include_str!("fixtures/repl-inline-n-1b16b1df.orna"))
+                .unwrap_err()
+                .code(),
+            "ORNA-EVAL-NAME"
+        );
     }
 
     #[test]
     fn repl_bindings_are_session_only_even_with_a_spoofed_environment() {
         let environment = Environment::from([("$_".into(), Value::int(42.into()))]);
         assert_eq!(
-            crate::evaluate_expression("$_", &environment, Limits::default())
-                .unwrap_err()
-                .code(),
+            crate::evaluate_expression(
+                include_str!("fixtures/repl-inline-source-ba1da4b7.orna"),
+                &environment,
+                Limits::default()
+            )
+            .unwrap_err()
+            .code(),
             "ORNA-EVAL-UNSUPPORTED"
         );
         assert_eq!(
@@ -1133,12 +1498,20 @@ mod tests {
             max_steps: 0,
             ..Limits::default()
         });
-        assert_eq!(invalid.submit("1").unwrap_err().code(), "ORNA-EVAL-LIMIT");
+        assert_eq!(
+            invalid
+                .submit(include_str!("fixtures/repl-inline-1-6b86b273.orna"))
+                .unwrap_err()
+                .code(),
+            "ORNA-EVAL-LIMIT"
+        );
     }
 
     #[test]
     fn admitted_module_functions_cannot_read_repl_bindings() {
-        let parsed = parse_module("fn last() = $_;");
+        let parsed = parse_module(include_str!(
+            "fixtures/repl-admitted-module-binding-isolation.orna"
+        ));
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
         let Declaration::Function { signature, body } = parsed
             .value
@@ -1162,12 +1535,26 @@ mod tests {
             ReplSession::with_bindings(Limits::default(), Environment::new(), functions)
                 .expect("admitted function");
         assert_eq!(
-            session.submit("40 + 2").unwrap(),
+            session
+                .submit(include_str!("fixtures/repl-inline-40-2-0fcd2493.orna"))
+                .unwrap(),
             Some(Value::int(42.into()))
         );
-        assert_eq!(session.submit("use library;").unwrap(), None);
         assert_eq!(
-            session.submit("library.last()").unwrap_err().code(),
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-use-library-a84bcc62.orna"
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            session
+                .submit(include_str!(
+                    "fixtures/repl-inline-library-last-f4c79f1c.orna"
+                ))
+                .unwrap_err()
+                .code(),
             "ORNA-EVAL-UNSUPPORTED"
         );
     }
@@ -1175,7 +1562,9 @@ mod tests {
     #[test]
     fn lexical_callable_shadows_an_admitted_module_sibling() {
         let mut functions = library_functions();
-        let parsed = parse_module("fn local(add) = add(21, 21);");
+        let parsed = parse_module(include_str!(
+            "fixtures/repl-lexical-callable-shadowing.orna"
+        ));
         assert!(parsed.is_ok());
         let Declaration::Function { signature, body } =
             parsed.value.items.into_iter().next().unwrap().declaration
@@ -1192,9 +1581,15 @@ mod tests {
         );
         let mut session =
             ReplSession::with_bindings(Limits::default(), Environment::new(), functions).unwrap();
-        session.submit("use library;").unwrap();
+        session
+            .submit(include_str!(
+                "fixtures/repl-inline-use-library-a84bcc62.orna"
+            ))
+            .unwrap();
         assert_eq!(
-            session.submit("library.local((left, right) => left - right)"),
+            session.submit(include_str!(
+                "fixtures/repl-inline-library-local-left-right-left-right-7146287e.orna"
+            )),
             Ok(Some(Value::int(0.into())))
         );
     }

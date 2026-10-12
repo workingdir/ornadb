@@ -1,0 +1,1 @@
+fn positional_witness(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.invoke<Int>(function, arguments, Int);

@@ -1,0 +1,6 @@
+CREATE SCHEMA people;
+CREATE SCHEMA other;
+CREATE TYPE people.person AS OBJECT (stored BOOLEAN);
+CREATE TYPE other.person AS OBJECT (stored BOOLEAN);
+CREATE SERVER FUNCTION read_stored() RETURNS ROWS (stored BOOLEAN) AS
+SELECT probe.stored FROM other.person probe;

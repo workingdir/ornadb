@@ -1,0 +1,7 @@
+Contact.insert({
+    id: key,
+    name: "Ada Lovelace",
+    first: "Ada",
+    last: "Lovelace",
+    emails: [],
+})

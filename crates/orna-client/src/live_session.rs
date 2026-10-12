@@ -4,7 +4,11 @@
 //! before this module is constructed. `AuthenticatedLiveTransport` is an
 //! explicit trust-boundary marker; it does not validate credentials itself.
 
-use std::{collections::BTreeMap, future::Future, pin::Pin};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    pin::Pin,
+};
 
 use orna_protocol_v1::{CanonicalSnapshot, Envelope, Limits, Message, PresentNode};
 
@@ -94,6 +98,7 @@ pub struct LiveSessionDriver<I, R, A> {
     request_ids: A,
     pending_resync: Option<(ResyncRequest, [u8; 16], Vec<u8>)>,
     expected_resync_request: Option<[u8; 16]>,
+    used_request_ids: BTreeSet<[u8; 16]>,
     pending_publication: Option<(LivePresentationUpdate, PublishedPresentation)>,
     detached: bool,
     terminal_unsubscribed: bool,
@@ -129,6 +134,7 @@ where
     ) -> Result<Self, LiveSessionError<I::Error, R::Error>> {
         let presentation =
             WatchPresentation::new(watch, limits).map_err(LiveSessionError::Presentation)?;
+        let used_request_ids = expected_snapshot_request.into_iter().collect();
         Ok(Self {
             io,
             watch,
@@ -138,6 +144,7 @@ where
             request_ids,
             pending_resync: None,
             expected_resync_request: expected_snapshot_request,
+            used_request_ids,
             pending_publication: None,
             detached: false,
             terminal_unsubscribed: false,
@@ -155,6 +162,10 @@ where
 
     pub const fn limits(&self) -> Limits {
         self.limits
+    }
+
+    pub(crate) fn has_used_request_id(&self, request: [u8; 16]) -> bool {
+        self.used_request_ids.contains(&request)
     }
 
     /// Sends one canonical unsubscribe frame for this watch and permanently
@@ -304,6 +315,9 @@ where
         self.terminal_unsubscribed = false;
         self.unsubscribe_completed = false;
         self.watch = watch;
+        if let Some(request) = expected_snapshot_request {
+            self.used_request_ids.insert(request);
+        }
         let presentation = WatchPresentation::new(watch, self.limits).map_err(|_| ())?;
         self.presentation = presentation;
         self.presentation.begin_resubscription();
@@ -320,6 +334,7 @@ where
             && let Some(request) = self.presentation.take_resync_request()
         {
             let request_id = self.request_ids.next_request_id();
+            self.used_request_ids.insert(request_id);
             let encoded = request
                 .encode(request_id, self.limits)
                 .map_err(LiveSessionError::Protocol)?;

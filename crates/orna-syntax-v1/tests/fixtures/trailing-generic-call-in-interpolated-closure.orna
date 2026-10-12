@@ -1,0 +1,6 @@
+pub fn recovered(flag: Bool): Str =
+    "head {identity<Int,>(1)} middle {value => { case value {
+        true: "selected {flag}",
+        false: "other {value}"
+    } }} tail";
+pub fn later(): Bool = true;

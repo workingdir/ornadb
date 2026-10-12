@@ -1,0 +1,15 @@
+
+            table Reading(id: Str) { value: Int, }
+            enum Availability { ready, waiting { reason: Str }, }
+
+            fn touch(value: Str): Str {
+                Reading.count();
+                value
+            }
+            fn describe(value: Availability): Str = case value {
+                Availability.ready: touch(value: "ready"),
+                Availability.waiting { reason }: touch(value: reason),
+            };
+            fn add(left: Int, right: Int): Int = left + right;
+            fn total(): Int = add(right: 2, left: 1);
+        

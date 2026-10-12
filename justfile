@@ -88,7 +88,7 @@ studio-qt-action-smoke:
     env -u QT_QPA_PLATFORM cargo run --locked -p orna-client --example studio_demo -- target/runtime-qt/liborna-runtime-qt.so --smoke-action
 
 # Exercise the accepted TTY and Qt runtime smoke paths without a display server.
-runtime-suite: runtime-qt-test
+runtime-suite: runtime-abi-header-check runtime-qt-test
     cargo run --locked --offline -p orna-runtime-tty --example runtime_demo > target/runtime-tty-demo-output.bin
     QT_QPA_PLATFORM=offscreen target/runtime-qt/orna-runtime-qt-demo --smoke
 
@@ -101,8 +101,8 @@ runtime-display-suite:
 
 
 # Validate the accepted headless runtime C-shaped ABI header against the canonical spec bundle.
-# The canonical header is an external sibling input in this checkout; hosts without
-# ../spec cannot run this local gate until the checkout contract is resolved.
+# The canonical header is an external sibling input in this checkout. Its absence
+# is a hard gate failure, not a skipped success on a clean host.
 runtime-abi-header-check:
     gcc -std=c11 -fsyntax-only ../spec/spec/orna_runtime_abi_v1.h
 

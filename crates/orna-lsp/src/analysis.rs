@@ -1,9 +1,9 @@
 //! Compiler-backed analysis for one open Orna document.
 #![allow(deprecated)] // lsp-types 0.97 keeps the mandatory `deprecated` field.
 //!
-//! The analysis stages reuse the offline Orna compiler, so they need no
-//! running database and never write to disk. The standard library is
-//! verified once and cached for the lifetime of the server.
+//! The analysis stages reuse Orna's offline parser and semantic catalogue, so
+//! they need no running database and never write to disk. The standard
+//! catalogue is verified once and cached for the lifetime of the server.
 
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionTriggerKind, Diagnostic,
@@ -12,11 +12,14 @@ use lsp_types::{
 };
 use orna_compiler::{
     CompilerDiagnostic, DiagnosticCode, DiagnosticSeverity as CompilerDiagnosticSeverity,
-    SourceLocation, check_standard_library_source,
+    SourceLocation,
 };
-use orna_core::catalogue::{QualifiedSemanticName, ValueTypePersistence};
 use orna_core::source::{SourceBundle, SourceUnit};
-use orna_standard::{retained_standard_library_v11_snapshot, verify_standard_library_v11_snapshot};
+use orna_semantic_v1::{
+    Catalogue as StandardCatalogueV1, ModuleInput as ModuleInputV1, Namespace as NamespaceV1,
+    SymbolKind as SymbolKindV1, Type as TypeV1, analyze_with_catalogue,
+};
+use orna_standard::reference_standard_catalogue_v1;
 use orna_syntax::FunctionReturnType;
 use orna_syntax::{
     ClientExpression, ClientFunctionDeclaration, EnumTypeDeclaration, HighlightKind,
@@ -27,31 +30,35 @@ use orna_syntax::{
 
 use crate::documents::{Document, PositionMapper};
 
-/// The verified, checked standard library shared by all documents.
+/// The verified 1.0.0 source-backed standard catalogue shared by documents.
 pub struct StandardLibrary {
-    checked: orna_compiler::CheckedStandardLibrary,
+    catalogue: StandardCatalogueV1,
+    modules: std::collections::BTreeMap<NamespaceV1, orna_semantic_v1::ModuleHeader>,
 }
 
 impl StandardLibrary {
-    /// Loads and verifies the retained V11 standard library.
+    /// Loads the pinned Orna 1.0.0 standard source catalogue.
     ///
-    /// This runs once per server process. The checked library is immutable
+    /// This runs once per server process. The catalogue is immutable
     /// and safe to reuse for every document.
     pub fn load() -> Result<Self, String> {
-        let snapshot =
-            retained_standard_library_v11_snapshot().map_err(|error| error.to_string())?;
-        let verified =
-            verify_standard_library_v11_snapshot(snapshot).map_err(|error| error.to_string())?;
-        let checked =
-            check_standard_library_source(&verified).map_err(|error| error.to_string())?;
-        Ok(Self { checked })
+        let catalogue = reference_standard_catalogue_v1()
+            .map_err(|error| format!("invalid pinned 1.0.0 standard catalogue: {error:?}"))?;
+        let analysis = analyze_with_catalogue(&[], &catalogue);
+        if !analysis.is_ok() {
+            return Err("pinned 1.0.0 standard catalogue did not analyze cleanly".to_owned());
+        }
+        Ok(Self {
+            catalogue,
+            modules: analysis.modules,
+        })
     }
 }
 
 /// Returns the syntax diagnostics of one document.
 ///
-/// This path needs no standard library and is used when the verified
-/// standard snapshot cannot be loaded.
+/// This path needs no standard library and is used when the pinned standard
+/// catalogue cannot be loaded.
 pub fn syntax_diagnostics(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
     let logical_path = document.logical_path();
     if let Ok(bundle) =
@@ -94,27 +101,58 @@ pub fn check_document(
     let Some(standard) = standard else {
         return syntax_diagnostics(document, mapper);
     };
-    let logical_path = document.logical_path();
-    let bundle =
-        match SourceBundle::new([SourceUnit::new(logical_path.clone(), document.text.clone())]) {
-            Ok(bundle) => bundle,
-            Err(_) => return syntax_diagnostics(document, mapper),
-        };
-    let application = orna_core::catalogue::CatalogueSnapshot::new(
-        orna_compiler::EMPTY_APPLICATION_CATALOGUE_REVISION_ID,
-        Vec::new(),
-        Vec::new(),
-    )
-    .expect("the empty application catalogue is valid");
-    let context =
-        orna_compiler::StandardApplicationCheckContext::try_new(&application, &standard.checked)
-            .expect("the empty application catalogue is valid for the checked standard");
-    let report = orna_compiler::check_standard_application(&bundle, &context);
+    // Semantic-v1 accepts repository-relative module paths. LSP analysis is
+    // intentionally per-document today, so use a stable virtual module path
+    // instead of treating the editor URI as a source-module name.
+    let logical_path = "lsp-document.orna";
+    let parsed = orna_syntax_v1::parse_module_with_file(&document.text, logical_path);
+    if !parsed.is_ok() {
+        return parsed
+            .diagnostics
+            .iter()
+            .map(|diagnostic| Diagnostic {
+                range: mapper.range(&SourceSpan {
+                    start: diagnostic.span.start,
+                    end: diagnostic.span.end,
+                }),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String(diagnostic.code.to_owned())),
+                code_description: None,
+                source: Some("orna".to_owned()),
+                message: diagnostic.message.clone(),
+                related_information: None,
+                tags: None,
+                data: Some(serde_json::json!({
+                    "title": diagnostic.title,
+                    "help": diagnostic.help,
+                    "notes": diagnostic.notes,
+                })),
+            })
+            .collect();
+    }
+    let report = analyze_with_catalogue(
+        &[ModuleInputV1::new(logical_path, document.text.clone())],
+        &standard.catalogue,
+    );
     report
-        .diagnostics()
+        .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.location().logical_path() == logical_path)
-        .map(|diagnostic| compiler_diagnostic(diagnostic, mapper, &document.uri, &logical_path))
+        .map(|diagnostic| Diagnostic {
+            range: mapper.range(&SourceSpan {
+                start: 0,
+                end: document.text.len(),
+            }),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String(diagnostic.code().to_owned())),
+            code_description: None,
+            source: Some("orna".to_owned()),
+            message: diagnostic.message().to_owned(),
+            related_information: None,
+            tags: None,
+            data: Some(serde_json::json!({
+                "standardProfile": standard.catalogue.standard_dependency_profile().map(|profile| profile.snapshot()),
+            })),
+        })
         .collect()
 }
 
@@ -1638,15 +1676,6 @@ fn qualified_names_match(left: &QualifiedName, right: &QualifiedName) -> bool {
             .zip(&right.parts)
             .all(|(left, right)| identifier_spelling_matches(&left.text, &right.text))
 }
-fn semantic_name_matches_source(candidate: &QualifiedSemanticName, source: &QualifiedName) -> bool {
-    candidate.parts().len() == source.parts.len()
-        && candidate
-            .parts()
-            .iter()
-            .zip(&source.parts)
-            .all(|(candidate, source)| identifier_spelling_matches(candidate, &source.text))
-}
-
 fn type_owner_name(specification: &TypeSpecification) -> Option<QualifiedName> {
     match specification {
         TypeSpecification::Named(name) => Some(name.clone()),
@@ -3469,38 +3498,67 @@ fn standard_value_hover(
     name: &str,
     doc_link: Option<&str>,
 ) -> Option<lsp_types::Hover> {
-    for value_type in standard.checked.value_types() {
-        let parts = value_type.name().parts();
-        if parts
-            .last()
-            .is_some_and(|part| identifier_spelling_matches(part, name))
-        {
-            let kind = match value_type.kind() {
-                orna_core::catalogue::ValueTypeKind::Primitive => "primitive",
-                orna_core::catalogue::ValueTypeKind::Opaque => "opaque",
-                _ => "value",
-            };
-            return Some(crate::hover::standard_type_hover(
-                parts.last().expect("nonempty name"),
-                kind,
-                value_type.representation_contract(),
-                doc_link,
-            ));
-        }
+    let target = source_name_parts(name)
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if let Some((namespace, _)) = standard.modules.iter().find(|(namespace, _)| {
+        namespace.0.len() == target.len()
+            && namespace
+                .0
+                .iter()
+                .map(|part| part.to_ascii_lowercase())
+                .eq(target.iter().cloned())
+    }) {
+        return Some(crate::hover::standard_module_hover(
+            &namespace.display(),
+            doc_link,
+        ));
     }
-    for schema in standard.checked.schemas() {
-        let parts = schema.name().parts();
-        if parts
-            .last()
-            .is_some_and(|part| identifier_spelling_matches(part, name))
-        {
-            return Some(crate::hover::standard_schema_hover(
-                &parts.join("."),
-                doc_link,
-            ));
+    for module in standard.modules.values() {
+        for (symbol_name, symbol) in &module.exports {
+            if identifier_spelling_matches(symbol_name, name)
+                && matches!(
+                    symbol.kind,
+                    SymbolKindV1::Type | SymbolKindV1::Enum | SymbolKindV1::Protocol
+                )
+            {
+                return Some(crate::hover::standard_type_hover(
+                    symbol_name,
+                    "source-backed",
+                    "Pinned by the Orna 1.0.0 standard source profile.",
+                    doc_link,
+                ));
+            }
         }
     }
     None
+}
+
+fn standard_symbol_matches_source(
+    standard: &StandardLibrary,
+    name: &QualifiedName,
+    kinds: &[SymbolKindV1],
+) -> bool {
+    let parts = name
+        .parts
+        .iter()
+        .map(|part| identifier_key(&part.text))
+        .collect::<Vec<_>>();
+    let Some((symbol_name, namespace_parts)) = parts.split_last() else {
+        return false;
+    };
+    standard.modules.iter().any(|(namespace, module)| {
+        namespace.0.len() == namespace_parts.len()
+            && namespace
+                .0
+                .iter()
+                .zip(namespace_parts)
+                .all(|(candidate, query)| identifier_key(candidate) == *query)
+            && module.exports.iter().any(|(candidate, symbol)| {
+                identifier_key(candidate) == *symbol_name && kinds.contains(&symbol.kind)
+            })
+    })
 }
 
 /// Returns the declaration location for the identifier at one position.
@@ -3757,24 +3815,19 @@ fn callable_name_start(text: &str, open: usize) -> usize {
     }
 }
 
-fn resolved_type_name(
-    return_type: orna_core::types::ResolvedType,
-    standard: &StandardLibrary,
-) -> String {
+fn resolved_type_name(return_type: &TypeV1) -> String {
     match return_type {
-        orna_core::types::ResolvedType::Scalar(scalar) => format!("{scalar:?}").to_uppercase(),
-        orna_core::types::ResolvedType::Value(type_id) => standard
-            .checked
-            .value_types()
-            .iter()
-            .find(|value_type| value_type.id() == type_id)
-            .and_then(|value_type| value_type.name().parts().last())
-            .map(|name| name.to_uppercase())
-            .unwrap_or_else(|| format!("TYPE {type_id:?}")),
-        orna_core::types::ResolvedType::Named(type_id)
-        | orna_core::types::ResolvedType::Reference { target: type_id } => {
-            format!("TYPE {type_id:?}")
-        }
+        TypeV1::Int => "Int".into(),
+        TypeV1::Decimal => "Decimal".into(),
+        TypeV1::Float => "Float".into(),
+        TypeV1::Date => "Date".into(),
+        TypeV1::Instant => "Instant".into(),
+        TypeV1::Text => "Text".into(),
+        TypeV1::Bool => "Bool".into(),
+        TypeV1::Null => "Null".into(),
+        TypeV1::Named(name) => name.clone(),
+        TypeV1::Optional(inner) => format!("{}?", resolved_type_name(inner)),
+        _ => format!("{return_type:?}"),
     }
 }
 
@@ -3787,47 +3840,47 @@ struct StandardFunctionSignature {
 fn standard_function(standard: &StandardLibrary, name: &str) -> Option<StandardFunctionSignature> {
     let target = source_name_parts(name)
         .into_iter()
-        .map(identifier_key)
+        .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
-    let definition = standard
-        .checked
-        .verified_snapshot()
-        .catalogue()
-        .functions()
-        .iter()
-        .find(|function| {
-            function
-                .name()
-                .parts()
+    let (function_name, namespace_parts) = target.split_last()?;
+    let (namespace, module) = standard.modules.iter().find(|(namespace, module)| {
+        namespace.0.len() == namespace_parts.len()
+            && namespace
+                .0
                 .iter()
-                .map(|part| identifier_key(part))
-                .eq(target.iter().cloned())
-        })?;
-    let parameters = definition
-        .parameters()
-        .iter()
-        .map(|parameter| (parameter.name().to_owned(), None))
-        .collect();
-    let return_type = match definition.return_type() {
-        orna_core::catalogue::FunctionReturn::Single(return_type)
-        | orna_core::catalogue::FunctionReturn::Stream(return_type) => {
-            resolved_type_name(*return_type, standard)
-        }
-        orna_core::catalogue::FunctionReturn::Rows(columns) => format!(
-            "ROWS ({})",
-            columns
-                .iter()
-                .map(|column| column.name().to_owned())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+                .map(|part| part.to_ascii_lowercase())
+                .eq(namespace_parts.iter().cloned())
+            && module.exports.iter().any(|(candidate, symbol)| {
+                candidate.eq_ignore_ascii_case(function_name)
+                    && symbol.kind == SymbolKindV1::Function
+            })
+    })?;
+    let (function_name, definition) = module.exports.iter().find(|(candidate, symbol)| {
+        candidate.eq_ignore_ascii_case(function_name) && symbol.kind == SymbolKindV1::Function
+    })?;
+    let TypeV1::Function {
+        parameters: parameter_types,
+        parameter_names,
+        result,
+        ..
+    } = &definition.ty
+    else {
+        return None;
     };
+    let parameters = parameter_names
+        .as_ref()
+        .map(|names| names.iter().map(|name| (name.clone(), None)).collect())
+        .unwrap_or_else(|| {
+            parameter_types
+                .iter()
+                .enumerate()
+                .map(|(index, _)| (format!("arg{}", index + 1), None))
+                .collect()
+        });
+    let return_type = resolved_type_name(result);
     Some(StandardFunctionSignature {
-        name: definition.name().to_string(),
-        domain: match definition.domain() {
-            orna_core::catalogue::FunctionDomain::Server => "SERVER",
-            orna_core::catalogue::FunctionDomain::Client => "CLIENT",
-        },
+        name: format!("{}.{}", namespace.display(), function_name),
+        domain: "1.0",
         parameters,
         return_type,
     })
@@ -3933,13 +3986,19 @@ pub fn completion_at(
         .and_then(|byte| client_target_completion_at_byte(parse, byte));
     let mut items = Vec::new();
     if let Some(standard) = standard {
-        for value_type in standard.checked.value_types() {
-            let name = value_type.name();
-            if let Some(last) = name.parts().last() {
+        for module in standard.modules.values() {
+            for (last, symbol) in &module.exports {
+                if !matches!(
+                    symbol.kind,
+                    SymbolKindV1::Type | SymbolKindV1::Enum | SymbolKindV1::Protocol
+                ) {
+                    continue;
+                }
+                let name = format!("{}.{}", module.namespace.display(), last);
                 items.push(CompletionItem {
                     label: last.clone(),
                     kind: Some(CompletionItemKind::STRUCT),
-                    detail: Some(format!("standard type {name}")),
+                    detail: Some(format!("1.0 standard type {name}")),
                     documentation: Some(lsp_types::Documentation::String(format!(
                         "Standard-library value type `{name}`."
                     ))),
@@ -3950,15 +4009,18 @@ pub fn completion_at(
         }
     }
     if let Some(standard) = standard {
-        for function in standard.checked.verified_snapshot().catalogue().functions() {
-            if let Some(last) = function.name().parts().last() {
+        for module in standard.modules.values() {
+            for (last, symbol) in &module.exports {
+                if symbol.kind != SymbolKindV1::Function {
+                    continue;
+                }
+                let name = format!("{}.{}", module.namespace.display(), last);
                 items.push(CompletionItem {
                     label: last.clone(),
                     kind: Some(CompletionItemKind::FUNCTION),
-                    detail: Some(format!("standard {:?} function", function.domain())),
+                    detail: Some("1.0 standard function".to_owned()),
                     documentation: Some(lsp_types::Documentation::String(format!(
-                        "Standard-library function `{}`.",
-                        function.name()
+                        "Standard-library function `{name}`."
                     ))),
                     sort_text: Some(format!("0-{last}")),
                     ..CompletionItem::default()
@@ -4142,15 +4204,15 @@ fn stream_target_element_is_supported(
                     .iter()
                     .any(|candidate| qualified_names_match(&candidate.name, name));
             let standard_named = standard.is_some_and(|standard| {
-                let catalogue = standard.checked.verified_snapshot().catalogue();
-                catalogue
-                    .enum_types()
-                    .iter()
-                    .any(|candidate| semantic_name_matches_source(candidate.name(), name))
-                    || catalogue
-                        .record_value_types()
-                        .iter()
-                        .any(|candidate| semantic_name_matches_source(candidate.name(), name))
+                standard_symbol_matches_source(
+                    standard,
+                    name,
+                    &[
+                        SymbolKindV1::Type,
+                        SymbolKindV1::Enum,
+                        SymbolKindV1::Protocol,
+                    ],
+                )
             });
             closed_scalar || qualified_scalar || local_named || standard_named
         }
@@ -4164,13 +4226,11 @@ fn stream_target_element_is_supported(
                 .iter()
                 .any(|candidate| qualified_names_match(&candidate.name, name));
             let standard_object = standard.is_some_and(|standard| {
-                standard
-                    .checked
-                    .verified_snapshot()
-                    .catalogue()
-                    .object_types()
-                    .iter()
-                    .any(|candidate| semantic_name_matches_source(candidate.name(), name))
+                standard_symbol_matches_source(
+                    standard,
+                    name,
+                    &[SymbolKindV1::Type, SymbolKindV1::Table],
+                )
             });
             local_object || standard_object
         }
@@ -4203,7 +4263,7 @@ fn action_target_return_type_is_durable(
 
 fn action_target_type_is_durable(
     type_specification: &TypeSpecification,
-    standard: Option<&StandardLibrary>,
+    _standard: Option<&StandardLibrary>,
 ) -> bool {
     match type_specification {
         TypeSpecification::Reference { .. } => true,
@@ -4235,25 +4295,7 @@ fn action_target_type_is_durable(
                     && identifier_spelling_matches(&name.parts[0].text, "std")
                     && identifier_spelling_matches(&name.parts[1].text, "action")
                     && identifier_spelling_matches(&name.parts[2].text, "Action"));
-            prelude_scalar
-                || standard_scalar_alias
-                || standard_action_alias
-                || standard.is_some_and(|standard| {
-                    standard.checked.value_types().iter().any(|value_type| {
-                        let standard_action_type = value_type.name().parts().len() == 3
-                            && identifier_spelling_matches(&value_type.name().parts()[0], "std")
-                            && identifier_spelling_matches(&value_type.name().parts()[1], "action")
-                            && identifier_spelling_matches(&value_type.name().parts()[2], "Action");
-                        (value_type.persistence() == ValueTypePersistence::Persistable
-                            || standard_action_type)
-                            && value_type.name().parts().len() == name.parts.len()
-                            && value_type.name().parts().iter().zip(&name.parts).all(
-                                |(candidate, source)| {
-                                    identifier_spelling_matches(candidate, &source.text)
-                                },
-                            )
-                    })
-                })
+            prelude_scalar || standard_scalar_alias || standard_action_alias
         }
         TypeSpecification::List { .. }
         | TypeSpecification::Set { .. }

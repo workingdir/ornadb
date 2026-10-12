@@ -1,0 +1,1 @@
+fn bad() = every(1, value => true);

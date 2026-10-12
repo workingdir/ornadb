@@ -1,0 +1,9 @@
+
+            table Reading(id: Int) { value: Int, }
+            fn increment(value: Int) = value + 1;
+            pub fn direct(values: [Int]) = std.collection.map(values, increment);
+            pub fn pipeline(values: [Int]) = values | std.collection.map(transform: value => value + 1);
+            pub fn named(values: [Int]) = std.collection.map(transform: value => value + 1, rows: values);
+            pub fn flattened(values: [Int]) = std.collection.flat_map(rows: values, transform: value => [value, value + 1]);
+            pub fn reads(values: [Int]) = std.collection.map(values, value => Reading.count() + value);
+        

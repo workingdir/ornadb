@@ -1,0 +1,1 @@
+use std as _; use std.math.{increment, is_zero}; use std.ui.{text}; use std.json.{encode}; fn next(value: INTEGER): INTEGER = increment(value); fn zero(): BOOLEAN = is_zero(0); fn view(): UI = text("hello"); fn bytes(value: JsonValue): ByteStream = encode(value);

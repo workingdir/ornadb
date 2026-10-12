@@ -1,0 +1,7 @@
+CREATE CLIENT FUNCTION files.document() RETURNS TEXT IS
+    LET body CHARACTER LARGE OBJECT := std.large.object();
+BEGIN
+    LET data BINARY LARGE OBJECT := body;
+    data := std.binary.large.object();
+    RETURN body;
+END;

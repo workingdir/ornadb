@@ -14,13 +14,20 @@ use std::{
 };
 
 use orna_repository_v1::{
-    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError,
+    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, PrivateCommit, Repository,
+    RepositoryError,
 };
 use orna_semantic_v1::{Catalogue, ModuleInput, StandardCatalogueError, StandardDependencyProfile};
 use orna_syntax_v1::{Declaration, parse_module};
 use unicode_normalization::UnicodeNormalization;
 
+mod attachments;
 mod unicode16;
+
+pub use attachments::{
+    AttachedDatabaseSession, AttachedRelationSource, AttachmentError, PACKAGE_PIN_MANIFEST_PATH,
+    PackagePin, PackagePinManifest, PackagePinSpec, PackageResolver, PinnedDatabase,
+};
 
 /// Bounded resource limits applied before source contents are read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +117,8 @@ pub struct LoadedProject {
     identities: Vec<ModuleIdentity>,
     loose_rows: Vec<LooseRowCandidate>,
     standard_profile: Option<StandardDependencyProfile>,
+    standard_sources: Vec<(String, String)>,
+    standard_runtime_modules: BTreeSet<String>,
     standard_imports: bool,
     standard_modules: BTreeSet<String>,
 }
@@ -139,6 +148,17 @@ impl LoadedProject {
     /// if this project was loaded with one.
     pub fn standard_profile(&self) -> Option<&StandardDependencyProfile> {
         self.standard_profile.as_ref()
+    }
+
+    /// Source units read from the exact Git commit attached as `stdlib/std`,
+    /// rewritten under the reserved `std/` logical namespace.
+    pub fn standard_sources(&self) -> &[(String, String)] {
+        &self.standard_sources
+    }
+
+    /// Pinned standard modules reachable from this program's explicit imports.
+    pub fn standard_runtime_modules(&self) -> &BTreeSet<String> {
+        &self.standard_runtime_modules
     }
 
     /// Reports whether reachable project source requested the reserved
@@ -180,7 +200,9 @@ impl ProjectLoader {
     }
 
     pub fn load(&self, repository: &Repository) -> Result<LoadedProject, ProjectLoadError> {
-        self.load_with_standard_profile(repository, None)
+        let project = self.load_with_standard_profile(repository, None)?;
+        let commit = repository.head().map_err(ProjectLoadError::Repository)?;
+        self.bind_attached_standard_module(repository, commit.as_ref(), project)
     }
 
     /// Loads a project while carrying an explicitly selected standard
@@ -211,7 +233,8 @@ impl ProjectLoader {
         repository: &Repository,
         commit: &GitCommitRef,
     ) -> Result<LoadedProject, ProjectLoadError> {
-        self.load_committed_snapshot_with_standard_profile(repository, commit, None)
+        let project = self.load_committed_snapshot_with_standard_profile(repository, commit, None)?;
+        self.bind_attached_standard_module(repository, Some(commit), project)
     }
 
     /// Snapshot variant of [`Self::load_with_standard_profile`]. Standard
@@ -249,6 +272,163 @@ impl ProjectLoader {
                 )
             },
         )
+    }
+
+    /// Loads the root module and reachable imports from the immutable tree of
+    /// a private publication candidate. The candidate capability, rather than
+    /// a ref name or worktree path, is the source authority.
+    pub fn load_private_candidate(
+        &self,
+        repository: &Repository,
+        candidate: &PrivateCommit,
+    ) -> Result<LoadedProject, ProjectLoadError> {
+        let project = self.load_private_candidate_with_standard_profile(repository, candidate, None)?;
+        self.bind_private_standard_module(repository, candidate, project)
+    }
+
+    /// Private-candidate variant of
+    /// [`Self::load_committed_snapshot_with_standard_profile`].
+    pub fn load_private_candidate_with_standard_profile(
+        &self,
+        repository: &Repository,
+        candidate: &PrivateCommit,
+        standard_profile: Option<StandardDependencyProfile>,
+    ) -> Result<LoadedProject, ProjectLoadError> {
+        let source_paths = validate_private_candidate_tree(repository, candidate, self.limits)?;
+        load_reachable_project(
+            self.limits,
+            standard_profile,
+            |logical_path, total_bytes| {
+                read_private_candidate_module(
+                    repository,
+                    candidate,
+                    &source_paths,
+                    logical_path,
+                    total_bytes,
+                    self.limits,
+                )
+            },
+            |segments| resolve_committed_import(&source_paths, segments),
+            |tables, total_bytes| {
+                discover_private_candidate_rows(
+                    repository,
+                    candidate,
+                    &source_paths,
+                    tables,
+                    total_bytes,
+                    self.limits,
+                )
+            },
+        )
+    }
+
+    /// Resolves `std` only through the gitlink captured in the owning
+    /// database snapshot. `stdlib/std` is the attached repository path; no
+    /// installed library or mutable worktree source can replace that commit.
+    /// `.orna/packages` can pin read-only attached databases (including a
+    /// `std` alias for an attached REPL session); `PackageResolver` requires
+    /// that alias to agree with this gitlink whenever both are present.
+    fn bind_attached_standard_module(
+        &self,
+        repository: &Repository,
+        owner_commit: Option<&GitCommitRef>,
+        mut project: LoadedProject,
+    ) -> Result<LoadedProject, ProjectLoadError> {
+        if project.standard_modules.is_empty() {
+            return Ok(project);
+        }
+        let Some(owner_commit) = owner_commit else {
+            return Ok(project);
+        };
+        let Ok(module_commit) = repository.committed_submodule_commit(owner_commit, "stdlib/std")
+        else {
+            return Ok(project);
+        };
+        self.load_attached_standard_commit(repository, &module_commit, &mut project);
+        Ok(project)
+    }
+
+    fn bind_private_standard_module(
+        &self,
+        repository: &Repository,
+        candidate: &PrivateCommit,
+        mut project: LoadedProject,
+    ) -> Result<LoadedProject, ProjectLoadError> {
+        if project.standard_modules.is_empty() {
+            return Ok(project);
+        }
+        let Ok(module_commit) =
+            repository.private_candidate_submodule_commit(candidate, "stdlib/std")
+        else {
+            return Ok(project);
+        };
+        self.load_attached_standard_commit(repository, &module_commit, &mut project);
+        Ok(project)
+    }
+
+    fn load_attached_standard_commit(
+        &self,
+        owner: &Repository,
+        module_commit: &GitCommitRef,
+        project: &mut LoadedProject,
+    ) {
+        let module_path = owner.worktree().join("stdlib/std");
+        let Ok(metadata) = fs::symlink_metadata(&module_path) else {
+            return;
+        };
+        if !metadata.is_dir() {
+            return;
+        }
+        let Ok(module_root) = fs::canonicalize(&module_path) else {
+            return;
+        };
+        let Ok(module_repository) = Repository::discover(&module_path) else {
+            return;
+        };
+        if module_repository.worktree() != module_root {
+            return;
+        }
+        let Ok(module_commit) = module_repository.resolve_snapshot(module_commit.as_str()) else {
+            return;
+        };
+        let Ok(module_project) =
+            self.load_committed_snapshot_with_standard_profile(&module_repository, &module_commit, None)
+        else {
+            return;
+        };
+        let sources = module_project
+            .modules()
+            .iter()
+            .map(|module| {
+                (
+                    format!("std/{}", module.logical_path),
+                    module.source.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let available = sources
+            .iter()
+            .map(|(logical_path, _)| logical_path.as_str())
+            .collect::<BTreeSet<_>>();
+        if !project
+            .standard_modules
+            .iter()
+            .all(|logical_path| available.contains(logical_path.as_str()))
+        {
+            return;
+        }
+        let Ok(profile) = StandardDependencyProfile::from_sources(
+            module_commit.as_str().to_owned(),
+            sources.clone(),
+        ) else {
+            return;
+        };
+        project.standard_runtime_modules = standard_runtime_closure(
+            &project.standard_modules,
+            &sources,
+        );
+        project.standard_profile = Some(profile);
+        project.standard_sources = sources;
     }
 }
 
@@ -343,9 +523,60 @@ fn load_reachable_project(
         identities,
         loose_rows,
         standard_profile,
+        standard_sources: Vec::new(),
+        standard_runtime_modules: BTreeSet::new(),
         standard_imports,
         standard_modules,
     })
+}
+
+fn standard_runtime_closure(
+    requested: &BTreeSet<String>,
+    sources: &[(String, String)],
+) -> BTreeSet<String> {
+    let source_by_path = sources
+        .iter()
+        .map(|(logical_path, source)| (logical_path.as_str(), source.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = requested.iter().cloned().collect::<VecDeque<_>>();
+    let mut reachable = BTreeSet::new();
+    while let Some(logical_path) = pending.pop_front() {
+        if !reachable.insert(logical_path.clone()) {
+            continue;
+        }
+        let Some(source) = source_by_path.get(logical_path.as_str()) else {
+            continue;
+        };
+        let parsed = parse_module(source);
+        if !parsed.is_ok() {
+            continue;
+        }
+        for item in &parsed.value.items {
+            let Declaration::Use { path, .. } = &item.declaration else {
+                continue;
+            };
+            let segments = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>();
+            if segments.is_empty() || segments[0] == "sys" {
+                continue;
+            }
+            let base = if segments[0] == "std" {
+                segments.join("/")
+            } else {
+                format!("std/{}", segments.join("/"))
+            };
+            let file = format!("{base}.orna");
+            let directory = format!("{base}/main.orna");
+            if source_by_path.contains_key(file.as_str()) {
+                pending.push_back(file);
+            } else if source_by_path.contains_key(directory.as_str()) {
+                pending.push_back(directory);
+            }
+        }
+    }
+    reachable
 }
 
 #[derive(Debug)]
@@ -492,6 +723,24 @@ fn validate_committed_tree(
     let entries = repository
         .list_committed_tree(commit, limits.max_repository_entries.saturating_add(1))
         .map_err(ProjectLoadError::Repository)?;
+    validate_snapshot_tree(entries, limits)
+}
+
+fn validate_private_candidate_tree(
+    repository: &Repository,
+    candidate: &PrivateCommit,
+    limits: ProjectLimits,
+) -> Result<BTreeSet<String>, ProjectLoadError> {
+    let entries = repository
+        .list_private_candidate_tree(candidate, limits.max_repository_entries.saturating_add(1))
+        .map_err(ProjectLoadError::Repository)?;
+    validate_snapshot_tree(entries, limits)
+}
+
+fn validate_snapshot_tree(
+    entries: Vec<CommittedTreeEntry>,
+    limits: ProjectLimits,
+) -> Result<BTreeSet<String>, ProjectLoadError> {
     if entries.len() > limits.max_repository_entries {
         return Err(ProjectLoadError::RepositoryLimit);
     }
@@ -511,13 +760,15 @@ fn validate_committed_tree_entry(
     module_owners: &mut BTreeMap<Vec<String>, String>,
     source_paths: &mut BTreeSet<String>,
 ) -> Result<(), ProjectLoadError> {
+    let path = entry.path().as_path();
+    let attached_standard_module = path == Path::new("stdlib/std");
     match entry.kind() {
         CommittedTreeEntryKind::File { .. } => {}
         CommittedTreeEntryKind::Symlink => return Err(ProjectLoadError::Symlink),
+        CommittedTreeEntryKind::Submodule if attached_standard_module => {}
         CommittedTreeEntryKind::Submodule => return Err(ProjectLoadError::UnsafePath),
     }
 
-    let path = entry.path().as_path();
     let mut parent = PathBuf::new();
     let mut components = Vec::new();
     for component in path.components() {
@@ -574,8 +825,11 @@ fn validate_committed_tree_entry(
 fn is_committed_metadata_path(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root)
         .ok()
-        .and_then(|relative| relative.components().next())
-        .is_some_and(|component| component.as_os_str() == ".orna")
+        .is_some_and(|relative| {
+            relative
+                .components()
+                .any(|component| component.as_os_str() == ".orna")
+        })
 }
 
 fn is_module_source_path(root: &Path, path: &Path) -> bool {
@@ -649,6 +903,11 @@ fn discover_worktree_rows(
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let path = entry.path();
+            if directory == root
+                && path.file_name().and_then(|name| name.to_str()) == Some(".git")
+            {
+                continue;
+            }
             let metadata =
                 fs::symlink_metadata(&path).map_err(|_| ProjectLoadError::SourceUnavailable)?;
             if metadata.is_dir() {
@@ -703,6 +962,41 @@ fn discover_committed_rows(
             let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
             let bytes = repository
                 .read_committed_file(commit, logical_path, maximum)
+                .map_err(ProjectLoadError::Repository)?;
+            let source =
+                String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
+            if source.len() > maximum {
+                return Err(ProjectLoadError::SourceTooLarge);
+            }
+            *total_bytes += source.len();
+            Ok(LooseRowCandidate {
+                logical_path: logical_path.clone(),
+                table_path,
+                key_path,
+                source,
+            })
+        })
+        .collect()
+}
+
+fn discover_private_candidate_rows(
+    repository: &Repository,
+    candidate: &PrivateCommit,
+    source_paths: &BTreeSet<String>,
+    table_paths: &BTreeSet<String>,
+    total_bytes: &mut usize,
+    limits: ProjectLimits,
+) -> Result<Vec<LooseRowCandidate>, ProjectLoadError> {
+    source_paths
+        .iter()
+        .filter_map(|logical_path| {
+            table_owner_and_key(logical_path, table_paths)
+                .map(|(table_path, key_path)| (logical_path, table_path, key_path))
+        })
+        .map(|(logical_path, table_path, key_path)| {
+            let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
+            let bytes = repository
+                .read_private_candidate_file(candidate, logical_path, maximum)
                 .map_err(ProjectLoadError::Repository)?;
             let source =
                 String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
@@ -809,6 +1103,29 @@ fn read_committed_module(
     let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
     let bytes = repository
         .read_committed_file(commit, logical_path, maximum)
+        .map_err(ProjectLoadError::Repository)?;
+    let source = String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
+    if source.len() > maximum {
+        return Err(ProjectLoadError::SourceTooLarge);
+    }
+    *total_bytes += source.len();
+    Ok(source)
+}
+
+fn read_private_candidate_module(
+    repository: &Repository,
+    candidate: &PrivateCommit,
+    source_paths: &BTreeSet<String>,
+    logical_path: &str,
+    total_bytes: &mut usize,
+    limits: ProjectLimits,
+) -> Result<String, ProjectLoadError> {
+    if !source_paths.contains(logical_path) {
+        return Err(ProjectLoadError::SourceUnavailable);
+    }
+    let maximum = limits.max_source_bytes.saturating_sub(*total_bytes);
+    let bytes = repository
+        .read_private_candidate_file(candidate, logical_path, maximum)
         .map_err(ProjectLoadError::Repository)?;
     let source = String::from_utf8(bytes).map_err(|_| ProjectLoadError::SourceUnavailable)?;
     if source.len() > maximum {

@@ -1,0 +1,4 @@
+pub table Note(id: Int) {
+    value: Int,
+    assert every(note => one([note.value > 0]));
+}

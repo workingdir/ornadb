@@ -1,0 +1,1 @@
+if true { let total = 0; for outer in [1, 2] { let inner = for value in [1, 2] { if value == 2 { break outer * 10; }; total += 1; }; total += inner; }; total }

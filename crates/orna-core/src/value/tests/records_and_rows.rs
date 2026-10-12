@@ -611,12 +611,9 @@ fn rejects_zero_columns_even_when_rows_have_zero_width() {
 }
 
 #[test]
-fn rejects_non_finite_floats_and_preserves_finite_equality() {
+fn accepts_ieee_float_values_and_preserves_ordinary_equality() {
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert_eq!(
-            RuntimeFloat::new(value),
-            Err(ResultRowsError::NonFiniteFloat)
-        );
+        assert!(RuntimeFloat::new(value).is_ok());
     }
 
     let finite = RuntimeFloat::new(2.5).unwrap();
@@ -625,6 +622,10 @@ fn rejects_non_finite_floats_and_preserves_finite_equality() {
     assert_eq!(
         RuntimeFloat::new(0.0).unwrap(),
         RuntimeFloat::new(-0.0).unwrap()
+    );
+    assert_ne!(
+        RuntimeFloat::new(f64::NAN).unwrap(),
+        RuntimeFloat::new(f64::NAN).unwrap()
     );
 }
 

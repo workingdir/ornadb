@@ -1,0 +1,1 @@
+pub fn names(rows: [Int]): [Int] = rows | row => row + 1;

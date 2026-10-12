@@ -1,0 +1,1 @@
+sys.invoke requires exactly one explicit type argument when generic arguments are supplied

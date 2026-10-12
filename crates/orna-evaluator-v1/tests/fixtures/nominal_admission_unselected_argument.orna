@@ -1,0 +1,1 @@
+fn ignore(value: Int) = 1;

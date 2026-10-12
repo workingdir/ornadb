@@ -1,0 +1,1 @@
+fn is_two(value: Int) = value == 2; fn pick(rows: [Int]) = one(rows, is_two);

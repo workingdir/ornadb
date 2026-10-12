@@ -1,0 +1,12 @@
+pub fn bad(flag: Bool): Int { case flag {
+1: 2 3 { value: 4 },
+true: "outer {outer => { case outer {
+1: 2 3 { value: 5 },
+true: outer,
+false: nested => { case nested {
+true: "leaf {flag} suffix",
+false: "last {outer} end"
+} }
+}}} after",
+false: "fallback {flag} done"
+}}

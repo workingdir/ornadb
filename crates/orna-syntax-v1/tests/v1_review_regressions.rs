@@ -2,10 +2,19 @@
 //!
 //! Requirements below refer to immutable reference/Orna-1.0.0. These focused
 //! regressions close the confirmed parser findings without broadening legacy
-//! syntax. Inputs stay in memory; no filesystem fixtures or temporary files
-//! are used.
+//! syntax. ORNA source is kept in reviewable `.orna` fixtures.
 
 use orna_syntax_v1::{Declaration, Expr, LiteralKind, parse_module};
+
+fn fixture_case(name: &str) -> &str {
+    include_str!("fixtures/v1_review_alias_cases.orna")
+        .split("// CASE: ")
+        .find_map(|section| {
+            let (case, source) = section.split_once('\n')?;
+            (case.trim() == name).then_some(source)
+        })
+        .unwrap_or_else(|| panic!("missing ORNA fixture case {name}"))
+}
 
 fn accepted_body(source: &str) -> Expr {
     let parsed = parse_module(source);
@@ -88,19 +97,19 @@ fn calendar_range_body(
 // ORNA-LAMBDA-004 and ORNA-OP-001 admit infix OR, but not a pipe closure.
 #[test]
 fn logical_or_is_accepted() {
-    let body = accepted_body("fn f() = true || false;");
+    let body = accepted_body(include_str!("fixtures/v1_review_source_000.orna"));
     assert!(matches!(body, Expr::Binary { op, .. } if op == "||"));
 }
 
 #[test]
 fn logical_and_is_accepted() {
-    let body = accepted_body("fn f() = true && false;");
+    let body = accepted_body(include_str!("fixtures/v1_review_source_001.orna"));
     assert!(matches!(body, Expr::Binary { op, .. } if op == "&&"));
 }
 
 #[test]
 fn control_condition_binary_rhs_leaves_body_brace_for_control() {
-    let body = accepted_body("fn f() = if ready && done { 1 };");
+    let body = accepted_body(include_str!("fixtures/v1_review_source_002.orna"));
     let Expr::Control {
         condition: Some(condition),
         body: Some(body),
@@ -141,19 +150,22 @@ fn assert_nested_nominal_condition(source: &str, expected_path: &[&str]) {
 #[test]
 fn compound_control_conditions_allow_nested_nominal_constructors() {
     assert_nested_nominal_condition(
-        "fn f() = if ready && Status { value: raw } { 1 };",
+        include_str!("fixtures/v1_review_source_003.orna"),
         &["Status"],
     );
-    assert_nested_nominal_condition("fn f() = while ready && Status {} { 1 };", &["Status"]);
     assert_nested_nominal_condition(
-        "fn f() = for item in ready && Model.Status { value: raw } { 1 };",
+        include_str!("fixtures/v1_review_source_004.orna"),
+        &["Status"],
+    );
+    assert_nested_nominal_condition(
+        include_str!("fixtures/v1_review_source_005.orna"),
         &["Model", "Status"],
     );
 }
 
 #[test]
 fn compound_case_conditions_allow_nested_nominal_constructors() {
-    let body = accepted_body("fn f() = case ready && Status {} { true: 1 };");
+    let body = accepted_body(include_str!("fixtures/v1_review_source_006.orna"));
     let Expr::Control {
         condition: Some(condition),
         arms,
@@ -168,16 +180,16 @@ fn compound_case_conditions_allow_nested_nominal_constructors() {
 
 #[test]
 fn immediate_nominal_constructor_still_reserves_control_body_brace() {
-    rejected("type Status { value: Int } fn f() = if Status { value: raw } { 1 };");
+    rejected(include_str!("fixtures/v1_review_source_007.orna"));
 }
 
 #[test]
 fn immediate_record_control_condition_requires_parentheses() {
     for source in [
-        "fn f() = if { value: 1 } { 1 };",
-        "fn f() = while { value: 1 } { 1 };",
-        "fn f() = for item in { value: 1 } { 1 };",
-        "fn f() = case { value: 1 } { true: 1 };",
+        include_str!("fixtures/v1_review_source_008.orna"),
+        include_str!("fixtures/v1_review_source_009.orna"),
+        include_str!("fixtures/v1_review_source_010.orna"),
+        include_str!("fixtures/v1_review_source_011.orna"),
     ] {
         let parsed = parse_module(source);
         assert!(
@@ -190,7 +202,7 @@ fn immediate_record_control_condition_requires_parentheses() {
         );
     }
 
-    let body = accepted_body("fn f() = if ({ value: 1 }) { 1 };");
+    let body = accepted_body(include_str!("fixtures/v1_review_source_012.orna"));
     let Expr::Control {
         condition: Some(condition),
         body: Some(body),
@@ -208,35 +220,21 @@ fn immediate_record_control_condition_requires_parentheses() {
 
 #[test]
 fn legacy_empty_pipe_closure_is_rejected() {
-    rejected("fn f() = || true;");
+    rejected(include_str!("fixtures/v1_review_source_013.orna"));
 }
 
 // `var` is a contextual identifier in Orna 1.0.0. Only the removed mutable
 // declaration form remains reserved, including destructuring patterns.
 #[test]
 fn var_is_accepted_in_ordinary_identifier_positions() {
-    accepted_body(
-        "type var { var: var, } \
-         table var(var: var) { var: var, } \
-         protocol var { static var: var; fn var(var: var): var; } \
-         enum var { var { var: var }, } \
-         fn var(var: var): var { \
-             let var: var = var; \
-             var = replacement; \
-             { var: var }; \
-             var.member; \
-             namespace.var; \
-             call(var: var); \
-             var \
-         }",
-    );
+    accepted_body(include_str!("fixtures/v1_review_source_014.orna"));
 }
 
 #[test]
 fn legacy_var_declarations_remain_rejected_at_statement_boundaries() {
     for source in [
-        "fn f() { var value = 1; }",
-        "fn f() { var (left, [right], { field: nested }, Variant { payload: value }) = source; }",
+        include_str!("fixtures/v1_review_source_015.orna"),
+        include_str!("fixtures/v1_review_source_016.orna"),
     ] {
         let parsed = parse_module(source);
         assert_eq!(
@@ -253,35 +251,30 @@ fn legacy_var_declarations_remain_rejected_at_statement_boundaries() {
 #[test]
 fn opaque_and_currency_are_accepted_in_ordinary_identifier_positions() {
     for name in ["opaque", "currency", "check", "unique", "where"] {
-        accepted_body(&format!(
-            "type {name} {{ {name}: {name}, }} \
-             table {name}({name}: {name}) {{ {name}: {name}, }} \
-             protocol {name} {{ static {name}: {name}; fn {name}({name}: {name}): {name}; }} \
-             enum {name} {{ {name} {{ {name}: {name} }}, }} \
-             fn {name}({name}: {name}): {name} {{ \
-                 let {name}: {name} = {name}; \
-                 {name} = replacement; \
-                 {{ {name}: {name} }}; \
-                 {name}.member; \
-                 namespace.{name}; \
-                 call({name}: {name}); \
-                 {name} \
-             }}"
-        ));
+        accepted_body(
+            &include_str!("fixtures/v1_review_ordinary_name_declarations.orna")
+                .replace("fixture_name", name),
+        );
     }
 }
 
 #[test]
 fn legacy_opaque_and_currency_declarations_remain_rejected() {
     for (source, expected) in [
-        ("opaque EmailAddress = Str;", "ORNA091-E-OPAQUE"),
-        ("pub opaque EmailAddress = Str;", "ORNA091-E-OPAQUE"),
         (
-            "currency GBP { code: \"GBP\", symbol: \"£\", minor_digits: 2 }",
+            include_str!("fixtures/v1_review_source_017.orna"),
+            "ORNA091-E-OPAQUE",
+        ),
+        (
+            include_str!("fixtures/v1_review_source_018.orna"),
+            "ORNA091-E-OPAQUE",
+        ),
+        (
+            include_str!("fixtures/v1_review_source_019.orna"),
             "ORNA091-E-CURRENCY",
         ),
         (
-            "pub currency GBP { code: \"GBP\", symbol: \"£\", minor_digits: 2 }",
+            include_str!("fixtures/v1_review_source_020.orna"),
             "ORNA091-E-CURRENCY",
         ),
     ] {
@@ -298,21 +291,10 @@ fn legacy_opaque_and_currency_declarations_remain_rejected() {
 #[test]
 fn assertion_aliases_are_accepted_in_ordinary_identifier_positions() {
     for name in ["ensure", "fact", "constraint", "constraints"] {
-        accepted_body(&format!(
-            "type {name} {{ {name}: {name}, }} \
-             table {name}({name}: {name}) {{ {name}: {name}, }} \
-             protocol {name} {{ static {name}: {name}; fn {name}({name}: {name}): {name}; }} \
-             enum {name} {{ {name} {{ {name}: {name} }}, }} \
-             fn {name}({name}: {name}): {name} {{ \
-                 let {name}: {name} = {name}; \
-                 {name} = replacement; \
-                 {{ {name}: {name} }}; \
-                 {name}.member; \
-                 namespace.{name}; \
-                 call({name}: {name}); \
-                 {name} \
-             }}"
-        ));
+        accepted_body(
+            &include_str!("fixtures/v1_review_ordinary_name_declarations.orna")
+                .replace("fixture_name", name),
+        );
     }
 }
 
@@ -320,44 +302,65 @@ fn assertion_aliases_are_accepted_in_ordinary_identifier_positions() {
 fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
     for (source, expected) in [
         (
-            "pub fn bad(amount: Int) { ensure amount > 0; }",
+            include_str!("fixtures/v1_review_source_021.orna"),
             "ORNA-A091-010",
         ),
         (
-            "pub fn bad(amount: Int) { fact amount > 0; }",
+            include_str!("fixtures/v1_review_source_022.orna"),
             "ORNA-A091-010",
         ),
         (
-            "pub fn bad(amount: Int) { constraint amount > 0; }",
-            "ORNA-A091-010",
-        ),
-        ("pub ensure amount > 0;", "ORNA-A091-010"),
-        ("pub fact amount > 0;", "ORNA-A091-010"),
-        ("pub constraint amount > 0;", "ORNA-A091-010"),
-        (
-            "pub table User(id: Uuid) { name: Str, constraints { unique(name); } }",
+            include_str!("fixtures/v1_review_source_023.orna"),
             "ORNA-A091-010",
         ),
         (
-            "pub table User(id: Uuid) { assert id > 0; constraints { unique(id); } }",
+            include_str!("fixtures/v1_review_source_024.orna"),
             "ORNA-A091-010",
         ),
-        ("constraints { unique(id); }", "ORNA-A091-010"),
-        ("pub constraints { unique(id); }", "ORNA-A091-010"),
         (
-            "pub table User(id: Uuid) { username: Str unique, }",
+            include_str!("fixtures/v1_review_source_025.orna"),
+            "ORNA-A091-010",
+        ),
+        (
+            include_str!("fixtures/v1_review_source_026.orna"),
+            "ORNA-A091-010",
+        ),
+        (
+            include_str!("fixtures/v1_review_source_027.orna"),
+            "ORNA-A091-010",
+        ),
+        (
+            include_str!("fixtures/v1_review_source_028.orna"),
+            "ORNA-A091-010",
+        ),
+        (
+            include_str!("fixtures/v1_review_source_029.orna"),
+            "ORNA-A091-010",
+        ),
+        (
+            include_str!("fixtures/v1_review_source_030.orna"),
+            "ORNA-A091-010",
+        ),
+        (
+            include_str!("fixtures/v1_review_source_031.orna"),
             "ORNA091-E-FIELD-CONSTRAINT",
         ),
         (
-            "pub table User(id: Uuid) { age: Int check(age >= 0), }",
+            include_str!("fixtures/v1_review_source_032.orna"),
             "ORNA091-E-FIELD-CONSTRAINT",
         ),
         (
-            "pub table User(id: Uuid) { callback: fn(Int): Str check(value > 0), }",
+            include_str!("fixtures/v1_review_source_033.orna"),
             "ORNA091-E-FIELD-CONSTRAINT",
         ),
-        ("type Port = Int where self >= 1;", "ORNA-A091-001"),
-        ("pub type Port = Int where self >= 1;", "ORNA-A091-001"),
+        (
+            include_str!("fixtures/v1_review_source_034.orna"),
+            "ORNA-A091-001",
+        ),
+        (
+            include_str!("fixtures/v1_review_source_035.orna"),
+            "ORNA-A091-001",
+        ),
     ] {
         let parsed = parse_module(source);
         assert_eq!(
@@ -368,23 +371,11 @@ fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
         );
     }
 
-    for alias in ["ensure", "fact"] {
-        for operator in [
-            "<",
-            "<=",
-            ">",
-            ">=",
-            "==",
-            "!=",
-            "in",
-            "-amount >",
-            "+amount >",
-        ] {
-            for source in [
-                format!("pub fn bad(amount: Int) {{ {alias} {operator} 0; }}"),
-                format!("pub table User(id: Uuid) {{ name: Str, {alias} {operator} 0; }}"),
-                format!("pub table User(id: Uuid) {{ assert id > 0; {alias} {operator} 0; }}"),
-            ] {
+    for alias_index in 0..2 {
+        for operator_index in 0..9 {
+            for shape_index in 0..3 {
+                let case = format!("alias_{alias_index}_{operator_index}_{shape_index}");
+                let source = fixture_case(&case);
                 let parsed = parse_module(&source);
                 assert_eq!(
                     parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
@@ -396,7 +387,7 @@ fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
         }
     }
 
-    let parsed = parse_module("on value; fn later() { item => item }");
+    let parsed = parse_module(include_str!("fixtures/v1_review_source_036.orna"));
     assert_ne!(
         parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
         Some("E1005"),
@@ -407,11 +398,7 @@ fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
 
 #[test]
 fn constraints_remains_an_ordinary_nominal_constructor_in_nested_impl() {
-    let parsed = parse_module(
-        "table T(id: Int) { \
-            impl P { fn make() { constraints { value: raw } } } \
-         }",
-    );
+    let parsed = parse_module(include_str!("fixtures/v1_review_source_038.orna"));
     assert!(
         parsed.diagnostics.is_empty(),
         "nested nominal construction should remain valid: {:?}",
@@ -421,13 +408,7 @@ fn constraints_remains_an_ordinary_nominal_constructor_in_nested_impl() {
 
 #[test]
 fn field_constraint_names_remain_ordinary_outside_removed_modifiers() {
-    let parsed = parse_module(
-        "table T(id: Int) { \
-            check: Str, \
-            unique: Str, \
-            impl P { fn make() { check(raw); unique(raw); where; } } \
-         }",
-    );
+    let parsed = parse_module(include_str!("fixtures/v1_review_source_039.orna"));
     assert!(
         parsed.diagnostics.is_empty(),
         "ordinary check/unique/where uses should remain valid: {:?}",
@@ -437,7 +418,7 @@ fn field_constraint_names_remain_ordinary_outside_removed_modifiers() {
 
 #[test]
 fn where_remains_an_ordinary_name_after_a_closed_type_refinement() {
-    let parsed = parse_module("type T = Int { assert self > 0; } fn where() = 1;");
+    let parsed = parse_module(include_str!("fixtures/v1_review_source_040.orna"));
     assert!(
         parsed.diagnostics.is_empty(),
         "where should remain ordinary after a complete refinement: {:?}",
@@ -448,20 +429,19 @@ fn where_remains_an_ordinary_name_after_a_closed_type_refinement() {
 #[test]
 fn legacy_declaration_words_are_scoped_to_removed_module_shapes() {
     for name in ["ingest", "log", "store", "view", "transaction", "on"] {
-        accepted_body(&format!(
-            "type {name} {{ {name}: {name}, }} \
-             table {name}({name}: {name}) {{ {name}: {name}, }} \
-             fn {name}({name}: {name}) = {name};"
-        ));
+        accepted_body(
+            &include_str!("fixtures/v1_review_legacy_name_declarations.orna")
+                .replace("fixture_name", name),
+        );
     }
 
     for (source, expected) in [
-        ("pub ingest google = google.mail() | into(Email);", "E1004"),
-        ("pub log Reading { time: Instant }", "E1001"),
-        ("pub store daily = Reading | count();", "E1003"),
-        ("pub view daily = Reading | count();", "E1002"),
-        ("transaction { Note.insert({ text: \"x\" }); }", "E1007"),
-        ("on google.mail() { mail => Email.insert(mail); }", "E1005"),
+        (include_str!("fixtures/v1_review_source_041.orna"), "E1004"),
+        (include_str!("fixtures/v1_review_source_042.orna"), "E1001"),
+        (include_str!("fixtures/v1_review_source_043.orna"), "E1003"),
+        (include_str!("fixtures/v1_review_source_044.orna"), "E1002"),
+        (include_str!("fixtures/v1_review_source_045.orna"), "E1007"),
+        (include_str!("fixtures/v1_review_source_046.orna"), "E1005"),
     ] {
         let parsed = parse_module(source);
         assert_eq!(
@@ -478,48 +458,32 @@ fn legacy_declaration_words_are_scoped_to_removed_module_shapes() {
 // legacy `=>` arms.
 #[test]
 fn match_is_accepted_in_ordinary_identifier_positions() {
-    accepted_body(
-        "type match { match: match, } \
-         table match(match: match) { match: match, } \
-         protocol match { static match: match; fn match(match: match): match; } \
-         enum match { match { match: match }, } \
-         fn match(match: match): match { \
-             let match: match = match; \
-             match = replacement; \
-             { match: match }; \
-             match.member; \
-             namespace.match; \
-             call(match: match); \
-             match \
-         }",
-    );
+    accepted_body(include_str!("fixtures/v1_review_source_047.orna"));
 }
 
 #[test]
 fn match_is_accepted_as_a_lambda_parameter() {
-    accepted_body("fn f() = match => { let f = x => x; f };");
+    accepted_body(include_str!("fixtures/v1_review_source_048.orna"));
 }
 
 #[test]
 fn match_lambda_is_accepted_as_a_record_field_value() {
-    accepted_body("fn f() = { value: match => { let f = x => x; f } };");
+    accepted_body(include_str!("fixtures/v1_review_source_049.orna"));
 }
 
 #[test]
 fn match_is_accepted_as_a_field_name_before_a_nested_lambda_record() {
-    accepted_body("fn f() = { match: { value: x => x } };");
+    accepted_body(include_str!("fixtures/v1_review_source_050.orna"));
 }
 
 #[test]
 fn match_is_accepted_in_a_return_type_product_before_a_lambda_body() {
-    accepted_body("fn f(): match * match { let f = x => x; f }");
+    accepted_body(include_str!("fixtures/v1_review_source_051.orna"));
 }
 
 #[test]
 fn legacy_match_expression_remains_rejected_at_a_function_body_boundary() {
-    let parsed = parse_module(
-        "pub fn bad(status: Status): Str = match status { Status.ready => \"ready\" };",
-    );
+    let parsed = parse_module(include_str!("fixtures/v1_review_source_052.orna"));
     assert_eq!(
         parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
         Some("ORNA091-E-MATCH"),
@@ -531,9 +495,9 @@ fn legacy_match_expression_remains_rejected_at_a_function_body_boundary() {
 #[test]
 fn legacy_match_expression_is_rejected_after_record_or_nominal_constructor_scrutinee() {
     for source in [
-        "fn f() = match Status { value: raw } { Status.ready => \"ready\" };",
-        "fn f() = match Status {} { Status.ready => \"ready\" };",
-        "fn f() = match { value: raw } { Status.ready => \"ready\" };",
+        include_str!("fixtures/v1_review_source_053.orna"),
+        include_str!("fixtures/v1_review_source_054.orna"),
+        include_str!("fixtures/v1_review_source_055.orna"),
     ] {
         let parsed = parse_module(source);
         assert_eq!(
@@ -548,10 +512,10 @@ fn legacy_match_expression_is_rejected_after_record_or_nominal_constructor_scrut
 #[test]
 fn legacy_match_expression_is_rejected_at_nested_expression_boundaries() {
     for source in [
-        "fn f() = call(match status { Status.ready => \"ready\" });",
-        "fn f() = [match status { Status.ready => \"ready\" }];",
-        "fn f() = (match status { Status.ready => \"ready\" });",
-        "fn f() = { value: match status { Status.ready => \"ready\" } };",
+        include_str!("fixtures/v1_review_source_056.orna"),
+        include_str!("fixtures/v1_review_source_057.orna"),
+        include_str!("fixtures/v1_review_source_058.orna"),
+        include_str!("fixtures/v1_review_source_059.orna"),
     ] {
         let parsed = parse_module(source);
         assert_eq!(
@@ -566,16 +530,16 @@ fn legacy_match_expression_is_rejected_at_nested_expression_boundaries() {
 #[test]
 fn legacy_match_expression_is_rejected_after_expression_introducers() {
     for source in [
-        "fn f() = true && match status { Status.ready => \"ready\" };",
-        "fn f() = 1 + match status { Status.ready => \"ready\" };",
-        "fn f() = value | match status { Status.ready => \"ready\" };",
-        "fn f() = if match status { Status.ready => true } { 1 };",
-        "fn f() = while match status { Status.ready => true } { 1 };",
-        "fn f() = for item in match status { Status.ready => item } { item };",
-        "fn f() = case match status { Status.ready => true } { true: 1 };",
-        "fn f() { return match status { Status.ready => \"ready\" }; }",
-        "fn f() { break match status { Status.ready => \"ready\" }; }",
-        "fn f() { assert match status { Status.ready => true }; }",
+        include_str!("fixtures/v1_review_source_060.orna"),
+        include_str!("fixtures/v1_review_source_061.orna"),
+        include_str!("fixtures/v1_review_source_062.orna"),
+        include_str!("fixtures/v1_review_source_063.orna"),
+        include_str!("fixtures/v1_review_source_064.orna"),
+        include_str!("fixtures/v1_review_source_065.orna"),
+        include_str!("fixtures/v1_review_source_066.orna"),
+        include_str!("fixtures/v1_review_source_067.orna"),
+        include_str!("fixtures/v1_review_source_068.orna"),
+        include_str!("fixtures/v1_review_source_069.orna"),
     ] {
         let parsed = parse_module(source);
         assert_eq!(
@@ -593,7 +557,7 @@ fn legacy_match_expression_is_rejected_after_expression_introducers() {
 #[test]
 fn qualified_nominal_construction_is_accepted() {
     nominal_body(
-        "enum E { v { x: Int } } fn f() = E.v { x: 1 };",
+        include_str!("fixtures/v1_review_source_070.orna"),
         &["E", "v"],
         &["x"],
     );
@@ -601,12 +565,20 @@ fn qualified_nominal_construction_is_accepted() {
 
 #[test]
 fn empty_nominal_construction_is_accepted() {
-    nominal_body("type T {} fn f() = T {};", &["T"], &[]);
+    nominal_body(
+        include_str!("fixtures/v1_review_source_071.orna"),
+        &["T"],
+        &[],
+    );
 }
 
 #[test]
 fn nonempty_unqualified_nominal_construction_is_accepted() {
-    nominal_body("type T { x: Int, } fn f() = T { x: 1 };", &["T"], &["x"]);
+    nominal_body(
+        include_str!("fixtures/v1_review_source_072.orna"),
+        &["T"],
+        &["x"],
+    );
 }
 
 // grammar/orna.ebnf: qualified_name starts with identifier; contextual names
@@ -614,7 +586,8 @@ fn nonempty_unqualified_nominal_construction_is_accepted() {
 #[test]
 fn reserved_words_cannot_start_type_references() {
     for keyword in ["true", "false", "null", "self", "if", "type", "pub", "as"] {
-        let source = format!("fn f(value: {keyword}) = value;");
+        let source = include_str!("fixtures/v1_review_reserved_type_head.orna")
+            .replace("fixture_keyword", keyword);
         let parsed = parse_module(&source);
         assert!(
             !parsed.is_ok(),
@@ -627,7 +600,7 @@ fn reserved_words_cannot_start_type_references() {
 // source/04-lexical.md: ORNA-RECORD-001 and ORNA-PATTERN-002.
 #[test]
 fn nominal_construction_punning_is_rejected() {
-    rejected("type T { x: Int, } fn f() = T { x };");
+    rejected(include_str!("fixtures/v1_review_source_073.orna"));
 }
 
 // grammar/orna.ebnf: comparison_expression admits only one comparison_operator
@@ -636,42 +609,42 @@ fn nominal_construction_punning_is_rejected() {
 // comparison explicitly does permit its use as the next comparison's operand.
 #[test]
 fn comparison_chain_with_grouped_operand_is_rejected() {
-    rejected("fn f() = 1 < (2) < 3;");
+    rejected(include_str!("fixtures/v1_review_source_074.orna"));
 }
 
 #[test]
 fn comparison_chain_with_additive_operand_is_rejected() {
-    rejected("fn f() = 1 < 2 + 3 < 6;");
+    rejected(include_str!("fixtures/v1_review_source_075.orna"));
 }
 
 #[test]
 fn boolean_comparison_chain_is_rejected() {
-    rejected("fn f() = true == false == true;");
+    rejected(include_str!("fixtures/v1_review_source_076.orna"));
 }
 
 #[test]
 fn membership_comparison_chain_is_rejected() {
-    rejected("fn f() = 1 in [1] == true;");
+    rejected(include_str!("fixtures/v1_review_source_077.orna"));
 }
 
 #[test]
 fn block_tail_comparison_chain_is_rejected() {
-    rejected("fn f() { 1 < 2 < 3 }");
+    rejected(include_str!("fixtures/v1_review_source_078.orna"));
 }
 
 #[test]
 fn simple_comparison_chain_is_rejected() {
-    rejected("fn f() = 1 < 2 < 3;");
+    rejected(include_str!("fixtures/v1_review_source_079.orna"));
 }
 
 #[test]
 fn comparison_conjunction_is_accepted() {
-    accepted_body("fn f() = 1 < 2 && 2 < 3;");
+    accepted_body(include_str!("fixtures/v1_review_source_080.orna"));
 }
 
 #[test]
 fn explicitly_grouped_comparison_is_accepted() {
-    accepted_body("fn f() = (1 < 2) == true;");
+    accepted_body(include_str!("fixtures/v1_review_source_081.orna"));
 }
 
 // grammar/orna.ebnf: range_expression, range_operator and date_literal;
@@ -680,7 +653,7 @@ fn explicitly_grouped_comparison_is_accepted() {
 #[test]
 fn adjacent_exclusive_date_range_is_accepted() {
     calendar_range_body(
-        "fn f() = 2026-09-01..2026-09-02;",
+        include_str!("fixtures/v1_review_source_082.orna"),
         "..",
         LiteralKind::Date,
         ["2026-09-01", "2026-09-02"],
@@ -690,7 +663,7 @@ fn adjacent_exclusive_date_range_is_accepted() {
 #[test]
 fn adjacent_inclusive_date_range_is_accepted() {
     calendar_range_body(
-        "fn f() = 2026-09-01..=2026-09-02;",
+        include_str!("fixtures/v1_review_source_083.orna"),
         "..=",
         LiteralKind::Date,
         ["2026-09-01", "2026-09-02"],
@@ -700,7 +673,7 @@ fn adjacent_inclusive_date_range_is_accepted() {
 #[test]
 fn adjacent_instant_range_is_accepted() {
     calendar_range_body(
-        "fn f() = 2026-09-01T14:30:00Z..2026-09-02T14:30:00Z;",
+        include_str!("fixtures/v1_review_source_084.orna"),
         "..",
         LiteralKind::Instant,
         ["2026-09-01T14:30:00Z", "2026-09-02T14:30:00Z"],
@@ -709,7 +682,7 @@ fn adjacent_instant_range_is_accepted() {
 
 #[test]
 fn adjacent_date_range_does_not_rewrite_quoted_text() {
-    let body = accepted_body("fn f() = 2026-09-01..2026-09-02 || \"2026-09-01..2026-09-02\";");
+    let body = accepted_body(include_str!("fixtures/v1_review_source_085.orna"));
     let Expr::Binary { lhs, op, rhs, .. } = body else {
         panic!("expected range/string logical-or expression");
     };
@@ -728,13 +701,13 @@ fn adjacent_date_range_does_not_rewrite_quoted_text() {
 #[test]
 fn spaced_date_ranges_are_accepted() {
     calendar_range_body(
-        "fn f() = 2026-09-01 .. 2026-09-02;",
+        include_str!("fixtures/v1_review_source_086.orna"),
         "..",
         LiteralKind::Date,
         ["2026-09-01", "2026-09-02"],
     );
     calendar_range_body(
-        "fn f() = 2026-09-01 ..= 2026-09-02;",
+        include_str!("fixtures/v1_review_source_087.orna"),
         "..=",
         LiteralKind::Date,
         ["2026-09-01", "2026-09-02"],
@@ -745,5 +718,5 @@ fn spaced_date_ranges_are_accepted() {
 // a calendar-invalid date-shaped literal must not be reinterpreted as subtraction.
 #[test]
 fn calendar_invalid_date_is_rejected() {
-    rejected("fn f() = 2026-02-30;");
+    rejected(include_str!("fixtures/v1_review_source_088.orna"));
 }

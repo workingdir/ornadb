@@ -1,0 +1,6 @@
+pub table Note(id: Int) { value: Int, }
+fn filter(rows: Relation<Note>): Int = 99;
+fn parent() {
+    assert filter(Note) == 99;
+    assert (Note | filter) == 99;
+}

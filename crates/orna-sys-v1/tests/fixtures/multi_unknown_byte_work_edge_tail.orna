@@ -1,0 +1,8 @@
+pub table MultiUnknownByteSource(id: Int) { value: Int, }
+pub table MultiUnknownByteBefore(id: Int) { value: Int, }
+pub table MultiUnknownByteUnknownFirst(id: Int) { value: Int, }
+pub table MultiUnknownByteBetween(id: Int) { value: Int, }
+pub table MultiUnknownByteUnknownSecond(id: Int) { value: Int, }
+pub table MultiUnknownByteAfter(id: Int) { value: Int, }
+pub table MultiUnknownByteFirstReset(id: Int) { value: Int, }
+pub table MultiUnknownByteLastReset(id: Int) { value: Int, }

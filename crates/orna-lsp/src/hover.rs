@@ -76,9 +76,9 @@ pub fn standard_type_hover(
     hover(value)
 }
 
-/// Builds the hover for one standard-library schema.
-pub fn standard_schema_hover(name: &str, doc_link: Option<&str>) -> Hover {
-    let mut value = format!("**`{name}`** standard schema\n");
+/// Builds the hover for one source-backed 1.0 standard module.
+pub fn standard_module_hover(name: &str, doc_link: Option<&str>) -> Hover {
+    let mut value = format!("**`{name}`** pinned standard module\n");
     append_spec_link(&mut value, doc_link);
     hover(value)
 }

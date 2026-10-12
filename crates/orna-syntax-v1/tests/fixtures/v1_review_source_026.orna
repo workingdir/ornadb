@@ -1,0 +1,1 @@
+pub constraint amount > 0;

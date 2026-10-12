@@ -9,4 +9,5 @@ license.workspace = true
 rowan.workspace = true
 
 [dev-dependencies]
+orna-syntax-v1 = { path = "../orna-syntax-v1" }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }

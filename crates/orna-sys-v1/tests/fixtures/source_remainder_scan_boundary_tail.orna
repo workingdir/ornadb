@@ -1,0 +1,6 @@
+pub table SourceRemainderScanBoundarySource(id: Int) { value: Int, }
+pub table SourceRemainderScanBoundaryFirst(id: Int) { value: Int, }
+pub table SourceRemainderScanBoundarySecond(id: Int) { value: Int, }
+pub table SourceRemainderScanBoundaryUnknown(id: Int) { value: Int, }
+pub table SourceRemainderScanBoundaryTarget(id: Int) { value: Int, }
+pub fn delete_source_remainder_scan_boundary() = SourceRemainderScanBoundaryTarget.delete(1);

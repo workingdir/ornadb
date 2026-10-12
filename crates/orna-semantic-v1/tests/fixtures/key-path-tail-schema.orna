@@ -1,0 +1,22 @@
+pub table Parent(tenant: Str, sequence: Int) {
+    label: Str,
+}
+
+type ParentKey = Parent;
+
+pub table Child(parent: Parent) {
+    label: Str,
+}
+
+pub table AliasedChild(parent: ParentKey) {
+    label: Str,
+}
+
+pub table NestedComposite(key: (Parent, (Bool, Date))) {
+    label: Str,
+}
+
+pub table RangeData(id: Int) {
+    active: Range<Date>,
+    previous: Range<Date>,
+}

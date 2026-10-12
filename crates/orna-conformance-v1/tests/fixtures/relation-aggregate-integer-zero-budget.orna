@@ -1,0 +1,10 @@
+pub table Reading(id: Int) { value: Int, }
+fn minimum(): Int? = Reading | map(reading => reading.value) | min();
+fn maximum(): Int? = Reading | map(reading => reading.value) | max();
+fn total(): Int = Reading | map(reading => reading.value) | sum;
+fn parent() {
+
+            Reading.insert({ id: 1, value: 2 });
+            Reading | map(reading => reading.value) | sum;
+
+}

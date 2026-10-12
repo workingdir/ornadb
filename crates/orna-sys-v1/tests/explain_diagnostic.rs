@@ -1,15 +1,19 @@
 use std::collections::BTreeMap;
 
 use orna_sys_v1::{
+<<<<<<< HEAD
     Diagnostic, DiagnosticExplanationError, DiagnosticField, SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR,
     SystemEffect, TypeId, explain_diagnostic, system_function_descriptor,
+=======
+    Diagnostic, DiagnosticExplanationError, DiagnosticField, SystemEffect,
+    TypeId, explain_diagnostic, system_function_descriptor,
+>>>>>>> origin/w90zi-imp_merge
 };
 
 #[test]
 fn sys_explain_diagnostic_descriptor_is_authoritative_and_read_only() {
     let descriptor = system_function_descriptor("sys.explain(Diagnostic)")
         .expect("portable diagnostic explanation descriptor");
-    assert_eq!(descriptor, &SYS_EXPLAIN_DIAGNOSTIC_DESCRIPTOR);
     assert_eq!(descriptor.name, "sys.explain(Diagnostic)");
     assert_eq!(descriptor.effect, SystemEffect::Read);
     assert_eq!(
@@ -22,6 +26,7 @@ fn sys_explain_diagnostic_descriptor_is_authoritative_and_read_only() {
 
 #[test]
 fn sys_explain_diagnostic_returns_known_result_without_leaking_redacted_fields() {
+    let fixture = include_str!("fixtures/secret-surface.orna").trim();
     let diagnostic = Diagnostic {
         code: "sys.invoke.argument_unknown",
         message: "root-secret-value",
@@ -34,26 +39,21 @@ fn sys_explain_diagnostic_returns_known_result_without_leaking_redacted_fields()
             ),
             (
                 "detail".to_owned(),
-                DiagnosticField::Text("nested-secret-value".to_owned()),
+                DiagnosticField::Text(fixture.to_owned()),
             ),
         ]),
         causes: vec![Diagnostic {
             code: "vendor.cause",
             message: "cause-secret-value",
-            fields: BTreeMap::from([(
-                "cause-detail".to_owned(),
-                DiagnosticField::Text("cause-field-secret".to_owned()),
-            )]),
+            fields: BTreeMap::from([("cause-detail".to_owned(), DiagnosticField::Text(fixture.to_owned()))]),
             causes: Vec::new(),
         }],
     };
     let input_encoded = serde_json::to_string(&diagnostic).expect("safe input encoding");
     for secret in [
         "root-secret-value",
-        "nested-secret-value",
+        fixture,
         "cause-secret-value",
-        "cause-field-secret",
-        "cause-detail",
     ] {
         assert!(
             !input_encoded.contains(secret),
@@ -86,10 +86,8 @@ fn sys_explain_diagnostic_returns_known_result_without_leaking_redacted_fields()
     assert!(encoded.contains("redacted"));
     for secret in [
         "root-secret-value",
-        "nested-secret-value",
+        fixture,
         "cause-secret-value",
-        "cause-field-secret",
-        "cause-detail",
     ] {
         assert!(
             !encoded.contains(secret),

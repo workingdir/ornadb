@@ -1,0 +1,8 @@
+pub enum State {
+    queued,
+    completed,
+}
+
+pub table Job(id: State) {
+    description: Str,
+}

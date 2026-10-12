@@ -163,7 +163,7 @@ const KEYWORD_REFERENCES: &[KeywordReference] = &[
         keyword: "CLIENT",
         summary: "Declares a function that executes in the local orna client.",
         context: "CREATE CLIENT FUNCTION qualified_name ( params ) RETURNS type body;",
-        example: "CREATE CLIENT FUNCTION studio.main() RETURNS std.ui.UI RETURN std.ui.window(...);",
+        example: include_str!("examples/page.orna"),
     },
     KeywordReference {
         keyword: "EXTERNAL",

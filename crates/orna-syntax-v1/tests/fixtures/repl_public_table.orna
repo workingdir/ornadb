@@ -1,0 +1,1 @@
+pub table Book(id: Int) { title: Text, }

@@ -1,0 +1,2 @@
+CREATE SCHEMA café;
+CREATE TYPE CAFÉ.probe AS OBJECT (value BOOLEAN);

@@ -58,7 +58,7 @@ const NON_STD_SCHEMA_STANDARD_DIGEST: [u8; 32] = [
     0x12, 0x36, 0x60, 0xae, 0x7f, 0x65, 0xc2, 0x76, 0x8c, 0x5b, 0x0d, 0x9a, 0xcf, 0x94, 0x35, 0x49,
 ];
 
-const CANONICAL_STANDARD_SOURCE: &str = include_str!("../../../stdlib/std/types.orna");
+const CANONICAL_STANDARD_SOURCE: &str = include_str!("../tests/fixtures/standard/types.orna");
 
 static PREPARE_CATALOGUE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static PREPARE_BUNDLE_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -1116,7 +1116,7 @@ fn checks_a_core_verified_non_golden_standard_source() {
     );
     assert_eq!(
         checked.verified_snapshot().source().units()[0].content(),
-        "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;"
+        include_str!("tests/fixtures/verified-standard-source.orna")
     );
 
     assert_eq!(checked.schemas().len(), 2);
@@ -1849,7 +1849,7 @@ fn unknown_qualified_aliases_and_quoted_counterparts_do_not_resolve_through_stan
     )
     .unwrap();
     let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app; CREATE TYPE app.flag AS OBJECT (alias std.ALIAS, quoted std.\"BOOLEAN\");";
+    let source = include_str!("tests/fixtures/unknown-qualified-aliases.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
 
     let report = check_standard_application(&bundle, &context);
@@ -1879,10 +1879,7 @@ fn standard_declaration_type_uses_are_ordered_by_written_source_not_declaration_
     )
     .unwrap();
     let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app;\
-            CREATE SERVER FUNCTION app.read() RETURNS ROWS (value BOOLEAN) \
-            AS SELECT f.value FROM app.flag f;\
-            CREATE TYPE app.flag AS OBJECT (value BOOLEAN);";
+    let source = include_str!("tests/fixtures/declaration-use-order.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
 
     let report = check_standard_application(&bundle, &context);
@@ -1926,7 +1923,7 @@ fn standard_values_are_not_valid_ref_targets() {
     )
     .unwrap();
     let context = StandardApplicationCheckContext::try_new(&application, &standard).unwrap();
-    let source = "CREATE SCHEMA app; CREATE TYPE app.flag AS OBJECT (value REF std.BOOLEAN);";
+    let source = include_str!("tests/fixtures/ref-scalar-target.orna");
     let bundle = SourceBundle::new([SourceUnit::new("application.orna", source)]).unwrap();
 
     let report = check_standard_application(&bundle, &context);
@@ -1961,7 +1958,10 @@ fn counts_source_units_before_parsing_or_reconciling() {
     );
     let two = verified_empty_catalogue_fixture(
         &[
-            ("std/one.orna", "CREATE SCHEMA std.;"),
+            (
+                "std/one.orna",
+                include_str!("tests/fixtures/invalid-standard-schema.orna"),
+            ),
             ("std/two.orna", ""),
         ],
         [
@@ -1983,7 +1983,7 @@ fn counts_source_units_before_parsing_or_reconciling() {
 
 #[test]
 fn returns_parser_diagnostics_before_reconciliation() {
-    const SOURCE: &str = "CREATE SCHEMA std.;CREATE SCHEMA ;CREATE SCHEMA std;";
+    const SOURCE: &str = include_str!("tests/fixtures/parser-diagnostics-before-reconciliation.orna");
     let parsed =
         parse_bundle(&SourceBundle::new([SourceUnit::new("std/types.orna", SOURCE)]).unwrap());
     assert_eq!(parsed.units()[0].parsed().schemas().len(), 1);
@@ -2347,7 +2347,7 @@ fn active_with_history(
 }
 
 fn verified_standard_source_fixture() -> orna_core::revision::VerifiedStandardLibrarySnapshot {
-    const SOURCE: &str = "CREATE SCHEMA std;CREATE SCHEMA std.types;CREATE TYPE std.types.BOOLEAN AS VALUE PRIMITIVE KERNEL CONTRACT 'orna.kernel.value.boolean@1' IMMUTABLE PERSISTABLE;EXPORT TYPE std.types.BOOLEAN AS std.BOOLEAN;EXPORT TYPE std.BOOLEAN TO PRELUDE AS BOOLEAN;";
+    const SOURCE: &str = include_str!("tests/fixtures/verified-standard-source.orna");
 
     let source_unit = StoredSourceUnit::new(
         SourceUnitId::from_bytes(CANONICAL_RESERVED_ID),
@@ -2429,7 +2429,7 @@ fn verified_standard_source_fixture() -> orna_core::revision::VerifiedStandardLi
 
 fn verified_non_std_schema_standard_source_fixture()
 -> orna_core::revision::VerifiedStandardLibrarySnapshot {
-    const SOURCE: &str = "CREATE SCHEMA library;";
+    const SOURCE: &str = include_str!("tests/fixtures/non-standard-schema.orna");
     let source_unit = StoredSourceUnit::new(
         SourceUnitId::from_bytes(CANONICAL_RESERVED_ID),
         0,
@@ -2718,8 +2718,8 @@ fn verified_empty_catalogue_fixture(
 
 #[test]
 fn retains_exact_source_and_syntax_text_in_bundle_order() {
-    let first_source = "-- customer source\r\nCREATE SCHEMA crm;  \r\n";
-    let second_source = "/* task source */\nCREATE SCHEMA tasks;\n";
+    let first_source = include_str!("tests/fixtures/retained-customer-source.orna");
+    let second_source = include_str!("tests/fixtures/retained-task-source.orna");
     let bundle = SourceBundle::new([
         SourceUnit::new("crm/schema.orna", first_source),
         SourceUnit::new("tasks/schema.orna", second_source),
@@ -2740,9 +2740,10 @@ fn retains_exact_source_and_syntax_text_in_bundle_order() {
 
 #[test]
 fn parses_later_units_after_an_earlier_syntax_error() {
+    let retained_source = include_str!("tests/fixtures/retained-valid-source.orna");
     let bundle = SourceBundle::new([
         SourceUnit::new("broken.orna", "CREATE SCHEMA crm.;"),
-        SourceUnit::new("valid.orna", "-- retained\nCREATE SCHEMA tasks;"),
+        SourceUnit::new("valid.orna", retained_source),
     ])
     .unwrap();
 
@@ -2751,7 +2752,7 @@ fn parses_later_units_after_an_earlier_syntax_error() {
     assert_eq!(report.units().len(), 2);
     assert_eq!(
         report.units()[1].syntax_text(),
-        "-- retained\nCREATE SCHEMA tasks;"
+        retained_source
     );
     assert_eq!(report.diagnostics().len(), 1);
     assert_eq!(
@@ -2764,7 +2765,10 @@ fn parses_later_units_after_an_earlier_syntax_error() {
 fn maps_syntax_codes_and_retains_owned_paths_and_byte_spans() {
     let bundle = SourceBundle::new([
         SourceUnit::new("syntax.orna", "CREATE SCHEMA crm.;"),
-        SourceUnit::new("comment.orna", "/* unfinished"),
+        SourceUnit::new(
+            "comment.orna",
+            include_str!("tests/fixtures/unterminated-comment.orna"),
+        ),
     ])
     .unwrap();
 
@@ -2809,7 +2813,9 @@ fn renders_contextual_diagnostics_from_retained_source_without_mutating_raw_data
     // Keep the diagnostic span and syntax tree fixed while changing the retained
     // source text.  Human output must use the retained text, not reparse or
     // reconstruct a different presentation from the private syntax tree.
-    report.units[0].replace_source_text_for_test("CREATE SCHEMA CRM.;");
+    report.units[0].replace_source_text_for_test(include_str!(
+        "tests/fixtures/retained-source-uppercase-syntax-error.orna"
+    ));
     let rendered = report.render_human();
 
     assert!(rendered.contains("error[ORNA0001]:"));
@@ -2864,5 +2870,29 @@ fn falls_back_to_raw_location_when_span_end_is_not_a_utf8_boundary() {
     assert!(rendered.contains("error[ORNA0001]:"));
     assert!(rendered.contains(" --> syntax.orna: byte 18..19"));
     assert!(!rendered.contains("1 |"));
+    assert_eq!(report.diagnostics(), raw.as_slice());
+}
+
+#[test]
+fn renders_semantic_check_diagnostics_from_retained_source() {
+    let source =
+        include_str!("../../orna-conformance-v1/tests/fixtures/bounded-invalid-function-body.orna");
+    let bundle = SourceBundle::new([SourceUnit::new("invalid-body.orna", source)]).unwrap();
+    let base = CatalogueSnapshot::new(CatalogueRevisionId::new(), Vec::new(), Vec::new()).unwrap();
+    let report = check(&bundle, &base);
+    let raw = report.diagnostics().to_vec();
+    assert!(!raw.is_empty());
+
+    let rendered = report
+        .parse_report()
+        .render_diagnostics(report.diagnostics());
+
+    assert!(rendered.contains("error[ORNA"), "{rendered}");
+    assert!(rendered.contains("--> invalid-body.orna:"), "{rendered}");
+    assert!(
+        rendered.contains("pub fn secret() = missing;"),
+        "{rendered}"
+    );
+    assert!(rendered.contains('^'), "{rendered}");
     assert_eq!(report.diagnostics(), raw.as_slice());
 }

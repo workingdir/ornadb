@@ -5,6 +5,17 @@ use orna_syntax_v1::{
 
 const LIMIT_ERROR: &str = "maximum syntax nesting exceeded";
 
+fn source(case: &str) -> &'static str {
+    let fixture = std::str::from_utf8(include_bytes!("fixtures/nesting_limits.orna"))
+        .expect("checked-in .orna fixture must be UTF-8");
+    let marker = format!("// CASE {case}\n");
+    let (_, source) = fixture
+        .split_once(&marker)
+        .unwrap_or_else(|| panic!("missing nesting fixture case {case}"));
+    let end = source.find("\n// CASE ").unwrap_or(source.len());
+    source[..end].trim_end()
+}
+
 fn assert_limited(diagnostics: &[orna_syntax_v1::ParseError]) {
     assert!(
         diagnostics
@@ -17,62 +28,46 @@ fn assert_limited(diagnostics: &[orna_syntax_v1::ParseError]) {
 
 #[test]
 fn prefix_recursion_is_limited_before_stack_exhaustion() {
-    let parsed = parse_expression(&format!("{}value", "!".repeat(600)));
+    let parsed = parse_expression(source("prefix-deep"));
     assert_limited(&parsed.diagnostics);
 }
 
 #[test]
 fn recursive_types_and_patterns_share_the_parser_limit() {
-    let nested_type = format!("{}Int{}", "[".repeat(600), "]".repeat(600));
-    let parsed = parse_module(&format!("fn typed(value: {nested_type}) = value;"));
+    let parsed = parse_module(source("type-deep"));
     assert_limited(&parsed.diagnostics);
 
-    let nested_pattern = format!("{}value{}", "[".repeat(600), "]".repeat(600));
-    let parsed = parse_module(&format!("fn destructure({nested_pattern}) = 1;"));
+    let parsed = parse_module(source("pattern-deep"));
     assert_limited(&parsed.diagnostics);
 }
 
 #[test]
 fn ordinary_recursive_forms_below_the_budget_are_accepted() {
-    let parsed = parse_expression(&format!("{}value", "!".repeat(32)));
+    let parsed = parse_expression(source("prefix-shallow"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
 
-    let nested_type = format!("{}Int{}", "[".repeat(32), "]".repeat(32));
-    let parsed = parse_module(&format!("fn typed(value: {nested_type}) = value;"));
+    let parsed = parse_module(source("type-shallow"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
 
-    let nested_pattern = format!("{}value{}", "[".repeat(32), "]".repeat(32));
-    let parsed = parse_module(&format!("fn destructure({nested_pattern}) = 1;"));
+    let parsed = parse_module(source("pattern-shallow"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
 }
 
 #[test]
 fn mixed_delimiters_and_postfix_spines_share_one_ast_budget() {
-    let source = format!(
-        "{}value{}{}",
-        "(".repeat(120),
-        ".field".repeat(400),
-        ")".repeat(120)
-    );
-    let parsed = parse_expression_with_file(&source, "memory.orna");
+    let parsed = parse_expression_with_file(source("mixed-postfix"), "memory.orna");
     assert_limited(&parsed.diagnostics);
 }
 
 #[test]
 fn nested_control_blocks_are_limited_at_active_recursion_entrance() {
-    let source = format!("{}1{}", "if true {".repeat(100), "}".repeat(100),);
-    let parsed = parse_expression(&source);
+    let parsed = parse_expression(source("control-deep"));
     assert_limited(&parsed.diagnostics);
 }
 
 #[test]
 fn overdeep_control_recovers_to_the_next_top_level_declaration() {
-    let source = format!(
-        "fn limited() {{ {}1{} }} fn retained() = 2;",
-        "if true {".repeat(100),
-        "}".repeat(100),
-    );
-    let parsed = parse_module_with_file(&source, "recovery.orna");
+    let parsed = parse_module_with_file(source("control-recovery"), "recovery.orna");
     assert_limited(&parsed.diagnostics);
     assert!(
         parsed
@@ -88,7 +83,7 @@ fn overdeep_control_recovers_to_the_next_top_level_declaration() {
 
 #[test]
 fn repl_entrypoint_reports_the_same_nesting_limit_with_file_context() {
-    let parsed = parse_repl_with_file(&format!("{}value", "!".repeat(100)), "repl.orna");
+    let parsed = parse_repl_with_file(source("repl-deep"), "repl.orna");
     assert_limited(&parsed.diagnostics);
     assert!(
         parsed
@@ -100,45 +95,30 @@ fn repl_entrypoint_reports_the_same_nesting_limit_with_file_context() {
 
 #[test]
 fn row_entrypoint_reports_the_same_nesting_limit_without_panicking() {
-    let nested = format!("{}1{}", "{ value: ".repeat(100), " }".repeat(100),);
-    let parsed = parse_row(&nested);
+    let parsed = parse_row(source("row-deep"));
     assert_limited(&parsed.diagnostics);
 
-    let shallow = parse_row("{ value: 1 }");
+    let shallow = parse_row(source("row-shallow"));
     assert!(shallow.is_ok(), "{:?}", shallow.diagnostics);
 }
 
 #[test]
 fn list_wrappers_compose_with_field_spines() {
-    let source = format!(
-        "{}value{}{}",
-        "[".repeat(40),
-        ".field".repeat(30),
-        "]".repeat(40),
-    );
-    let parsed = parse_expression(&source);
+    let parsed = parse_expression(source("list-postfix"));
     assert_limited(&parsed.diagnostics);
 }
 
 #[test]
 fn optional_types_and_assignment_targets_cannot_form_unbounded_spines() {
-    let optional = format!("Int {}", "? ".repeat(600));
-    let parsed = parse_module(&format!("fn typed(value: {optional}) = value;"));
+    let parsed = parse_module(source("optional-type"));
     assert_limited(&parsed.diagnostics);
 
-    let target = format!("value{}", ".field".repeat(600));
-    let parsed = parse_module(&format!("fn assign() {{ {target} = 1; }}"));
+    let parsed = parse_module(source("assignment-target"));
     assert_limited(&parsed.diagnostics);
 }
 
 #[test]
 fn wide_shallow_lists_remain_valid() {
-    let source = format!(
-        "[{}]",
-        std::iter::repeat_n("1", 1_000)
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let parsed = parse_expression(&source);
+    let parsed = parse_expression(source("wide-list"));
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
 }

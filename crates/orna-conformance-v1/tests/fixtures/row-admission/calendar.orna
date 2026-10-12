@@ -1,0 +1,1 @@
+pub table Event(id: Date) { name: Str, }

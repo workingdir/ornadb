@@ -1,0 +1,3 @@
+use std.math.{abs, min,};
+pub table Book(id: Int) { title: Text, assert > 0; }
+fn f(x: Int): Int = x + 1;

@@ -1,0 +1,2 @@
+pub fn answer(): Int = 42;
+pub unit meter : length base ;

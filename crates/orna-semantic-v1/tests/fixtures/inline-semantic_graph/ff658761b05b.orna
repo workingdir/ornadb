@@ -1,0 +1,1 @@
+fn poll(outer: Bool, inner: Bool) { while outer { while inner { continue; break; } break; } }

@@ -22,10 +22,6 @@ use orna_core::{
     types::TypeDescriptor,
     value::{EnumValue, RecordValue},
 };
-use orna_standard::{
-    registered_opaque_codecs, retained_standard_library_v2_snapshot,
-    verify_standard_library_v2_snapshot,
-};
 use proptest::prelude::*;
 
 use super::*;
@@ -70,15 +66,12 @@ fn record_active_revision() -> (ActiveDatabaseRevision, TypeId, TypeId) {
     const OTHER_RECORD_TYPE: TypeId = TypeId::from_bytes([0x98; 16]);
     const FIELD_ID: FieldId = FieldId::from_bytes([0x92; 16]);
     const OTHER_FIELD_ID: FieldId = FieldId::from_bytes([0x99; 16]);
-    let standard =
-        verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot().unwrap())
-            .unwrap();
     let schema_id = SchemaId::from_bytes([0x93; 16]);
     let catalogue_revision = CatalogueRevisionId::from_bytes([0x94; 16]);
     let source_bundle = SourceBundleId::from_bytes([0x95; 16]);
     let source_revision = SourceRevisionId::from_bytes([0x96; 16]);
     let source_unit = SourceUnitId::from_bytes([0x97; 16]);
-    let source_content = "record";
+    let source_content = include_str!("../tests/fixtures/synthetic-standard-enum.orna");
     let unit = StoredSourceUnit::new(
         source_unit,
         0,
@@ -99,10 +92,7 @@ fn record_active_revision() -> (ActiveDatabaseRevision, TypeId, TypeId) {
     .unwrap();
     let catalogue = CatalogueSnapshot::new_with_record_value_types(
         catalogue_revision,
-        vec![SchemaDefinition::new(
-            schema_id,
-            QualifiedSemanticName::new(["crm"]).unwrap(),
-        )],
+        vec![SchemaDefinition::new(schema_id, QualifiedSemanticName::new(["crm"]).unwrap())],
         Vec::new(),
         Vec::new(),
         Vec::new(),
@@ -110,64 +100,39 @@ fn record_active_revision() -> (ActiveDatabaseRevision, TypeId, TypeId) {
             RecordValueTypeDefinition::new(
                 RECORD_TYPE,
                 QualifiedSemanticName::new(["crm", "event"]).unwrap(),
-                vec![
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        FIELD_ID,
-                        "title",
-                        0,
-                        TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
-                    )
-                    .unwrap(),
-                ],
+                vec![RecordValueFieldDefinition::try_new_descriptor(
+                    FIELD_ID,
+                    "title",
+                    0,
+                    TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
+                )
+                .unwrap()],
             ),
             RecordValueTypeDefinition::new(
                 OTHER_RECORD_TYPE,
                 QualifiedSemanticName::new(["crm", "other_event"]).unwrap(),
-                vec![
-                    RecordValueFieldDefinition::try_new_descriptor(
-                        OTHER_FIELD_ID,
-                        "title",
-                        0,
-                        TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
-                    )
-                    .unwrap(),
-                ],
+                vec![RecordValueFieldDefinition::try_new_descriptor(
+                    OTHER_FIELD_ID,
+                    "title",
+                    0,
+                    TypeDescriptor::named(orna_standard::BOOLEAN_TYPE_ID),
+                )
+                .unwrap()],
             ),
         ],
         Vec::new(),
     )
     .unwrap();
     let origins = vec![
-        DefinitionOrigin::new(
-            DefinitionIdentity::Schema(schema_id),
-            SourceOrigin::new(source_unit, 0, 1).unwrap(),
-        ),
-        DefinitionOrigin::new(
-            DefinitionIdentity::ValueType(RECORD_TYPE),
-            SourceOrigin::new(source_unit, 1, 2).unwrap(),
-        ),
-        DefinitionOrigin::new(
-            DefinitionIdentity::Field {
-                owner: RECORD_TYPE,
-                field: FIELD_ID,
-            },
-            SourceOrigin::new(source_unit, 2, 3).unwrap(),
-        ),
-        DefinitionOrigin::new(
-            DefinitionIdentity::ValueType(OTHER_RECORD_TYPE),
-            SourceOrigin::new(source_unit, 3, 4).unwrap(),
-        ),
-        DefinitionOrigin::new(
-            DefinitionIdentity::Field {
-                owner: OTHER_RECORD_TYPE,
-                field: OTHER_FIELD_ID,
-            },
-            SourceOrigin::new(source_unit, 4, 5).unwrap(),
-        ),
+        DefinitionOrigin::new(DefinitionIdentity::Schema(schema_id), SourceOrigin::new(source_unit, 0, 1).unwrap()),
+        DefinitionOrigin::new(DefinitionIdentity::ValueType(RECORD_TYPE), SourceOrigin::new(source_unit, 1, 2).unwrap()),
+        DefinitionOrigin::new(DefinitionIdentity::Field { owner: RECORD_TYPE, field: FIELD_ID }, SourceOrigin::new(source_unit, 2, 3).unwrap()),
+        DefinitionOrigin::new(DefinitionIdentity::ValueType(OTHER_RECORD_TYPE), SourceOrigin::new(source_unit, 3, 4).unwrap()),
+        DefinitionOrigin::new(DefinitionIdentity::Field { owner: OTHER_RECORD_TYPE, field: OTHER_FIELD_ID }, SourceOrigin::new(source_unit, 4, 5).unwrap()),
     ];
-    let context = CatalogueHashContext::version_two(standard);
-    let catalogue_hash =
-        catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
+    let context =
+        CatalogueHashContext::version_two(crate::tests::synthetic_verified_standard_for_protocol());
+    let catalogue_hash = catalogue_digest_with_context(&context, &catalogue, &[], &[], &origins, &[]).unwrap();
     let active = ActiveDatabaseRevision::new_with_catalogue_hash_context(
         ActiveDatabaseRevisionInput::new(
             RevisionPair::new(source_revision, catalogue_revision),
@@ -183,10 +148,7 @@ fn record_active_revision() -> (ActiveDatabaseRevision, TypeId, TypeId) {
 }
 
 fn test_registry() -> OpaqueCodecRegistry {
-    let standard =
-        verify_standard_library_v2_snapshot(retained_standard_library_v2_snapshot().unwrap())
-            .unwrap();
-    registered_opaque_codecs(&standard).unwrap()
+    crate::tests::test_registry()
 }
 fn resource_hex(input: &str) -> Vec<u8> {
     assert_eq!(input.len() % 2, 0);

@@ -1,0 +1,1 @@
+fn f() = while match status { Status.ready => true } { 1 };

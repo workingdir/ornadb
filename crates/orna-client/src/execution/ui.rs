@@ -290,10 +290,8 @@ pub(super) fn evaluate_standard_ui_constructor(
             OpaqueValueError::ActiveStandardRequired,
         ));
     };
-    if !((standard.revision() == STANDARD_LIBRARY_V9_REVISION_ID
-        && standard.catalogue().revision() == STANDARD_CATALOGUE_V9_REVISION_ID)
-        || (standard.revision() == STANDARD_LIBRARY_V10_REVISION_ID
-            && standard.catalogue().revision() == STANDARD_CATALOGUE_V10_REVISION_ID))
+    if standard.revision() != STANDARD_LIBRARY_V10_REVISION_ID
+        || standard.catalogue().revision() != STANDARD_CATALOGUE_V10_REVISION_ID
     {
         return Err(invalid_ui_constructor_registry(
             context,

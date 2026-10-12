@@ -1,0 +1,4 @@
+pub fn inferred_await(job: sys.InvocationHandle<Int>) =
+    sys.await(job, timeout: 1.s);
+pub fn explicit_await(job: sys.InvocationHandle<Int>) =
+    sys.await<Int>(invocation: job, timeout: null);

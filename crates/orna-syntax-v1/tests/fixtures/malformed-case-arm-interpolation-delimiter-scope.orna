@@ -1,0 +1,1 @@
+pub fn bad(): Int { case 1 { "value {(1} and {2, 3}": 4, true: 5 } }

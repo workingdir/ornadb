@@ -1,0 +1,2 @@
+pub fn contextual(raw: Str) = codec.decode(raw, as: Message);
+pub fn keyword_member() = sys.ObjectKind.table;

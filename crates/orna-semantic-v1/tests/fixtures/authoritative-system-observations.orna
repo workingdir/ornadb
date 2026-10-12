@@ -1,0 +1,37 @@
+pub fn replay_mail_failure(
+    consumer: sys.FunctionRef,
+    consumer_identity: sys.ConsumerIdentity,
+    source_identity: Str,
+    partition: Str?,
+    position_format: Str,
+    position: sys.CheckpointPosition,
+) {
+    let failure = sys.Failure | one(failure =>
+        failure.consumer == consumer
+        && failure.consumer_identity == consumer_identity
+        && failure.source_identity == source_identity
+        && failure.partition == partition
+        && failure.position_format == position_format
+        && failure.position == position
+    );
+    sys.admin.replay_failure(
+        failure.reference,
+        expected_version: failure.version,
+        expected_status: failure.status,
+    )
+}
+
+pub fn skip_mail_failure(failure_reference: sys.FailureRef, reason: Str) {
+    let failure = sys.Failure | one(failure => failure.reference == failure_reference);
+    sys.admin.skip_failure(
+        failure.reference,
+        expected_version: failure.version,
+        expected_status: failure.status,
+        reason: reason,
+    )
+}
+
+pub fn compare_old_and_current() {
+    let old = sys.database.as_of(sys.snapshot("HEAD~10"));
+    { old: old.directory.Contact, current: contacts.Contact }
+}

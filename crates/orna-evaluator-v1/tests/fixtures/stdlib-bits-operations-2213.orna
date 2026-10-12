@@ -1,0 +1,7 @@
+bits_ops.bit_or(left: 5, right: 2) == 7
+&& bits_ops.bit_and(5, 3) == 1
+&& bits_ops.bit_xor(5, 3) == 6
+&& bits_ops.bit_not(0) == -1
+&& bits_ops.shift_left(value: -3, count: 2) == -12
+&& bits_ops.shift_right(value: -9, count: 2) == -3
+&& bits_ops.shift_left(1, 100) == 1267650600228229401496703205376

@@ -1,0 +1,5 @@
+{
+  id: "root/child/deep",
+  name: "Deep child",
+  city: "London",
+}

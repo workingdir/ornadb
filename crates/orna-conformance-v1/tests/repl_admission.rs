@@ -2,15 +2,31 @@ use orna_conformance_v1::AdmittedReplSession;
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::{OvbRaw, Value};
 
+const RUNTIME_FAILURE: &str = include_str!("fixtures/repl-admission/runtime-failure.orna");
+const REJECTED_FUNCTION: &str = include_str!("fixtures/repl-admission/rejected-function.orna");
+const PREVIEW: &str = include_str!("fixtures/repl-admission/preview.orna");
+const SESSION_ISOLATION: &str = include_str!("fixtures/repl-admission/session-isolation.orna");
+const RETAINED_RESULT: &str = include_str!("fixtures/repl-admission/retained-result.orna");
+const EFFECT: &str = include_str!("fixtures/repl-admission/effect.orna");
+const PROJECT_MAIN: &str = include_str!("fixtures/repl-admission/project-main.orna");
+const PROJECT_LIBRARY: &str = include_str!("fixtures/repl-admission/project-library.orna");
+const PROJECT_LIBRARY_EDITED: &str =
+    include_str!("fixtures/repl-admission/project-library-edited.orna");
+const PROJECT_CALLS: &str = include_str!("fixtures/repl-admission/project-calls.orna");
+
+fn source(fixture: &str, index: usize) -> &str {
+    fixture.lines().nth(index).expect("fixture source line")
+}
+
 #[test]
 fn runtime_failure_does_not_publish_a_semantic_binding() {
     let mut session = AdmittedReplSession::new(Limits::default());
     assert_eq!(
-        session.submit("40 + 2").unwrap(),
+        session.submit(source(RUNTIME_FAILURE, 0)).unwrap(),
         Some(Value::int(42.into()))
     );
-    let source = "let pending: Int = 1 / 0;";
-    let parsed = orna_syntax_v1::parse_repl(source);
+    let pending = source(RUNTIME_FAILURE, 1);
+    let parsed = orna_syntax_v1::parse_repl(pending);
     assert!(parsed.is_ok());
     assert!(
         orna_semantic_v1::ReplContext::empty()
@@ -18,17 +34,17 @@ fn runtime_failure_does_not_publish_a_semantic_binding() {
             .is_ok()
     );
     assert_eq!(
-        session.submit(source).unwrap_err().code(),
+        session.submit(pending).unwrap_err().code(),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
-    assert!(session.submit("pending").is_err());
-    assert_eq!(session.submit("$_").unwrap(), Some(Value::int(42.into())));
+    assert!(session.submit(source(RUNTIME_FAILURE, 2)).is_err());
     assert_eq!(
-        session.submit("let pending: Str = \"ready\";").unwrap(),
-        None
+        session.submit(source(RUNTIME_FAILURE, 3)).unwrap(),
+        Some(Value::int(42.into()))
     );
+    assert_eq!(session.submit(source(RUNTIME_FAILURE, 4)).unwrap(), None);
     assert_eq!(
-        session.submit("pending").unwrap(),
+        session.submit(source(RUNTIME_FAILURE, 5)).unwrap(),
         Some(Value::new(OvbRaw::Text("ready".into())).unwrap())
     );
 }
@@ -36,44 +52,55 @@ fn runtime_failure_does_not_publish_a_semantic_binding() {
 #[test]
 fn rejected_function_does_not_occupy_its_session_name() {
     let mut session = AdmittedReplSession::new(Limits::default());
-    assert!(session.submit("fn answer(): Int = \"wrong\";").is_err());
-    assert_eq!(session.submit("fn answer(): Int = 42;").unwrap(), None);
+    assert!(session.submit(source(REJECTED_FUNCTION, 0)).is_err());
+    assert_eq!(session.submit(source(REJECTED_FUNCTION, 1)).unwrap(), None);
     assert_eq!(
-        session.submit("answer()").unwrap(),
+        session.submit(source(REJECTED_FUNCTION, 2)).unwrap(),
         Some(Value::int(42.into()))
     );
-    assert!(session.submit("answer(99)").is_err());
-    assert_eq!(session.submit("$_").unwrap(), Some(Value::int(42.into())));
+    assert!(session.submit(source(REJECTED_FUNCTION, 3)).is_err());
+    assert_eq!(
+        session.submit(source(REJECTED_FUNCTION, 4)).unwrap(),
+        Some(Value::int(42.into()))
+    );
 }
 
 #[test]
 fn preview_never_publishes_declarations_or_last_result() {
     let mut session = AdmittedReplSession::new(Limits::default());
-    assert_eq!(session.submit("let seed: Int = 40;").unwrap(), None);
+    assert_eq!(session.submit(source(PREVIEW, 0)).unwrap(), None);
     assert_eq!(
-        session.submit("seed + 2").unwrap(),
+        session.submit(source(PREVIEW, 1)).unwrap(),
         Some(Value::int(42.into()))
     );
-    assert_eq!(session.preview("seed + 3").unwrap(), Value::int(43.into()));
-    assert!(session.preview("let preview_only: Int = 9;").is_err());
-    assert!(session.submit("preview_only").is_err());
-    assert_eq!(session.submit("$_").unwrap(), Some(Value::int(42.into())));
+    assert_eq!(
+        session.preview(source(PREVIEW, 2)).unwrap(),
+        Value::int(43.into())
+    );
+    assert!(session.preview(source(PREVIEW, 3)).is_err());
+    assert!(session.submit(source(PREVIEW, 4)).is_err());
+    assert_eq!(
+        session.submit(source(PREVIEW, 5)).unwrap(),
+        Some(Value::int(42.into()))
+    );
 }
 
 #[test]
 fn typed_declarations_and_results_do_not_escape_a_session() {
     let mut first = AdmittedReplSession::new(Limits::default());
-    first.submit("let seed: Int = 21;").unwrap();
-    first
-        .submit("fn twice(value: Int): Int = value + value;")
-        .unwrap();
+    first.submit(source(SESSION_ISOLATION, 0)).unwrap();
+    first.submit(source(SESSION_ISOLATION, 1)).unwrap();
     assert_eq!(
-        first.submit("twice(seed)").unwrap(),
+        first.submit(source(SESSION_ISOLATION, 2)).unwrap(),
         Some(Value::int(42.into()))
     );
     let mut second = AdmittedReplSession::new(Limits::default());
-    for source in ["seed", "twice(21)", "$_"] {
-        assert!(second.submit(source).is_err());
+    for source_text in [
+        source(SESSION_ISOLATION, 3),
+        source(SESSION_ISOLATION, 4),
+        source(SESSION_ISOLATION, 5),
+    ] {
+        assert!(second.submit(source_text).is_err());
     }
 }
 
@@ -82,16 +109,16 @@ fn retained_function_keeps_its_typed_last_result_capture() {
     let mut session = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         session
-            .submit("fn previous(): Int = $_;")
+            .submit(source(RETAINED_RESULT, 0))
             .unwrap_err()
             .code(),
         "ORNA-S012-UNRESOLVED"
     );
-    session.submit("42").unwrap();
-    session.submit("fn previous(): Int = $_;").unwrap();
-    session.submit("\"later\"").unwrap();
+    session.submit(source(RETAINED_RESULT, 1)).unwrap();
+    session.submit(source(RETAINED_RESULT, 2)).unwrap();
+    session.submit(source(RETAINED_RESULT, 3)).unwrap();
     assert_eq!(
-        session.submit("previous()").unwrap(),
+        session.submit(source(RETAINED_RESULT, 4)).unwrap(),
         Some(Value::int(42.into()))
     );
 }
@@ -99,18 +126,21 @@ fn retained_function_keeps_its_typed_last_result_capture() {
 #[test]
 fn known_effect_is_rejected_by_preview_before_execution() {
     let mut session = AdmittedReplSession::new(Limits::default());
-    session.submit("42").unwrap();
-    let source = "std.net.http.get(\"https://example.com\")";
-    let parsed = orna_syntax_v1::parse_repl(source);
+    session.submit(source(EFFECT, 0)).unwrap();
+    let effect_source = source(EFFECT, 1);
+    let parsed = orna_syntax_v1::parse_repl(effect_source);
     let admission = orna_semantic_v1::ReplContext::empty()
         .stage(&parsed.value)
         .unwrap();
     assert!(!admission.effects.effects.is_empty());
     assert_eq!(
-        session.preview(source).unwrap_err().code(),
+        session.preview(effect_source).unwrap_err().code(),
         "ORNA-REPL-EFFECT"
     );
-    assert_eq!(session.submit("$_").unwrap(), Some(Value::int(42.into())));
+    assert_eq!(
+        session.submit(source(EFFECT, 0)).unwrap(),
+        Some(Value::int(42.into()))
+    );
 }
 
 #[test]
@@ -124,33 +154,29 @@ fn loaded_project_snapshot_pairs_visibility_and_executable_bodies() {
             .unwrap()
             .success()
     );
-    std::fs::write(project.path().join("main.orna"), "use library;").unwrap();
+    std::fs::write(project.path().join("main.orna"), PROJECT_MAIN).unwrap();
     let library = project.path().join("library.orna");
-    std::fs::write(&library, "pub fn value(): Int = 42; fn hidden(): Int = 99;").unwrap();
+    std::fs::write(&library, PROJECT_LIBRARY).unwrap();
     let repository = orna_repository_v1::Repository::discover(project.path()).unwrap();
     let loaded = orna_project_v1::ProjectLoader::default()
         .load(&repository)
         .unwrap();
 
     // Later disk edits must not change either side of an already loaded source snapshot.
-    std::fs::write(
-        &library,
-        "pub fn value(): Str = \"changed\"; pub fn hidden(): Int = 99;",
-    )
-    .unwrap();
+    std::fs::write(&library, PROJECT_LIBRARY_EDITED).unwrap();
     let mut session = AdmittedReplSession::from_loaded_project(
         &loaded,
         std::iter::empty::<(String, String)>(),
         Limits::default(),
     )
     .unwrap();
-    session.submit("use library;").unwrap();
+    session.submit(PROJECT_MAIN.trim()).unwrap();
     assert_eq!(
-        session.submit("library.value()").unwrap(),
+        session.submit(source(PROJECT_CALLS, 0)).unwrap(),
         Some(Value::int(42.into()))
     );
     assert_eq!(
-        session.submit("library.hidden()").unwrap_err().code(),
+        session.submit(source(PROJECT_CALLS, 1)).unwrap_err().code(),
         "ORNA-S012-UNRESOLVED"
     );
 }

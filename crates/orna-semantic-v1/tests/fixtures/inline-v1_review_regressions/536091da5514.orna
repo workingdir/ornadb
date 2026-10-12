@@ -1,0 +1,6 @@
+
+            pub fn bad(): Int {
+                let x: Int = "wrong";
+                x
+            }
+        

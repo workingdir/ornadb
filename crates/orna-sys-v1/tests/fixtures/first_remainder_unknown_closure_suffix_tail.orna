@@ -1,0 +1,4 @@
+pub table FirstRemainderUnknownClosureSource(id: Int) { value: Int, }
+pub table FirstRemainderUnknownClosureRight(id: Int) { value: Int, }
+pub table FirstRemainderUnknownClosureTarget(id: Int) { value: Int, }
+pub fn update_first_remainder_unknown_closure() = FirstRemainderUnknownClosureTarget.update(1, { value: 2 });

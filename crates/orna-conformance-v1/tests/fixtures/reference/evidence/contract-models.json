@@ -1,0 +1,127 @@
+{
+  "scope": "Selected reference algorithms, static contract checks and real-Git experiments. No complete Orna implementation, independent Parquet reader/writer or network client/server was executed.",
+  "results": [
+    {
+      "name": "values.canonical-known-answers",
+      "scope": "semantic-reference-model",
+      "pass": true,
+      "detail": {
+        "known_answers": 17,
+        "scope": "CBOR scalar structure, selected Orna tags, exact Decimal and nested Option; not a complete typed codec"
+      }
+    },
+    {
+      "name": "values.reject-noncanonical",
+      "scope": "semantic-reference-model",
+      "pass": true,
+      "detail": {
+        "malformed_vectors_rejected": 12
+      }
+    },
+    {
+      "name": "snapshots.pin-preservation",
+      "scope": "semantic-reference-model",
+      "pass": true,
+      "detail": "Distinct CWD generations preserve distinct bytes; bare [0] and wrong digest widths reject."
+    },
+    {
+      "name": "numbers.money-and-unit-oracles",
+      "scope": "semantic-reference-model",
+      "pass": true,
+      "detail": "Exact decimal money sum and mile/hour conversion recomputed independently."
+    },
+    {
+      "name": "delivery.stable-identity-atomic-retry",
+      "scope": "semantic-reference-model",
+      "pass": true,
+      "detail": {
+        "failed_retries": 10000,
+        "stable_delivery_rows": 1,
+        "final_checkpoint": 1,
+        "stale_failure_version_rejected": true
+      }
+    },
+    {
+      "name": "checkpoint.argument-sensitive-identity",
+      "scope": "semantic-reference-model",
+      "pass": true,
+      "detail": "Full bound argument identity distinguishes consumers of the same function."
+    },
+    {
+      "name": "examples.reference-state-oracles",
+      "scope": "semantic-reference-model",
+      "pass": true,
+      "detail": "Independent state model matches distributed seed/transfer/loan/sensor oracles; not execution of Orna source."
+    },
+    {
+      "name": "tasks.owner-termination-and-timeout",
+      "scope": "semantic-reference-model",
+      "pass": true,
+      "detail": "Normal owner termination cancels/joins; prior commits remain; timeout leaves target alive; unrelated owner work survives."
+    },
+    {
+      "name": "api.closed-types-keys-runtime-members",
+      "scope": "static-schema-check",
+      "pass": true,
+      "detail": {
+        "declared_sys_type_names": 255,
+        "referenced_types": 253,
+        "relations": 78,
+        "functions_and_overloads": 66,
+        "all_key_fields_exist": true,
+        "runtime_handles_match": true
+      }
+    },
+    {
+      "name": "git.original-ref-only-reversal-reproduced",
+      "pass": true,
+      "detail": "Ref-only sequence reproduces the old staged reversal with real Git.",
+      "scope": "real-Git-regression"
+    },
+    {
+      "name": "git.reconciliation-preserves-partial-staging",
+      "pass": true,
+      "detail": "Managed new value survives later commit; partial staging and unstaged bytes preserved; index lock blocks a competing commit.",
+      "scope": "real-Git-regression"
+    },
+    {
+      "name": "git.ref-cas-refuses-concurrent-commit",
+      "pass": true,
+      "detail": "Expected-old ref mismatch leaves the concurrent ref and ordinary index intact.",
+      "scope": "real-Git-regression"
+    },
+    {
+      "name": "git.branch-carries-changes-at-HEAD",
+      "pass": true,
+      "detail": "New branch at HEAD carries staged/unstaged changes without a commit.",
+      "scope": "real-Git-regression"
+    },
+    {
+      "name": "vectors.retained-float-and-path",
+      "scope": "selected-reference-vectors",
+      "pass": true,
+      "detail": [
+        {
+          "tool": "check_float_vectors.py",
+          "stdout": "PASS: 10 order values, 3 equality vectors, 4 aggregate vectors, 2 statistics vectors"
+        },
+        {
+          "tool": "check_path_vectors.py",
+          "stdout": "PASS: 22 round trips, 10 rejections, 2 collision pairs"
+        }
+      ]
+    },
+    {
+      "name": "source.present-contract-and-oracles",
+      "scope": "static-source-check",
+      "pass": true,
+      "detail": {
+        "unique_normative_requirements": 870,
+        "chapters": 36,
+        "historical_iteration_markers_in_normative_text": 0
+      }
+    }
+  ],
+  "passed": 15,
+  "total": 15
+}

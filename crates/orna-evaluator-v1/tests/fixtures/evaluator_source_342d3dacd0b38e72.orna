@@ -1,0 +1,1 @@
+std.text.ends_with("βeta", "ta")

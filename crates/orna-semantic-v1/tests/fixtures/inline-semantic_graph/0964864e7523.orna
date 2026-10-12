@@ -1,0 +1,1 @@
+fn bad(values: [Money<GBP>]) = sum(values);

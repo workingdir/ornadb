@@ -1,0 +1,4 @@
+pub table Contact(id: Str) {
+    name: Str,
+    unchanged: Bool => Contact.update(id, { name: name }).name == name,
+}

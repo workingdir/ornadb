@@ -1,0 +1,3 @@
+pub table Note(id: Int) { value: Int, }
+fn flat_map(rows: Relation<Note>): Relation<Note> = rows;
+pub fn shadowed(rows: Relation<Note>) = rows | flat_map;

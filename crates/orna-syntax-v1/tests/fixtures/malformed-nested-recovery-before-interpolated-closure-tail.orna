@@ -1,0 +1,22 @@
+pub fn bad(flag: Bool): Int { case flag {
+true: "outer {root => { let saved = root; case root {
+true: first => { case first {
+true: 1,
+false: 2
+} },
+false: "keep {prefix => { case prefix {
+true: 3,
+false: 4
+} }} alive",
+false 0 { value: 5 },
+true 1 { other_value: 6 },
+false 2 { third_value: 7 },
+true 3 { fourth_value: 8 }
+};
+after => { let after_saved = saved; "middle {suffix => { case suffix {
+true: after_saved,
+false: "suffix {flag} value"
+} }} tail" }
+}} end",
+false: "fallback {flag} done"
+}}

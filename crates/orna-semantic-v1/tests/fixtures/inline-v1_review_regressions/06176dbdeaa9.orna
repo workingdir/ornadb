@@ -1,0 +1,10 @@
+
+            pub protocol P {
+                static code: Str;
+            }
+            pub type Box {
+                impl P {
+                    static code = "box";
+                }
+            }
+        

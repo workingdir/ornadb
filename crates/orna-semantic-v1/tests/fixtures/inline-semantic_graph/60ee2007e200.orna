@@ -1,0 +1,1 @@
+fn bad(values: [Int]) = min(values: values, extra: 1);

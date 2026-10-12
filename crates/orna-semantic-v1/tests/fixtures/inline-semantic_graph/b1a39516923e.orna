@@ -1,0 +1,1 @@
+fn wrong_arguments(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Int>(function, 1, as: Int);

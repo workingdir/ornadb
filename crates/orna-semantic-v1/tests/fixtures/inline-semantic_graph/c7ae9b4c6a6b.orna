@@ -1,0 +1,13 @@
+
+            pub table Book(id: Int) { title: Str, }
+            pub table Loan(id: Int) { book_id: Int, }
+            pub table Reading(id: Int) { value: Int, }
+            fn available() = Book
+                | filter(book => !exists(Loan, loan => loan.book_id == book.id))
+                | one();
+            fn ingest() {
+                Stream.from_list([1], source_identity: "fixture") | for_each(value => {
+                    Reading.insert({ id: value, value: value });
+                });
+            }
+        

@@ -1,0 +1,1 @@
+pub fn too_many(value: Int) = library.lookup<Int, Str>(value);

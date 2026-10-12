@@ -110,6 +110,8 @@ pub trait WatchFrameSource {
 
     fn start_watch(&mut self, source: &str) -> Result<WatchPresentation, Self::Error>;
     fn next_frame(&mut self, watch: [u8; 16]) -> Result<Option<Vec<u8>>, Self::Error>;
+    fn request_resync(&mut self, request: ResyncRequest) -> Result<(), Self::Error>;
+    fn close_watch(&mut self, watch: [u8; 16]) -> Result<(), Self::Error>;
 }
 
 /// Observable state for the currently subscribed REPL watch.
@@ -159,15 +161,23 @@ impl WatchCommandState {
 
     /// Retain the authoritative presentation when the same watch is
     /// re-subscribed, including its complete-snapshot barrier.
-    fn install(&mut self, presentation: WatchPresentation) {
+    fn install(&mut self, presentation: WatchPresentation) -> Option<[u8; 16]> {
         if self
             .presentation
             .as_ref()
             .is_some_and(|current| current.watch() == presentation.watch())
         {
-            return;
+            return None;
         }
-        self.presentation = Some(presentation);
+        self.presentation
+            .replace(presentation)
+            .map(|previous| previous.watch())
+    }
+
+    fn close(&mut self) -> Option<[u8; 16]> {
+        self.presentation
+            .take()
+            .map(|presentation| presentation.watch())
     }
 }
 
@@ -176,7 +186,57 @@ struct WatchBinding<'a, S: ?Sized> {
     state: &'a mut WatchCommandState,
 }
 
+fn repl_error_documentation(code: &str) -> (&'static str, &'static str) {
+    match code {
+        "ORNA-REPL-INPUT-LIMIT" => (
+            "submission is longer than the REPL input limit",
+            "shorten the submission and enter it again",
+        ),
+        "ORNA-REPL-INPUT-UTF8" => (
+            "submission is not valid UTF-8 text",
+            "re-enter the submission using valid UTF-8",
+        ),
+        "ORNA-REPL-COMMAND" => (
+            "command is unknown or unavailable in this REPL",
+            "enter `:help` to see the supported commands",
+        ),
+        "ORNA-REPL-AT" => (
+            "requested project snapshot could not be loaded",
+            "choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`",
+        ),
+        "ORNA-REPL-EFFECT" => (
+            "REPL preview cannot perform an effect",
+            "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
+        ),
+        "ORNA-REPL-WATCH-FRAME" => (
+            "live update could not be read",
+            "start the watch again with `:watch expression`",
+        ),
+        "ORNA-REPL-WATCH-SOURCE" => (
+            "live update source is unavailable",
+            "start the watch again with `:watch expression`",
+        ),
+        "ORNA-S010-IMPORT" => (
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        ),
+        "ORNA-S012-UNRESOLVED" => (
+            "name could not be resolved",
+            "declare the name or add the matching `use` import before using it",
+        ),
+        "ORNA-S021-TYPE" => (
+            "expression has the wrong type",
+            "change the expression or its declared type so the value and requirement agree",
+        ),
+        _ => (
+            "expression could not be evaluated",
+            "review the expression and try again",
+        ),
+    }
+}
+
 fn write_repl_error<W: Write>(writer: &mut W, code: &str, color_enabled: bool) -> io::Result<()> {
+    let (title, help) = repl_error_documentation(code);
     write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
     writer.write_all(b"[")?;
     write_styled(
@@ -185,7 +245,11 @@ fn write_repl_error<W: Write>(writer: &mut W, code: &str, color_enabled: bool) -
         code.as_bytes(),
         color_enabled,
     )?;
-    writer.write_all(b"]\n")
+    writer.write_all(b"]: ")?;
+    writer.write_all(title.as_bytes())?;
+    writer.write_all(b"\nhelp: ")?;
+    writer.write_all(help.as_bytes())?;
+    writer.write_all(b"\n")
 }
 
 fn write_repl_value<W: Write>(
@@ -342,7 +406,10 @@ fn run_loop<
         )?;
         writer.flush()?;
         match read_submission(reader)? {
-            ReadSubmission::Eof => return Ok(()),
+            ReadSubmission::Eof => {
+                close_session_watch(&mut watch, writer, color_enabled)?;
+                return Ok(());
+            }
             ReadSubmission::TooLong => {
                 write_repl_error(writer, "ORNA-REPL-INPUT-LIMIT", color_enabled)?;
             }
@@ -352,6 +419,7 @@ fn run_loop<
             ReadSubmission::Source(source) => {
                 let command = source.trim();
                 if command == ":quit" {
+                    close_session_watch(&mut watch, writer, color_enabled)?;
                     return Ok(());
                 }
                 if let Some(help) = parse_help_command(command) {
@@ -406,13 +474,35 @@ fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
     };
     match binding.source.start_watch(source) {
         Ok(presentation) => {
-            binding.state.install(presentation);
+            if let Some(previous) = binding.state.install(presentation)
+                && binding.source.close_watch(previous).is_err()
+            {
+                write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+            }
             drain_available_frames(binding, writer, color_enabled)?;
         }
         Err(_) => write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?,
     }
     Ok(())
 }
+
+/// Cancels the watch owned by this session when the REPL closes.
+fn close_session_watch<W: Write, S: WatchFrameSource + ?Sized>(
+    watch: &mut Option<WatchBinding<'_, S>>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let Some(binding) = watch.as_mut() else {
+        return Ok(());
+    };
+    if let Some(watch) = binding.state.close()
+        && binding.source.close_watch(watch).is_err()
+    {
+        write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+    }
+    Ok(())
+}
+
 /// Applies one frame to the owning presentation and prints its outcome.
 fn accept_frame<W: Write>(
     state: &mut WatchCommandState,
@@ -481,17 +571,47 @@ fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
     writer: &mut W,
     color_enabled: bool,
 ) -> io::Result<()> {
+    if !send_pending_resync(binding, writer, color_enabled)? {
+        return Ok(());
+    }
     let Some(watch) = binding.state.watch() else {
         return Ok(());
     };
     loop {
         match binding.source.next_frame(watch) {
-            Ok(Some(frame)) => accept_frame(binding.state, frame, writer, color_enabled)?,
+            Ok(Some(frame)) => {
+                accept_frame(binding.state, frame, writer, color_enabled)?;
+                if !send_pending_resync(binding, writer, color_enabled)? {
+                    return Ok(());
+                }
+            }
             Ok(None) => return Ok(()),
             Err(_) => {
                 write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
                 return Ok(());
             }
+        }
+    }
+}
+
+/// Sends the presentation's pending resync through its owning host source.
+/// A failed send remains pending and is retried at the next loop boundary.
+fn send_pending_resync<W: Write, S: WatchFrameSource + ?Sized>(
+    binding: &mut WatchBinding<'_, S>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<bool> {
+    let Some(request) = binding.state.take_resync_request() else {
+        return Ok(true);
+    };
+    match binding.source.request_resync(request) {
+        Ok(()) => {
+            binding.state.acknowledge_resync_request(request);
+            Ok(true)
+        }
+        Err(_) => {
+            write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+            Ok(false)
         }
     }
 }
@@ -634,7 +754,18 @@ fn inspect_raw(raw: &Raw, depth: usize) -> (String, &'static str) {
         Raw::Text(value) => (format!("\"{}\"", escape(value)), "Str"),
         Raw::Array(values) => (inspect_sequence(values, depth), "Array"),
         Raw::Map(entries) => (inspect_map(entries, depth), "Map"),
+        // OVB tag 0 is the protected-value boundary. Discard the whole inner
+        // subtree before rendering so even nested inspect fallbacks cannot
+        // turn a secret payload into printable structure.
         Raw::Tag(0, _) => ("<redacted>".into(), "Secret"),
+        // This generic display has no field-level disclosure proof. Diagnostic
+        // text, Error payloads, renderer properties, and typed sys.Value data
+        // therefore remain opaque here; callers needing a privileged view must
+        // use a separately authorized projection.
+        Raw::Tag(60011, _) => ("<redacted>".into(), "Diagnostic"),
+        Raw::Tag(60012, _) => ("<redacted>".into(), "Present"),
+        Raw::Tag(60016, _) => ("<redacted>".into(), "Error"),
+        Raw::Tag(60026, _) => ("<redacted>".into(), "sys.Value"),
         // OVB tag 37 is the closed 1.0 UUID representation. Keep its
         // structural fallback human-readable without turning presentation
         // into an alternate persistence encoding.
@@ -743,6 +874,153 @@ mod tests {
     }
 
     #[test]
+    fn inspect_redacts_payload_bearing_protected_values_inside_collections() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let raw = Raw::Map(vec![
+            (
+                Raw::Text("credential".into()),
+                Raw::Array(vec![Raw::Tag(
+                    0,
+                    Box::new(Raw::Text(fixture.to_owned())),
+                )]),
+            ),
+            (
+                Raw::Tag(0, Box::new(Raw::Text(fixture.to_owned()))),
+                Raw::Text("keyed payload".into()),
+            ),
+        ]);
+
+        let rendered = inspect_raw(&raw, 0).0;
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains(fixture), "{rendered}");
+    }
+
+    #[test]
+    fn inspect_redacts_payloads_in_diagnostic_present_error_and_sys_value_tags() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let tagged = |number, payload| Raw::Tag(number, Box::new(payload));
+        let diagnostic = tagged(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(4.into()),
+                    Raw::Array(vec![Raw::Text(fixture.into())]),
+                ),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let present = tagged(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("credential".into()),
+                    Raw::Text(fixture.into()),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let error = tagged(
+            60016,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Text(fixture.into())),
+                (Raw::Int(2.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Map(vec![(
+                        Raw::Text("credential".into()),
+                        Raw::Text(fixture.into()),
+                    )]),
+                ),
+            ]),
+        );
+        let sys_value = tagged(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+
+        for raw in [diagnostic, present, error, sys_value] {
+            let value = CanonicalValue::new(raw).expect("fixture wrapper is canonical");
+            let display = inspect(&value);
+            assert!(display.starts_with("<redacted> : "), "{display}");
+            assert!(!display.contains(fixture), "{display}");
+        }
+    }
+
+    #[test]
+    fn composed_debug_inspect_and_trace_projections_keep_wrapper_tails_opaque() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let tagged = |number, payload| Raw::Tag(number, Box::new(payload));
+        let diagnostic = tagged(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text(fixture.into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (Raw::Int(4.into()), Raw::Array(vec![Raw::Text(fixture.into())])),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let sys_value = tagged(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+        let present = tagged(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("diagnostic".into()),
+                    Raw::Array(vec![diagnostic.clone(), sys_value.clone()]),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let error = tagged(
+            60016,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Text(fixture.into())),
+                (Raw::Int(2.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Map(vec![(
+                        Raw::Text("credential".into()),
+                        Raw::Text(fixture.into()),
+                    )]),
+                ),
+            ]),
+        );
+        let raw = Raw::Array(vec![diagnostic, present, error, sys_value]);
+        let value = CanonicalValue::new(raw.clone()).expect("composed wrappers are canonical");
+
+        let debug = format!("{raw:?} {value:?}");
+        let display = inspect(&value);
+        let trace = value.redacted_for_trace().unwrap().encode().unwrap();
+        assert!(!debug.contains(fixture), "{debug}");
+        assert!(!display.contains(fixture), "{display}");
+        assert!(!trace
+            .windows(fixture.len())
+            .any(|part| part == fixture.as_bytes()));
+    }
+
+    #[test]
     fn inspect_renders_canonical_uuid_text_without_affecting_ovb() {
         let value = CanonicalValue::uuid([
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
@@ -781,7 +1059,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            format!("> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]\n> 2 : Int\n> ")
+            format!("> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]: command is unknown or unavailable in this REPL\nhelp: enter `:help` to see the supported commands\n> 2 : Int\n> ")
         );
     }
 
@@ -841,7 +1119,7 @@ mod tests {
         assert_eq!(loader.calls.get(), 0);
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> error[ORNA-REPL-AT]\n> "
+            "> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> "
         );
     }
 
@@ -859,7 +1137,7 @@ mod tests {
         .expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > error[ORNA-REPL-AT]\n> 42 : Int\n> "
+            "> > error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> 42 : Int\n> "
         );
     }
 
@@ -891,7 +1169,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-REPL-INPUT-LIMIT]\n> 1 : Int\n> "
+            "> error[ORNA-REPL-INPUT-LIMIT]: submission is longer than the REPL input limit\nhelp: shorten the submission and enter it again\n> 1 : Int\n> "
         );
     }
 
@@ -915,7 +1193,7 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]"));
+        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n"));
         assert!(output.ends_with("> 2 : Int\n> "));
     }
 
@@ -927,7 +1205,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-S021-TYPE]\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
+            "> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
         );
     }
 
@@ -941,7 +1219,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]\n> 2 : Int\n> "
+            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]: REPL preview cannot perform an effect\nhelp: evaluate a pure expression or invoke the operation through its admitted runtime entry point\n> 2 : Int\n> "
         );
     }
 
@@ -953,7 +1231,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL recovers");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]\n> 2 : Int\n> "
+            "> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]: submission is not valid UTF-8 text\nhelp: re-enter the submission using valid UTF-8\n> 2 : Int\n> "
         );
     }
 

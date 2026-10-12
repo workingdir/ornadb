@@ -387,31 +387,6 @@ pub(super) fn resolve_unclassified_target<'a>(
     }
 }
 
-// ClientActionError preserves its public diagnostic layout at this resolver boundary.
-#[allow(clippy::result_large_err)]
-pub(super) fn resolve_action_target<'a>(
-    active: &'a ActiveDatabaseRevision,
-    descriptor: &ClientActionDescriptor,
-) -> Result<ResolvedResourceTarget<'a>, ClientActionError> {
-    if descriptor.target_revision != active.pair() {
-        return Err(ClientActionError::RevisionMismatch);
-    }
-    let Some(resolved) = resolve_unclassified_target(
-        active,
-        InvocationTarget::new(descriptor.target, descriptor.target_revision),
-    ) else {
-        return Err(ClientActionError::TargetMismatch);
-    };
-    let expected_domain = match descriptor.domain {
-        ActionTargetDomain::Client => FunctionDomain::Client,
-        ActionTargetDomain::Server => FunctionDomain::Server,
-    };
-    if resolved.definition.domain() != expected_domain {
-        return Err(ClientActionError::TargetMismatch);
-    }
-    Ok(resolved)
-}
-
 pub(super) fn validate_resource_arguments(
     active: &ActiveDatabaseRevision,
     target: InvocationTarget,

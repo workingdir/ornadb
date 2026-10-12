@@ -1,0 +1,1 @@
+std.collection.one(predicate: value => value == 2, rows: [1, 2, 3])

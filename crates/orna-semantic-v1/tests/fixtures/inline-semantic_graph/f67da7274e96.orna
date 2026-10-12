@@ -1,0 +1,1 @@
+fn absent_on_row(failure: sys.Failure) = failure.legacy_member;

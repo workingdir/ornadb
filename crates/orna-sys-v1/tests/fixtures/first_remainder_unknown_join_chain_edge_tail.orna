@@ -1,0 +1,5 @@
+pub table FirstRemainderUnknownJoinChainSource(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinChainLeft(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinChainRight(id: Int) { value: Int, }
+pub table FirstRemainderUnknownJoinChainTarget(id: Int) { value: Int, }
+pub fn delete_first_remainder_unknown_join_chain() = FirstRemainderUnknownJoinChainTarget.delete(1);

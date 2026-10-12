@@ -1,0 +1,1 @@
+fn f() { break match status { Status.ready => "ready" }; }

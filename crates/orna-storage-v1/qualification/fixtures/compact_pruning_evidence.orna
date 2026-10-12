@@ -1,0 +1,10 @@
+pub table Sample {
+    service: Str,
+    status: Int,
+    observed_at: Int,
+}
+
+// Submitted row IDs and physical-unit counters are recorded separately in a
+// JSON evidence profile; this source does not implement a storage planner.
+pub fn evidence_row_id(): Str = "sample-2";
+pub fn main() = Sample | count();

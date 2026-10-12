@@ -1,0 +1,3 @@
+pub table SourceRemainderKnownAfterUnknownSource(id: Int) { value: Int, }
+pub table SourceRemainderKnownAfterUnknownScan(id: Int) { value: Int, }
+pub table SourceRemainderKnownAfterUnknownBound(id: Int) { value: Int, }

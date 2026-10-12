@@ -1,0 +1,1 @@
+fn stable() = 1; fn added() = 2;

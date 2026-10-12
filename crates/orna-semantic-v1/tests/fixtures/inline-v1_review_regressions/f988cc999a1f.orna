@@ -1,0 +1,12 @@
+
+                use vault.{Vault};
+                use vault as v;
+                pub fn named() {
+                    let value: Vault = Vault { value: 1 };
+                    value
+                }
+                pub fn aliased() {
+                    let value: v.Vault = v.Vault { value: 2 };
+                    value
+                }
+            

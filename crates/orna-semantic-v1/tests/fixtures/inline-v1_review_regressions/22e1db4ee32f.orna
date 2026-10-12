@@ -1,0 +1,11 @@
+
+                use foreign;
+                pub protocol P { fn value(self): Int; }
+                pub type Box {
+                    pub value: Int,
+                    impl P { fn value(self): Int = self.value; }
+                }
+                pub fn accept<T impl P>(value: T): T = value;
+                pub fn own() = accept(Box { value: 1 });
+                pub fn bad() = accept(foreign.Box { value: 1 });
+            

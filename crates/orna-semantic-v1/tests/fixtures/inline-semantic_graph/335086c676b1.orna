@@ -1,0 +1,4 @@
+
+            fn add(left: Int, right: Int): Int = left + right;
+            fn bad(): Int = add(left: 1, left: 2);
+        

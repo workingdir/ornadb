@@ -1,0 +1,4 @@
+pub fn value(): Int {
+    if true { 1 }
+    2
+}

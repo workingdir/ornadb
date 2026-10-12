@@ -1231,11 +1231,14 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "orna-application-v1"
 version = "1.0.0"
 dependencies = [
+ "futures",
+ "getrandom 0.3.4",
  "num-bigint 0.4.8",
  "orna-evaluator-v1",
  "orna-foundation-v1",
  "orna-live-v1",
  "orna-protocol-v1",
+ "orna-repository-v1",
  "orna-runtime-v1",
  "orna-semantic-v1",
  "orna-syntax-v1",
@@ -1253,16 +1256,22 @@ dependencies = [
 name = "orna-cli-v1"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "orna-application-v1",
  "orna-client",
  "orna-conformance-v1",
  "orna-evaluator-v1",
  "orna-foundation-v1",
+ "orna-live-v1",
  "orna-project-v1",
+ "orna-protocol-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
+ "orna-security-v1",
  "orna-semantic-v1",
+ "orna-serving-v1",
  "orna-value-v1",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -1337,6 +1346,7 @@ name = "orna-core"
 version = "1.0.0"
 dependencies = [
  "base64",
+ "orna-syntax-v1",
  "orna-value-v1",
  "proptest",
  "serde",
@@ -1356,6 +1366,7 @@ dependencies = [
  "orna-project-v1",
  "orna-repository-v1",
  "orna-semantic-v1",
+ "orna-standard",
  "orna-syntax-v1",
  "orna-value-v1",
  "tempfile",
@@ -1367,6 +1378,8 @@ name = "orna-evolution-v1"
 version = "1.0.0"
 dependencies = [
  "orna-foundation-v1",
+ "orna-syntax-v1",
+ "serde_json",
 ]
 
 [[package]]
@@ -1413,8 +1426,10 @@ dependencies = [
  "lsp-types",
  "orna-compiler",
  "orna-core",
+ "orna-semantic-v1",
  "orna-standard",
  "orna-syntax",
+ "orna-syntax-v1",
  "serde_json",
 ]
 
@@ -1481,9 +1496,13 @@ dependencies = [
  "libsql",
  "num-bigint 0.4.8",
  "orna-core",
+ "orna-evaluator-v1",
  "orna-foundation-v1",
  "orna-repository-v1",
  "orna-stream-v1",
+ "orna-syntax-v1",
+ "orna-sys-v1",
+ "orna-value-v1",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -1494,7 +1513,12 @@ dependencies = [
 name = "orna-security-v1"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "subtle",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]
@@ -1503,6 +1527,8 @@ version = "1.0.0"
 dependencies = [
  "orna-foundation-v1",
  "orna-syntax-v1",
+ "orna-sys-v1",
+ "orna-value-v1",
  "serde_json",
  "sha2 0.10.9",
  "unicode-casefold",
@@ -1523,6 +1549,7 @@ dependencies = [
  "orna-artifact",
  "orna-compiler",
  "orna-core",
+ "orna-semantic-v1",
  "orna-syntax",
 ]
 
@@ -1536,6 +1563,7 @@ dependencies = [
  "orna-foundation-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
+ "orna-syntax-v1",
  "orna-value-v1",
  "parquet",
  "sha2 0.10.9",
@@ -1554,6 +1582,7 @@ dependencies = [
 name = "orna-syntax"
 version = "1.0.0"
 dependencies = [
+ "orna-syntax-v1",
  "proptest",
  "rowan",
 ]
@@ -1569,17 +1598,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "orna-sys-macros"
+version = "1.0.0"
+
+[[package]]
 name = "orna-sys-v1"
 version = "1.0.0"
 dependencies = [
+ "orna-security-v1",
+ "orna-syntax-v1",
+ "orna-sys-macros",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "syn 2.0.119",
 ]
 
 [[package]]
 name = "orna-table-v1"
 version = "1.0.0"
+dependencies = [
+ "num-bigint 0.4.8",
+]
 
 [[package]]
 name = "orna-traceability-v1"

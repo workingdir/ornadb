@@ -54,8 +54,8 @@ impl LiveReconnectFailure {
 }
 
 pub enum LiveReconnectError {
-    /// The requested fresh-watch attachment was malformed; no session resume
-    /// or socket replacement was attempted.
+    /// The requested fresh-watch attachment was malformed or reused a request
+    /// identity; no session resume or socket replacement was attempted.
     InvalidRequest,
     Resume(LiveTransportError),
     AfterResume(LiveReconnectFailure),
@@ -289,11 +289,13 @@ where
 impl LiveClient {
     /// Resumes the HTTP session, opens a new authenticated WebSocket, and
     /// resubscribes with `request`, receiving a complete snapshot for a new
-    /// watch before replacing the driver.
+    /// watch before replacing the driver. Its request ID must not have been
+    /// used by an earlier operation on this driver; the server retains request
+    /// outcomes for replay, so a used identity cannot name a new logical watch.
     #[allow(clippy::result_large_err)]
     pub async fn reconnect_driver<R, A>(
         &self,
-        session: &LiveSession,
+        session: &mut LiveSession,
         driver: &mut LiveSessionDriver<
             PrefetchedBinaryTransport<
                 crate::live_transport::AuthenticatedWebSocketTransport<MaybeTlsStream<TcpStream>>,
@@ -310,8 +312,14 @@ impl LiveClient {
         if !valid_subscribe_request(&request) {
             return Err(LiveReconnectError::InvalidRequest);
         }
+        if request
+            .request
+            .is_some_and(|request_id| driver.has_used_request_id(request_id))
+        {
+            return Err(LiveReconnectError::InvalidRequest);
+        }
         let mut replacement = Some(
-            self.resume_session(session)
+            self.resume_session_with_handoff(session)
                 .await
                 .map_err(LiveReconnectError::Resume)?,
         );
@@ -368,7 +376,7 @@ impl LiveClient {
     #[allow(clippy::result_large_err)]
     pub async fn resume_driver<R, A>(
         &self,
-        session: &LiveSession,
+        session: &mut LiveSession,
         driver: &mut LiveSessionDriver<
             PrefetchedBinaryTransport<
                 crate::live_transport::AuthenticatedWebSocketTransport<MaybeTlsStream<TcpStream>>,
@@ -382,7 +390,7 @@ impl LiveClient {
         A: RequestIdAllocator,
     {
         let mut replacement = Some(
-            self.resume_session(session)
+            self.resume_session_with_handoff(session)
                 .await
                 .map_err(LiveReconnectError::Resume)?,
         );

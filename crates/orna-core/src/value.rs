@@ -1867,23 +1867,20 @@ impl NullValue {
     }
 }
 
-/// A finite FLOAT value with reflexive numeric equality.
+/// One IEEE-754 binary64 FLOAT value with ordinary numeric equality.
 ///
-/// `+0.0` and `-0.0` compare equal. Non-finite IEEE values are not runtime
-/// values in this initial subset.
+/// `+0.0` and `-0.0` compare equal. NaN is unequal to every value, including
+/// itself; non-finite values remain valid FLOAT values.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeFloat(f64);
 
 impl RuntimeFloat {
-    /// Creates one finite FLOAT value.
+    /// Creates one FLOAT value without changing its binary64 value.
     pub fn new(value: f64) -> Result<Self, ResultRowsError> {
-        if !value.is_finite() {
-            return Err(ResultRowsError::NonFiniteFloat);
-        }
         Ok(Self(value))
     }
 
-    /// Returns the finite floating-point value.
+    /// Returns the binary64 floating-point value.
     pub const fn value(&self) -> f64 {
         self.0
     }

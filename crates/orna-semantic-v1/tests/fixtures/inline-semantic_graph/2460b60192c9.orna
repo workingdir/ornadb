@@ -1,0 +1,1 @@
+fn unknown_generic(function: sys.FunctionRef, arguments: sys.ArgumentMap) = sys.start<Missing>(function, arguments, as: Int);

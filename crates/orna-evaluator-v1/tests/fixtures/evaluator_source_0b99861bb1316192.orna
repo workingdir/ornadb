@@ -1,0 +1,1 @@
+std.stats.median(values: [1, 2])

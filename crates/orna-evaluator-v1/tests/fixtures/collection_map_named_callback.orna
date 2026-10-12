@@ -1,0 +1,2 @@
+fn scale(value: Int) = value * 10;
+fn run() = std.collection.map([3, 1, 2], scale);
