@@ -41,7 +41,7 @@ pub async fn commit_capture(
     let context = state.begin_activation().await.unwrap();
 
     let value = evaluate_expression_ovb2_with_effects(
-        capture_expression(expression),
+        expression,
         &Default::default(),
         Limits::default(),
         bindings,
@@ -74,9 +74,3 @@ pub async fn commit_capture(
     publish_media_row(repository, state, key, ordinal + 0x10).await;
 }
 
-fn capture_expression(source: &str) -> &str {
-    source
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("// @capture: "))
-        .unwrap_or(source)
-}
