@@ -1,0 +1,1 @@
+pub fn storage_rows(): Int? = sys.Storage | map(storage => storage.rows) | first() ?? -1;
