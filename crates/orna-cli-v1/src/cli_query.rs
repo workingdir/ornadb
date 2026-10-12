@@ -338,6 +338,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let scope = graph
         .open_read_scope()
         .map_err(|error| query_error("Read scope could not be opened", format!("{error:?}")))?;
+    let filter_active = options.predicate != BlobMetadataFilter::new();
     // `--key` asks for exactly one row. A row committed from imported media is
     // keyed by the raw bytes a caller passed, and a row written by hand may be
     // keyed by canonical text, so the spelling printed by the listing is tried
@@ -362,8 +363,18 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 .range
                 .as_ref()
                 .expect("parse_options validates the requested typed range");
+            let range = if filter_active {
+                KeyRange::new(
+                    range.lower_inclusive().cloned(),
+                    range.upper_exclusive().cloned(),
+                    MAX_QUERY_LIMIT,
+                )
+                .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?
+            } else {
+                range.clone()
+            };
             graph
-                .range_rows(range, &scope)
+                .range_rows(&range, &scope)
                 .map_err(|error| query_error("Row range could not be read", format!("{error:?}")))?
         }
     };
@@ -408,6 +419,11 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         |field| format!("field {field}"),
     );
     let matched = listings.len();
+    // Count matches before applying the presentation window, so `--limit`
+    // cannot hide matching rows that occur later in the scanned relation.
+    if filter_active {
+        listings.truncate(options.limit);
+    }
     let plan = PredicatePlan::new(
         &options.predicate,
         &options.predicate_constraints,
