@@ -6470,6 +6470,12 @@ mod tests {
             unit_definitions.clone(),
         ))
         .unwrap();
+        let other_schema = SchemaDescriptor::new(schema_for_type(
+            quantity_type(unit_b),
+            unit_definitions.clone(),
+        ))
+        .unwrap();
+        assert_ne!(schema, other_schema);
         let key = encode_raw(&Raw::Int(7.into())).unwrap();
         let quantity = |unit_id| {
             Raw::Tag(
