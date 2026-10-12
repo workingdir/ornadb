@@ -29,7 +29,7 @@
 //! publication boundary would reject.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -215,12 +215,15 @@ impl MigratedCopy {
 /// Prepares a format-3 disposable copy of one populated legacy repository and
 /// the migration journal that sponsors it.
 ///
-/// The source must be a non-bare worktree whose recorded format is 1 or 2. The
-/// copy is created at `destination`, which must not exist and must lie outside
-/// the source worktree; it carries the source's commits, index state, working
-/// tree and submodule worktrees, but not the source's private runtime
-/// ownership, and its index is settled. The source's recorded `format.orna` is
-/// retired in the copy so its readers dispatch by the new recorded format.
+/// The source must be a non-bare worktree whose recorded format is 1 or 2.
+/// The copy is built beside `destination`, fully synchronized, and installed
+/// by one directory rename. A retry recovers an installed prepared copy only
+/// when its source snapshot and migration coordinates still match. It carries
+/// the source commits, index state, working tree and submodule worktrees, but
+/// not the source's private runtime ownership. The source's recorded format
+/// remains unchanged; retirement is represented only in the candidate commit.
+/// Its journal and Git refs are synced before installation, pinning the
+/// candidate commit and staged-index objects for restart recovery.
 ///
 /// `continuity` and `annotation_defaults` are the coordinates the conversion
 /// established. Neither is inferred here: a format-1/2 commit this module can
@@ -233,14 +236,68 @@ pub fn prepare_format3_migration(
     continuity: MigrationContinuityRecord,
     annotation_defaults: MigrationAnnotationDefaults,
 ) -> Result<MigratedCopy, RepositoryError> {
+    let destination = canonical_destination(destination)?;
+    let source_root = source
+        .worktree()
+        .canonicalize()
+        .map_err(|_| RepositoryError::NotAWorktree)?;
+    if destination == source_root || destination.starts_with(&source_root) {
+        return Err(RepositoryError::InvalidSelector);
+    }
+    if path_exists(&destination)? {
+        return recover_prepared_copy(source, &destination, continuity, annotation_defaults);
+    }
+
+    let staging = migration_staging_path(&destination)?;
+    let result = (|| {
+        let mut copy =
+            prepare_format3_migration_in(source, &staging, continuity, annotation_defaults)?;
+        let repository = Repository::discover(&staging)?;
+        pin_migration_index(
+            &repository,
+            copy.source_index_generation
+                .tree()
+                .ok_or(RepositoryError::InvalidFormatMigration)?
+                .as_str(),
+        )?;
+        pin_migration_candidate(&repository, copy.candidate_journal.new_head())?;
+        repository.write_publication_journal(&copy.candidate_journal)?;
+        sync_tree(&staging)?;
+        let parent = destination
+            .parent()
+            .ok_or(RepositoryError::LocalStateUnavailable)?;
+        crate::init::publish_directory_noreplace(parent, &staging, &destination).map_err(
+            |error| match error {
+                crate::RepositoryInitError::MetadataChanged => {
+                    RepositoryError::PublicationRecoveryConflict
+                }
+                crate::RepositoryInitError::PlatformUnsupported => {
+                    RepositoryError::PlatformUnsupported
+                }
+                _ => RepositoryError::LocalStateUnavailable,
+            },
+        )?;
+        copy.destination = destination;
+        Ok(copy)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn prepare_format3_migration_in(
+    source: &Repository,
+    destination: &Path,
+    continuity: MigrationContinuityRecord,
+    annotation_defaults: MigrationAnnotationDefaults,
+) -> Result<MigratedCopy, RepositoryError> {
     let context = source
         .open_format_context()
         .map_err(|_| RepositoryError::LocalStateUnavailable)?;
     if context.supports_writes() {
         return Err(RepositoryError::InvalidFormatMigration);
     }
-    // A coordinate derived from payload bytes is refused by the journal, so an
-    // inspecting default can never be advertised as a metadata migration.
     if annotation_defaults.payload_inspected() {
         return Err(RepositoryError::InvalidFormatMigration);
     }
@@ -249,15 +306,12 @@ pub fn prepare_format3_migration(
     let source_index_generation = source.index_generation()?;
     require_index_tree(&source_index_generation)?;
     require_no_protected_pins(source)?;
-    // Both coordinates come from committed objects before the copy exists, so
-    // the source's concurrently changing working tree cannot influence them.
     let source_tree_identity = source_tree_identity(source, &source_commit)?;
+    let (source_working_tree_identity, source_working_tree_entries) =
+        working_tree_identity(source)?;
     let dependency_entries = dependency_entries(source, &source_commit)?;
     let source_root = source.worktree().to_path_buf();
     let root = clone_source_graph(&source_root, destination)?;
-    // The graph clone contains committed objects only. Carry the source's
-    // submodule administrative repositories and index separately so the copy
-    // retains independently editable dirty submodules and staged state.
     copy_submodule_admin(&source_root, &root)?;
     clear_checkout(&root)?;
     copy_working_tree(&source_root, &root)?;
@@ -265,22 +319,24 @@ pub fn prepare_format3_migration(
     copy_source_index(&source_root, &root)?;
     release_source_ownership(&root)?;
 
-    let copy = Repository::discover(&root)?;
-    // The copy carries the source's own bytes at this point, including the
-    // legacy `.orna` records: a migration must never install new bytes before
-    // it is published. The format-3 records the copy needs to read as format 3
-    // travel in the candidate below, so nothing here writes metadata.
-    let database_id = context.database_id().unwrap_or_else(DatabaseId::new_v4);
+    if source.head()?.as_ref() != Some(&source_commit)
+        || source.index_generation()? != source_index_generation
+        || working_tree_identity(source)?.0 != source_working_tree_identity
+    {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
 
-    // The candidate is built with a hidden index derived from the source's
-    // recorded tree and never touches the copy's ordinary index or worktree.
-    // It carries the two records that make the copy a format-3 repository: the
-    // canonical database identity, and the retirement of the legacy format
-    // record, which the profile reader reports as "no format file beside a
-    // database record" — the canonical format-3 spelling. The annotation
-    // coordinate rides in the candidate's own message, because the copy cannot
-    // publish the transition yet: its head must stay on the legacy commit until
-    // the runtime owner completes the migration.
+    configure_migration_commit_identity(&root)?;
+    let copy = Repository::discover(&root)?;
+    let (working_tree_identity, working_tree_entries) = working_tree_identity(&copy)?;
+    if working_tree_identity != source_working_tree_identity
+        || working_tree_entries != source_working_tree_entries
+        || copy.head()?.as_ref() != Some(&source_commit)
+        || copy.index_generation()? != source_index_generation
+    {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    let database_id = context.database_id().unwrap_or_else(DatabaseId::new_v4);
     let database_bytes = canonical_database_bytes(&database_id);
     let record = migration_record(
         source_format,
@@ -312,10 +368,6 @@ pub fn prepare_format3_migration(
             .cloned()
             .ok_or(RepositoryError::InvalidFormatMigration)?,
         fresh_runtime_intent_id()?,
-        // The journal names every path the migration changes, so a resume
-        // replays the transition rather than re-deciding it. None of these
-        // bytes exist in the copy yet, because preparation never installs
-        // metadata the publication has not admitted.
         vec![
             PublicationJournalEntry::new(
                 crate::ManagedPath::new(".orna/database.orna")?,
@@ -337,8 +389,6 @@ pub fn prepare_format3_migration(
     .with_migration_continuity(continuity.clone())?
     .with_migration_annotation_defaults(annotation_defaults)?;
 
-    let (working_tree_identity, working_tree_entries) = working_tree_identity(&copy)?;
-
     Ok(MigratedCopy {
         source_root,
         destination: root,
@@ -354,6 +404,312 @@ pub fn prepare_format3_migration(
         annotation_defaults,
         continuity,
     })
+}
+
+fn canonical_destination(destination: &Path) -> Result<PathBuf, RepositoryError> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .canonicalize()
+        .map_err(|_| RepositoryError::NotAWorktree)?;
+    let name = destination
+        .file_name()
+        .ok_or(RepositoryError::InvalidSelector)?;
+    Ok(parent.join(name))
+}
+
+fn migration_staging_path(destination: &Path) -> Result<PathBuf, RepositoryError> {
+    let parent = destination
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    Ok(parent.join(format!(".orna-migration-copy-{}", crate::Uuid::new_v4())))
+}
+
+fn path_exists(path: &Path) -> Result<bool, RepositoryError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(RepositoryError::LocalStateUnavailable),
+    }
+}
+
+fn migration_index_ref(tree: &str) -> String {
+    format!("refs/orna/migration-indexes/{tree}")
+}
+
+fn migration_index_blob_ref(object_id: &str) -> String {
+    format!(
+        "refs/orna/migration-index-blobs/{}",
+        object_id.to_ascii_lowercase()
+    )
+}
+
+fn pin_migration_index_blob(root: &Path, object_id: &str) -> Result<(), RepositoryError> {
+    let object_id = object_id.to_ascii_lowercase();
+    let reference = migration_index_blob_ref(&object_id);
+    let zero = "0".repeat(object_id.len());
+    let mut command = git_command(root);
+    command.args(["update-ref", "--no-deref", &reference, &object_id, &zero]);
+    crate::scrub_git_routing_environment(&mut command);
+    if command
+        .status()
+        .map_err(|_| RepositoryError::GitUnavailable)?
+        .success()
+    {
+        return Ok(());
+    }
+    let mut verify = git_command(root);
+    verify.args(["rev-parse", "--verify", &reference]);
+    crate::scrub_git_routing_environment(&mut verify);
+    let output = verify
+        .output()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    if output.status.success() && crate::trim_output(&output.stdout) == object_id {
+        Ok(())
+    } else {
+        Err(RepositoryError::InvalidPublicationJournal)
+    }
+}
+
+fn pin_migration_index(repository: &Repository, tree: &str) -> Result<(), RepositoryError> {
+    let reference = migration_index_ref(tree);
+    let zero = "0".repeat(tree.len());
+    let mut command = git_command(repository.worktree());
+    command.args(["update-ref", "--no-deref", &reference, tree, &zero]);
+    crate::scrub_git_routing_environment(&mut command);
+    if command
+        .status()
+        .map_err(|_| RepositoryError::GitUnavailable)?
+        .success()
+    {
+        return Ok(());
+    }
+    require_migration_index_pin(repository, tree)
+}
+
+fn require_migration_index_pin(repository: &Repository, tree: &str) -> Result<(), RepositoryError> {
+    let reference = migration_index_ref(tree);
+    let mut command = git_command(repository.worktree());
+    command.args(["rev-parse", "--verify", &reference]);
+    crate::scrub_git_routing_environment(&mut command);
+    let output = command
+        .output()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    if !output.status.success() || crate::trim_output(&output.stdout) != tree {
+        return Err(RepositoryError::InvalidPublicationJournal);
+    }
+    Ok(())
+}
+fn migration_candidate_ref(commit: &GitCommitRef) -> String {
+    format!("refs/orna/migration-candidates/{}", commit.as_str())
+}
+
+fn pin_migration_candidate(
+    repository: &Repository,
+    commit: &GitCommitRef,
+) -> Result<(), RepositoryError> {
+    let reference = migration_candidate_ref(commit);
+    let zero = "0".repeat(commit.as_str().len());
+    let mut command = git_command(repository.worktree());
+    command.args([
+        "update-ref",
+        "--no-deref",
+        &reference,
+        commit.as_str(),
+        &zero,
+    ]);
+    crate::scrub_git_routing_environment(&mut command);
+    if command
+        .status()
+        .map_err(|_| RepositoryError::GitUnavailable)?
+        .success()
+    {
+        return Ok(());
+    }
+    require_migration_candidate_pin(repository, commit)
+}
+
+fn require_migration_candidate_pin(
+    repository: &Repository,
+    commit: &GitCommitRef,
+) -> Result<(), RepositoryError> {
+    let reference = migration_candidate_ref(commit);
+    let mut command = git_command(repository.worktree());
+    command.args(["rev-parse", "--verify", &reference]);
+    crate::scrub_git_routing_environment(&mut command);
+    let output = command
+        .output()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    if !output.status.success() || crate::trim_output(&output.stdout) != commit.as_str() {
+        return Err(RepositoryError::InvalidPublicationJournal);
+    }
+    Ok(())
+}
+
+fn recover_prepared_copy(
+    source: &Repository,
+    destination: &Path,
+    continuity: MigrationContinuityRecord,
+    annotation_defaults: MigrationAnnotationDefaults,
+) -> Result<MigratedCopy, RepositoryError> {
+    let source_context = source
+        .open_format_context()
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    if source_context.supports_writes()
+        || !matches!(
+            source_context.repository_format(),
+            RepositoryFormat::Legacy1 | RepositoryFormat::Legacy2
+        )
+        || annotation_defaults.payload_inspected()
+    {
+        return Err(RepositoryError::InvalidFormatMigration);
+    }
+    let source_format = source_context.repository_format();
+    let source_commit = source.head()?.ok_or(RepositoryError::UnbornHead)?;
+    let source_index_generation = source.index_generation()?;
+    require_index_tree(&source_index_generation)?;
+    let source_tree_identity = source_tree_identity(source, &source_commit)?;
+    let (source_working_tree_identity, source_working_tree_entries) =
+        working_tree_identity(source)?;
+
+    let metadata =
+        fs::symlink_metadata(destination).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    let repository = Repository::discover(destination)?;
+    let journal = repository
+        .read_publication_journal()?
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    if journal.stage() != crate::PublicationJournalStage::Prepared
+        || journal.runtime_intent_id().is_none()
+        || journal.old_head() != &source_commit
+        || journal.base_index_tree() != source_index_generation.tree()
+        || journal.migration_continuity() != Some(&continuity)
+        || journal.migration_annotation_defaults() != Some(annotation_defaults)
+        || repository.head()?.as_ref() != Some(&source_commit)
+        || repository.index_generation()? != source_index_generation
+    {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    require_migration_index_pin(
+        &repository,
+        source_index_generation
+            .tree()
+            .ok_or(RepositoryError::InvalidFormatMigration)?
+            .as_str(),
+    )?;
+    require_migration_candidate_pin(&repository, journal.new_head())?;
+    let candidate = repository.candidate_from_journal(&journal)?;
+    let candidate_context = repository
+        .open_private_candidate_format_context(&candidate)
+        .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+    let database_id = candidate_context
+        .database_id()
+        .ok_or(RepositoryError::InvalidFormatMigration)?;
+    if candidate_context.repository_format() != RepositoryFormat::Format3 {
+        return Err(RepositoryError::InvalidFormatMigration);
+    }
+    let expected_record = migration_record(
+        source_format,
+        &source_commit,
+        &source_tree_identity,
+        annotation_defaults,
+        &continuity,
+    );
+    let expected_entries = vec![
+        PublicationJournalEntry::new(
+            crate::ManagedPath::new(".orna/database.orna")?,
+            None,
+            Some(canonical_database_bytes(&database_id)),
+        ),
+        PublicationJournalEntry::new(
+            crate::ManagedPath::new(LEGACY_FORMAT_PATH)?,
+            Some(legacy_format_bytes(source_format)),
+            None,
+        ),
+        PublicationJournalEntry::new(
+            crate::ManagedPath::new(MIGRATION_RECORD)?,
+            None,
+            Some(expected_record),
+        ),
+    ];
+    if journal.entries() != expected_entries {
+        return Err(RepositoryError::InvalidFormatMigration);
+    }
+    let (working_tree_identity, working_tree_entries) = working_tree_identity(&repository)?;
+    if working_tree_identity != source_working_tree_identity
+        || working_tree_entries != source_working_tree_entries
+    {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    let dependency_entries = dependency_entries(source, &source_commit)?;
+
+    Ok(MigratedCopy {
+        source_root: source.worktree().to_path_buf(),
+        destination: destination.to_path_buf(),
+        source_format,
+        database_id,
+        source_commit,
+        source_tree_identity,
+        source_index_generation,
+        candidate_journal: journal,
+        working_tree_identity,
+        working_tree_entries,
+        dependency_entries,
+        annotation_defaults,
+        continuity,
+    })
+}
+
+fn sync_tree(root: &Path) -> Result<(), RepositoryError> {
+    let metadata =
+        fs::symlink_metadata(root).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_file() {
+        return fs::File::open(root)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| RepositoryError::LocalStateUnavailable);
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(root).map_err(|_| RepositoryError::LocalStateUnavailable)? {
+            let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            sync_tree(&entry.path())?;
+        }
+        return sync_directory(root);
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), RepositoryError> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| RepositoryError::LocalStateUnavailable)
+}
+
+/// Gives the migration commit a stable identity independent of the caller's
+/// Git configuration. The source commit remains unchanged; this identity only
+/// names the explicit format-transition commit in the disposable copy.
+fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryError> {
+    for (key, value) in [
+        ("user.name", "Orna migration"),
+        ("user.email", "migration@orna.invalid"),
+        ("commit.gpgsign", "false"),
+    ] {
+        let mut command = git_command(root);
+        command.args(["config", "--local", key, value]);
+        crate::scrub_git_routing_environment(&mut command);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+    }
+    Ok(())
 }
 
 /// The recorded `format.orna` bytes of one legacy source.
@@ -549,10 +905,12 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
             .arg(format!("{object_id}^{{blob}}"));
         crate::scrub_git_routing_environment(&mut exists);
         if exists
+            .stderr(Stdio::null())
             .status()
             .map_err(|_| RepositoryError::GitUnavailable)?
             .success()
         {
+            pin_migration_index_blob(destination, object_id)?;
             continue;
         }
 
@@ -592,6 +950,7 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
         {
             return Err(RepositoryError::GitOperationFailed);
         }
+        pin_migration_index_blob(destination, object_id)?;
     }
     Ok(())
 }
