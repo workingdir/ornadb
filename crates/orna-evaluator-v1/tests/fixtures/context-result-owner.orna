@@ -1,1 +1,4 @@
-fn entry(blob: Blob) = sys.test.consume_blob(sys.test.replace_blob(blob));
+fn entry(blob: Blob) = {
+  sys.test.replace_blob(blob);
+  sys.test.consume_blob(one($__orna_relation.source("sys.Storage")));
+}
