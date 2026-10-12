@@ -1,27 +1,23 @@
 use std::path::Path;
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_project_v1::{
-    ObjectIdentityManifest, ObjectKind, ProjectLoader, admit_source_row_with_owner_fields,
-};
+use orna_project_v1::{ObjectIdentityManifest, ObjectKind, ProjectLoader};
 use orna_repository_v1::{KeyRange, Repository, RowRevision, TypedKey};
 use orna_runtime_v1::{
     RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use orna_value_v1::{BlobMetadataFilter, Raw, compare_blob_metadata, decode_rov3_blob_metadata};
+use orna_value_v1::{BlobMetadataFilter, compare_blob_metadata, decode_rov3_blob_metadata};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[path = "support/format3.rs"]
 mod format3;
 use format3::*;
+#[path = "support/media_commit.rs"]
+mod media_commit;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
-const OVERFLOW_ROW_FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/media/query-source-overflow-row.orna"
-);
 const SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song.orna"
@@ -2043,6 +2039,14 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         text.contains("matched 1"),
         "the plan states the match count: {text}"
     );
+    let plan_line = text
+        .lines()
+        .find(|line| line.starts_with("plan: annotation predicate"))
+        .expect("the human plan is one summary line");
+    assert!(
+        plan_line.contains("matched 1") && plan_line.contains("subject all fields"),
+        "match count and scope stay on one plan line: {plan_line}"
+    );
 
     // A flag that names no coordinate the annotation binds is refused rather
     // than silently ignored.
@@ -2064,13 +2068,10 @@ async fn source_admitted_query_decodes_inline_and_overflow_rows_without_payload_
         )
         .unwrap();
     }
-    let (directory, repository, relation_id, admission_context) =
+    let (directory, repository, relation_id, format_context) =
         object_format3_repository(source.path());
     let base_commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
-    let project = loader
-        .load_committed_snapshot(&repository, &base_commit)
-        .unwrap();
     let schema = loader
         .resolve_committed_source_table_schema(
             &repository,
@@ -2078,7 +2079,6 @@ async fn source_admitted_query_decodes_inline_and_overflow_rows_without_payload_
             orna_runtime_v1::TableObjectId::new(relation_id),
         )
         .unwrap();
-
     let runtime_identity = RuntimeIdentity {
         database_id: *schema.database_id(),
         repository_id: [0x91; 16],
@@ -2087,86 +2087,28 @@ async fn source_admitted_query_decodes_inline_and_overflow_rows_without_payload_
         .await
         .unwrap();
     let writer = state.acquire_lease([0x93; 16]).await.unwrap();
-    let request_identity = RequestIdentity {
-        session_id: [0x94; 16],
-        request_id: [0x95; 16],
-    };
-    let fingerprint = [0x96; 32];
-    let (_, admission) = state
-        .reserve_request_with_admission(request_identity, fingerprint)
-        .await
-        .unwrap();
-    state
-        .start_request_with_owner_and_admission(
-            request_identity,
-            fingerprint,
-            writer,
-            admission.expect("new request returns its admission capability"),
-        )
-        .await
-        .unwrap();
-    let activation = state.begin_activation().await.unwrap();
-
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(source.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let expression = import_expression(SONG_IMPORT_FIXTURE, source.path());
-    let value = evaluate_expression_ovb2_with_effects(
-        &expression,
-        &Default::default(),
-        Limits::default(),
+    let song_expression = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    let image_expression = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    media_commit::commit_source_captures(
+        &repository,
+        &state,
+        writer,
         &mut bindings,
+        relation_id,
+        &format_context,
+        &[
+            (&song_expression, "song", 0x94),
+            (&image_expression, "image", 0x95),
+            (&song_expression, "overflow", 0x96),
+        ],
     )
-    .unwrap();
-    let blob_binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-
-    // A real Object.content value crosses the persisted tuple threshold.
-    // It is source content, not growth in media payload bytes.
-    let content = "A committed source document contains a searchable description. ".repeat(180);
-    let row_source = std::fs::read_to_string(OVERFLOW_ROW_FIXTURE)
-        .unwrap()
-        .replace("__QUERY_CONTENT__", &format!("{content:?}"));
-    let payload_len = std::fs::metadata(source.path().join("tone.wav"))
-        .unwrap()
-        .len();
-    let admitted = admit_source_row_with_owner_fields(
-        &project,
-        "Object/overflow.orna",
-        &row_source,
-        &schema,
-        &admission_context,
-        vec![("payload".to_owned(), blob_binding)],
-        vec![(
-            "size".to_owned(),
-            Raw::Float((payload_len as f64 / 1_048_576.0).to_bits()),
-        )],
-        [0x97; 16],
-    )
-    .expect("the committed Object schema admits a source row with its captured Blob");
-    assert!(
-        admitted.canonical_fields().len() > 8_192,
-        "the complete source tuple must cross the persisted inline cutoff"
-    );
-    let (mutation, source_blob_bindings, _) = admitted.into_mutation_and_bindings();
-    let committed = state
-        .commit_table_request_activation(
-            writer,
-            request_identity,
-            fingerprint,
-            &activation,
-            &[mutation],
-            [0x98; 32],
-            TerminalOutcome::new(vec![0x99]).unwrap(),
-            &orna_runtime_v1::NoFault,
-        )
-        .await
-        .unwrap();
-    assert_eq!(committed.request.state, RequestState::Completed);
-    publish_media_row(&repository, &state, "overflow", 0x9a).await;
-    drop(source_blob_bindings);
+    .await;
     drop(bindings);
     drop(state);
 
@@ -2196,7 +2138,7 @@ async fn source_admitted_query_decodes_inline_and_overflow_rows_without_payload_
     let overflow_listing = listings
         .iter()
         .find(|listing| listing["key"] == "overflow")
-        .expect("the CLI query lists the source-admitted overflow row");
+        .expect("the query lists the source-admitted overflow row");
     assert_eq!(overflow_listing["media_type"], "audio/wav");
     assert_eq!(overflow_listing["hydrated"], false);
 
@@ -2222,45 +2164,50 @@ async fn source_admitted_query_decodes_inline_and_overflow_rows_without_payload_
     let scope = graph.open_read_scope().unwrap();
     let range = KeyRange::new(
         Some(TypedKey::Text("image".to_owned())),
-        Some(TypedKey::Text("zzzz".to_owned())),
+        Some(TypedKey::Text("song".to_owned())),
         16,
     )
     .unwrap();
     let rows = row_map
         .range_with_graph_context(&graph, &scope, &range)
         .unwrap();
+    assert_eq!(rows.len(), 2);
     let mut saw_inline = false;
     let mut saw_overflow = false;
     for row in &rows {
         let fields = graph
             .decode_admitted_row_fields(row, selected_schema.binding(), &scope)
             .unwrap();
-        let payload_index = fields
-            .fields()
-            .iter()
-            .position(|field| field.field_id() == &payload_field_id)
-            .expect("decoded source fields include the manifest payload ID");
-        let content_index = fields
-            .fields()
-            .iter()
-            .position(|field| field.field_id() == &content_field_id)
-            .expect("decoded source fields include the manifest content ID");
-        assert!(fields.fields()[payload_index].blob_metadata().is_some());
-        assert!(fields.fields()[content_index].blob_metadata().is_none());
-        let encoded_size = fields.canonical_fields().len();
-        if row.key() == &TypedKey::Text("overflow".to_owned()) {
-            assert!(encoded_size > 8_192);
-            assert_eq!(overflow_listing["field"], payload_index);
-            saw_overflow = true;
-        } else {
-            assert!(encoded_size < 8_192);
+        assert_eq!(fields.fields().len(), 2);
+        assert_eq!(fields.fields()[0].field_id(), &payload_field_id);
+        assert_eq!(fields.fields()[1].field_id(), &content_field_id);
+        assert!(fields.fields()[0].blob_metadata().is_some());
+        assert!(fields.fields()[1].blob_metadata().is_none());
+        let (marker, expected_inline) = match row.key() {
+            TypedKey::Text(key) if key == "image" => (
+                b"Survey image: the calibration panel photographed at the north ridge station."
+                    .as_slice(),
+                true,
+            ),
+            TypedKey::Text(key) if key == "overflow" => (
+                b"End of station log. Entries describe observed conditions and recorded maintenance, not inferred causes."
+                    .as_slice(),
+                false,
+            ),
+            key => panic!("unexpected query-range key: {key:?}"),
+        };
+        let canonical_fields = fields.canonical_fields();
+        assert!(canonical_fields.windows(marker.len()).any(|window| window == marker));
+        let inline = canonical_fields.len() < 8_192;
+        assert_eq!(inline, expected_inline);
+        if expected_inline {
             saw_inline = true;
+        } else {
+            assert_eq!(overflow_listing["field"], 0);
+            saw_overflow = true;
         }
     }
     assert!(saw_inline, "the source fixture retains inline media rows");
-    assert!(
-        saw_overflow,
-        "the source fixture persists a tuple over the inline cutoff"
-    );
+    assert!(saw_overflow, "the real source tuple crosses the inline cutoff");
     assert_eq!(scope.payload_bytes_read(), 0);
 }
