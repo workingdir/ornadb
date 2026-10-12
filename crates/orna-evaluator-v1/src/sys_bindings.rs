@@ -1420,4 +1420,58 @@ mod tests {
             ("application/octet-stream", None)
         );
     }
+
+    #[test]
+    fn blob_annotation_keeps_bound_format3_context() {
+        struct NoReadResolver;
+
+        impl orna_value_v1::BlobResolver for NoReadResolver {
+            fn read_range(
+                &self,
+                _reference: &orna_value_v1::ContentReference,
+                _offset: u64,
+                _length: u64,
+            ) -> orna_value_v1::Result<Vec<u8>> {
+                Err(orna_value_v1::Error::ContentUnavailable)
+            }
+        }
+
+        let database = [1; 16];
+        let context = orna_value_v1::Format3Context::from_persisted(
+            database,
+            orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            orna_value_v1::GitHash::Sha1,
+            orna_value_v1::NativeOid::from_bytes(&[9; 20]).unwrap(),
+            orna_value_v1::NativeOid::from_bytes(&[8; 20]).unwrap(),
+            orna_value_v1::AvailabilityState::Available,
+            orna_value_v1::OwnerLifetime::new([3; 16]),
+            orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+            std::sync::Arc::new(NoReadResolver),
+        )
+        .unwrap();
+        let source_blob =
+            Blob::from_bytes_with_annotation(b"payload".to_vec(), "application/octet-stream", None)
+                .unwrap();
+        let portable = ContextValue::from_blob(&source_blob, ValueFormat::Ovb2).unwrap();
+        let source =
+            ContextValue::new_in_context(&context, ValueFormat::Ovb2, portable.raw().clone())
+                .unwrap();
+        let arguments = [
+            source,
+            ContextValue::new(
+                ValueFormat::Ovb2,
+                OvbRaw::Text("application/json".to_owned()),
+            )
+            .unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Null).unwrap(),
+        ];
+
+        let annotated = dispatch_blob_annotation(BLOB_ANNOTATION_OPERATION, &arguments)
+            .expect("annotation dispatch should accept its bound source context");
+
+        assert!(annotated.context().is_some());
+        let blob = annotated.blob().unwrap();
+        assert_eq!(blob.media_type(), "application/json");
+        assert_eq!(blob.read_to_end().unwrap(), b"payload");
+    }
 }
