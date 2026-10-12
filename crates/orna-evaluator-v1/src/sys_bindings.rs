@@ -1539,5 +1539,16 @@ mod tests {
                 payload.len() as u64
             );
         }
+        let role = orna_sys_v1::system_dispatch_table()
+            .role(BLOB_ANNOTATION_ROLE)
+            .expect("generated Blob annotation role exists");
+        let legacy = ContextValue::new(ValueFormat::Ovb1, OvbRaw::Bytes(payload.to_vec())).unwrap();
+        assert_eq!(
+            BlobAnnotationProvider::linked(role, &legacy)
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("ORNA-EVAL-VALUE".to_owned()),
+            "the annotated-Blob ABI must not reinterpret OVB-1 bytes"
+        );
     }
 }
