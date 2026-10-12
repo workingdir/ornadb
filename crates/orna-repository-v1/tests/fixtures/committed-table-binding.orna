@@ -1,0 +1,4 @@
+module main;
+pub table Audio(id: Int) {
+    payload: Blob,
+}
