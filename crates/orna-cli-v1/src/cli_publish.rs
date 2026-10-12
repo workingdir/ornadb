@@ -77,10 +77,61 @@ fn row_path(mutation: &TableMutation) -> Result<LoosePath, orna_storage_v1::Erro
     LoosePath::for_key(mutation.table(), &[key.to_owned()])
 }
 
-/// Rejects mutations that cannot be represented as published source rows
-/// before the candidate builder reads or changes repository publication state.
-fn validate_candidate_source_rows(mutations: &[TableMutation]) -> Result<(), Diagnostic> {
+/// Rejects mutations that cannot be represented as source-owned rows before
+/// the candidate builder reads or changes repository publication state.
+fn validate_candidate_source_rows(
+    repository: &orna_repository_v1::Repository,
+    head: &orna_repository_v1::GitCommitRef,
+    mutations: &[TableMutation],
+) -> Result<(), Diagnostic> {
+    let loader = orna_project_v1::ProjectLoader::default();
     for mutation in mutations {
+        let table_id = mutation.table_object_id().ok_or_else(|| {
+            publish_error(
+                "source row has no committed table identity",
+                "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
+            )
+        })?;
+        let schema = loader
+            .resolve_committed_source_table_schema(repository, head, table_id)
+            .map_err(|error| {
+                publish_error(
+                    "source table schema could not be resolved",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+        if schema.declaration_name() != mutation.table() || schema.table_object_id() != table_id {
+            return Err(publish_error(
+                "source row table identity does not match its committed schema",
+                "table name or TableObjectId conflicts with the selected snapshot; the pending range was preserved",
+            ));
+        }
+        let fields = mutation.value().ok_or_else(|| {
+            publish_error(
+                "source row has no complete stored-field tuple",
+                "source-owned publication requires the admitted ROV-3 fields; the pending range was preserved",
+            )
+        })?;
+        schema
+            .descriptor()
+            .validate_stored_row(table_id.bytes(), mutation.key(), fields)
+            .map_err(|error| {
+                publish_error(
+                    "source row does not match its committed schema",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+        if let Some(new_key) = mutation.rekey_to() {
+            schema
+                .descriptor()
+                .validate_stored_row(table_id.bytes(), new_key, fields)
+                .map_err(|error| {
+                    publish_error(
+                        "source row rekey does not match its committed schema",
+                        format!("{error:?}; the pending range was preserved"),
+                    )
+                })?;
+        }
         row_path(mutation).map_err(|error| {
             publish_error(
                 "source row could not be admitted for publication",
@@ -417,10 +468,6 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     format!("{error:?}"),
                 )
             })?;
-        validate_candidate_source_rows(&frozen)?;
-        // The frozen range is the only content this call may commit: the
-        // candidate is built from the captured base plus exactly these rows.
-        let counts = table_row_counts(&frozen);
         let head = repository
             .head()
             .map_err(|error| {
@@ -432,6 +479,10 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     "make an initial commit before publishing runtime data",
                 )
             })?;
+        validate_candidate_source_rows(&repository, &head, &frozen)?;
+        // The frozen range is the only content this call may commit: the
+        // candidate is built from the captured base plus exactly these rows.
+        let counts = table_row_counts(&frozen);
         let index = repository.index_generation().map_err(|error| {
             publish_error("ordinary index could not be read", format!("{error:?}"))
         })?;
