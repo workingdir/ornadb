@@ -2422,6 +2422,7 @@ struct ApplicationReplSession {
 pub struct ApplicationLiveAdapter {
     authority: ApplicationAuthority,
     project: Option<LoadedProject>,
+    admitted_source_rows: Arc<Mutex<Option<Vec<AdmittedSourceRow>>>>,
     logical_path: String,
     entry: String,
     sessions: Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>,
@@ -2468,6 +2469,7 @@ impl ApplicationLiveAdapter {
         Self {
             authority,
             project: None,
+            admitted_source_rows: Arc::new(Mutex::new(None)),
             logical_path: "remote_eval.orna".to_owned(),
             entry: "main".to_owned(),
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2483,6 +2485,14 @@ impl ApplicationLiveAdapter {
     #[must_use]
     pub fn with_loaded_project(mut self, project: LoadedProject) -> Self {
         self.project = Some(project);
+        self
+    }
+    /// Supplies rows already admitted by the committed-project source loader.
+    /// The live transaction consumes them once and retains their schema and
+    /// protected pins until the host commits the terminal request outcome.
+    #[must_use]
+    pub fn with_admitted_source_rows(mut self, rows: Vec<AdmittedSourceRow>) -> Self {
+        self.admitted_source_rows = Arc::new(Mutex::new(Some(rows)));
         self
     }
 
@@ -2981,9 +2991,17 @@ impl LiveApplication for ApplicationLiveAdapter {
                 return Ok(LiveEvalResponse::transaction(envelope, transaction));
             }
             let admitted = self.evaluate_eval_message(message)?;
-            let staged = self
-                .authority
-                .evaluate_staged(&admitted, &Environment::new())?;
+            let source_rows = self
+                .admitted_source_rows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .unwrap_or_default();
+            let staged = self.authority.evaluate_staged_with_source_rows(
+                &admitted,
+                &Environment::new(),
+                source_rows,
+            )?;
             let envelope =
                 self.success_envelope(request, eval_fingerprint(message)?, staged.value().clone())?;
             if staged.mutations().is_empty() {
@@ -3019,6 +3037,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                 request_id: request,
             })
             .after_commit(move || {
+                drop(staged);
                 record_session_run_event(&run_events, session, true, event_value, None);
             });
             Ok(LiveEvalResponse::transaction(envelope, transaction))
