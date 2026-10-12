@@ -84,7 +84,7 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
     let result = admit_source_row(
         &project,
         "media/picture.orna",
-        "{ content: null, }\n",
+        "{ id: \"picture\", content: null, }\n",
         &schema,
         &foreign_context,
         Vec::new(),
