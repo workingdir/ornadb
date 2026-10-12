@@ -25,8 +25,11 @@ mod repl;
 mod semantic_payload;
 mod system_api;
 mod object_identity;
+mod source_row;
 
 pub use object_identity::{ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectKind};
+
+pub use source_row::{LoweredRowUnit, lower_row_unit, lower_row_unit_with_owner_fields};
 
 pub use semantic_payload::{
     DeclarationExplicitness, LocalSourceOrigin, NamedSemanticParameter, SEMANTIC_PAYLOAD_DOMAIN,
@@ -2033,10 +2036,18 @@ impl RowUnitAdmission {
 /// This is schema admission only: it parses and type-checks the row expression,
 /// validates the encoded path key, and retains the existing assertion plans.
 /// Evaluation, persistence and assertion execution remain downstream concerns.
-pub fn admit_row_unit(
+pub fn admit_row_unit(analysis: &Analysis, input: &RowUnitInput<'_>) -> RowUnitAdmission {
+    admit_row_unit_with_owner_fields(analysis, input, &[])
+}
+
+/// Admits a row while reserving named stored fields for an authorized owner
+/// binding. Reserved fields must be declared stored fields and absent in source.
+pub fn admit_row_unit_with_owner_fields(
     analysis: &Analysis,
     input: &RowUnitInput<'_>,
+    owner_fields: &[String],
 ) -> RowUnitAdmission {
+    let owner_fields = owner_fields.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut result = RowUnitAdmission::default();
     if !analysis.is_ok() {
         result.diagnostics.extend(analysis.diagnostics.iter().cloned());
@@ -2118,6 +2129,21 @@ pub fn admit_row_unit(
         ));
         return result;
     };
+    if owner_fields.iter().any(|name| {
+        !admission.required.contains(*name)
+            || admission.keys.iter().any(|(key, _)| key == name)
+            || admission.computed.contains(*name)
+    }) {
+        result.diagnostics.push(diag(
+            DIAG_TYPE,
+            "owner-bound field is not a required stored field",
+        ));
+        return result;
+    }
+    let mut source_schema_fields = schema.fields.clone();
+    for name in &owner_fields {
+        source_schema_fields.remove(*name);
+    }
     let Some(decoded_key) = decode_row_key_path(input.key_path) else {
         result.diagnostics.push(diag(
             DIAG_BAD_PATH,
@@ -2184,21 +2210,31 @@ pub fn admit_row_unit(
                 "project row body cannot supply a computed field",
             ));
         }
+        if owner_fields.contains(field.name.as_str()) {
+            result.diagnostics.push(diag(
+                DIAG_TYPE,
+                "project row body cannot supply an owner-bound field",
+            ));
+        }
     }
     let mut inferred = Vec::new();
     let input_type = infer_table_row_input(
         &parsed.value,
-        &schema.fields,
+        &source_schema_fields,
         &Scope::default(),
         &BTreeMap::new(),
         &mut inferred,
+        true,
     );
     result.diagnostics.extend(inferred);
     if let Type::Record(fields) = input_type.ty {
         result.fields = fields;
     }
     for required in &admission.required {
-        if !key_names.contains(required.as_str()) && !seen.contains(required.as_str()) {
+        if !key_names.contains(required.as_str())
+            && !owner_fields.contains(required.as_str())
+            && !seen.contains(required.as_str())
+        {
             result
                 .diagnostics
                 .push(diag(DIAG_TYPE, "project row omits a required stored field"));
@@ -2206,6 +2242,7 @@ pub fn admit_row_unit(
     }
     result
 }
+
 
 /// Load and check caller-provided modules.  `sys` is a built-in namespace,
 /// while `std` remains absent unless an adapter supplies it separately; source
@@ -15514,8 +15551,14 @@ fn infer_table_operation(
             inferred
         } else if insertion_like || update {
             row.map(|fields| {
-                let inferred =
-                    infer_table_row_input(&argument.value, fields, scope, local, diagnostics);
+                let inferred = infer_table_row_input(
+                    &argument.value,
+                    fields,
+                    scope,
+                    local,
+                    diagnostics,
+                    false,
+                );
                 if let Some(schema) = admission
                     && let Type::Record(supplied) = &inferred.ty
                 {
@@ -15624,7 +15667,8 @@ fn infer_table_row_input(
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> Inferred {
+    source_blob_values_are_external: bool,
+ ) -> Inferred {
     let inferred = if let Expr::Record {
         fields: supplied, ..
     } = expression
@@ -15633,7 +15677,16 @@ fn infer_table_row_input(
         let mut effects = EffectSummary::default();
         for field in supplied {
             let value = if let Some(expected) = fields.get(&field.name) {
-                infer_contextual(&field.value, expected, scope, local, diagnostics)
+                if source_blob_values_are_external
+                    && matches!(expected, Type::Named(name) if matches!(name.as_str(), "Blob" | "std.BINARY_LARGE_OBJECT"))
+                {
+                    Inferred {
+                        ty: expected.clone(),
+                        effects: EffectSummary::default(),
+                    }
+                } else {
+                    infer_contextual(&field.value, expected, scope, local, diagnostics)
+                }
             } else {
                 infer(&field.value, scope, local, diagnostics)
             };
