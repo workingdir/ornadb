@@ -197,6 +197,22 @@ impl FilesystemProvider {
         path: &str,
         max_bytes: u64,
     ) -> Result<CaptureFileReader, CaptureFileError> {
+        let stream = self.capture_file_stream(root, path, max_bytes)?;
+        Ok(CaptureFileReader {
+            stream,
+            captured: Vec::new(),
+        })
+    }
+
+    /// Opens a bounded regular file for streaming without retaining its bytes.
+    /// The returned stream can verify that both the open inode and current
+    /// path still match their initial identity, size, and modification time.
+    pub fn capture_file_stream(
+        &self,
+        root: &str,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<CaptureFileStream, CaptureFileError> {
         let (authorized_path, root_handle) = self.authorized_root_handle(root)?;
         let components = capture_components(path)?;
         if max_bytes > self.max_text_bytes as u64 || max_bytes > i64::MAX as u64 {
@@ -213,7 +229,7 @@ impl FilesystemProvider {
         if before.size > max_bytes {
             return Err(CaptureFileError::LimitExceeded);
         }
-        Ok(CaptureFileReader {
+        Ok(CaptureFileStream {
             file,
             root_path: authorized_path,
             root: root_handle,
@@ -221,7 +237,6 @@ impl FilesystemProvider {
             before,
             max_bytes,
             bytes_read: 0,
-            captured: Vec::new(),
             exceeded: false,
         })
     }
@@ -578,9 +593,15 @@ impl FilesystemProvider {
 }
 
 /// A file opened beneath a held filesystem root for one bounded Blob capture.
-/// Its reader retains at most `max_bytes` and reads one extra byte only to
-/// distinguish an exact fit from a growing or oversized source.
+/// This compatibility wrapper additionally retains captured bytes.
 pub struct CaptureFileReader {
+    stream: CaptureFileStream,
+    captured: Vec<u8>,
+}
+
+/// A file opened beneath a held filesystem root for bounded streaming.
+/// Reading it never retains source bytes in memory.
+pub struct CaptureFileStream {
     file: File,
     root_path: PathBuf,
     root: Arc<File>,
@@ -588,7 +609,6 @@ pub struct CaptureFileReader {
     before: FileSnapshot,
     max_bytes: u64,
     bytes_read: u64,
-    captured: Vec<u8>,
     exceeded: bool,
 }
 
@@ -596,9 +616,24 @@ impl CaptureFileReader {
     pub fn captured_bytes(&self) -> &[u8] {
         &self.captured
     }
+
     /// Consumes the reader and transfers its retained bytes without cloning them.
     pub fn into_captured_bytes(self) -> Vec<u8> {
         self.captured
+    }
+
+    pub const fn exceeded(&self) -> bool {
+        self.stream.exceeded()
+    }
+
+    pub fn verify_unchanged(&self) -> Result<(), CaptureFileError> {
+        self.stream.verify_unchanged()
+    }
+}
+
+impl CaptureFileStream {
+    pub const fn length(&self) -> u64 {
+        self.before.size
     }
 
     pub const fn exceeded(&self) -> bool {
@@ -628,7 +663,7 @@ impl CaptureFileReader {
     }
 }
 
-impl Read for CaptureFileReader {
+impl Read for CaptureFileStream {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         if output.is_empty() || self.exceeded {
             return Ok(0);
@@ -642,13 +677,22 @@ impl Read for CaptureFileReader {
         if count == 0 {
             return Ok(0);
         }
+        self.bytes_read = self.bytes_read.saturating_add(count as u64);
+        self.exceeded = self.bytes_read > self.max_bytes;
+        Ok(count)
+    }
+}
+
+impl Read for CaptureFileReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let bytes_read = self.stream.bytes_read;
+        let count = self.stream.read(output)?;
+        let remaining = self.stream.max_bytes.saturating_sub(bytes_read);
         let retained = count.min(usize::try_from(remaining).unwrap_or(usize::MAX));
         self.captured
             .try_reserve(retained)
             .map_err(|_| io::Error::other("capture allocation failed"))?;
         self.captured.extend_from_slice(&output[..retained]);
-        self.bytes_read = self.bytes_read.saturating_add(count as u64);
-        self.exceeded = self.bytes_read > self.max_bytes;
         Ok(count)
     }
 }
