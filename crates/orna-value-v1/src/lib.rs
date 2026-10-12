@@ -6474,7 +6474,7 @@ mod tests {
         let quantity = |unit_id| {
             Raw::Tag(
                 60006,
-                Box::new(Raw::Array(vec![Raw::Float(1.0), uuid_raw(unit_id)])),
+                Box::new(Raw::Array(vec![Raw::Float(1.0_f64.to_bits()), uuid_raw(unit_id)])),
             )
         };
         let matching_fields =
