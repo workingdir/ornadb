@@ -3477,7 +3477,7 @@ mod graph_bridge_tests {
         fs::write(root.join("main.orna"), "use media;\n").expect("write importing module");
         fs::write(
             root.join("media.orna"),
-            "pub table Audio(id: Int) {\n    payload: Blob,\n    note: Text,\n}\n",
+            "pub table Audio(id: Int) {\n    payload: Blob,\n    note: Str,\n}\n",
         )
         .expect("write committed table manifest");
         commit(root);
@@ -3520,7 +3520,7 @@ mod graph_bridge_tests {
                     field(
                         [0x33; 16],
                         "note",
-                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Text".into())]),
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
                         1,
                     ),
                 ]),
@@ -3578,8 +3578,20 @@ mod graph_bridge_tests {
             encoded
         };
         let inline_fields = fields("short");
-        let overflow_fields = fields(&"x".repeat(crate::row_store::ROW_INLINE_LIMIT + 1));
+        let overflow_note = "x".repeat(crate::row_store::ROW_INLINE_LIMIT + 1);
+        let overflow_fields = fields(&overflow_note);
         assert!(overflow_fields.len() > crate::row_store::ROW_INLINE_LIMIT);
+        let mut semantic_fields = vec![0x82];
+        cbor_head(&mut semantic_fields, 6, 60112);
+        cbor_head(&mut semantic_fields, 4, 4);
+        cbor_head(&mut semantic_fields, 0, media.len() as u64);
+        cbor_bytes(&mut semantic_fields, &media_digest);
+        cbor_head(&mut semantic_fields, 3, "image/png".len() as u64);
+        semantic_fields.extend_from_slice(b"image/png");
+        semantic_fields.push(0xf6);
+        cbor_head(&mut semantic_fields, 3, overflow_note.len() as u64);
+        semantic_fields.extend_from_slice(overflow_note.as_bytes());
+        let semantic_digest = Sha256::digest(&semantic_fields).into();
         let overflow_digest = Sha256::digest(&overflow_fields).into();
         let overflow_chunk = write_git_object(root, algorithm, "blob", &overflow_fields);
         let overflow_byte_root = write_native_node(
@@ -3595,14 +3607,22 @@ mod graph_bridge_tests {
                 }],
             },
         );
+        let dependency_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::DependencyIndex {
+                height: 0,
+                children: vec![blob_descriptor.clone()],
+            },
+        );
         let overflow_root = write_native_node(
             root,
             algorithm,
             &NodeData::ValueOverflow {
                 encoded_length: overflow_fields.len() as u64,
-                semantic_digest: overflow_digest,
+                semantic_digest,
                 byte_root: overflow_byte_root,
-                dependency_root: None,
+                dependency_root: Some(dependency_root),
             },
         );
         let mut overflow_value = Vec::new();
@@ -3636,7 +3656,10 @@ mod graph_bridge_tests {
             .open_native_graph(&snapshot)
             .expect("owner-issued graph context");
         let scope = graph.open_read_scope().expect("owner read scope");
-        for (key, expected_len) in [(7, inline_fields.len()), (8, overflow_fields.len())] {
+        for (key, expected_fields) in [
+            (7, inline_fields.as_slice()),
+            (8, overflow_fields.as_slice()),
+        ] {
             let row = graph
                 .lookup_row(&TypedKey::UInt(key), &scope)
                 .expect("read persisted row")
@@ -3647,6 +3670,7 @@ mod graph_bridge_tests {
                 .decode_admitted_row_fields(&row, &binding, &scope)
                 .expect("decode against source-bound TableManifest");
             assert_eq!(decoded.fields().len(), 2);
+            assert_eq!(decoded.canonical_fields(), expected_fields);
             assert_eq!(decoded.fields()[0].field_id(), &[0x22; 16]);
             assert_eq!(decoded.fields()[1].field_id(), &[0x33; 16]);
             let metadata = decoded.fields()[0]
@@ -3661,7 +3685,7 @@ mod graph_bridge_tests {
             assert!(!metadata.is_hydrated());
             assert_eq!(
                 scope.structured_metadata_bytes_read() - structured_before,
-                expected_len as u64
+                expected_fields.len() as u64
             );
             assert_eq!(scope.payload_bytes_read() - media_before, 0);
         }
