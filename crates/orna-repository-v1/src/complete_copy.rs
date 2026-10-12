@@ -60,7 +60,7 @@ use std::{
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
-use crate::{CommittedTreeEntryKind, GitCommitRef, Repository, scrub_git_routing_environment};
+use crate::{GitCommitRef, Repository, scrub_git_routing_environment};
 
 const MANIFEST_FILE: &str = "manifest.tsv";
 const SUPERPROJECT_BUNDLE: &str = "superproject.bundle";
@@ -827,38 +827,22 @@ fn resolve_dependencies_of(
     let mut recorded = BTreeSet::new();
 
     for exported in members {
-        let entries = repository
-            .list_committed_tree(&exported.snapshot, MAX_EXPORT_OBJECTS)
-            .map_err(|_| CompleteCopyError::GitUnavailable)?;
-        if !entries
-            .iter()
-            .any(|entry| entry.kind() == CommittedTreeEntryKind::Submodule)
-        {
+        // Repository's committed-tree convenience methods spawn their own Git
+        // processes after scrubbing routing variables, which also discards
+        // GIT_NO_REPLACE_OBJECTS. Read the pinned commit directly through this
+        // module's replacement-safe Git wrapper instead.
+        let snapshot = exported.snapshot.as_str();
+        let gitlinks = committed_gitlinks(repository.worktree(), snapshot)?;
+        if gitlinks.is_empty() {
             continue;
         }
-        let origins = read_gitmodules(repository, &exported.snapshot)?;
+        let origins = read_gitmodules_from(repository.worktree(), snapshot)?;
         let mut work = Vec::new();
-        for entry in entries
-            .iter()
-            .filter(|entry| entry.kind() == CommittedTreeEntryKind::Submodule)
-        {
-            let path = entry
-                .path()
-                .as_path()
-                .to_str()
-                .ok_or(CompleteCopyError::InvalidArchive(
-                    "dependency path is not UTF-8",
-                ))?
-                .to_owned();
+        for (path, commit) in gitlinks {
             if !valid_dependency_path(&path) {
                 return Err(CompleteCopyError::InvalidDependencyPath { path });
             }
             let origin = dependency_origin(&origins, &path)?;
-            let commit = repository
-                .committed_submodule_commit(&exported.snapshot, &path)
-                .map_err(|_| CompleteCopyError::DependencyUnavailable { path: path.clone() })?
-                .as_str()
-                .to_owned();
             work.push(DependencyWork::Enter(DependencyCandidate {
                 path,
                 commit,
@@ -1010,10 +994,15 @@ fn committed_gitlinks(
 ) -> Result<Vec<(String, String)>, CompleteCopyError> {
     let output = git_output(directory, &["ls-tree", "-r", "-z", "--full-tree", commit])?;
     let mut gitlinks = Vec::new();
+    let mut entries = 0;
     for record in output
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
     {
+        entries += 1;
+        if entries > MAX_EXPORT_OBJECTS {
+            return Err(CompleteCopyError::ClosureTooLarge);
+        }
         let separator = record
             .iter()
             .position(|byte| *byte == b'\t')
@@ -1070,22 +1059,6 @@ fn valid_dependency_path(path: &str) -> bool {
         && path
             .split('/')
             .all(|component| !component.is_empty() && component != "." && component != "..")
-}
-
-/// Reads the committed `.gitmodules` file as `path`/`url` pairs. A snapshot
-/// without `.gitmodules` records no origins.
-fn read_gitmodules(
-    repository: &Repository,
-    snapshot: &GitCommitRef,
-) -> Result<Vec<(String, String)>, CompleteCopyError> {
-    let bytes = match repository.read_committed_file(snapshot, ".gitmodules", MAX_GITMODULES_BYTES)
-    {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"))?;
-    parse_gitmodules(text)
 }
 
 /// Parses `[submodule ...]` sections, one `path`/`url` pair each. A value is a
