@@ -132,6 +132,7 @@ impl LooseRowCandidate {
 pub struct ResolvedTableSchema {
     source_commit: GitCommitRef,
     snapshot_id: [u8; 32],
+    database_id: [u8; 16],
     table: SourceTableSchemaArtifact,
 }
 
@@ -142,6 +143,10 @@ impl ResolvedTableSchema {
 
     pub const fn snapshot_id(&self) -> &[u8; 32] {
         &self.snapshot_id
+    }
+
+    pub const fn database_id(&self) -> &[u8; 16] {
+        &self.database_id
     }
 
     pub fn declaration_name(&self) -> &str {
@@ -186,6 +191,7 @@ impl SourceBlobFieldBinding {
 pub struct AdmittedSourceRow {
     table_name: String,
     table_object_id: TableObjectId,
+    database_id: [u8; 16],
     source_commit: GitCommitRef,
     snapshot_id: [u8; 32],
     schema: SchemaDescriptor,
@@ -198,6 +204,7 @@ pub struct AdmittedSourceRow {
 impl AdmittedSourceRow {
     pub fn table_name(&self) -> &str { &self.table_name }
     pub const fn table_object_id(&self) -> TableObjectId { self.table_object_id }
+    pub const fn database_id(&self) -> &[u8; 16] { &self.database_id }
     pub fn source_commit(&self) -> &GitCommitRef { &self.source_commit }
     pub const fn snapshot_id(&self) -> &[u8; 32] { &self.snapshot_id }
     pub fn schema(&self) -> &SchemaDescriptor { &self.schema }
@@ -313,6 +320,7 @@ pub fn admit_source_row(
 ) -> Result<AdmittedSourceRow, ProjectLoadError> {
     if project.source_commit() != Some(schema.source_commit())
         || project.source_snapshot_id().as_ref() != Some(schema.snapshot_id())
+        || context.database_uuid() != schema.database_id
         || !format_context_matches_commit(context, schema.source_commit())
     {
         return Err(ProjectLoadError::InvalidSourceRow);
@@ -358,6 +366,9 @@ pub fn admit_source_row(
     }
     let mut pending_bindings = BTreeMap::new();
     for (field_name, binding) in blob_bindings {
+        if binding.transfer_record().database_id() != schema.database_id() {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        }
         let field = fields
             .iter()
             .find(|field| field.name == field_name && field.role == 1 && field.is_blob)
@@ -436,6 +447,7 @@ pub fn admit_source_row(
     Ok(AdmittedSourceRow {
         table_name,
         table_object_id: schema.table_object_id(),
+        database_id: *schema.database_id(),
         source_commit: schema.source_commit.clone(),
         snapshot_id: *schema.snapshot_id(),
         schema: schema.descriptor().clone(),
@@ -648,6 +660,10 @@ impl ProjectLoader {
         if context.snapshot_pin().snapshot_id() != snapshot_id {
             return Err(ProjectLoadError::InvalidTableSchema);
         }
+        let database_id = *context
+            .require_database_id()
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?
+            .as_bytes();
         let binding = context
             .resolve_committed_table_descriptor(declaration_name, table_object_id.bytes())
             .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
@@ -677,6 +693,7 @@ impl ProjectLoader {
             source_commit,
             snapshot_id,
             table,
+            database_id,
         })
     }
 
@@ -1098,6 +1115,7 @@ pub enum ProjectLoadError {
     DuplicateModuleNamespace,
     ReservedNamespace,
     StandardSnapshotMismatch,
+    InvalidTableSchema,
     InvalidSourceRow,
 }
 
