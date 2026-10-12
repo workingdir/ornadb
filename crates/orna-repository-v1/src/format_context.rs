@@ -1430,7 +1430,7 @@ mod graph_bridge_tests {
     }
 
     #[test]
-    fn committed_table_binding_pins_source_and_rejects_descriptor_mismatch() {
+    fn committed_table_bindings_pin_source_and_reject_descriptor_mismatch() {
         let relation_id = [0xa1; 16];
         let (directory, descriptor) = seeded_table_binding(relation_id);
         let repository = Repository::discover(directory.path()).expect("discover fixture");
