@@ -1061,50 +1061,63 @@ fn valid_dependency_path(path: &str) -> bool {
             .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
-/// Parses `[submodule ...]` sections, one `path`/`url` pair each. A value is a
-/// single token; a value containing a control character is refused rather than
-/// truncated into the manifest.
+/// Parses committed `.gitmodules` with Git's config parser so quoted paths and
+/// URLs are decoded before they are matched to gitlinks.
 fn parse_gitmodules(text: &str) -> Result<Vec<(String, String)>, CompleteCopyError> {
-    let mut pairs = Vec::new();
-    let mut in_section = false;
-    let mut path: Option<String> = None;
-    let mut url: Option<String> = None;
-    let flush = |path: &mut Option<String>, url: &mut Option<String>, pairs: &mut Vec<_>| {
-        if let (Some(path), Some(url)) = (path.take(), url.take()) {
-            pairs.push((path, url));
-        }
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            if in_section {
-                flush(&mut path, &mut url, &mut pairs);
-            }
-            in_section = line.starts_with("[submodule ");
-            path = None;
-            url = None;
-            continue;
-        }
-        if !in_section || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
+    let output = git_output_stdin(
+        Path::new("."),
+        &["config", "--no-includes", "--null", "--list", "--file", "-"],
+        Some(text.as_bytes()),
+    )?;
+    let mut sections: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or(CompleteCopyError::GitUnavailable)?;
+        let key = std::str::from_utf8(&record[..separator])
+            .map_err(|_| CompleteCopyError::GitUnavailable)?;
+        let value = std::str::from_utf8(&record[separator + 1..])
+            .map_err(|_| CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"))?;
+        let Some(key) = key.get("submodule.".len()..).filter(|_| {
+            key.get(.."submodule.".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("submodule."))
+        }) else {
             continue;
         };
-        let value = value.trim();
-        if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control()) {
+        let (name, is_path) = if key.len() >= ".path".len()
+            && key
+                .get(key.len() - ".path".len()..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".path"))
+        {
+            (&key[..key.len() - ".path".len()], true)
+        } else if key.len() >= ".url".len()
+            && key
+                .get(key.len() - ".url".len()..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".url"))
+        {
+            (&key[..key.len() - ".url".len()], false)
+        } else {
+            continue;
+        };
+        if name.is_empty() || value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control())
+        {
             return Err(CompleteCopyError::InvalidArchive("`.gitmodules` value"));
         }
-        match key.trim() {
-            "path" => path = Some(value.to_owned()),
-            "url" => url = Some(value.to_owned()),
-            _ => {}
+        let pair = sections.entry(name.to_owned()).or_default();
+        if is_path {
+            pair.0 = Some(value.to_owned());
+        } else {
+            pair.1 = Some(value.to_owned());
         }
     }
-    if in_section {
-        flush(&mut path, &mut url, &mut pairs);
-    }
-    Ok(pairs)
+    Ok(sections
+        .into_values()
+        .filter_map(|(path, url)| path.zip(url))
+        .collect())
 }
 
 /// Lists every object reachable from `commit`, ordered by object ID.
@@ -1684,6 +1697,18 @@ mod tests {
                 ),
                 ("tools".to_owned(), "../tools.git".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn gitmodules_quoted_values_are_decoded() {
+        let text = "[submodule \"reference\"]\n\tpath = \"deps/reference project\"\n\turl = \"file:///tmp/reference project\"\n";
+        assert_eq!(
+            parse_gitmodules(text).unwrap(),
+            vec![(
+                "deps/reference project".to_owned(),
+                "file:///tmp/reference project".to_owned()
+            )]
         );
     }
 
