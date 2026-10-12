@@ -89,13 +89,19 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         .with_repository_capture_capability(capability);
 
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
-    let capture = |name: &str| format!("sys.blob.capture_file({root}, {name:?}, 65536)");
+    let capture_fixture = |name: &str| {
+        std::fs::read_to_string(Path::new(MEDIA_FIXTURES).join(name))
+            .unwrap()
+            .replace("__MEDIA_ROOT__", &root)
+    };
+    let song_capture = capture_fixture("import-song.orna");
+    let image_capture = capture_fixture("import-image.orna");
     commit_capture(
         &repository,
         &state,
         writer,
         &mut bindings,
-        &capture("tone.wav"),
+        &song_capture,
         "song",
         0x80,
         true,
@@ -106,7 +112,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         &state,
         writer,
         &mut bindings,
-        &capture("pixel.png"),
+        &image_capture,
         "image",
         0x90,
         true,
