@@ -17,8 +17,14 @@ use orna_repository_v1::{
     CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, PrivateCommit, Repository,
     RepositoryError,
 };
-use orna_semantic_v1::{Catalogue, ModuleInput, StandardCatalogueError, StandardDependencyProfile};
+use orna_runtime_v1::TableObjectId;
+use orna_semantic_v1::{
+    Analysis, Catalogue, ModuleInput, Namespace, SourceTableSchemaArtifact,
+    StandardCatalogueError, StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
+    source_table_schema_with_ids,
+};
 use orna_syntax_v1::{Declaration, parse_module};
+use orna_value_v1::{Raw, SchemaDescriptor};
 use unicode_normalization::UnicodeNormalization;
 
 mod attachments;
@@ -108,6 +114,37 @@ impl LooseRowCandidate {
     /// The downstream semantic/conformance boundary's stable unit tag.
     pub const fn parse_as(&self) -> &'static str {
         "row_unit"
+    }
+}
+
+/// A source-analysis schema bound to the exact committed snapshot that issued
+/// its table and field identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedTableSchema {
+    source_commit: GitCommitRef,
+    snapshot_id: [u8; 32],
+    table: SourceTableSchemaArtifact,
+}
+
+impl ResolvedTableSchema {
+    pub const fn source_commit(&self) -> &GitCommitRef {
+        &self.source_commit
+    }
+
+    pub const fn snapshot_id(&self) -> &[u8; 32] {
+        &self.snapshot_id
+    }
+
+    pub fn declaration_name(&self) -> &str {
+        self.table.declaration_name()
+    }
+
+    pub fn table_object_id(&self) -> TableObjectId {
+        TableObjectId::new(*self.table.table_id())
+    }
+
+    pub fn descriptor(&self) -> &SchemaDescriptor {
+        self.table.descriptor()
     }
 }
 
@@ -303,6 +340,77 @@ impl ProjectLoader {
         Ok(project)
     }
 
+    /// Resolves a source-derived schema and owner-issued identities at one
+    /// verified commit. The persisted descriptor is consulted only for its
+    /// table and field IDs/names; its type nodes, roles, fallbacks, and
+    /// definitions do not contribute to the expected schema.
+    pub fn resolve_committed_table_schema(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+        declaration_name: &str,
+        table_object_id: TableObjectId,
+    ) -> Result<ResolvedTableSchema, ProjectLoadError> {
+        let project = self.load_committed_snapshot(repository, commit)?;
+        let source_commit = project
+            .source_commit()
+            .cloned()
+            .ok_or(ProjectLoadError::InvalidTableSchema)?;
+        if &source_commit != commit {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+        let snapshot_id = project
+            .source_snapshot_id()
+            .ok_or(ProjectLoadError::InvalidTableSchema)?;
+        let catalogue = project
+            .standard_catalogue(project.standard_sources().iter().cloned())
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let analysis = match catalogue.as_ref() {
+            Some(catalogue) => analyze_with_catalogue(project.modules(), catalogue),
+            None => analyze(project.modules()),
+        };
+        if !analysis.is_ok() {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+        let module_name = source_table_module_name(&project, &analysis, declaration_name)?;
+
+        let context = repository
+            .open_pinned_format_context(commit.as_str())
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        if context.snapshot_pin().snapshot_id() != snapshot_id {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+        let binding = context
+            .resolve_committed_table_descriptor(declaration_name, table_object_id.bytes())
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        if binding.snapshot_id() != &snapshot_id
+            || binding.declaration_name() != declaration_name
+            || binding.table_object_id() != &table_object_id.bytes()
+        {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+
+        let field_ids = committed_field_ids(binding.descriptor(), table_object_id.bytes())?;
+        let table = source_table_schema_with_ids(
+            &analysis,
+            &module_name,
+            declaration_name,
+            table_object_id.bytes(),
+            &field_ids,
+        )
+        .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        if table.declaration_name() != declaration_name
+            || table.table_id() != &table_object_id.bytes()
+        {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+        Ok(ResolvedTableSchema {
+            source_commit,
+            snapshot_id,
+            table,
+        })
+    }
+
     /// Loads the root module and reachable imports from the immutable tree of
     /// a private publication candidate. The candidate capability, rather than
     /// a ref name or worktree path, is the source authority.
@@ -474,6 +582,85 @@ impl ProjectLoader {
     }
 }
 
+fn source_table_module_name(
+    project: &LoadedProject,
+    analysis: &Analysis,
+    declaration_name: &str,
+) -> Result<String, ProjectLoadError> {
+    let mut resolved = None;
+    for identity in project.identities() {
+        let namespace = Namespace(identity.namespace().to_vec());
+        let Some(module) = analysis.modules.get(&namespace) else {
+            continue;
+        };
+        if !module
+            .symbols
+            .get(declaration_name)
+            .is_some_and(|symbol| symbol.kind == SymbolKind::Table)
+        {
+            continue;
+        }
+        if resolved.replace(namespace.display()).is_some() {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+    }
+    resolved.ok_or(ProjectLoadError::InvalidTableSchema)
+}
+
+fn committed_field_ids(
+    descriptor: &SchemaDescriptor,
+    expected_table_id: [u8; 16],
+) -> Result<BTreeMap<String, [u8; 16]>, ProjectLoadError> {
+    let table_id = raw_map_value(descriptor.raw(), "1")
+        .and_then(committed_uuid)
+        .ok_or(ProjectLoadError::InvalidTableSchema)?;
+    if table_id != expected_table_id {
+        return Err(ProjectLoadError::InvalidTableSchema);
+    }
+    let Raw::Array(fields) = raw_map_value(descriptor.raw(), "3")
+        .ok_or(ProjectLoadError::InvalidTableSchema)?
+    else {
+        return Err(ProjectLoadError::InvalidTableSchema);
+    };
+
+    let mut ids = BTreeSet::new();
+    let mut field_ids = BTreeMap::new();
+    for field in fields {
+        let Raw::Array(parts) = field else {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        };
+        let [id, Raw::Text(name), _, _, _] = parts.as_slice() else {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        };
+        let id = committed_uuid(id).ok_or(ProjectLoadError::InvalidTableSchema)?;
+        if !ids.insert(id) || field_ids.insert(name.clone(), id).is_some() {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+    }
+    Ok(field_ids)
+}
+
+fn raw_map_value<'a>(raw: &'a Raw, key: &str) -> Option<&'a Raw> {
+    let Raw::Map(entries) = raw else {
+        return None;
+    };
+    entries.iter().find_map(|(candidate, value)| match candidate {
+        Raw::Int(integer) if integer.to_string() == key => Some(value),
+        _ => None,
+    })
+}
+
+fn committed_uuid(raw: &Raw) -> Option<[u8; 16]> {
+    let Raw::Tag(37, value) = raw else {
+        return None;
+    };
+    let Raw::Bytes(bytes) = value.as_ref() else {
+        return None;
+    };
+    let bytes: [u8; 16] = bytes.as_slice().try_into().ok()?;
+    Some(bytes)
+}
+
 fn load_reachable_project(
     limits: ProjectLimits,
     standard_profile: Option<StandardDependencyProfile>,
@@ -642,6 +829,7 @@ pub enum ProjectLoadError {
     DuplicateModuleNamespace,
     ReservedNamespace,
     StandardSnapshotMismatch,
+    InvalidTableSchema,
 }
 
 impl fmt::Display for ProjectLoadError {
@@ -668,6 +856,9 @@ impl fmt::Display for ProjectLoadError {
             Self::ReservedNamespace => "repository source module shadows a reserved namespace",
             Self::StandardSnapshotMismatch => {
                 "standard dependency profile does not match the committed std submodule pin"
+            }
+            Self::InvalidTableSchema => {
+                "committed table schema could not be resolved from source and identity metadata"
             }
         })
     }
