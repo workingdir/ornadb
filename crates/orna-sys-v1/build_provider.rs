@@ -54,6 +54,7 @@ pub fn generate_provider_registry_schema() -> Result<String, String> {
                     "name": {"type": "string", "minLength": 1},
                     "version": {"$ref": "#/$defs/version"},
                     "signature": {"type": "string", "minLength": 1},
+                    "contract": {"type": ["string", "null"], "minLength": 1},
                     "effect": {"enum": ["read", "invoke", "admin"]},
                     "preconditions": {
                         "type": "array",
