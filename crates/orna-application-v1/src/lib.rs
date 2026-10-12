@@ -22,12 +22,14 @@ use orna_protocol_v1::{
     Envelope, Message, PatchList, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey,
     ResultStatus,
 };
+use orna_repository_v1::{
+    GitCommitRef, OrpBlobBinding, ProtectedContentPin, RepositoryCaptureCapability,
+};
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
     RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
     RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
-use orna_repository_v1::RepositoryCaptureCapability;
 use orna_semantic_v1::{
     Catalogue, ModuleInput, Namespace, SymbolKind, TableSchema, analyze_with_catalogue,
 };
@@ -35,6 +37,7 @@ use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
     TableMember, parse_module_with_file, parse_repl,
 };
+use orna_value_v1::SchemaDescriptor;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -355,12 +358,7 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        let mutations = handler.into_mutations()?;
-        Ok(StagedActivation {
-            value,
-            mutations,
-            snapshot_generation: None,
-        })
+        handler.into_staged_activation(value, None)
     }
 
     /// Evaluates table mutations against one activation-pinned table snapshot.
@@ -396,12 +394,10 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        let mutations = handler.into_mutations()?;
-        Ok(StagedActivation {
+        handler.into_staged_activation(
             value,
-            mutations,
-            snapshot_generation: Some(snapshot.context().capture().generation_digest()),
-        })
+            Some(snapshot.context().capture().generation_digest()),
+        )
     }
 
     /// Evaluates admitted source with a preloaded durable publication snapshot
@@ -436,12 +432,7 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        let mutations = handler.into_mutations()?;
-        Ok(StagedActivation {
-            value,
-            mutations,
-            snapshot_generation: None,
-        })
+        handler.into_staged_activation(value, None)
     }
 
     /// Evaluates admitted source while dispatching its terminal runtime effect
@@ -516,6 +507,8 @@ impl ApplicationAuthority {
             value,
             mutations,
             snapshot_generation: None,
+            source_row_schemas: Vec::new(),
+            protected_field_pins: Vec::new(),
         })
     }
 
@@ -599,6 +592,7 @@ impl ApplicationAuthority {
         context: RuntimeActivationContext,
         mutations: Vec<TableMutation>,
         request: Option<RequestIdentity>,
+        protected_field_pins: &[RetainedSourceBlobPin],
     ) -> Result<StagedTableActivation, ApplicationError> {
         let activation_digest = Self::canonical_digest(&context, &mutations)?;
         let mutations = mutations
@@ -618,7 +612,7 @@ impl ApplicationAuthority {
                 let id: [u8; 16] = digest.finalize()[..16]
                     .try_into()
                     .map_err(|_| ApplicationError::DigestEncoding)?;
-                let rebuilt = match (mutation.rekey_to(), mutation.is_insert()) {
+                let mut rebuilt = match (mutation.rekey_to(), mutation.is_insert()) {
                     (Some(new_key), _) => mutation
                         .value()
                         .ok_or_else(|| {
@@ -633,7 +627,7 @@ impl ApplicationAuthority {
                                 value.to_vec(),
                             )
                             .map_err(|error| ApplicationError::Runtime(error.to_string()))
-                        }),
+                        })?,
                     (None, true) => mutation
                         .value()
                         .ok_or_else(|| {
@@ -647,32 +641,135 @@ impl ApplicationAuthority {
                                 value.to_vec(),
                             )
                             .map_err(|error| ApplicationError::Runtime(error.to_string()))
-                        }),
+                        })?,
                     (None, false) => TableMutation::new(
                         id,
                         mutation.table(),
                         mutation.key().to_vec(),
                         mutation.value().map(<[u8]>::to_vec),
                     )
-                    .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string())),
-                }?;
-                Ok(match mutation.table_object_id() {
-                    Some(object_id) => rebuilt.with_table_object_id(object_id),
-                    None => rebuilt,
-                })
+                    .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string()))?,
+                };
+                if let Some(object_id) = mutation.table_object_id() {
+                    rebuilt = rebuilt.with_table_object_id(object_id);
+                }
+                for pin in protected_field_pins
+                    .iter()
+                    .filter(|pin| pin.mutation_id == mutation.id())
+                {
+                    rebuilt = rebuilt
+                        .with_protected_content_pin(pin.pin())
+                        .map_err(|error| ApplicationError::Runtime(error.to_string()))?;
+                }
+                Ok(rebuilt)
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.stage_mutations(context, mutations)
     }
 }
-
-/// The evaluated result of one admitted source activation together with the
-/// ordered table mutations it performed.
+/// One validated source-backed row mutation staged by an application activation.
 #[derive(Clone, Debug)]
 pub struct StagedActivation {
     value: CanonicalValue,
     mutations: Vec<TableMutation>,
     snapshot_generation: Option<[u8; 32]>,
+    source_row_schemas: Vec<SourceRowSchemaProvenance>,
+    protected_field_pins: Vec<RetainedSourceBlobPin>,
+}
+
+/// One accepted Blob binding attached to a source field by the source-row producer.
+#[derive(Debug)]
+pub struct SourceBlobFieldBinding {
+    pub field_object_id: [u8; 16],
+    pub binding: OrpBlobBinding,
+}
+
+/// Complete source-owned row projection admitted without Object lowering here.
+#[derive(Debug)]
+pub struct SourceRowMutationInput {
+    pub table_name: String,
+    pub table_object_id: TableObjectId,
+    pub source_commit: GitCommitRef,
+    pub source_snapshot_id: [u8; 32],
+    pub declaration_name: String,
+    pub schema: SchemaDescriptor,
+    pub canonical_key: Vec<u8>,
+    pub canonical_fields: Vec<u8>,
+    pub blob_fields: Vec<SourceBlobFieldBinding>,
+    pub insert_only: bool,
+}
+
+/// Schema provenance retained for the durable consumer's expected-schema bind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceRowSchemaProvenance {
+    mutation_id: [u8; 16],
+    table_name: String,
+    table_object_id: TableObjectId,
+    source_commit: GitCommitRef,
+    source_snapshot_id: [u8; 32],
+    declaration_name: String,
+    schema: SchemaDescriptor,
+}
+
+impl SourceRowSchemaProvenance {
+    #[must_use]
+    pub const fn mutation_id(&self) -> [u8; 16] {
+        self.mutation_id
+    }
+    #[must_use]
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    #[must_use]
+    pub const fn table_object_id(&self) -> TableObjectId {
+        self.table_object_id
+    }
+
+    #[must_use]
+    pub fn source_commit(&self) -> &GitCommitRef {
+        &self.source_commit
+    }
+
+    #[must_use]
+    pub const fn source_snapshot_id(&self) -> [u8; 32] {
+        self.source_snapshot_id
+    }
+
+    #[must_use]
+    pub fn declaration_name(&self) -> &str {
+        &self.declaration_name
+    }
+
+    /// Descriptor to supply as `expected_schema` during repository admission.
+    #[must_use]
+    pub const fn expected_schema(&self) -> &SchemaDescriptor {
+        &self.schema
+    }
+}
+
+/// A protected Blob pin held until the durable row transaction completes.
+#[derive(Clone, Debug)]
+pub struct RetainedSourceBlobPin {
+    mutation_id: [u8; 16],
+    field_object_id: [u8; 16],
+    pin: Arc<ProtectedContentPin>,
+}
+
+impl RetainedSourceBlobPin {
+    #[must_use]
+    pub const fn mutation_id(&self) -> [u8; 16] {
+        self.mutation_id
+    }
+    #[must_use]
+    pub const fn field_object_id(&self) -> [u8; 16] {
+        self.field_object_id
+    }
+
+    #[must_use]
+    pub fn pin(&self) -> &ProtectedContentPin {
+        &self.pin
+    }
 }
 
 /// A runtime operation requested by admitted application source.
@@ -781,6 +878,18 @@ impl StagedActivation {
         &self.mutations
     }
 
+    /// Source descriptors needed by the repository's expected-schema bind.
+    #[must_use]
+    pub fn source_row_schemas(&self) -> &[SourceRowSchemaProvenance] {
+        &self.source_row_schemas
+    }
+
+    /// Accepted payload-field pins held for the lifetime of this activation.
+    #[must_use]
+    pub fn protected_field_pins(&self) -> &[RetainedSourceBlobPin] {
+        &self.protected_field_pins
+    }
+
     /// Stages this activation's mutations against the captured context for
     /// the owner-fenced runtime commit. Empty mutation batches are rejected
     /// by the runtime boundary, so a pure activation must not call this.
@@ -822,7 +931,12 @@ impl StagedActivation {
         // Request identity supplements the activation pin so identical source
         // writes from distinct request entries cannot alias durable mutation
         // IDs even when a caller reuses one captured context.
-        authority.stage_source_mutations(context.clone(), self.mutations.clone(), request)
+        authority.stage_source_mutations(
+            context.clone(),
+            self.mutations.clone(),
+            request,
+            &self.protected_field_pins,
+        )
     }
 }
 
@@ -845,6 +959,8 @@ pub struct SourceMutationEffectHandler {
     publication_rows: Option<RuntimePublicationMetadataRows>,
     captured_rows: Option<BTreeMap<String, BTreeMap<Vec<u8>, CanonicalValue>>>,
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
+    source_row_schemas: Vec<SourceRowSchemaProvenance>,
+    protected_field_pins: Vec<RetainedSourceBlobPin>,
 }
 
 impl SourceMutationEffectHandler {
@@ -860,6 +976,8 @@ impl SourceMutationEffectHandler {
             next_automatic_ids,
             mutations: Vec::new(),
             next_ordinal: 0,
+            source_row_schemas: Vec::new(),
+            protected_field_pins: Vec::new(),
             publication_rows: None,
             captured_rows: None,
             overlay: BTreeMap::new(),
@@ -965,17 +1083,146 @@ impl SourceMutationEffectHandler {
     ) -> Result<Self, ApplicationError> {
         let next_automatic_ids = automatic_id_counters(&tables);
         let mut handler = Self::new_with_table_object_ids(tables, table_object_ids)?;
+
         handler.next_automatic_ids = next_automatic_ids;
         handler.publication_rows = Some(publication_rows);
         Ok(handler)
     }
+    /// Admits a source-owner row projection without lowering or rewriting its Object.
+    /// The key and descriptor-ordered stored-field tuple are validated as-is;
+    /// every accepted Blob pin and the exact schema provenance remain attached
+    /// to the staged activation until its durable consumer finishes.
+    pub fn record_source_row(
+        &mut self,
+        input: SourceRowMutationInput,
+    ) -> Result<(), ApplicationError> {
+        let SourceRowMutationInput {
+            table_name,
+            table_object_id,
+            source_commit,
+            source_snapshot_id,
+            declaration_name,
+            schema,
+            canonical_key,
+            canonical_fields,
+            blob_fields,
+            insert_only,
+        } = input;
+        if !self.tables.contains_key(&table_name)
+            || self.table_object_ids.get(&table_name).copied() != Some(table_object_id)
+        {
+            return Err(ApplicationError::InvalidTableMetadata);
+        }
+        schema
+            .validate_stored_row(table_object_id.bytes(), &canonical_key, &canonical_fields)
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+
+        let ordinal = self.next_ordinal;
+        let next_ordinal = ordinal
+            .checked_add(1)
+            .ok_or_else(|| ApplicationError::Runtime("source mutation limit reached".into()))?;
+        let schema_bytes = schema
+            .encode()
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        let mut blob_fields = blob_fields;
+        blob_fields.sort_by_key(|field| field.field_object_id);
+        let mut digest = Sha256::new();
+        digest.update(SOURCE_MUTATION_DOMAIN);
+        digest.update(b"complete-source-row\0");
+        put_bytes(&mut digest, table_name.as_bytes());
+        digest.update(table_object_id.bytes());
+        put_bytes(&mut digest, source_commit.as_str().as_bytes());
+        digest.update(source_snapshot_id);
+        put_bytes(&mut digest, declaration_name.as_bytes());
+        put_bytes(&mut digest, &schema_bytes);
+        put_bytes(&mut digest, &canonical_key);
+        digest.update([u8::from(insert_only)]);
+        put_bytes(&mut digest, &canonical_fields);
+        for field in &blob_fields {
+            digest.update(field.field_object_id);
+            let transfer = field.binding.transfer_record();
+            digest.update(transfer.pin_id());
+            put_bytes(&mut digest, field.binding.encoded_value());
+        }
+        digest.update(ordinal.to_be_bytes());
+        let mut id: [u8; 16] = digest.finalize()[..16]
+            .try_into()
+            .expect("SHA-256 prefix has the requested width");
+        if id == [0; 16] {
+            id[0] = 1;
+        }
+        let mut mutation = if insert_only {
+            TableMutation::insert(id, &table_name, canonical_key, canonical_fields)
+        } else {
+            TableMutation::new(id, &table_name, canonical_key, Some(canonical_fields))
+        }
+        .map_err(|error| ApplicationError::Runtime(error.to_string()))?
+        .with_table_object_id(table_object_id);
+
+        let mut retained_pins = Vec::with_capacity(blob_fields.len());
+        let mut field_ids = BTreeSet::new();
+        for field in blob_fields {
+            if !field_ids.insert(field.field_object_id) {
+                return Err(ApplicationError::InvalidTableMetadata);
+            }
+            let pin = Arc::new(field.binding.into_pin());
+            mutation = mutation
+                .with_protected_content_pin(&pin)
+                .map_err(|error| ApplicationError::Runtime(error.to_string()))?;
+            retained_pins.push(RetainedSourceBlobPin {
+                mutation_id: id,
+                field_object_id: field.field_object_id,
+                pin,
+            });
+        }
+
+        self.next_ordinal = next_ordinal;
+        self.mutations.push(mutation);
+        self.source_row_schemas.push(SourceRowSchemaProvenance {
+            mutation_id: id,
+            table_name,
+            table_object_id,
+            source_commit,
+            source_snapshot_id,
+            declaration_name,
+            schema,
+        });
+        self.protected_field_pins.extend(retained_pins);
+        Ok(())
+    }
+
+    /// Finishes evaluation while retaining schema provenance and protected pins.
+    pub fn into_staged_activation(
+        self,
+        value: CanonicalValue,
+        snapshot_generation: Option<[u8; 32]>,
+    ) -> Result<StagedActivation, ApplicationError> {
+        self.validate_mutations()?;
+        Ok(StagedActivation {
+            value,
+            mutations: self.mutations,
+            snapshot_generation,
+            source_row_schemas: self.source_row_schemas,
+            protected_field_pins: self.protected_field_pins,
+        })
+    }
 
     /// Consumes the handler after validating every recorded mutation.
     pub fn into_mutations(self) -> Result<Vec<TableMutation>, ApplicationError> {
+        if !self.source_row_schemas.is_empty() || !self.protected_field_pins.is_empty() {
+            return Err(ApplicationError::Runtime(
+                "source row admission requires a staged activation".into(),
+            ));
+        }
         self.into_validated_mutations()
     }
 
     fn into_validated_mutations(self) -> Result<Vec<TableMutation>, ApplicationError> {
+        self.validate_mutations()?;
+        Ok(self.mutations)
+    }
+
+    fn validate_mutations(&self) -> Result<(), ApplicationError> {
         for mutation in &self.mutations {
             TableMutation::new(
                 mutation.id(),
@@ -985,7 +1232,7 @@ impl SourceMutationEffectHandler {
             )
             .map_err(|_| ApplicationError::Runtime("recorded mutation was invalid".into()))?;
         }
-        Ok(self.mutations)
+        Ok(())
     }
 
     fn effect_error(code: &'static str) -> EvaluationError {
@@ -2565,7 +2812,9 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let mut repl = self.repl_candidate(session)?;
                 let staged = match repl.stage_activation(source) {
                     Ok(staged) => staged,
-                    Err(error) if error.code() == "ORNA-REPL-EFFECT" => match self.submit_repl_input(&mut repl, source) {
+                    Err(error) if error.code() == "ORNA-REPL-EFFECT" => match self
+                        .submit_repl_input(&mut repl, source)
+                    {
                         Ok(value) => {
                             let value = value.unwrap_or_else(|| {
                                 CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
@@ -2632,6 +2881,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                         session_id: session,
                         request_id: request,
                     }),
+                    &[],
                 )?;
                 let identity = RequestIdentity {
                     session_id: session,
