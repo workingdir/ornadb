@@ -25,6 +25,8 @@ pub const FINAL_REPOSITORY_FORMAT: u8 = 3;
 
 /// The bounded size of the tracked `database.orna` record.
 pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
+/// Per-module source bound compatible with project loading's aggregate budget.
+const MAX_SOURCE_MODULE_BYTES: usize = 4 * 1024 * 1024;
 
 const DATABASE_PATH: &str = ".orna/database.orna";
 pub(crate) const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
@@ -149,13 +151,13 @@ impl fmt::Display for FormatContextError {
 impl std::error::Error for FormatContextError {}
 
 /// Owner-authenticated descriptor binding for one format-3 relation in an
-/// exact repository snapshot. A qualified source identity is retained only
-/// when its module path and unique table declaration are verified against
-/// that pinned snapshot. The descriptor is decoded from the schema object
-/// sealed by `snapshot_id`; its key order, key types, field roles, and field
-/// types must equal the complete expected source descriptor.
+/// exact repository UUID and snapshot. A qualified source identity is retained
+/// only when its module path and unique table declaration are verified against
+/// that snapshot. The descriptor is decoded from its sealed schema object; the
+/// complete expected source descriptor must equal it exactly.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommittedTableBinding {
+    database_id: DatabaseId,
     snapshot_id: [u8; 32],
     module_name: Option<String>,
     source_path: Option<String>,
@@ -167,6 +169,11 @@ pub struct CommittedTableBinding {
 }
 
 impl CommittedTableBinding {
+    /// Stable repository UUID authenticated from the pinned `.orna/database.orna`.
+    pub const fn database_id(&self) -> DatabaseId {
+        self.database_id
+    }
+
     pub const fn snapshot_id(&self) -> &[u8; 32] {
         &self.snapshot_id
     }
@@ -629,6 +636,7 @@ impl RepositoryFormatContext {
             return Err(FormatContextError::TableBindingMismatch);
         }
         Ok(CommittedTableBinding {
+            database_id: self.require_database_id()?,
             snapshot_id: self.snapshot.snapshot_id(),
             module_name: None,
             source_path: None,
@@ -651,7 +659,7 @@ impl RepositoryFormatContext {
         }
         let source = self
             .snapshot
-            .read_file(&self.repository, source_path, 64 * 1024)
+            .read_file(&self.repository, source_path, MAX_SOURCE_MODULE_BYTES)
             .map_err(|error| match error {
                 RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
                 _ => FormatContextError::SchemaRootInvalid,
@@ -659,6 +667,9 @@ impl RepositoryFormatContext {
         let source =
             std::str::from_utf8(&source).map_err(|_| FormatContextError::SchemaRootInvalid)?;
         let parsed = parse_module(source);
+        if !parsed.is_ok() {
+            return Err(FormatContextError::SchemaRootInvalid);
+        }
         let mut declarations =
             parsed
                 .value
@@ -675,21 +686,23 @@ impl RepositoryFormatContext {
     }
 
     /// Binds a qualified source table and its expected schema to this exact
-    /// committed snapshot. The caller supplies the module namespace and
-    /// repository-relative source path from project analysis; this method
-    /// checks their agreement, declaration uniqueness, table ID, snapshot and
-    /// complete expected descriptor before issuing source-bound authority.
+    /// repository UUID and committed snapshot. The caller supplies the module
+    /// namespace and repository-relative path from project analysis; the
+    /// binding checks source identity, repository UUID, snapshot, table ID,
+    /// and complete expected descriptor before issuing source-bound authority.
     pub fn bind_committed_table(
         &self,
         module_name: &str,
         source_path: &str,
         declaration_name: &str,
         table_object_id: [u8; 16],
+        expected_database_id: DatabaseId,
         expected_snapshot_id: &[u8; 32],
         expected_schema: &SchemaDescriptor,
     ) -> Result<CommittedTableBinding, FormatContextError> {
         self.require_format3()?;
-        if *expected_snapshot_id != self.snapshot.snapshot_id()
+        if self.require_database_id()? != expected_database_id
+            || *expected_snapshot_id != self.snapshot.snapshot_id()
             || schema_descriptor_table_id(expected_schema) != Some(table_object_id)
         {
             return Err(FormatContextError::TableBindingMismatch);
@@ -710,11 +723,13 @@ impl RepositoryFormatContext {
     pub fn bind_committed_table_by_relation_id(
         &self,
         relation_id: [u8; 16],
+        expected_database_id: DatabaseId,
         expected_snapshot_id: &[u8; 32],
         expected_schema: &SchemaDescriptor,
     ) -> Result<CommittedTableBinding, FormatContextError> {
         self.require_format3()?;
-        if *expected_snapshot_id != self.snapshot.snapshot_id()
+        if self.require_database_id()? != expected_database_id
+            || *expected_snapshot_id != self.snapshot.snapshot_id()
             || schema_descriptor_table_id(expected_schema) != Some(relation_id)
         {
             return Err(FormatContextError::TableBindingMismatch);
@@ -844,6 +859,7 @@ impl HistoricalFormatContext {
         source_path: &str,
         declaration_name: &str,
         table_object_id: [u8; 16],
+        expected_database_id: DatabaseId,
         expected_snapshot_id: &[u8; 32],
         expected_schema: &SchemaDescriptor,
     ) -> Result<CommittedTableBinding, FormatContextError> {
@@ -852,6 +868,7 @@ impl HistoricalFormatContext {
             source_path,
             declaration_name,
             table_object_id,
+            expected_database_id,
             expected_snapshot_id,
             expected_schema,
         )
@@ -860,11 +877,13 @@ impl HistoricalFormatContext {
     pub fn bind_committed_table_by_relation_id(
         &self,
         relation_id: [u8; 16],
+        expected_database_id: DatabaseId,
         expected_snapshot_id: &[u8; 32],
         expected_schema: &SchemaDescriptor,
     ) -> Result<CommittedTableBinding, FormatContextError> {
         self.context.bind_committed_table_by_relation_id(
             relation_id,
+            expected_database_id,
             expected_snapshot_id,
             expected_schema,
         )
@@ -1469,16 +1488,21 @@ mod graph_bridge_tests {
     }
 
     #[test]
-    fn committed_table_bindings_pin_imported_source_and_reject_descriptor_mismatch() {
+    fn committed_table_bindings_pin_imported_source_repository_uuid_and_schema() {
         let relation_id = [0xa1; 16];
         let (directory, descriptor) = seeded_table_binding(relation_id);
-        let repository = Repository::discover(directory.path()).expect("discover fixture");
+        let root = directory.path();
+        let repository = Repository::discover(root).expect("discover fixture");
         let context = repository.open_format_context().expect("admit fixture");
+        let database_id = context
+            .require_database_id()
+            .expect("admitted repository UUID");
         let snapshot_id = context.snapshot_pin().snapshot_id();
 
         let resolved = context
             .resolve_committed_table_by_relation_id(relation_id)
             .expect("resolve descriptor by committed relation ID");
+        assert_eq!(resolved.database_id(), database_id);
         assert_eq!(resolved.snapshot_id(), &snapshot_id);
         assert_eq!(resolved.module_name(), None);
         assert_eq!(resolved.source_path(), None);
@@ -1492,10 +1516,12 @@ mod graph_bridge_tests {
                 "media.orna",
                 "Audio",
                 relation_id,
+                database_id,
                 &snapshot_id,
                 &descriptor,
             )
-            .expect("bind source analysis to imported committed descriptor");
+            .expect("bind imported source analysis to committed descriptor");
+        assert_eq!(binding.database_id(), database_id);
         assert_eq!(binding.snapshot_id(), &snapshot_id);
         assert_eq!(binding.module_name(), Some("media"));
         assert_eq!(binding.source_path(), Some("media.orna"));
@@ -1508,6 +1534,7 @@ mod graph_bridge_tests {
                 "media.orna",
                 "Audio",
                 relation_id,
+                database_id,
                 &snapshot_id,
                 &descriptor,
             ),
@@ -1522,6 +1549,7 @@ mod graph_bridge_tests {
                 "media.orna",
                 "Audio",
                 relation_id,
+                database_id,
                 &wrong_snapshot,
                 &descriptor,
             ),
@@ -1536,6 +1564,7 @@ mod graph_bridge_tests {
                 "media.orna",
                 "Audio",
                 relation_id,
+                database_id,
                 &snapshot_id,
                 &wrong_descriptor,
             ),
@@ -1550,6 +1579,7 @@ mod graph_bridge_tests {
                 "media.orna",
                 "Audio",
                 relation_id,
+                database_id,
                 &snapshot_id,
                 &wrong_table_descriptor,
             ),
@@ -1562,11 +1592,95 @@ mod graph_bridge_tests {
                 "media.orna",
                 "Missing",
                 relation_id,
+                database_id,
                 &snapshot_id,
                 &descriptor,
             ),
             Err(super::FormatContextError::TableBindingMismatch),
             "binding rejects a source declaration absent from the imported module"
+        );
+
+        let foreign_database_id = super::DatabaseId::new_v4();
+        let large_source = format!(
+            "{}{}",
+            " ".repeat(65 * 1024),
+            include_str!("../tests/fixtures/committed-table-binding.orna")
+        );
+        fs::write(root.join("media.orna"), large_source)
+            .expect("write valid imported source above the old bound");
+        // `commit_store_root` advances HEAD without refreshing the worktree/index.
+        // Reset the index to that committed graph before staging only the source change.
+        git(root, &["read-tree", "HEAD"]);
+        git(root, &["add", "--", "media.orna"]);
+        git(root, &["commit", "--quiet", "-m", "advance imported source fixture"]);
+        let large_context = Repository::discover(root)
+            .expect("discover large imported module")
+            .open_format_context()
+            .expect("open large imported-module context");
+        let large_snapshot_id = large_context.snapshot_pin().snapshot_id();
+        let large_binding = large_context
+            .bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &large_snapshot_id,
+                &descriptor,
+            )
+            .expect("bind valid imported source within project byte budget");
+        assert_eq!(large_binding.descriptor(), &descriptor);
+
+        fs::write(
+            root.join(".orna/database.orna"),
+            super::canonical_database_bytes(&foreign_database_id),
+        )
+        .expect("write another repository UUID");
+        commit(root);
+        let foreign_context = Repository::discover(root)
+            .expect("discover alternate UUID fixture")
+            .open_format_context()
+            .expect("open alternate UUID context");
+        assert_eq!(
+            foreign_context.require_database_id(),
+            Ok(foreign_database_id),
+            "fixture opens the alternate repository UUID"
+        );
+        assert_ne!(foreign_database_id, database_id);
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                foreign_database_id,
+                &snapshot_id,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a foreign repository UUID"
+        );
+
+        fs::write(root.join("media.orna"), "pub table Audio(id: Int)\n")
+            .expect("write malformed imported table source");
+        commit(root);
+        let malformed_context = Repository::discover(root)
+            .expect("discover malformed imported module")
+            .open_format_context()
+            .expect("open malformed imported-module context");
+        let malformed_snapshot_id = malformed_context.snapshot_pin().snapshot_id();
+        assert_eq!(
+            malformed_context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                foreign_database_id,
+                &malformed_snapshot_id,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::SchemaRootInvalid),
+            "binding rejects a recovered declaration from a malformed module"
         );
     }
 
