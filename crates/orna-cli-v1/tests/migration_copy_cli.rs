@@ -120,6 +120,7 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     let source_submodule = source.join("dependencies/example");
     fs::write(source_submodule.join("tracked.txt"), b"staged dependency\n").unwrap();
     git_output(&source_submodule, &["add", "tracked.txt"]);
+    git_output(&source_submodule, &["update-index", "--split-index"]);
     fs::write(
         source_submodule.join("tracked.txt"),
         b"unstaged dependency\n",
@@ -276,6 +277,56 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
         candidate
     );
 
+    let metadata_destination = parent.path().join("metadata-state");
+    let metadata_copy = run_copy(&source, &metadata_destination, "0", &git_trace);
+    assert!(
+        metadata_copy.status.success(),
+        "metadata-state migration copy: {}",
+        String::from_utf8_lossy(&metadata_copy.stderr)
+    );
+    let metadata_submodule = metadata_destination.join("dependencies/example");
+    let source_submodule_head = git_output(&source_submodule, &["rev-parse", "HEAD"]);
+    git_output(&metadata_submodule, &["branch", "alternate"]);
+    git_output(
+        &metadata_submodule,
+        &["symbolic-ref", "HEAD", "refs/heads/alternate"],
+    );
+    assert_eq!(
+        git_output(&metadata_submodule, &["rev-parse", "HEAD"]),
+        source_submodule_head,
+        "the active submodule commit is unchanged"
+    );
+    let changed_head = run_copy(&source, &metadata_destination, "0", &git_trace);
+    assert_eq!(changed_head.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&changed_head.stderr).contains("E2100"));
+    git_output(
+        &metadata_submodule,
+        &["symbolic-ref", "HEAD", "refs/heads/main"],
+    );
+    git_output(
+        &metadata_submodule,
+        &["update-ref", "-d", "refs/heads/alternate"],
+    );
+
+    let shared_index = String::from_utf8(git_output(
+        &metadata_submodule,
+        &["rev-parse", "--shared-index-path"],
+    ))
+    .unwrap();
+    assert!(!shared_index.trim().is_empty(), "source uses a split index");
+    let shared_index = Path::new(shared_index.trim());
+    let shared_index = if shared_index.is_absolute() {
+        shared_index.to_path_buf()
+    } else {
+        metadata_submodule.join(shared_index)
+    };
+    let original_shared_index = fs::read(&shared_index).unwrap();
+    let changed_shared_index = [original_shared_index.as_slice(), b"changed"].concat();
+    fs::write(&shared_index, &changed_shared_index).unwrap();
+    let changed_split_index = run_copy(&source, &metadata_destination, "0", &git_trace);
+    assert_eq!(changed_split_index.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&changed_split_index.stderr).contains("E2100"));
+    assert_eq!(fs::read(&shared_index).unwrap(), changed_shared_index);
     let conflict = run_copy(&source, &destination, "1", &git_trace);
     assert_eq!(conflict.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("E2100"));
