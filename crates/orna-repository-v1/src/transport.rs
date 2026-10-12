@@ -269,13 +269,11 @@ impl Repository {
     /// Publishes the continuity refs [`Repository::ordinary_push_refs`] selects
     /// together with one ordinary branch ref.
     ///
-    /// The selected continuity refs are transferred by pushing `refs/orna/*`
-    /// directly, so the remote and the local repository agree on each ref by
-    /// name. Every selected continuity ref must already match on the remote:
-    /// a ref that the remote is missing or names with a different object ID is
-    /// refused as a conflict instead of being republished under a different
-    /// reachability, which is the rule a later fetch revalidates
-    /// (`ORNA-GIT-008`).
+    /// The allocator advances to the published branch only when that branch
+    /// contains its current watermark. Consumer checkpoints retain their own
+    /// independently synchronized positions; ordinary push must not claim
+    /// consumption that did not occur. Missing or divergent continuity refs
+    /// are refused (`ORNA-GIT-008`).
     pub fn push_ordinary_with_local_continuity(
         &self,
         remote: impl Into<String>,
@@ -287,26 +285,64 @@ impl Repository {
             return Err(FetchError::InvalidRemote);
         }
         let _lock = self.acquire_coordination_lock()?;
+        // Publication recovery owns the exact ref/index/worktree generation
+        // recorded in its journal. Validate under this lock through ref transfer,
+        // preventing a journal from appearing between validation and push.
+        self.require_no_pending_publication_recovery_locked()?;
+        #[cfg(test)]
+        tests::pause_push_after_journal_validation();
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_head =
+            local_ref_oid(self, &branch_ref)?.ok_or(FetchError::RequestedRefMissing)?;
         let selected = self.ordinary_push_refs()?;
         let mut continuity = Vec::with_capacity(selected.len());
-        for (reference, object_id) in selected {
-            if object_id.len() != self.native_object_id_length()? {
+        let mut ref_plans = Vec::with_capacity(selected.len());
+        for (reference, local_id) in selected {
+            if local_id.len() != self.native_object_id_length()? {
                 return Err(FetchError::InvalidContinuity);
             }
+            let reference_name = reference.as_str().to_owned();
             let advertised = advertise(
                 self,
                 &remote,
-                std::slice::from_ref(&reference.as_str().to_owned()),
-                object_id.len(),
+                std::slice::from_ref(&reference_name),
+                local_id.len(),
             )?;
-            match advertised.get(reference.as_str()) {
-                Some(remote_id) if remote_id.eq_ignore_ascii_case(&object_id) => {}
-                _ => return Err(FetchError::RefConflict),
+            let remote_id = advertised
+                .get(&reference_name)
+                .ok_or(FetchError::RefConflict)?;
+            let remote_ahead = is_fast_forward(self, &local_id, remote_id)?;
+            let local_ahead = is_fast_forward(self, remote_id, &local_id)?;
+            if !remote_ahead && !local_ahead {
+                return Err(FetchError::RefConflict);
             }
+            let mut target_id = if remote_ahead {
+                remote_id.clone()
+            } else {
+                local_id.clone()
+            };
+            if reference_name == ALLOCATOR_REF {
+                if is_fast_forward(self, &target_id, &branch_head)? {
+                    target_id.clone_from(&branch_head);
+                } else if !is_fast_forward(self, &branch_head, &target_id)? {
+                    return Err(FetchError::RefConflict);
+                }
+            }
+            ref_plans.push(RefPlan {
+                source: reference_name.clone(),
+                destination: reference_name,
+                object_id: target_id.clone(),
+                old: Some(local_id.clone()),
+                kind: RefKind::Internal,
+                updated: target_id != local_id,
+            });
             continuity.push(reference);
         }
+        self.preflight_atomic(&remote, &branch_ref, &branch_head)?;
+        install_refs(self, &ref_plans)?;
+        sync_fetched_ref_directories(self, &ref_plans)?;
         let request = PushRequest::new(remote, branch, continuity)?;
-        self.push_locked(&request)
+        self.push_locked_at(&request, &branch_head)
     }
 }
 
@@ -793,11 +829,19 @@ impl Repository {
     /// branch update cannot become visible before its allocation watermark.
     pub fn push(&self, request: &PushRequest) -> Result<(), FetchError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_publication_recovery_locked()?;
         self.push_locked(request)
     }
 
     /// Pushes with the repository coordination lock already held.
     fn push_locked(&self, request: &PushRequest) -> Result<(), FetchError> {
+        let branch_ref = format!("refs/heads/{}", request.branch());
+        let branch_head =
+            local_ref_oid(self, &branch_ref)?.ok_or(FetchError::RequestedRefMissing)?;
+        self.push_locked_at(request, &branch_head)
+    }
+
+    fn push_locked_at(&self, request: &PushRequest, branch_head: &str) -> Result<(), FetchError> {
         if !self
             .remote_names()?
             .iter()
@@ -808,15 +852,19 @@ impl Repository {
         let branch_ref = format!("refs/heads/{}", request.branch());
         let mut internal = request.internal.clone();
         internal.sort_by_key(|reference| if reference == ALLOCATOR_REF { 0 } else { 1 });
-        let mut ordered = internal
-            .into_iter()
-            .map(|reference| format!("{reference}:{reference}"))
-            .collect::<Vec<_>>();
-        ordered.push(format!("{branch_ref}:{branch_ref}"));
-        self.preflight_atomic(request.remote(), &branch_ref)?;
-        let allocator = ordered
-            .iter()
-            .position(|refspec| refspec == &format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}"));
+        let mut ordered = Vec::with_capacity(internal.len().saturating_add(1));
+        for reference in internal {
+            let object_id =
+                local_ref_oid(self, &reference)?.ok_or(FetchError::InvalidContinuity)?;
+            ordered.push(format!("{object_id}:{reference}"));
+        }
+        ordered.push(format!("{branch_head}:{branch_ref}"));
+        self.preflight_atomic(request.remote(), &branch_ref, branch_head)?;
+        let allocator = ordered.iter().position(|refspec| {
+            refspec
+                .split_once(':')
+                .is_some_and(|(_, reference)| reference == ALLOCATOR_REF)
+        });
         if let Some(index) = allocator {
             let allocator_ref = ordered.remove(index);
             self.push_refspecs(
@@ -828,8 +876,13 @@ impl Repository {
         self.push_refspecs(request.remote(), &ordered, true)
     }
 
-    fn preflight_atomic(&self, remote: &str, branch_ref: &str) -> Result<(), FetchError> {
-        let branch_refspec = format!("{branch_ref}:{branch_ref}");
+    fn preflight_atomic(
+        &self,
+        remote: &str,
+        branch_ref: &str,
+        branch_head: &str,
+    ) -> Result<(), FetchError> {
+        let branch_refspec = format!("{branch_head}:{branch_ref}");
         let mut command = self.observer_command();
         command.args([
             "push",
@@ -840,9 +893,7 @@ impl Repository {
             remote,
             &branch_refspec,
         ]);
-        command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.stdout(Stdio::null()).stderr(Stdio::null());
         command
             .status()
             .map_err(|_| FetchError::RemoteUnavailable)?
@@ -1435,7 +1486,26 @@ fn valid_fetch_full_ref(reference: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::Path, process::Command};
+    use std::{
+        fs,
+        path::Path,
+        process::Command,
+        sync::{Arc, Barrier, Mutex},
+        thread,
+    };
+
+    static PUSH_LOCK_GATE: Mutex<Option<Arc<(Barrier, Barrier)>>> = Mutex::new(None);
+
+    pub(super) fn pause_push_after_journal_validation() {
+        let gate = PUSH_LOCK_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.0.wait();
+            gate.1.wait();
+        }
+    }
 
     fn git(directory: &Path, arguments: &[&str]) -> String {
         let output = Command::new("git")
@@ -1772,6 +1842,176 @@ mod tests {
             "continuity refs are selected and no private pin ref is exposed"
         );
         assert_eq!(selected[0].1, head, "each ref keeps its own object ID");
+    }
+
+    #[test]
+    fn ordinary_push_fences_journal_and_serializes_continuity_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        let remote = root.path().join("remote.git");
+        fs::create_dir(&local).unwrap();
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(&local, &["init", "-b", "main"]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("state.txt"), "initial\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "initial"]);
+        let first = git(&local, &["rev-parse", "HEAD"]);
+        git(&local, &["update-ref", ALLOCATOR_REF, &first]);
+        git(
+            &local,
+            &[
+                "update-ref",
+                "refs/orna/pins/0123456789abcdef/scratch/row-1",
+                &first,
+            ],
+        );
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&local, &["push", "origin", "main"]);
+        git(
+            &local,
+            &[
+                "push",
+                "origin",
+                &format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}"),
+            ],
+        );
+        fs::write(local.join("state.txt"), "next\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "next"]);
+
+        let repository = Repository::discover(&local).unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let journal = crate::PublicationJournal::new_with_index_tree(
+            head.clone(),
+            head,
+            index.tree().unwrap().clone(),
+            vec![crate::PublicationJournalEntry::new(
+                crate::ManagedPath::new("state.txt").unwrap(),
+                Some(b"next\n".to_vec()),
+                Some(b"published candidate\n".to_vec()),
+            )],
+        )
+        .unwrap();
+
+        repository.write_publication_journal(&journal).unwrap();
+        let direct_request =
+            PushRequest::new("origin", "main", std::iter::empty::<OrnaInternalRef>()).unwrap();
+        assert!(matches!(
+            repository.push(&direct_request),
+            Err(FetchError::Repository(RepositoryError::PublicationPending))
+        ));
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), first);
+        assert!(matches!(
+            repository.push_ordinary_with_local_continuity("origin", "main"),
+            Err(FetchError::Repository(RepositoryError::PublicationPending))
+        ));
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), first);
+        repository.clear_publication_journal().unwrap();
+
+        let gate = Arc::new((Barrier::new(2), Barrier::new(2)));
+        *PUSH_LOCK_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate.clone());
+        let local_for_push = local.clone();
+        let push = thread::spawn(move || {
+            Repository::discover(local_for_push)
+                .unwrap()
+                .push_ordinary_with_local_continuity("origin", "main")
+        });
+        gate.0.wait();
+        let journal_write_during_push = repository.write_publication_journal(&journal);
+        gate.1.wait();
+        let push_result = push.join().unwrap();
+        *PUSH_LOCK_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
+        assert!(matches!(
+            journal_write_during_push,
+            Err(RepositoryError::RepositoryBusy)
+        ));
+        push_result.unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/main"]),
+            git(&local, &["rev-parse", "HEAD"]),
+            "the branch update is part of the synchronized push"
+        );
+        assert_eq!(
+            git(&remote, &["rev-parse", ALLOCATOR_REF]),
+            git(&remote, &["rev-parse", "refs/heads/main"]),
+            "the allocator advances only to the branch it publishes"
+        );
+        assert_eq!(
+            Command::new("git")
+                .current_dir(&remote)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/orna/pins/0123456789abcdef/scratch/row-1",
+                ])
+                .status()
+                .unwrap()
+                .code(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn ordinary_push_refuses_divergent_allocator_without_advancing_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        let remote = root.path().join("remote.git");
+        fs::create_dir(&local).unwrap();
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(&local, &["init", "-b", "main"]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("state.txt"), "initial\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "initial"]);
+        let initial = git(&local, &["rev-parse", "HEAD"]);
+        git(&local, &["update-ref", ALLOCATOR_REF, &initial]);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&local, &["push", "origin", "main"]);
+        let allocator_refspec = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
+        git(&local, &["push", "origin", &allocator_refspec]);
+
+        git(&local, &["checkout", "-b", "divergent"]);
+        fs::write(local.join("state.txt"), "remote divergence\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "divergent allocator"]);
+        let divergent = git(&local, &["rev-parse", "HEAD"]);
+        let divergent_refspec = format!("{divergent}:{ALLOCATOR_REF}");
+        git(&local, &["push", "origin", &divergent_refspec]);
+
+        git(&local, &["checkout", "main"]);
+        fs::write(local.join("state.txt"), "local branch advance\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "local branch advance"]);
+        let local_head = git(&local, &["rev-parse", "HEAD"]);
+
+        let repository = Repository::discover(&local).unwrap();
+        assert!(matches!(
+            repository.push_ordinary_with_local_continuity("origin", "main"),
+            Err(FetchError::RefConflict)
+        ));
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), initial);
+        assert_eq!(git(&remote, &["rev-parse", ALLOCATOR_REF]), divergent);
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]), local_head);
+        assert_eq!(git(&local, &["rev-parse", ALLOCATOR_REF]), initial);
     }
 
     #[test]

@@ -132,6 +132,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     assert_eq!(contextual_blob.media_type(), "application/octet-stream");
     assert_eq!(contextual_blob.suffix(), None);
     assert_eq!(resolver_bytes_read.load(Ordering::Relaxed), 0);
+
     let row_value = contextual_value
         .with_blob_annotation(annotated_blob.media_type(), annotated_blob.suffix())
         .unwrap();
@@ -146,6 +147,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     );
     assert!(!row_blob.is_hydrated());
     assert_eq!(resolver_bytes_read.load(Ordering::Relaxed), 0);
+
     let binding = bindings.accept_captured_blob_for_row(&row_value).unwrap();
     assert_eq!(resolver_bytes_read.load(Ordering::Relaxed), 0);
     // ROV-3 stores the descriptor, not a read-capable reference. The original

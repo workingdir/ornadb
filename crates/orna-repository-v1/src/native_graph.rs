@@ -1827,12 +1827,15 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
     ) -> Result<(), GraphError> {
         scope.authorize(self)?;
-        let persisted_row = self.lookup_row(row.key(), scope)?;
-        if row.version().database_id() != &self.database_id
-            || row.version().store_root() != &self.store_root
-            || row.version().schema().schema_digest() != &self.schema_digest
-            || persisted_row.as_ref() != Some(row)
+        let version = row.version();
+        if version.database_id() != &self.database_id
+            || version.relation_id() != self.row_snapshot.version().relation_id()
+            || version.store_root() != &self.store_root
+            || version.schema().schema_digest() != &self.schema_digest
         {
+            return Err(GraphError::ContextMismatch);
+        }
+        if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
             return Err(GraphError::ContextMismatch);
         }
         Ok(())
@@ -1984,10 +1987,10 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
     ) -> Result<VerifiedBlobRange, GraphError> {
         scope.authorize(self)?;
-        if !reference.matches_context(self)
-            || range.start > range.end
-            || range.end > reference.identity.length()
-        {
+        if !reference.matches_context(self) {
+            return Err(GraphError::ContextMismatch);
+        }
+        if range.start > range.end || range.end > reference.identity.length() {
             return Err(GraphError::InvalidRange);
         }
         let requested_len = range.end - range.start;
@@ -7629,6 +7632,39 @@ mod persisted_orp_tests {
         let first = graph
             .maintain_row_index(&first_mutation, &scope)
             .expect("mutate first relation natively");
+
+        let first_only_root = graph
+            .maintain_relations_rows(&[(&first_version, &first)], &scope)
+            .expect("publish first relation without rewriting the second");
+        let untouched_second = load_format3_row_map(
+            &graph.repository,
+            algorithm,
+            first_only_root,
+            *original.database_id(),
+            graph.snapshot_id,
+            second_relation,
+        )
+        .expect("load untouched second relation from successor StoreRoot");
+        assert_eq!(
+            untouched_second.version().schema().schema_oid(),
+            second_version.schema().schema_oid()
+        );
+        assert_eq!(
+            untouched_second.version().schema().schema_digest(),
+            second_version.schema().schema_digest()
+        );
+        assert_eq!(
+            untouched_second.version().primary_root(),
+            second_version.primary_root()
+        );
+        assert_eq!(
+            untouched_second.version().generation(),
+            second_version.generation()
+        );
+        assert_eq!(
+            untouched_second.version().row_count(),
+            second_version.row_count()
+        );
         graph.row_snapshot = second_snapshot;
         let second_mutation = [RowIndexMutation::Insert {
             key: TypedKey::Text("second".to_owned()),
@@ -8321,10 +8357,114 @@ mod persisted_orp_tests {
     }
 
     #[test]
+    fn prior_root_captured_blob_is_rejected_before_later_graph_reads() {
+        let (_directory, graph) = capture_test_context();
+        let capture_scope = graph.open_read_scope().expect("capture scope");
+        let payload = b"captured OGB-2 payload on the earlier StoreRoot";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &capture_scope)
+            .expect("capture native Blob");
+        let pin = graph
+            .protect_captured_blob(candidate, &capture_scope)
+            .expect("protect captured Blob");
+        let binding = graph
+            .accept_protected_blob_pin(pin)
+            .expect("admit captured descriptor");
+        let descriptor_oid = binding.descriptor_oid().clone();
+        let mut encoded_fields = vec![0x81];
+        encoded_fields.extend_from_slice(binding.encoded_value());
+        let blob_value = RowValue::decode_canonical_fields(encoded_fields)
+            .expect("decode canonical captured Blob value");
+
+        let source_version = graph.row_snapshot.version().clone();
+        let source_snapshot_id = [0x39; 32];
+        let row_key = TypedKey::Text("captured".to_owned());
+        let source_store_root = graph
+            .maintain_relation_rows(
+                &source_version,
+                &[RowIndexMutation::Insert {
+                    key: row_key.clone(),
+                    value: blob_value,
+                }],
+                &capture_scope,
+            )
+            .expect("write captured row under the source root");
+        let source_rows = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            source_store_root.clone(),
+            graph.database_id,
+            source_snapshot_id,
+            *source_version.relation_id(),
+        )
+        .expect("load source-root row map");
+        let source_graph = NativeGraphContext::issue(
+            graph.repository.clone(),
+            graph.repository_id,
+            [0x41; 32],
+            graph.database_id,
+            graph.owner_id,
+            source_snapshot_id,
+            graph.algorithm,
+            source_store_root,
+            graph.schema_digest,
+            source_rows,
+        )
+        .expect("issue source-root graph");
+        let source_scope = source_graph.open_read_scope().expect("source read scope");
+        let old_row = source_graph
+            .lookup_row(&row_key, &source_scope)
+            .expect("read captured source row")
+            .expect("captured source row exists");
+
+        let later_snapshot_id = [0x40; 32];
+        let later_store_root = source_graph
+            .maintain_relation_rows(
+                source_graph.row_snapshot.version(),
+                &[RowIndexMutation::Insert {
+                    key: TypedKey::Text("later".to_owned()),
+                    value: RowValue::decode_canonical_fields(vec![0x80])
+                        .expect("canonical empty later row"),
+                }],
+                &source_scope,
+            )
+            .expect("write a valid later StoreRoot");
+        let later_rows = load_format3_row_map(
+            &source_graph.repository,
+            source_graph.algorithm,
+            later_store_root.clone(),
+            source_graph.database_id,
+            later_snapshot_id,
+            *source_graph.row_snapshot.version().relation_id(),
+        )
+        .expect("load later-root row map");
+        let later_graph = NativeGraphContext::issue(
+            source_graph.repository.clone(),
+            source_graph.repository_id,
+            [0x42; 32],
+            source_graph.database_id,
+            source_graph.owner_id,
+            later_snapshot_id,
+            source_graph.algorithm,
+            later_store_root,
+            source_graph.schema_digest,
+            later_rows,
+        )
+        .expect("issue valid later-root graph");
+        let later_scope = later_graph.open_read_scope().expect("later read scope");
+
+        assert!(matches!(
+            later_graph.resolve_row_node(&old_row, &descriptor_oid, &later_scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(later_scope.objects_read(), 0);
+        assert_eq!(later_scope.payload_bytes_read(), 0);
+    }
+    #[test]
     fn requested_range_verifies_only_intersecting_real_media_chunks() {
         let (_directory, graph) = capture_test_context();
         let scope = graph.open_read_scope().expect("capture scope");
-        let wave = include_bytes!("../../orna-cli-v1/tests/fixtures/media/tone.wav");
+        let wave = include_bytes!("../tests/fixtures/media/tone.wav");
         assert_eq!(&wave[..4], b"RIFF");
         assert_eq!(&wave[8..12], b"WAVE");
         let mut payload = wave.to_vec();
@@ -8358,6 +8498,17 @@ mod persisted_orp_tests {
             .expect("read pinned media descriptor");
         let reference = graph.admit_blob(descriptor).expect("bind media descriptor");
         let selected = spans[0].length()..spans[0].length() + 32;
+        let stale_reference = AdmittedBlobReference {
+            snapshot_id: [0xff; 32],
+            ..reference.clone()
+        };
+        let stale_scope = graph.open_read_scope().expect("stale range scope");
+        assert!(matches!(
+            graph.read_blob_range(&stale_reference, selected.clone(), &stale_scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(stale_scope.objects_read(), 0);
+        assert_eq!(stale_scope.payload_bytes_read(), 0);
         let range_scope = graph.open_read_scope().expect("range scope");
         let before_objects = range_scope.objects_read();
         let result = graph

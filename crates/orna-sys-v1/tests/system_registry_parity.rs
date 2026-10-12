@@ -444,7 +444,7 @@ fn dispatch_metadata_schema_covers_nullable_roles_and_rejects_unknown_or_invalid
         "dispatch operation schema restricts effects to the ABI vocabulary"
     );
 
-    let mut invalid_failure = registry;
+    let mut invalid_failure = registry.clone();
     let operation = invalid_failure["operations"]
         .as_array_mut()
         .unwrap()
@@ -457,6 +457,24 @@ fn dispatch_metadata_schema_covers_nullable_roles_and_rejects_unknown_or_invalid
             .unwrap_err()
             .contains("invalid sys failure code"),
         "dispatch schema restricts operation failures to the sys vocabulary"
+    );
+    let mut empty_contract = registry;
+    let annotate = empty_contract["operations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|operation| operation["name"] == "sys.blob.annotate")
+        .expect("Blob annotation operation has generated contract metadata");
+    annotate["contract"] = Value::String(String::new());
+    let invalid_contract_json = empty_contract.to_string();
+    assert!(
+        build_host::validate_json_against_schema(&invalid_contract_json, schema_json).is_err(),
+        "generated provider schema rejects empty semantic contracts"
+    );
+    assert_eq!(
+        SystemProviderAbi::from_json(&invalid_contract_json),
+        Err(orna_sys_v1::ProviderAbiError::InvalidJson),
+        "typed dispatch rejects the same empty contract"
     );
 }
 

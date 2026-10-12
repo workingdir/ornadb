@@ -131,7 +131,10 @@ fn export_check_and_restore_carry_one_snapshot_offline() {
 
     // The checked-out code is the snapshot's own source, read from the copy.
     let source = std::fs::read_to_string(restored.join("main.orna")).unwrap();
-    assert_eq!(source, "capture test schema");
+    assert_eq!(
+        source,
+        std::fs::read_to_string(project.join("main.orna")).unwrap()
+    );
 }
 
 #[test]
@@ -217,6 +220,370 @@ fn committed_rows(
             &scope,
         )
         .expect("read the committed rows")
+}
+
+/// Commits an empty format-3 relation with an explicit secondary map, then
+/// installs a replace ref that points at the prior snapshot. Snapshot export
+/// must follow the pinned commit's real object graph rather than the overlay.
+fn commit_snapshot_with_secondary_root(
+    project: &Path,
+    relation_id: [u8; 16],
+) -> (String, String, String) {
+    let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
+    let schema_source = std::fs::read(project.join("main.orna")).unwrap();
+    let schema_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+
+    let chunk_oid = git_object(project, "blob", &schema_source);
+    let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
+    append_cbor_head(&mut byte_index, 0, schema_source.len());
+    byte_index.extend_from_slice(&[0x81, 0x83]);
+    append_cbor_head(&mut byte_index, 0, schema_source.len());
+    append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
+    append_cbor_bytes(&mut byte_index, &schema_digest);
+    let byte_index_oid = native_fixture_node(project, &byte_index, &[(chunk_oid.as_str(), "blob")]);
+
+    let mut schema = vec![0x85, 0x01, 0x06];
+    append_cbor_head(&mut schema, 0, schema_source.len());
+    append_cbor_bytes(&mut schema, &schema_digest);
+    append_cbor_bytes(&mut schema, &git_oid_bytes(&byte_index_oid));
+    let schema_oid = native_fixture_node(project, &schema, &[(byte_index_oid.as_str(), "tree")]);
+
+    let mut primary_domain = vec![0x83, 0x64];
+    primary_domain.extend_from_slice(b"rows");
+    append_cbor_bytes(&mut primary_domain, &relation_id);
+    append_cbor_bytes(&mut primary_domain, &schema_digest);
+    let mut primary_data = vec![0x84, 0x01, 0x01];
+    primary_data.extend_from_slice(&primary_domain);
+    primary_data.push(0x80);
+    let primary_root = native_fixture_node(project, &primary_data, &[]);
+
+    let mut secondary_domain = vec![0x83, 0x69];
+    secondary_domain.extend_from_slice(b"secondary");
+    append_cbor_bytes(&mut secondary_domain, &relation_id);
+    append_cbor_bytes(&mut secondary_domain, &schema_digest);
+    let mut secondary_data = vec![0x84, 0x01, 0x01];
+    secondary_data.extend_from_slice(&secondary_domain);
+    secondary_data.push(0x80);
+    let secondary_root = native_fixture_node(project, &secondary_data, &[]);
+
+    let mut relation_domain = vec![0x82, 0x69];
+    relation_domain.extend_from_slice(b"relations");
+    append_cbor_bytes(&mut relation_domain, &database_id);
+    let mut relation_map = vec![0x84, 0x01, 0x01];
+    relation_map.extend_from_slice(&relation_domain);
+    relation_map.extend_from_slice(&[0x81, 0x82]);
+    append_cbor_bytes(&mut relation_map, &relation_id);
+    relation_map.push(0x84);
+    for oid in [&schema_oid, &primary_root, &secondary_root] {
+        append_cbor_bytes(&mut relation_map, &git_oid_bytes(oid));
+    }
+    relation_map.push(0x00);
+    let relation_map_oid = native_fixture_node(
+        project,
+        &relation_map,
+        &[
+            (schema_oid.as_str(), "tree"),
+            (primary_root.as_str(), "tree"),
+            (secondary_root.as_str(), "tree"),
+        ],
+    );
+
+    let mut store_data = vec![0x83, 0x01, 0x00];
+    append_cbor_bytes(&mut store_data, &git_oid_bytes(&relation_map_oid));
+    let store_root =
+        native_fixture_node(project, &store_data, &[(relation_map_oid.as_str(), "tree")]);
+    let database = std::fs::read(project.join(".orna/database.orna")).unwrap();
+    let database_oid = git_object(project, "blob", &database);
+    let source_oid = git_object(project, "blob", &schema_source);
+    let orna_tree = git_tree(
+        project,
+        &format!("100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_root}\tstore\n"),
+    );
+    let root_tree = git_tree(
+        project,
+        &format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"),
+    );
+    let parent = String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let snapshot = String::from_utf8(git_output(
+        project,
+        &[
+            "commit-tree",
+            &root_tree,
+            "-p",
+            &parent,
+            "-m",
+            "secondary map fixture",
+        ],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let head_ref = String::from_utf8(git_output(project, &["symbolic-ref", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(project, &["update-ref", &head_ref, &snapshot]);
+    let replacement_ref = format!("refs/replace/{snapshot}");
+    git(project, &["update-ref", &replacement_ref, &parent]);
+
+    (snapshot, store_root, secondary_root)
+}
+
+#[test]
+fn complete_copy_preserves_secondary_native_roots_after_source_removal() {
+    let (root, repository, relation_id) = empty_format3_repository();
+    let source = root.path();
+    let source_path = source.to_path_buf();
+    let (snapshot, store_root, secondary_root) =
+        commit_snapshot_with_secondary_root(source, relation_id);
+
+    let replaced_store = format!("{snapshot}:.orna/store");
+    assert_ne!(
+        String::from_utf8(git_output(source, &["rev-parse", &replaced_store], None))
+            .unwrap()
+            .trim(),
+        store_root,
+        "the fixture's replace ref redirects ordinary Git walks away from the secondary root"
+    );
+
+    git(
+        source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "file:///unavailable/original.git",
+        ],
+    );
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("secondary-root-archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(source, &["export", archive_path, "--at", &snapshot]);
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export failed: {}",
+        stderr(&exported)
+    );
+
+    drop(repository);
+    drop(root);
+    assert!(
+        !source_path.exists(),
+        "the source repository is gone before restore"
+    );
+
+    let restored = outside.path().join("secondary-root-restored");
+    let restored_path = restored.to_str().unwrap();
+    let reconstructed = run(
+        outside.path(),
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored_path,
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&reconstructed)
+    );
+
+    let head = String::from_utf8(git_output(&restored, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(head, snapshot, "the copy restores the pinned commit");
+    let copied_store = format!("{snapshot}:.orna/store");
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["rev-parse", &copied_store], None))
+            .unwrap()
+            .trim(),
+        store_root,
+        "the committed store root is unchanged"
+    );
+    let secondary_expression = format!("{secondary_root}^{{tree}}");
+    git_output(&restored, &["cat-file", "-e", &secondary_expression], None);
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the reconstructed repository has no remote"
+    );
+
+    let reopened =
+        orna_repository_v1::Repository::discover(&restored).expect("discover the offline copy");
+    let format = reopened
+        .open_format_context()
+        .expect("reopen the pinned format-3 context offline");
+    format
+        .validate_store_root()
+        .expect("validate the copied native store root offline");
+}
+
+#[test]
+fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
+    const DEPENDENCY_PATH: &str = "deps/reference project";
+    const DEPENDENCY_SOURCE: &[u8] = include_bytes!("fixtures/reference-project/main.orna");
+
+    let (root, repository, _) = empty_format3_repository();
+    let source = root.path();
+    let source_path = source.to_path_buf();
+    let dependency_source = TempDir::new().unwrap();
+    let dependency_source_path = dependency_source.path().to_path_buf();
+    git(dependency_source.path(), &["init", "--quiet"]);
+    git(
+        dependency_source.path(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
+    git(
+        dependency_source.path(),
+        &["config", "user.name", "kierandrewett"],
+    );
+    std::fs::write(
+        dependency_source.path().join("main.orna"),
+        DEPENDENCY_SOURCE,
+    )
+    .unwrap();
+    git(dependency_source.path(), &["add", "main.orna"]);
+    git(
+        dependency_source.path(),
+        &["commit", "--quiet", "-m", "checked-in dependency fixture"],
+    );
+    let dependency_commit = String::from_utf8(git_output(
+        dependency_source.path(),
+        &["rev-parse", "HEAD"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let parent = String::from_utf8(git_output(source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(
+        source,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            dependency_source_path.to_str().unwrap(),
+            DEPENDENCY_PATH,
+        ],
+    );
+    git(
+        source,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "pin checked-in dependency fixture",
+        ],
+    );
+    let snapshot = String::from_utf8(git_output(source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(
+        source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "file:///unavailable/superproject.git",
+        ],
+    );
+    git(
+        source,
+        &["update-ref", &format!("refs/replace/{snapshot}"), &parent],
+    );
+    let replaced_gitlinks = git_output(
+        source,
+        &["ls-tree", "-r", "-z", "--full-tree", &snapshot],
+        None,
+    );
+    assert!(
+        replaced_gitlinks
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .all(|entry| !entry.starts_with(b"160000 commit ")),
+        "ordinary tree traversal is redirected by the fixture's replace ref"
+    );
+
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("dependency-archive");
+    let exported = run(
+        source,
+        &["export", archive.to_str().unwrap(), "--at", &snapshot],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export failed: {}",
+        stderr(&exported)
+    );
+
+    drop(repository);
+    drop(root);
+    drop(dependency_source);
+    assert!(!source_path.exists(), "source is gone before restore");
+    assert!(
+        !dependency_source_path.exists(),
+        "the dependency origin is gone before restore"
+    );
+
+    let restored = outside.path().join("restored-dependency");
+    let restored_output = run(
+        outside.path(),
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--restore",
+            restored.to_str().unwrap(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        restored_output.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&restored_output)
+    );
+    let restored_dependency = restored.join(DEPENDENCY_PATH);
+    assert_eq!(
+        String::from_utf8(git_output(
+            &restored_dependency,
+            &["rev-parse", "HEAD"],
+            None,
+        ))
+        .unwrap()
+        .trim(),
+        dependency_commit,
+        "restored gitlink uses the commit pinned by the real snapshot"
+    );
+    assert_eq!(
+        std::fs::read(restored_dependency.join("main.orna")).unwrap(),
+        DEPENDENCY_SOURCE,
+        "the checked-in dependency source is restored without its remote"
+    );
+    assert_eq!(
+        String::from_utf8(git_output(&restored_dependency, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the restored dependency has no remote"
+    );
 }
 
 /// `orna publish` of a database holding an imported media row produces a
@@ -346,6 +713,25 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
         "the newest listed revision is HEAD {head}"
     );
 
+    // Make ordinary Git walks substitute the pre-publication commit. The
+    // exporter must still archive the pinned publication's actual row/blob graph.
+    let replacement_ref = format!("refs/replace/{publication}");
+    git(project, &["update-ref", &replacement_ref, &parent]);
+    let publication_store = format!("{publication}:.orna/store");
+    let parent_store = format!("{parent}:.orna/store");
+    assert_eq!(
+        String::from_utf8(git_output(
+            project,
+            &["rev-parse", &publication_store],
+            None
+        ))
+        .unwrap()
+        .trim(),
+        String::from_utf8(git_output(project, &["rev-parse", &parent_store], None))
+            .unwrap()
+            .trim(),
+        "the fixture's replace ref redirects ordinary Git walks to the empty parent"
+    );
     // Step 3: freeze that publication and reconstruct it somewhere else.
     let outside = TempDir::new().unwrap();
     let archive = outside.path().join("publication-archive");
@@ -360,6 +746,7 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
         "export failed: {}",
         stderr(&exported)
     );
+    let expected_source = std::fs::read_to_string(project.join("main.orna")).unwrap();
     drop(repository);
     drop(root);
     drop(source);
@@ -403,7 +790,7 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
                 None,
             ))
             .unwrap(),
-            "capture test schema",
+            expected_source,
             "each snapshot independently recovers its module source"
         );
         let database = String::from_utf8(git_output(
@@ -605,7 +992,13 @@ fn export_fails_locally_for_a_missing_promisor_object() {
     std::fs::create_dir(&archive).unwrap();
     let exported = run(
         &partial,
-        &["export", archive.to_str().unwrap(), "--at", "HEAD"],
+        &[
+            "--debug",
+            "export",
+            archive.to_str().unwrap(),
+            "--at",
+            "HEAD",
+        ],
     );
     assert_ne!(
         exported.status.code(),
@@ -651,8 +1044,9 @@ fn export_fails_locally_for_a_missing_promisor_object() {
         "offline export must fail"
     );
     assert!(
-        stderr(&offline_export).contains(&oid),
-        "offline diagnostic names missing object {oid}: {}",
+        stderr(&offline_export)
+            .contains("error[E2000]: A required Git object is unavailable offline"),
+        "offline diagnostic names the unavailable Git-object scope: {}",
         stderr(&offline_export)
     );
     assert!(
