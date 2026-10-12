@@ -4539,7 +4539,7 @@ fn valid_stored_blob_reference(payload: &Raw) -> bool {
     };
     int_u64(length).is_ok_and(|length| length < MAX_BLOB_LENGTH)
         && bytes(digest).is_ok_and(|digest| digest.len() == 32)
-        && bytes(oid).is_ok_and(|oid| matches!(oid.len(), 20 | 32))
+        && matches!(oid.len(), 20 | 32)
         && validate_annotation_fields(media_type, suffix, MimeRegistry::mime1()).is_ok()
 }
 
