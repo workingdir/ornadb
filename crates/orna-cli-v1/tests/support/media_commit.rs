@@ -10,7 +10,7 @@ use orna_runtime_v1::{
     TerminalOutcome, WriterLease,
 };
 use orna_storage_v1::LoosePath;
-use orna_value_v1::{Format3Context, Raw};
+use orna_value_v1::Format3Context;
 
 pub async fn commit_capture(
     repository: &Repository,
@@ -119,7 +119,6 @@ pub async fn commit_source_captures(
         let blob_binding = bindings
             .accept_captured_blob_for_row(&value)
             .expect("accept the captured Blob for this row");
-        let size_mib = blob_binding.content_identity().length() as f64 / (1024.0 * 1024.0);
         let admitted = admit_source_row_with_owner_fields(
             &project,
             row.logical_path(),
@@ -127,7 +126,7 @@ pub async fn commit_source_captures(
             &schema,
             format_context,
             vec![("payload".to_owned(), blob_binding)],
-            vec![("size".to_owned(), Raw::Float(size_mib.to_bits()))],
+            vec![],
             [ordinal.wrapping_add(3); 16],
         )
         .expect("admit a source-bound full Object row");
