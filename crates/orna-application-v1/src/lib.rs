@@ -1129,7 +1129,11 @@ impl SourceMutationEffectHandler {
         let next_ordinal = ordinal
             .checked_add(1)
             .ok_or_else(|| ApplicationError::Runtime("source mutation limit reached".into()))?;
-        if self.mutations.iter().any(|existing| existing.id() == mutation.id()) {
+        if self
+            .mutations
+            .iter()
+            .any(|existing| existing.id() == mutation.id())
+        {
             return Err(ApplicationError::InvalidTableMetadata);
         }
         let mutation_id = mutation.id();
