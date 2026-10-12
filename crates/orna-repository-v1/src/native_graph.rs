@@ -1686,10 +1686,7 @@ impl NativeGraphContext {
         max_commits: usize,
         scope: &RepositoryReadScope,
     ) -> Result<Vec<RowRevision>, GraphError> {
-        scope.authorize(self)?;
-        if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
-            return Err(GraphError::ContextMismatch);
-        }
+        self.require_committed_row(row, scope)?;
         let descriptors: Vec<NativeObjectId> = row
             .value()
             .dependencies()
