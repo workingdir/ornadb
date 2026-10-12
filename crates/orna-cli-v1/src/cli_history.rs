@@ -17,8 +17,11 @@
 use super::*;
 
 use orna_repository_v1::{
-    AdmittedRow, FormatContextError, KeyRange, Repository, RepositoryFormatContext, TypedKey,
+    AdmittedRow, FormatContextError, GitCommitRef, KeyRange, Repository, RepositoryFormatContext,
+    TypedKey,
 };
+use orna_runtime_v1::TableObjectId;
+use orna_value_v1::{BlobMetadata, ROV3_BLOB_TAG, Raw, Value};
 
 use std::collections::BTreeMap;
 
@@ -211,7 +214,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             // One guard, one resolution: `pin_snapshot` refuses an ambiguous
             // name before it resolves, so `--at` and `--diff` cannot disagree.
             let (start, format) = pin_snapshot(&repository, path, selector)?;
-            (format, start)
+            (format, start.as_str().to_owned())
         }
         None => {
             let format = repository.open_format_context().map_err(|error| {
@@ -416,7 +419,7 @@ fn pin_snapshot(
     repository: &Repository,
     directory: &str,
     selector: &str,
-) -> Result<(String, RepositoryFormatContext), Diagnostic> {
+) -> Result<(GitCommitRef, RepositoryFormatContext), Diagnostic> {
     if bare_ref_selector_is_ambiguous(
         directory,
         selector,
@@ -441,7 +444,7 @@ fn pin_snapshot(
             };
             history_error(message, format!("{selector:?}: {error:?}"))
         })?;
-    Ok((commit.as_str().to_owned(), format))
+    Ok((commit, format))
 }
 
 /// Only exact matches count. `git for-each-ref <pattern>` matches by prefix, so
@@ -508,40 +511,158 @@ pub(super) fn bare_ref_selector_is_ambiguous(
     Ok(matches > 1)
 }
 
-/// One row's change between the two compared snapshots.
+/// One source-qualified logical field value and its optional Blob annotation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FieldContent {
+    Value(Raw),
+    Blob { length: u64, sha256: [u8; 32] },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BlobAnnotation {
+    media_type: String,
+    suffix: Option<String>,
+    length: u64,
+    sha256: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HistoryField {
+    id: [u8; 16],
+    index: usize,
+    content: FieldContent,
+    annotation: Option<BlobAnnotation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HistoryRow {
+    key: TypedKey,
+    fields: Vec<HistoryField>,
+}
+
+/// One row's change between two pinned snapshots.
 enum RowChange {
-    Added(AdmittedRow),
-    Removed(AdmittedRow),
+    Added(HistoryRow),
+    Removed(HistoryRow),
     Changed {
-        before: AdmittedRow,
-        after: AdmittedRow,
+        before: HistoryRow,
+        after: HistoryRow,
     },
 }
 
-/// The payload-free annotation coordinate of one row: the Blob field
-/// descriptors its own stored tuple carries, separately from the row's value.
-fn annotations_of(row: &AdmittedRow) -> Vec<(usize, serde_json::Value)> {
-    row.blob_fields()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(field, metadata)| {
-            (
-                field,
+fn history_row(
+    row: &AdmittedRow,
+    fields: &orna_repository_v1::AdmittedRowFields,
+) -> Result<HistoryRow, Diagnostic> {
+    let decoded = Value::decode(fields.canonical_fields()).map_err(|error| {
+        history_error(
+            "Canonical row fields could not be decoded",
+            format!("{error:?}"),
+        )
+    })?;
+    let Raw::Array(values) = decoded.raw() else {
+        return Err(history_error(
+            "Canonical row fields are not a tuple",
+            "the admitted source decoder returned a non-array value",
+        ));
+    };
+    if values.len() != fields.fields().len() {
+        return Err(history_error(
+            "Canonical row field count does not match schema",
+            format!(
+                "{} values, {} source fields",
+                values.len(),
+                fields.fields().len()
+            ),
+        ));
+    }
+    let mut result = Vec::with_capacity(values.len());
+    for (index, (value, field)) in values.iter().zip(fields.fields()).enumerate() {
+        let metadata = field.blob_metadata();
+        let content = match metadata {
+            Some(metadata) => {
+                if !matches!(value, Raw::Tag(ROV3_BLOB_TAG, _)) {
+                    return Err(history_error(
+                        "Decoded Blob field is not canonical",
+                        format!(
+                            "source field {} does not contain an ROV-3 value",
+                            hex(field.field_id())
+                        ),
+                    ));
+                }
+                FieldContent::Blob {
+                    length: metadata.length(),
+                    sha256: metadata.sha256(),
+                }
+            }
+            None => FieldContent::Value(value.clone()),
+        };
+        let annotation = metadata.map(|metadata: &BlobMetadata| BlobAnnotation {
+            media_type: metadata.media_type().to_owned(),
+            suffix: metadata.suffix().map(str::to_owned),
+            length: metadata.length(),
+            sha256: metadata.sha256(),
+        });
+        result.push(HistoryField {
+            id: *field.field_id(),
+            index,
+            content,
+            annotation,
+        });
+    }
+    result.sort_by_key(|field| field.id);
+    Ok(HistoryRow {
+        key: row.key().clone(),
+        fields: result,
+    })
+}
+
+fn annotations_of(row: &HistoryRow) -> Vec<serde_json::Value> {
+    row.fields
+        .iter()
+        .filter_map(|field| {
+            field.annotation.as_ref().map(|annotation| {
                 serde_json::json!({
-                    "field": field,
-                    "media_type": metadata.media_type(),
-                    "suffix": metadata.suffix(),
-                    "length": metadata.length(),
-                    "sha256": hex(&metadata.sha256()),
-                }),
-            )
+                    "field": field.index,
+                    "field_id": hex(&field.id),
+                    "media_type": annotation.media_type,
+                    "suffix": annotation.suffix,
+                    "length": annotation.length,
+                    "sha256": hex(&annotation.sha256),
+                })
+            })
         })
         .collect()
 }
 
-/// The stored value the row's own tuple holds, in its canonical encoded form.
-fn encoded_value(row: &AdmittedRow) -> Vec<u8> {
-    row.value().encoded_fields().unwrap_or_default().to_vec()
+fn content_changed(before: &HistoryRow, after: &HistoryRow) -> bool {
+    before
+        .fields
+        .iter()
+        .map(|field| (field.id, &field.content))
+        .ne(after.fields.iter().map(|field| (field.id, &field.content)))
+}
+
+fn annotations_changed(before: &HistoryRow, after: &HistoryRow) -> bool {
+    before
+        .fields
+        .iter()
+        .filter_map(|field| {
+            field
+                .annotation
+                .as_ref()
+                .map(|annotation| (field.id, &annotation.media_type, &annotation.suffix))
+        })
+        .ne(after.fields.iter().filter_map(|field| {
+            field
+                .annotation
+                .as_ref()
+                .map(|annotation| (field.id, &annotation.media_type, &annotation.suffix))
+        }))
+}
+
+fn row_changed(before: &HistoryRow, after: &HistoryRow) -> bool {
+    content_changed(before, after) || annotations_changed(before, after)
 }
 
 /// Reports what changed in one relation between two named snapshots.
@@ -596,10 +717,44 @@ fn run_diff(
             ),
         ));
     }
-    let from_label = format!("{from:?} ({from_commit})");
-    let to_label = format!("{to:?} ({to_commit})");
-    let (before, before_read) = read_relation_rows(&before_format, relation)?;
-    let (after, after_read) = read_relation_rows(&after_format, relation)?;
+    let from_label = format!("{from:?} ({})", from_commit.as_str());
+    let to_label = format!("{to:?} ({})", to_commit.as_str());
+    let before_schema = orna_project_v1::ProjectLoader::default()
+        .resolve_committed_source_table_schema(
+            repository,
+            &from_commit,
+            TableObjectId::new(relation),
+        )
+        .map_err(|error| {
+            history_error(
+                "Source table schema could not be resolved",
+                format!("{from:?}: {error:?}"),
+            )
+        })?;
+    let after_schema = orna_project_v1::ProjectLoader::default()
+        .resolve_committed_source_table_schema(repository, &to_commit, TableObjectId::new(relation))
+        .map_err(|error| {
+            history_error(
+                "Source table schema could not be resolved",
+                format!("{to:?}: {error:?}"),
+            )
+        })?;
+    if before_schema.snapshot_id() != &before_format.snapshot_pin().snapshot_id()
+        || after_schema.snapshot_id() != &after_format.snapshot_pin().snapshot_id()
+    {
+        return Err(history_error(
+            "Source table schema snapshot mismatch",
+            "source bindings must come from the exact history endpoint",
+        ));
+    }
+    let (before, before_read) = read_relation_rows(
+        &before_format,
+        &from_commit,
+        relation,
+        before_schema.binding(),
+    )?;
+    let (after, after_read) =
+        read_relation_rows(&after_format, &to_commit, relation, after_schema.binding())?;
     let payload_bytes_read = before_read.payload_bytes_read + after_read.payload_bytes_read;
     let native_objects_read = before_read.objects_read + after_read.objects_read;
     let changes = compare_rows(before, after);
@@ -658,7 +813,8 @@ struct ReadCost {
 fn read_relation_rows(
     format: &RepositoryFormatContext,
     relation: [u8; 16],
-) -> Result<(BTreeMap<Vec<u8>, AdmittedRow>, ReadCost), Diagnostic> {
+    binding: &orna_repository_v1::CommittedTableBinding,
+) -> Result<(BTreeMap<Vec<u8>, HistoryRow>, ReadCost), Diagnostic> {
     let row_map = format
         .load_row_map(relation)
         .map_err(|error| history_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -668,7 +824,7 @@ fn read_relation_rows(
     let scope = graph
         .open_read_scope()
         .map_err(|error| history_error("Read scope could not be opened", format!("{error:?}")))?;
-    let mut rows: BTreeMap<Vec<u8>, AdmittedRow> = BTreeMap::new();
+    let mut rows: BTreeMap<Vec<u8>, HistoryRow> = BTreeMap::new();
     let mut cursor: Option<TypedKey> = None;
     loop {
         let range = KeyRange::new(cursor.clone(), None, MAX_DIFF_PAGE)
@@ -679,14 +835,19 @@ fn read_relation_rows(
         let read = page.len();
         let mut last = None;
         for row in page {
-            // `KeyRange`'s lower bound is inclusive, so each page re-reads the
-            // boundary row it resumes at; the map insert keys by canonical
-            // bytes and dedupes it, and the cursor still advances a full page.
             last = Some(row.key().clone());
             let key = row.key().canonical_bytes().map_err(|error| {
                 history_error("Row key could not be encoded", format!("{error:?}"))
             })?;
-            rows.insert(key, row);
+            let fields = graph
+                .decode_admitted_row_fields(&row, binding, &scope)
+                .map_err(|error| {
+                    history_error(
+                        "Source-qualified row fields could not be decoded",
+                        format!("{error:?}"),
+                    )
+                })?;
+            rows.insert(key, history_row(&row, &fields)?);
         }
         if read < MAX_DIFF_PAGE {
             return Ok((
@@ -698,7 +859,6 @@ fn read_relation_rows(
             ));
         }
         match last {
-            // A full page with no advance would re-read the same page.
             Some(last) => cursor = Some(last),
             None => {
                 return Ok((
@@ -715,19 +875,17 @@ fn read_relation_rows(
 
 /// Joins the two pinned reads by canonical key into one ordered change list.
 fn compare_rows(
-    before: BTreeMap<Vec<u8>, AdmittedRow>,
-    after: BTreeMap<Vec<u8>, AdmittedRow>,
+    before: BTreeMap<Vec<u8>, HistoryRow>,
+    after: BTreeMap<Vec<u8>, HistoryRow>,
 ) -> Vec<RowChange> {
     let mut changes = Vec::new();
     for (key, old) in &before {
         match after.get(key) {
             None => changes.push(RowChange::Removed(old.clone())),
-            Some(new) if row_identity(old) != row_identity(new) => {
-                changes.push(RowChange::Changed {
-                    before: old.clone(),
-                    after: new.clone(),
-                });
-            }
+            Some(new) if row_changed(old, new) => changes.push(RowChange::Changed {
+                before: old.clone(),
+                after: new.clone(),
+            }),
             Some(_) => {}
         }
     }
@@ -741,9 +899,6 @@ fn compare_rows(
 
 /// What makes two readings of one committed row the same row: the stored value
 /// beside the Blob annotation coordinate its tuple carries.
-fn row_identity(row: &AdmittedRow) -> (Vec<u8>, Vec<(usize, serde_json::Value)>) {
-    (encoded_value(row), annotations_of(row))
-}
 
 /// One change as a JSON object. A `changed` entry separates the two
 /// coordinates so a content move and an annotation move are told apart.
@@ -751,18 +906,18 @@ fn change_json(change: &RowChange) -> serde_json::Value {
     match change {
         RowChange::Added(row) => serde_json::json!({
             "change": "added",
-            "key": render_key(row.key()),
+            "key": render_key(&row.key),
             "annotations": annotations_of(row),
         }),
         RowChange::Removed(row) => serde_json::json!({
             "change": "removed",
-            "key": render_key(row.key()),
+            "key": render_key(&row.key),
             "annotations": annotations_of(row),
         }),
         RowChange::Changed { before, after } => serde_json::json!({
             "change": "changed",
-            "key": render_key(after.key()),
-            "content_changed": encoded_value(before) != encoded_value(after),
+            "key": render_key(&after.key),
+            "content_changed": content_changed(before, after),
             "before": { "annotations": annotations_of(before) },
             "after": { "annotations": annotations_of(after) },
         }),
@@ -773,18 +928,14 @@ fn change_json(change: &RowChange) -> serde_json::Value {
 /// re-annotation is not read as a data change.
 fn human_change(change: &RowChange) -> String {
     match change {
-        RowChange::Added(row) => format!("added   {}", render_key(row.key())),
-        RowChange::Removed(row) => format!("removed {}", render_key(row.key())),
-        RowChange::Changed { before, after } => {
-            let content = encoded_value(before) != encoded_value(after);
-            let annotation = annotations_of(before) != annotations_of(after);
-            format!(
-                "changed {} (content={}, annotation={})",
-                render_key(after.key()),
-                content,
-                annotation,
-            )
-        }
+        RowChange::Added(row) => format!("added   {}", render_key(&row.key)),
+        RowChange::Removed(row) => format!("removed {}", render_key(&row.key)),
+        RowChange::Changed { before, after } => format!(
+            "changed {} (content={}, annotation={})",
+            render_key(&after.key),
+            content_changed(before, after),
+            annotations_changed(before, after),
+        ),
     }
 }
 
