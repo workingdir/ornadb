@@ -458,6 +458,9 @@ impl SystemProviderAbi {
             serde_json::from_str(source).map_err(|_| ProviderAbiError::InvalidJson)?;
         let mut operations = BTreeMap::new();
         for raw_operation in raw.operations {
+            if raw_operation.contract.as_deref().is_some_and(str::is_empty) {
+                return Err(ProviderAbiError::InvalidJson);
+            }
             let id = OperationId::new(raw_operation.name)?;
             let effect = parse_effect(&raw_operation.effect)?;
             let mut failures = raw_operation
