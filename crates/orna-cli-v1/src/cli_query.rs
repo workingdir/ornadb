@@ -656,7 +656,7 @@ fn query_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_options, parse_relation_id, render_key, QueryFormat, DEFAULT_QUERY_LIMIT};
+    use super::{DEFAULT_QUERY_LIMIT, QueryFormat, parse_options, parse_relation_id, render_key};
     use crate::Exit;
     use orna_repository_v1::TypedKey;
 
