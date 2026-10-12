@@ -72,6 +72,7 @@ struct Fixture {
     _root: TempDir,
     worktree: PathBuf,
     remote: PathBuf,
+    initial: String,
 }
 
 impl Fixture {
@@ -124,6 +125,7 @@ impl Fixture {
         Self {
             _root: root,
             worktree,
+            initial,
             remote,
         }
     }
@@ -170,8 +172,8 @@ fn push_publishes_the_branch_and_never_exposes_private_pins() {
     );
     assert_eq!(
         fixture.remote_ref(CHECKPOINT_REF).as_deref(),
-        Some(head.as_str()),
-        "the consumer checkpoint continuity ref must be published"
+        Some(fixture.initial.as_str()),
+        "pushing a branch must not claim an unconsumed checkpoint"
     );
     assert!(
         fixture.remote_ref(PIN_REF).is_none(),
