@@ -1,7 +1,0 @@
-pub table Object(id: Str) {
-    payload: Blob,
-}
-
-pub fn import_image(id: Str, payload: Blob) {
-    Object.insert({ id: id, payload: payload });
-}

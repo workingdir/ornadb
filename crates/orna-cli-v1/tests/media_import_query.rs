@@ -13,18 +13,12 @@ use tempfile::TempDir;
 
 #[path = "support/format3.rs"]
 mod format3;
-#[path = "support/media_commit.rs"]
-mod media_commit;
 use format3::*;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-song.orna"
-);
-const SOURCE_SONG_IMPORT_FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/media/query-import-song.orna"
 );
 const PAGED_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -45,10 +39,6 @@ const LIMIT_SONG_IMPORT_FIXTURE: &str = concat!(
 const IMAGE_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/media/import-image.orna"
-);
-const SOURCE_IMAGE_IMPORT_FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/media/query-import-image.orna"
 );
 const LIMIT_ZERO_SONG_IMPORT_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1456,42 +1446,16 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
         .with_repository_capture_capability(capability);
 
     let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
-    let song_source = std::fs::read_to_string(SOURCE_SONG_IMPORT_FIXTURE).unwrap();
-    media_commit::commit_source_capture(
-        directory.path(),
-        &repository,
-        &state,
-        writer,
-        &mut bindings,
-        &song_source,
-        "import_song",
-        &song,
-        "song",
-        0x70,
-    )
-    .await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
-    let image_source = std::fs::read_to_string(SOURCE_IMAGE_IMPORT_FIXTURE).unwrap();
-    media_commit::commit_source_capture(
-        directory.path(),
-        &repository,
-        &state,
-        writer,
-        &mut bindings,
-        &image_source,
-        "import_image",
-        &image,
-        "image",
-        0x80,
-    )
-    .await;
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
     drop(bindings);
     drop(state);
     let revisions = song_revisions_limited_to(&repository, relation_id, 16);
     assert_eq!(
         revisions.len(),
         1,
-        "the ProjectLoader-produced row is committed into OGS-1 history"
+        "the imported row is committed into OGS-1 history"
     );
 
     let relation = relation_hex(relation_id);
@@ -1899,49 +1863,21 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     // suffix) and one PNG, so the predicate has to discriminate on more than
     // the media type.
     let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
-    let song_source = std::fs::read_to_string(SOURCE_SONG_IMPORT_FIXTURE).unwrap();
-    media_commit::commit_source_capture(
-        directory.path(),
-        &repository,
-        &state,
-        writer,
-        &mut bindings,
-        &song_source,
-        "import_song",
-        &song,
-        "song",
-        0x70,
-    )
-    .await;
+    import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
     let annotated = import_expression(ANNOTATED_SONG_IMPORT_FIXTURE, source.path());
-    media_commit::commit_source_capture(
-        directory.path(),
+    import_media(
         &repository,
         &state,
         writer,
         &mut bindings,
-        &song_source,
-        "import_song",
         &annotated,
         "note",
         0x80,
+        true,
     )
     .await;
     let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
-    let image_source = std::fs::read_to_string(SOURCE_IMAGE_IMPORT_FIXTURE).unwrap();
-    media_commit::commit_source_capture(
-        directory.path(),
-        &repository,
-        &state,
-        writer,
-        &mut bindings,
-        &image_source,
-        "import_image",
-        &image,
-        "image",
-        0x90,
-    )
-    .await;
+    import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x90, true).await;
     drop(bindings);
     drop(state);
 
