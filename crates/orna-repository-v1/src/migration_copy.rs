@@ -29,8 +29,9 @@
 //! publication boundary would reject.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
 
@@ -254,11 +255,16 @@ pub fn prepare_format3_migration(
     let dependency_entries = dependency_entries(source, &source_commit)?;
     let source_root = source.worktree().to_path_buf();
     let root = clone_source_graph(&source_root, destination)?;
-    // The clone checks out no content of its own: every path in the copy is
-    // migrated from the source working tree, including the ones Git ignores.
+    // The graph clone contains committed objects only. Carry the source's
+    // submodule administrative repositories and index separately so the copy
+    // retains independently editable dirty submodules and staged state.
+    copy_submodule_admin(&source_root, &root)?;
     clear_checkout(&root)?;
     copy_working_tree(&source_root, &root)?;
+    copy_index_blobs(&source_root, &root)?;
+    copy_source_index(&source_root, &root)?;
     release_source_ownership(&root)?;
+
     let copy = Repository::discover(&root)?;
     // The copy carries the source's own bytes at this point, including the
     // legacy `.orna` records: a migration must never install new bytes before
@@ -443,13 +449,12 @@ fn clone_source_graph(source_root: &Path, destination: &Path) -> Result<PathBuf,
     Ok(root)
 }
 
-/// Removes the clone's own checkout, leaving its commit graph and index intact.
+/// Removes the clone's checkout while retaining its Git metadata.
 fn clear_checkout(root: &Path) -> Result<(), RepositoryError> {
     let entries = fs::read_dir(root).map_err(|_| RepositoryError::LocalStateUnavailable)?;
     for entry in entries {
         let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let name = entry.file_name();
-        if name == ".git" {
+        if entry.file_name() == ".git" {
             continue;
         }
         let path = entry.path();
@@ -460,6 +465,163 @@ fn clear_checkout(root: &Path) -> Result<(), RepositoryError> {
         } else if metadata.is_dir() {
             fs::remove_dir_all(&path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         }
+    }
+    Ok(())
+}
+
+/// Copies a clone's missing submodule repositories, including each module's
+/// private index and uncommitted objects. Gitfile pointers remain relative to
+/// the matching superproject layout and therefore resolve inside the copy.
+fn copy_submodule_admin(source: &Path, destination: &Path) -> Result<(), RepositoryError> {
+    let source_modules = git_path(source, "modules")?;
+    match fs::symlink_metadata(&source_modules) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        _ => return Err(RepositoryError::UnsafeManagedPath),
+    }
+    let destination_modules = git_path(destination, "modules")?;
+    match fs::symlink_metadata(&destination_modules) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(&destination_modules)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(RepositoryError::UnsafeManagedPath),
+    }
+    copy_entry(&source_modules, &destination_modules)
+}
+
+/// Resolves Git's per-worktree administrative path without assuming `.git` is
+/// a directory in the source or destination worktree.
+fn git_path(root: &Path, name: &str) -> Result<PathBuf, RepositoryError> {
+    let mut command = git_command(root);
+    command.args(["rev-parse", "--path-format=absolute", "--git-path", name]);
+    crate::scrub_git_routing_environment(&mut command);
+    let output = command
+        .output()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    if !output.status.success() {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+    let path = String::from_utf8(output.stdout).map_err(|_| RepositoryError::GitOperationFailed)?;
+    Ok(PathBuf::from(path.trim_end_matches('\n')))
+}
+
+/// Copies every index-referenced file blob absent from the graph clone. A
+/// staged blob is not reachable from the source's committed refs, so clone
+/// alone cannot guarantee that the exact copied index remains readable.
+fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryError> {
+    let mut command = git_command(source);
+    command.args(["ls-files", "--stage", "-z"]);
+    crate::scrub_git_routing_environment(&mut command);
+    let output = command
+        .output()
+        .map_err(|_| RepositoryError::GitUnavailable)?;
+    if !output.status.success() {
+        return Err(RepositoryError::GitOperationFailed);
+    }
+
+    for entry in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let header = entry
+            .split(|byte| *byte == b'\t')
+            .next()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let mut fields = header.split(|byte| *byte == b' ');
+        let mode = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+        let object_id = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+        if !matches!(mode, b"100644" | b"100755" | b"120000") {
+            continue;
+        }
+        if object_id.is_empty() || !object_id.iter().all(u8::is_ascii_hexdigit) {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let object_id =
+            std::str::from_utf8(object_id).map_err(|_| RepositoryError::GitOperationFailed)?;
+
+        let mut exists = git_command(destination);
+        exists
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "-e"])
+            .arg(format!("{object_id}^{{blob}}"));
+        crate::scrub_git_routing_environment(&mut exists);
+        if exists
+            .status()
+            .map_err(|_| RepositoryError::GitUnavailable)?
+            .success()
+        {
+            continue;
+        }
+
+        let mut read = git_command(source);
+        read.env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "blob", object_id])
+            .stdout(Stdio::piped());
+        crate::scrub_git_routing_environment(&mut read);
+        let mut read = read.spawn().map_err(|_| RepositoryError::GitUnavailable)?;
+        let mut write = git_command(destination);
+        write
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        crate::scrub_git_routing_environment(&mut write);
+        let mut write = write.spawn().map_err(|_| RepositoryError::GitUnavailable)?;
+        std::io::copy(
+            &mut read
+                .stdout
+                .take()
+                .ok_or(RepositoryError::GitOperationFailed)?,
+            &mut write
+                .stdin
+                .take()
+                .ok_or(RepositoryError::GitOperationFailed)?,
+        )
+        .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let read_status = read
+            .wait()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let write = write
+            .wait_with_output()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if !read_status.success()
+            || !write.status.success()
+            || crate::trim_output(&write.stdout) != object_id
+        {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+    }
+    Ok(())
+}
+
+/// Installs the source's exact stage entries in the copy, including split-index
+/// backing files. This keeps staged and unstaged versions distinct.
+fn copy_source_index(source: &Path, destination: &Path) -> Result<(), RepositoryError> {
+    let source_index = git_path(source, "index")?;
+    let destination_index = git_path(destination, "index")?;
+    let parent = destination_index
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    fs::create_dir_all(parent).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    fs::copy(&source_index, &destination_index)
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+
+    let source_parent = source_index
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    for entry in fs::read_dir(source_parent).map_err(|_| RepositoryError::LocalStateUnavailable)? {
+        let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("sharedindex.")
+        {
+            continue;
+        }
+        fs::copy(entry.path(), parent.join(entry.file_name()))
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
     }
     Ok(())
 }
@@ -651,28 +813,86 @@ fn dependency_entries(
         .count())
 }
 
-/// Settles the copy's working-tree identity over the whole copied tree.
+/// Settles a stable content identity over every copied path, including ignored
+/// and untracked entries. `.git` metadata is excluded at each repository root;
+/// the file bytes, modes, symlink targets and relative paths remain included.
 fn working_tree_identity(copy: &Repository) -> Result<([u8; 32], usize), RepositoryError> {
-    let head = copy.head()?.ok_or(RepositoryError::UnbornHead)?;
-    let mut command = copy.observer_command();
-    command.args([
-        "diff-index",
-        "--cached",
-        "--unified=0",
-        "--no-color",
-        "-z",
-        head.as_str(),
-    ]);
-    let output = copy.run(command)?;
-    if !output.status.success() {
-        return Err(RepositoryError::GitOperationFailed);
-    }
     let mut hash = Sha256::new();
-    hash.update(b"orna.migration.working-tree-identity.v1\0");
-    hash.update(head.as_str().as_bytes());
-    hash.update([0]);
-    hash.update(&output.stdout);
-    Ok((hash.finalize().into(), output.stdout.len()))
+    hash.update(b"orna.migration.working-tree-identity.v2\0");
+    let mut entries = 0;
+    hash_working_tree(copy.worktree(), Path::new(""), &mut hash, &mut entries)?;
+    Ok((hash.finalize().into(), entries))
+}
+fn hash_working_tree(
+    root: &Path,
+    relative: &Path,
+    hash: &mut Sha256,
+    entry_count: &mut usize,
+) -> Result<(), RepositoryError> {
+    let directory = root.join(relative);
+    let mut entries = fs::read_dir(&directory)
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let child = relative.join(name);
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let file_type = metadata.file_type();
+        if !file_type.is_file() && !file_type.is_dir() && !file_type.is_symlink() {
+            continue;
+        }
+        *entry_count = entry_count
+            .checked_add(1)
+            .ok_or(RepositoryError::LocalStateUnavailable)?;
+        let path_bytes = child.as_os_str().as_encoded_bytes();
+        hash.update((path_bytes.len() as u64).to_be_bytes());
+        hash.update(path_bytes);
+        #[cfg(unix)]
+        hash.update(std::os::unix::fs::MetadataExt::mode(&metadata).to_be_bytes());
+        #[cfg(not(unix))]
+        hash.update([u8::from(metadata.permissions().readonly())]);
+
+        if file_type.is_symlink() {
+            hash.update(b"symlink\0");
+            let target =
+                fs::read_link(entry.path()).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            let target_bytes = target.as_os_str().as_encoded_bytes();
+            hash.update((target_bytes.len() as u64).to_be_bytes());
+            hash.update(target_bytes);
+        } else if file_type.is_dir() {
+            hash.update(b"directory\0");
+            hash_working_tree(root, &child, hash, entry_count)?;
+        } else {
+            hash.update(b"file\0");
+            hash.update(metadata.len().to_be_bytes());
+            let mut file =
+                fs::File::open(entry.path()).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            let mut buffer = [0u8; 64 * 1024];
+            let mut bytes_read = 0u64;
+            loop {
+                let length = file
+                    .read(&mut buffer)
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                if length == 0 {
+                    break;
+                }
+                bytes_read = bytes_read
+                    .checked_add(length as u64)
+                    .ok_or(RepositoryError::LocalStateUnavailable)?;
+                hash.update(&buffer[..length]);
+            }
+            if bytes_read != metadata.len() {
+                return Err(RepositoryError::LocalStateUnavailable);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Builds the copy-local record of the migration coordinates.
