@@ -5,7 +5,7 @@
 //! an admitted native store root and schema.  Until then the boundary remains
 //! an explicit value and no raw row path is an admission API.
 
-use std::{cmp::Ordering, collections::BTreeMap, fmt, sync::Arc};
+use std::{cmp::Ordering, collections::BTreeMap, fmt, ops::Range, sync::Arc};
 
 use sha2::{Digest, Sha256};
 
@@ -897,10 +897,11 @@ impl RowEntry {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RowPage {
+    entries: Arc<[RowEntry]>,
+    range: Range<usize>,
     height: u8,
-    entries: Vec<RowEntry>,
     encoded_size: usize,
     direct_refs: usize,
 }
@@ -909,11 +910,9 @@ impl RowPage {
     pub fn height(&self) -> u8 {
         self.height
     }
-
     pub fn entries(&self) -> &[RowEntry] {
-        &self.entries
+        &self.entries[self.range.clone()]
     }
-
     pub const fn encoded_size(&self) -> usize {
         self.encoded_size
     }
@@ -923,10 +922,21 @@ impl RowPage {
     }
 }
 
+impl PartialEq for RowPage {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries() == other.entries()
+            && self.height == other.height
+            && self.encoded_size == other.encoded_size
+            && self.direct_refs == other.direct_refs
+    }
+}
+
+impl Eq for RowPage {}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrderedRowMap {
     boundary: RowMapBoundary,
-    entries: Vec<RowEntry>,
+    entries: Arc<[RowEntry]>,
     pages: Vec<RowPage>,
 }
 
@@ -994,12 +1004,13 @@ impl RowMapBuilder {
     }
 
     pub fn build(self) -> Result<OrderedRowMap, RowStoreError> {
-        let entries = self
+        let entries: Arc<[RowEntry]> = self
             .entries
             .into_iter()
             .map(|(key, value)| RowEntry::new(key, value))
-            .collect::<Vec<_>>();
-        let pages = partition_pages(&entries, 0)?;
+            .collect::<Vec<_>>()
+            .into();
+        let pages = partition_pages_shared(Arc::clone(&entries), 0)?;
         Ok(OrderedRowMap {
             boundary: self.boundary,
             entries,
@@ -1046,11 +1057,40 @@ pub(crate) fn partition_token_ranges(
     if node_overhead >= NODE_DATA_LIMIT {
         return Err(RowStoreError::EntryTooLarge(node_overhead));
     }
-    let mut ranges = Vec::new();
+    Ok(
+        partition_token_ranges_from_iter(tokens.iter().cloned().map(Ok), height, node_overhead)?
+            .into_iter()
+            .map(|group| group.range)
+            .collect(),
+    )
+}
+
+struct PartitionGroup {
+    range: Range<usize>,
+    encoded_size: usize,
+    direct_refs: usize,
+}
+
+fn partition_token_ranges_from_iter(
+    tokens: impl Iterator<Item = Result<BoundaryToken, RowStoreError>>,
+    height: u8,
+    node_overhead: usize,
+) -> Result<Vec<PartitionGroup>, RowStoreError> {
+    if height > MAX_PAGE_HEIGHT {
+        return Err(RowStoreError::PageHeightExceeded(height));
+    }
+
+    if node_overhead >= NODE_DATA_LIMIT {
+        return Err(RowStoreError::EntryTooLarge(node_overhead));
+    }
+    let mut groups = Vec::new();
     let mut start = 0usize;
+    let mut processed = 0usize;
     let mut size = node_overhead;
     let mut refs = 0usize;
-    for (index, token) in tokens.iter().enumerate() {
+    for (index, token) in tokens.enumerate() {
+        let token = token?;
+        processed = index + 1;
         if token.refs > MAX_REFS {
             return Err(RowStoreError::PageFanoutExceeded(token.refs));
         }
@@ -1067,7 +1107,11 @@ pub(crate) fn partition_token_ranges(
                 || refs + token.refs > MAX_REFS
                 || size + token.size > NODE_DATA_LIMIT)
         {
-            ranges.push(start..index);
+            groups.push(PartitionGroup {
+                range: start..index,
+                encoded_size: size,
+                direct_refs: refs,
+            });
             start = index;
             size = node_overhead;
             refs = 0;
@@ -1078,16 +1122,24 @@ pub(crate) fn partition_token_ranges(
         if count >= MIN_PAGE_ENTRIES
             && (count == MAX_PAGE_ENTRIES || boundary_anchor_bytes(height, &token.key)?)
         {
-            ranges.push(start..index + 1);
+            groups.push(PartitionGroup {
+                range: start..index + 1,
+                encoded_size: size,
+                direct_refs: refs,
+            });
             start = index + 1;
             size = node_overhead;
             refs = 0;
         }
     }
-    if start < tokens.len() {
-        ranges.push(start..tokens.len());
+    if start < processed {
+        groups.push(PartitionGroup {
+            range: start..processed,
+            encoded_size: size,
+            direct_refs: refs,
+        });
     }
-    Ok(ranges)
+    Ok(groups)
 }
 
 /// Encoded node header and domain cost charged to every height-0 page when the
@@ -1218,31 +1270,31 @@ pub(crate) fn partition_pages(
     entries: &[RowEntry],
     height: u8,
 ) -> Result<Vec<RowPage>, RowStoreError> {
-    let mut tokens = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let size = entry_encoded_size(entry)?;
-        tokens.push(BoundaryToken::new(
+    partition_pages_shared(Arc::from(entries.to_vec()), height)
+}
+
+fn partition_pages_shared(
+    entries: Arc<[RowEntry]>,
+    height: u8,
+) -> Result<Vec<RowPage>, RowStoreError> {
+    let tokens = entries.iter().map(|entry| {
+        Ok(BoundaryToken::new(
             entry.key.canonical_bytes()?,
-            size,
+            entry_encoded_size(entry)?,
             entry.value.dependencies().len(),
-        ));
-    }
-    let mut pages = Vec::new();
-    for range in partition_token_ranges(&tokens, height, PAGE_NODE_OVERHEAD)? {
-        let mut encoded_size = PAGE_NODE_OVERHEAD;
-        let mut direct_refs = 0usize;
-        for token in &tokens[range.clone()] {
-            encoded_size += token.size;
-            direct_refs += token.refs;
-        }
-        pages.push(RowPage {
+        ))
+    });
+    let groups = partition_token_ranges_from_iter(tokens, height, PAGE_NODE_OVERHEAD)?;
+    Ok(groups
+        .into_iter()
+        .map(|group| RowPage {
+            entries: Arc::clone(&entries),
+            range: group.range,
             height,
-            entries: entries[range].to_vec(),
-            encoded_size,
-            direct_refs,
-        });
-    }
-    Ok(pages)
+            encoded_size: group.encoded_size,
+            direct_refs: group.direct_refs,
+        })
+        .collect())
 }
 
 fn entry_encoded_size(entry: &RowEntry) -> Result<usize, RowStoreError> {
@@ -1382,8 +1434,10 @@ fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStor
         sha256,
         annotation.media_type(),
         annotation.suffix(),
-        Some(orna_value_v1::NativeOid::from_bytes(descriptor)
-            .map_err(|_| RowStoreError::InvalidCanonicalRowValue)?),
+        Some(
+            orna_value_v1::NativeOid::from_bytes(descriptor)
+                .map_err(|_| RowStoreError::InvalidCanonicalRowValue)?,
+        ),
     ))
 }
 
@@ -1598,6 +1652,31 @@ mod tests {
             .expect("original row remains");
         assert_eq!(row.value().encoded_fields(), Some(&[0x81, 0x01][..]));
     }
+    #[test]
+    fn row_page_equality_uses_only_visible_entries_and_page_metadata() {
+        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
+        let before = RowEntry::new(TypedKey::Text("before".to_owned()), value.clone());
+        let visible = RowEntry::new(TypedKey::Text("visible".to_owned()), value.clone());
+        let after = RowEntry::new(TypedKey::Text("after".to_owned()), value);
+        let left = RowPage {
+            entries: Arc::from(vec![before, visible.clone(), after]),
+            range: 1..2,
+            height: 2,
+            encoded_size: 48,
+            direct_refs: 1,
+        };
+        let right = RowPage {
+            entries: Arc::from(vec![visible]),
+            range: 0..1,
+            height: 2,
+            encoded_size: 48,
+            direct_refs: 1,
+        };
+
+        assert_eq!(left.entries(), right.entries());
+        assert_eq!(left, right);
+    }
+
     #[test]
     fn partition_token_ranges_rejects_heights_above_format_bound() {
         assert_eq!(
