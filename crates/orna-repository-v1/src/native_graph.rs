@@ -20,6 +20,7 @@ use std::{
     },
 };
 
+use fs2::FileExt;
 use orna_value_v1::{BlobMetadata, MediaAnnotation};
 use sha2::{Digest, Sha256};
 
@@ -3827,6 +3828,30 @@ fn algorithm_for_hex(hex: &str) -> Option<GitHashAlgorithm> {
     }
 }
 
+/// RAII handle for the same coordination lock used by repository publishers.
+/// Reconciliation must hold this lock from the journal check through the last
+/// private-ref deletion, otherwise a publisher can journal a root between them.
+struct NativeGraphCoordinationLock {
+    _file: File,
+}
+
+impl NativeGraphCoordinationLock {
+    fn acquire(repository: &crate::Repository) -> Result<Self, GraphError> {
+        let locks = repository.runtime_paths().locks();
+        fs::create_dir_all(&locks).map_err(|_| GraphError::DurabilityFailed)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(locks.join("coordination.lock"))
+            .map_err(|_| GraphError::DurabilityFailed)?;
+        file.try_lock_exclusive()
+            .map_err(|_| GraphError::PublicationNotTerminal)?;
+        Ok(Self { _file: file })
+    }
+}
+
 /// Reclaims a departed runtime owner's private refs after durable runtime
 /// state has been recovered. Accepted pending pins are retained only when the
 /// recovered manifest names both their pin IDs and descriptor OIDs.
@@ -3845,6 +3870,14 @@ pub(crate) fn reclaim_dead_owner_pin_refs(
     dead_owner: [u8; 16],
     accepted_pending: &BTreeMap<[u8; 16], NativeOid>,
 ) -> Result<usize, GraphError> {
+    let _coordination_lock = NativeGraphCoordinationLock::acquire(repository)?;
+    if repository
+        .read_publication_journal_locked()
+        .map_err(|_| GraphError::DurabilityFailed)?
+        .is_some()
+    {
+        return Err(GraphError::PublicationNotTerminal);
+    }
     let owner = PrivateRefCleanupOwner {
         repository: repository.clone(),
     };
@@ -7876,6 +7909,119 @@ mod persisted_orp_tests {
         drop(candidate);
 
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn owner_pin_reclaim_defers_across_publication_journal_interleaving() {
+        let (directory, graph) = capture_test_context();
+        let root = directory.path();
+        let repository = crate::Repository::discover(root).expect("discover capture repository");
+        let scope = graph.open_read_scope().expect("owner read scope");
+
+        let accepted_payload = b"accepted graph pin retained through publication";
+        let accepted_candidate = graph
+            .capture_blob_candidate(&accepted_payload[..], accepted_payload.len() as u64, &scope)
+            .expect("capture accepted payload");
+        let accepted_pin = graph
+            .protect_captured_blob(accepted_candidate, &scope)
+            .expect("protect accepted payload");
+        let accepted_ref = accepted_pin.protected_ref.clone();
+        let accepted_pending = BTreeMap::from([(
+            *accepted_pin.pin_id(),
+            accepted_pin.descriptor_oid.clone(),
+        )]);
+
+        let unaccepted_payload = b"unaccepted graph pin awaiting safe cleanup";
+        let unaccepted_candidate = graph
+            .capture_blob_candidate(&unaccepted_payload[..], unaccepted_payload.len() as u64, &scope)
+            .expect("capture unaccepted payload");
+        let unaccepted_pin = graph
+            .protect_captured_blob(unaccepted_candidate, &scope)
+            .expect("protect unaccepted payload");
+        let unaccepted_ref = unaccepted_pin.protected_ref.clone();
+
+        let commit = |message: &str| {
+            let output = Command::new("git")
+                .current_dir(root)
+                .args([
+                    "-c",
+                    "user.name=kierandrewett",
+                    "-c",
+                    "user.email=kieran@drewett.dev",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                ])
+                .output()
+                .expect("create journal fixture commit");
+            assert!(
+                output.status.success(),
+                "create journal fixture commit: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        commit("journal baseline");
+        let old_head = repository
+            .head()
+            .expect("read journal baseline")
+            .expect("journal baseline commit");
+        commit("journal candidate");
+        let new_head = repository
+            .head()
+            .expect("read journal candidate")
+            .expect("journal candidate commit");
+        let journal = crate::PublicationJournal::new(
+            old_head,
+            new_head,
+            vec![crate::PublicationJournalEntry::new(
+                crate::ManagedPath::new("pending.orna").expect("managed fixture path"),
+                None,
+                Some(b"candidate".to_vec()),
+            )],
+        )
+        .expect("valid publication journal");
+
+        let publication_lock = NativeGraphCoordinationLock::acquire(&repository)
+            .expect("hold publication coordination lock");
+        let worker_repository = repository.clone();
+        let worker_accepted = accepted_pending.clone();
+        let dead_owner = graph.owner_id;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal cleanup attempt");
+            reclaim_dead_owner_pin_refs(&worker_repository, dead_owner, &worker_accepted)
+        });
+        started_rx.recv().expect("cleanup attempt started");
+        assert_eq!(
+            worker.join().expect("join concurrent cleanup"),
+            Err(GraphError::PublicationNotTerminal),
+            "cleanup must defer while a publisher holds the shared lock"
+        );
+
+        repository
+            .write_publication_journal_locked(&journal)
+            .expect("persist journal under the held publication lock");
+        drop(publication_lock);
+
+        assert_eq!(
+            reclaim_dead_owner_pin_refs(&repository, graph.owner_id, &accepted_pending),
+            Err(GraphError::PublicationNotTerminal),
+            "cleanup must recheck the durable journal while holding the lock"
+        );
+        assert!(fixture_ref_exists(root, &accepted_ref));
+        assert!(fixture_ref_exists(root, &unaccepted_ref));
+
+        repository
+            .clear_publication_journal()
+            .expect("clear completed fixture journal");
+        assert_eq!(
+            reclaim_dead_owner_pin_refs(&repository, graph.owner_id, &accepted_pending),
+            Ok(1),
+            "retry removes only the unaccepted pin"
+        );
+        assert!(fixture_ref_exists(root, &accepted_ref));
+        assert!(!fixture_ref_exists(root, &unaccepted_ref));
     }
 
     const KILLED_OWNER_ROOT: &str = "ORNA_DEAD_OWNER_CAPTURE_ROOT";
