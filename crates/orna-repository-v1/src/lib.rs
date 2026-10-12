@@ -229,6 +229,33 @@ impl ManagedFileChange {
     }
 }
 
+/// Ordered row-index operations for one relation in a format-3 publication.
+///
+/// The relation identity is resolved through the captured committed store;
+/// callers cannot provide or substitute native row-map roots.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelationRowMutation {
+    relation_id: [u8; 16],
+    operations: Vec<RowIndexMutation>,
+}
+
+impl RelationRowMutation {
+    pub fn new(relation_id: [u8; 16], operations: Vec<RowIndexMutation>) -> Self {
+        Self {
+            relation_id,
+            operations,
+        }
+    }
+
+    pub const fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub fn operations(&self) -> &[RowIndexMutation] {
+        &self.operations
+    }
+}
+
 /// The Git objects for a candidate publication.  The candidate is private:
 /// building it never changes the ordinary index, worktree, or ref namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2526,6 +2553,77 @@ impl Repository {
         })();
         let _ = fs::remove_file(&index);
         result
+    }
+
+    /// Builds a private format-3 candidate by applying typed relation
+    /// mutations to committed ORP-1 maps and naming the resulting OGS-1 store
+    /// root at `.orna/store`.
+    ///
+    /// Relation schemas and starting roots are loaded from `expected_head`;
+    /// loose worktree rows and the ordinary Git index are not inputs. Every
+    /// relation mutation is checked against its admitted source map before a
+    /// successor store root or candidate commit is returned.
+    pub fn build_private_row_publication_candidate(
+        &self,
+        expected_head: &GitCommitRef,
+        mutations: &[RelationRowMutation],
+        message: &str,
+    ) -> Result<PrivateCommit, RepositoryError> {
+        if mutations.is_empty()
+            || mutations
+                .iter()
+                .any(|mutation| mutation.operations.is_empty())
+            || mutations
+                .iter()
+                .map(|mutation| mutation.relation_id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != mutations.len()
+        {
+            return Err(RepositoryError::NoManagedPaths);
+        }
+        if self.head()?.as_ref() != Some(expected_head) {
+            return Err(RepositoryError::StaleHead);
+        }
+        let snapshot = self
+            .pin_snapshot(expected_head.as_str())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let format = self
+            .open_format_context_at(&snapshot)
+            .map_err(RepositoryError::FormatContext)?;
+
+        let mut row_maps = Vec::with_capacity(mutations.len());
+        let mut graphs = Vec::with_capacity(mutations.len());
+        let mut maintenances = Vec::with_capacity(mutations.len());
+        let mut scopes = Vec::with_capacity(mutations.len());
+        for mutation in mutations {
+            let row_map = format
+                .load_row_map(mutation.relation_id)
+                .map_err(RepositoryError::FormatContext)?;
+            let graph = format
+                .open_native_graph(&row_map)
+                .map_err(RepositoryError::FormatContext)?;
+            let scope = graph.open_read_scope().map_err(RepositoryError::Graph)?;
+            let maintenance = graph
+                .maintain_row_index(&mutation.operations, &scope)
+                .map_err(RepositoryError::Graph)?;
+            row_maps.push(row_map);
+            graphs.push(graph);
+            scopes.push(scope);
+            maintenances.push(maintenance);
+        }
+
+        let relation_candidates = row_maps
+            .iter()
+            .zip(&maintenances)
+            .map(|(row_map, maintenance)| (row_map.version(), maintenance))
+            .collect::<Vec<_>>();
+        let graph = graphs.first().ok_or(RepositoryError::NoManagedPaths)?;
+        let scope = scopes.first().ok_or(RepositoryError::NoManagedPaths)?;
+        let store_root = graph
+            .maintain_relations_rows(&relation_candidates, scope)
+            .map_err(RepositoryError::Graph)?;
+        self.build_frozen_publication_candidate(expected_head, graph, &store_root, message)
     }
 
     /// Advances the symbolic current branch to a previously built private
@@ -7997,6 +8095,8 @@ pub enum RepositoryError {
     /// remains retained and the caller must use the typed compact recovery
     /// boundary to rebuild or reconcile it.
     CompactReconciliationRequired,
+    /// Format-3 snapshot admission failed while preparing a row publication.
+    FormatContext(FormatContextError),
     /// Native graph work failed while building or pinning a publication
     /// candidate. The graph context's own error identity is preserved.
     Graph(GraphError),
@@ -8071,6 +8171,7 @@ impl fmt::Display for RepositoryError {
             Self::CompactReconciliationRequired => {
                 f.write_str("compact publication requires explicit reconciliation")
             }
+            Self::FormatContext(error) => write!(f, "repository format context failed: {error}"),
             Self::Graph(error) => write!(f, "native graph operation failed: {error}"),
             Self::PlatformUnsupported => {
                 f.write_str("atomic Git index replacement is unsupported on this platform")
