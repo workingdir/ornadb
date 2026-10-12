@@ -182,10 +182,7 @@ impl RepositorySnapshotPin {
     /// commits never share an identity, and a repeated open of the same commit
     /// always reproduces it.
     pub fn snapshot_id(&self) -> [u8; 32] {
-        let mut hash = Sha256::new();
-        hash.update(SNAPSHOT_ID_DOMAIN);
-        hash.update(self.commit.as_str().as_bytes());
-        hash.finalize().into()
+        self.commit.snapshot_id()
     }
 
     fn read_file(
@@ -198,6 +195,16 @@ impl RepositorySnapshotPin {
             Some(candidate) => repository.read_private_candidate_file(candidate, path, max_bytes),
             None => repository.read_committed_file(&self.commit, path, max_bytes),
         }
+    }
+}
+
+impl crate::GitCommitRef {
+    /// Canonical logical snapshot identity of this repository-verified commit.
+    pub fn snapshot_id(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(SNAPSHOT_ID_DOMAIN);
+        hash.update(self.as_str().as_bytes());
+        hash.finalize().into()
     }
 }
 
