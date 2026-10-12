@@ -269,3 +269,34 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         assert_eq!(scope.payload_bytes_read(), expected_payload.len() as u64);
     }
 }
+
+#[test]
+fn complete_copy_rejects_a_valid_unlisted_commit_at_admission() {
+    let (directory, repository, _) = empty_format3_repository();
+    let root = directory.path();
+    let archive = root.join("archive");
+    let manifest = export_complete_copy(&repository, "HEAD", &archive, &[])
+        .expect("export the listed snapshot");
+
+    // This is a valid format-3 commit in the repository, but the archive does
+    // not list it. Admission must reject it before issuing a graph-capable pin.
+    git(
+        root,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "unlisted complete-copy member",
+        ],
+    );
+    let unlisted = String::from_utf8(git_output(root, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_ne!(unlisted, manifest.snapshot);
+    assert!(matches!(
+        manifest.pin_member(&repository, &unlisted),
+        Err(CompleteCopyReadError::MemberNotInCopy { .. })
+    ));
+}
