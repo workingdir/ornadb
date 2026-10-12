@@ -398,9 +398,13 @@ pub enum CompleteCopyError {
         path: String,
     },
     /// A gitlink dependency path is unsafe or malformed.
-    InvalidDependencyPath { path: String },
+    InvalidDependencyPath {
+        path: String,
+    },
     /// The pinned dependency graph contains a cycle.
-    DependencyCycle { path: String },
+    DependencyCycle {
+        path: String,
+    },
     /// The closure exceeds the recorded object or dependency bound.
     ClosureTooLarge,
     /// A reachable commit refers to an object absent from the local database.
@@ -946,7 +950,10 @@ enum DependencyWork {
     Exit(String),
 }
 
-fn dependency_origin(origins: &[(String, String)], path: &str) -> Result<String, CompleteCopyError> {
+fn dependency_origin(
+    origins: &[(String, String)],
+    path: &str,
+) -> Result<String, CompleteCopyError> {
     origins
         .iter()
         .find(|(candidate, _)| candidate == path)
@@ -1003,7 +1010,10 @@ fn committed_gitlinks(
 ) -> Result<Vec<(String, String)>, CompleteCopyError> {
     let output = git_output(directory, &["ls-tree", "-r", "-z", "--full-tree", commit])?;
     let mut gitlinks = Vec::new();
-    for record in output.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
         let separator = record
             .iter()
             .position(|byte| *byte == b'\t')
@@ -1042,7 +1052,9 @@ fn read_gitmodules_from(
         Err(_) => return Ok(Vec::new()),
     };
     if bytes.len() > MAX_GITMODULES_BYTES {
-        return Err(CompleteCopyError::InvalidArchive("`.gitmodules` exceeds bound"));
+        return Err(CompleteCopyError::InvalidArchive(
+            "`.gitmodules` exceeds bound",
+        ));
     }
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"))?;
