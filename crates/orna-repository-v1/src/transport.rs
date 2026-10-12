@@ -799,6 +799,7 @@ impl Repository {
     /// branch update cannot become visible before its allocation watermark.
     pub fn push(&self, request: &PushRequest) -> Result<(), FetchError> {
         let _lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_publication_recovery_locked()?;
         self.push_locked(request)
     }
 
@@ -1856,6 +1857,13 @@ mod tests {
         .unwrap();
 
         repository.write_publication_journal(&journal).unwrap();
+        let direct_request =
+            PushRequest::new("origin", "main", std::iter::empty::<OrnaInternalRef>()).unwrap();
+        assert!(matches!(
+            repository.push(&direct_request),
+            Err(FetchError::Repository(RepositoryError::PublicationPending))
+        ));
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), first);
         assert!(matches!(
             repository.push_ordinary_with_local_continuity("origin", "main"),
             Err(FetchError::Repository(RepositoryError::PublicationPending))
