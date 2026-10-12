@@ -470,7 +470,6 @@ impl RepositoryFormatContext {
         repository_hash.update(database_id.as_bytes());
         let repository_id: [u8; 32] = repository_hash.finalize().into();
 
-
         let authority = rows.authority();
         let mut owner_hash = Sha256::new();
         owner_hash.update(b"orna.repository.graph.owner.v1\0");
