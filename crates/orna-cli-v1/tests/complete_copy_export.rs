@@ -416,7 +416,8 @@ fn complete_copy_preserves_secondary_native_roots_after_source_removal() {
         "the reconstructed repository has no remote"
     );
 
-    let reopened = Repository::discover(&restored).expect("discover the offline copy");
+    let reopened =
+        orna_repository_v1::Repository::discover(&restored).expect("discover the offline copy");
     let format = reopened
         .open_format_context()
         .expect("reopen the pinned format-3 context offline");
