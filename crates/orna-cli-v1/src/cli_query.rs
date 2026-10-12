@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn query_options_parse_typed_ranges_and_reject_ambiguous_bounds() {
-        let parsed = parse_options(&words(&[
+        let arguments = words(&[
             "000102030405060708090a0b0c0d0e0f",
             "--from",
             "bytes:696d616765",
@@ -665,8 +665,8 @@ mod tests {
             "bytes:736f6e67",
             "--limit",
             "7",
-        ]))
-        .unwrap();
+        ]);
+        let parsed = parse_options(&arguments).unwrap();
         let range = parsed.range.as_ref().unwrap();
         assert_eq!(
             range.lower_inclusive(),
