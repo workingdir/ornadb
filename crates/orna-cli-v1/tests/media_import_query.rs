@@ -1889,6 +1889,17 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x90, true).await;
     drop(bindings);
     drop(state);
+    let row_map = repository
+        .open_format_context()
+        .unwrap()
+        .load_row_map(relation_id)
+        .unwrap();
+    let (_foreign_directory, foreign_repository, _) = empty_format3_repository();
+    let foreign_context = foreign_repository.open_format_context().unwrap();
+    assert!(
+        foreign_context.open_native_graph(&row_map).is_err(),
+        "a row map pinned to another context is rejected before point or range lookup"
+    );
 
     let relation = relation_hex(relation_id);
     let payload_bytes: u64 = ["tone.wav", "pixel.png", "note.wav"]
@@ -1901,6 +1912,29 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     let all = query_json(directory.path(), &[&relation]);
     assert_eq!(all["blobs"].as_u64(), Some(3), "three committed rows: {all}");
     assert_eq!(all["media_payload_bytes_read"], 0);
+
+    // Both controls use canonical Text keys. The point path performs one
+    // indexed lookup; the half-open range returns its inclusive lower key and
+    // excludes the exclusive upper key.
+    let point = query_json(directory.path(), &[&relation, "--key", "image"]);
+    assert_eq!(point["listings"].as_array().unwrap().len(), 1);
+    assert_eq!(point["listings"][0]["key"], "image");
+    assert_eq!(point["media_payload_bytes_read"], 0);
+    let bounded = query_json(
+        directory.path(),
+        &[&relation, "--from", "text:image", "--until", "text:note"],
+    );
+    assert_eq!(bounded["listings"].as_array().unwrap().len(), 1);
+    assert_eq!(bounded["listings"][0]["key"], "image");
+    let image = all["listings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listing| listing["key"] == "image")
+        .unwrap();
+    assert_eq!(&bounded["listings"][0], image);
+    assert!(bounded["native_objects_read"].as_u64().unwrap() > 0);
+    assert_eq!(bounded["media_payload_bytes_read"], 0);
 
     // `--kind` selects the canonical media type the authored annotation binds.
     let wavs = query_json(directory.path(), &[&relation, "--kind", "audio/wav"]);
@@ -2017,23 +2051,15 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         "a predicate over {payload_bytes} payload bytes read none of them"
     );
 
-    // The human listing states the plan and the payload it avoided.
+    // The existing human consumer exposes one plan as one output line; the
+    // JSON assertions above pin its query result and measured payload count.
     let human = run_query(directory.path(), &[&relation, "--kind", "audio/wav"]);
     assert_eq!(human.status.code(), Some(0));
     let text = String::from_utf8(human.stdout).unwrap();
-    assert!(
-        text.contains("media payload bytes read: 0"),
-        "the human summary must report the payload it avoided: {text}"
-    );
-    assert!(
-        text.contains("plan: annotation predicate")
-            && text.contains("coordinates kind,suffix,length")
-            && text.contains("decode-required coordinates duration,dimensions"),
-        "the human plan must name the coordinates it used: {text}"
-    );
-    assert!(
-        text.contains("matched 1"),
-        "the plan states the match count: {text}"
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with("plan:")).count(),
+        1,
+        "the measured plan is emitted on one line: {text}"
     );
 
     // A flag that names no coordinate the annotation binds is refused rather

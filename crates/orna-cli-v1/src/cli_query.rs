@@ -1,4 +1,4 @@
-//! `orna query <relation-hex> [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]`
+//! `orna query <relation-hex> [--key TEXT] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--limit N] [--format human|json]`
 //! lists the payload-free Blob metadata of committed format-3 rows, optionally
 //! narrowed by an annotation predicate (`--kind`, `--not-kind`, `--suffix`,
 //! `--min-length`, `--max-length`).
@@ -19,7 +19,6 @@
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
-use crate::cli_row_key::key_candidates;
 use orna_repository_v1::{KeyRange, Repository, TypedKey};
 use orna_value_v1::BlobMetadataFilter;
 
@@ -40,6 +39,8 @@ enum QueryFormat {
 struct QueryOptions<'a> {
     relation: &'a str,
     key: Option<&'a str>,
+    from: Option<TypedKey>,
+    until: Option<TypedKey>,
     field: Option<usize>,
     at: Option<&'a str>,
     limit: usize,
@@ -50,6 +51,8 @@ struct QueryOptions<'a> {
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
     let mut key = None;
+    let mut from = None;
+    let mut until = None;
     let mut field = None;
     let mut at = None;
     let mut limit = DEFAULT_QUERY_LIMIT;
@@ -63,6 +66,18 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                     .next()
                     .ok_or_else(|| query_error("--key needs a value", "usage: --key KEY"))?;
                 key = Some(value);
+            }
+            "--from" => {
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--from needs a value", "usage: --from text:KEY|bytes:HEX"))?;
+                from = Some(parse_bound_key(value)?);
+            }
+            "--until" => {
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--until needs a value", "usage: --until text:KEY|bytes:HEX"))?;
+                until = Some(parse_bound_key(value)?);
             }
             "--field" => {
                 let value = words
@@ -149,7 +164,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 return Err(query_error(
                     "Unknown query flag",
                     format!(
-                        "got {flag:?}; accepted: --key, --field, --at, --kind, --not-kind, --suffix, \
+                        "got {flag:?}; accepted: --key, --from, --until, --field, --at, --kind, --not-kind, --suffix, \
                          --min-length, --max-length, --limit, --format"
                     ),
                 ));
@@ -157,15 +172,22 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
             _ => positional.push(word),
         }
     }
+    if key.is_some() && (from.is_some() || until.is_some()) {
+        return Err(query_error(
+            "Point and range selectors cannot be combined",
+            "use --key alone, or use --from/--until for an indexed range",
+        ));
+    }
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
-        ));
+            "usage: orna query <relation-hex> [--key TEXT] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
     };
     Ok(QueryOptions {
         relation,
         key,
+        from,
+        until,
         field,
         at,
         limit,
@@ -174,6 +196,32 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     })
 }
 
+fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
+    if let Some(text) = value.strip_prefix("text:") {
+        return Ok(TypedKey::Text(text.to_owned()));
+    }
+    if let Some(hex) = value.strip_prefix("bytes:") {
+        if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(query_error(
+                "Range byte key is not hexadecimal",
+                format!("got {value:?}; usage: bytes:HEX with an even number of digits"),
+            ));
+        }
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex digits are ASCII"), 16)
+                    .expect("hexadecimal digits were checked above")
+            })
+            .collect();
+        return Ok(TypedKey::Bytes(bytes));
+    }
+    Err(query_error(
+        "Range key is not typed",
+        format!("got {value:?}; use text:KEY or bytes:HEX"),
+    ))
+}
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
     let relation = parse_relation_id(options.relation)?;
@@ -242,27 +290,22 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let scope = graph
         .open_read_scope()
         .map_err(|error| query_error("Read scope could not be opened", format!("{error:?}")))?;
-    // `--key` asks for exactly one row. A row committed from imported media is
-    // keyed by the raw bytes a caller passed, and a row written by hand may be
-    // keyed by canonical text, so the spelling printed by the listing is tried
-    // as text and then as those same bytes. Both are bounded point reads of
-    // the committed row map, and the row that answers is a real committed row
-    // rather than a reinterpretation of the query.
+    // Text lookup is one canonical typed point read. It never retries the
+    // spelling as bytes, which could otherwise answer a different key.
+    let filter_active = options.predicate != BlobMetadataFilter::new();
     let rows = match options.key {
-        Some(key) => {
-            let mut found = None;
-            for candidate in key_candidates(key)? {
-                found = graph
-                    .lookup_row(&candidate, &scope)
-                    .map_err(|error| query_error("Row lookup failed", format!("{error:?}")))?;
-                if found.is_some() {
-                    break;
-                }
-            }
-            found.into_iter().collect::<Vec<_>>()
-        }
+        Some(key) => graph
+            .lookup_row(&TypedKey::Text(key.to_owned()), &scope)
+            .map_err(|error| query_error("Row lookup failed", format!("{error:?}")))?
+            .into_iter()
+            .collect::<Vec<_>>(),
         None => {
-            let range = KeyRange::new(None, None, options.limit)
+            let range_limit = if filter_active {
+                MAX_QUERY_LIMIT
+            } else {
+                options.limit
+            };
+            let range = KeyRange::new(options.from.clone(), options.until.clone(), range_limit)
                 .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
             graph
                 .range_rows(&range, &scope)
@@ -312,6 +355,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     );
     listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
     let matched = listings.len();
+    if filter_active {
+        listings.truncate(options.limit);
+    }
     let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
     match options.format {
         QueryFormat::Human => {
@@ -515,11 +561,11 @@ fn query_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_options, parse_relation_id, render_key, QueryFormat, DEFAULT_QUERY_LIMIT,
+        parse_bound_key, parse_options, parse_relation_id, render_key, QueryFormat,
+        DEFAULT_QUERY_LIMIT,
     };
     use crate::Exit;
     use orna_repository_v1::TypedKey;
-
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
@@ -575,6 +621,22 @@ mod tests {
         let parsed = parse_options(&arguments).unwrap();
         assert_eq!(parsed.key, Some("song"));
         assert_eq!(parsed.field, Some(0));
+    }
+    #[test]
+    fn query_options_accept_typed_inclusive_and_exclusive_bounds() {
+        let arguments = words(&[
+            "000102030405060708090a0b0c0d0e0f",
+            "--from",
+            "text:image",
+            "--until",
+            "bytes:736f6e67",
+        ]);
+        let parsed = parse_options(&arguments).unwrap();
+        assert_eq!(parsed.from, Some(TypedKey::Text("image".to_owned())));
+        assert_eq!(parsed.until, Some(TypedKey::Bytes(b"song".to_vec())));
+        assert!(parse_options(&words(&["r", "--key", "image", "--from", "text:image"])).is_err());
+        assert!(parse_bound_key("bytes:xyz").is_err());
+        assert!(parse_bound_key("image").is_err());
     }
 
 
