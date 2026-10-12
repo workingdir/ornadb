@@ -289,7 +289,6 @@ impl RelationRowMutation {
     }
 }
 
-
 /// The Git objects for a candidate publication.  The candidate is private:
 /// building it never changes the ordinary index, worktree, or ref namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1205,10 +1205,8 @@ pub fn lower_protected_blob_mutations_for_publication(
     let format = repository
         .open_pinned_format_context(head.as_str())
         .map_err(|_| Error::RepositoryUnavailable)?;
-    let mut resolved_schemas = BTreeMap::<
-        [u8; 16],
-        (String, [u8; 32], orna_value_v1::SchemaDescriptor),
-    >::new();
+    let mut resolved_schemas =
+        BTreeMap::<[u8; 16], (String, [u8; 32], orna_value_v1::SchemaDescriptor)>::new();
     let mut by_relation = BTreeMap::<
         [u8; 16],
         (
