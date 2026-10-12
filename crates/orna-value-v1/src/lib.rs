@@ -1179,9 +1179,7 @@ impl Blob {
         match &self.content {
             BlobContent::Inline(bytes) => {
                 let start = usize::try_from(offset).map_err(|_| Error::Limit)?;
-                let end = start
-                    .checked_add(expected as usize)
-                    .ok_or(Error::Limit)?;
+                let end = start.checked_add(expected as usize).ok_or(Error::Limit)?;
                 Ok(bytes
                     .get(start..end)
                     .ok_or(Error::ContentDigestMismatch)?
@@ -1211,7 +1209,8 @@ impl Blob {
                     if overlap_start < overlap_end {
                         let start =
                             usize::try_from(overlap_start - cursor).map_err(|_| Error::Limit)?;
-                        let end = usize::try_from(overlap_end - cursor).map_err(|_| Error::Limit)?;
+                        let end =
+                            usize::try_from(overlap_end - cursor).map_err(|_| Error::Limit)?;
                         result.extend_from_slice(&bytes[start..end]);
                     }
                     cursor = chunk_end;
@@ -1475,7 +1474,6 @@ fn read_content_range(blob: &Blob, offset: u64, length: u64) -> Result<Vec<u8>> 
         BlobContent::Descriptor(_) | BlobContent::Commitment => Err(Error::ContentUnavailable),
     }
 }
-
 
 /// Canonical MIME-1 annotation stored with each Blob value.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
