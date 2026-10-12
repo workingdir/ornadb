@@ -14,15 +14,14 @@ use std::{
 };
 
 use orna_repository_v1::{
-    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, OrpBlobBinding, PrivateCommit,
-    ProtectedContentPin, Repository, RepositoryError,
+    CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef,
+    OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
 };
 use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
-    Analysis, Catalogue, ModuleInput, Namespace, ObjectIdentityManifest, RowUnitInput,
-    SourceTableSchemaArtifact, StandardCatalogueError, StandardDependencyProfile, SymbolKind,
-    analyze, analyze_with_catalogue, lower_row_unit_with_owner_fields,
-    source_table_schema as build_source_table_schema, source_table_schema_with_ids,
+    Analysis, Catalogue, ModuleInput, Namespace, RowUnitInput, StandardCatalogueError,
+    StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
+    lower_row_unit_with_owner_fields,
 };
 use orna_syntax_v1::{Declaration, parse_module};
 use orna_value_v1::{
@@ -46,10 +45,6 @@ pub use attachments::{
     PinnedDatabase, ReboundPathCheckpoint, ReboundPathResolution, SiblingRebindResolution,
 };
 
-/// Committed owner-issued UUID inventory for source table and field identities.
-pub const OBJECT_IDENTITY_MANIFEST_PATH: &str = ".orna/object-identities.cbor";
-
-const MAX_OBJECT_IDENTITY_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// Bounded resource limits applied before source contents are read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +135,7 @@ pub struct ResolvedTableSchema {
     snapshot_id: [u8; 32],
     database_id: [u8; 16],
     table: SourceTableSchemaArtifact,
+    binding: CommittedTableBinding,
 }
 
 impl ResolvedTableSchema {
@@ -165,6 +161,9 @@ impl ResolvedTableSchema {
 
     pub fn descriptor(&self) -> &SchemaDescriptor {
         self.table.descriptor()
+    }
+    pub fn binding(&self) -> &CommittedTableBinding {
+        &self.binding
     }
 }
 
@@ -344,20 +343,19 @@ impl LoadedProject {
             .map(|profile| Catalogue::from_standard_sources(profile, sources))
             .transpose()
     }
-    /// Builds a source-only table schema with identities from a caller-supplied
-    /// persisted manifest. Analysis uses only this project's modules and pinned
-    /// standard catalogue; the module must match a loaded source identity.
+    /// Builds a source-only schema from this project's committed identity manifest.
     pub fn source_table_schema(
         &self,
         manifest: &ObjectIdentityManifest,
         module_name: &str,
         declaration_name: &str,
     ) -> Result<SourceTableSchemaArtifact, ProjectLoadError> {
-        if !self.identities.iter().any(|identity| {
-            Namespace(identity.namespace().to_vec()).display() == module_name
-        }) {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        }
+        let source_path = self
+            .identities
+            .iter()
+            .find(|identity| Namespace(identity.namespace().to_vec()).display() == module_name)
+            .map(ModuleIdentity::logical_path)
+            .ok_or(ProjectLoadError::InvalidTableSchema)?;
         let catalogue = self
             .standard_catalogue(self.standard_sources.iter().cloned())
             .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
@@ -365,7 +363,8 @@ impl LoadedProject {
             Some(catalogue) => analyze_with_catalogue(&self.modules, catalogue),
             None => analyze(&self.modules),
         };
-        build_source_table_schema(&analysis, manifest, module_name, declaration_name)
+        manifest
+            .source_table_schema(&analysis, module_name, source_path, declaration_name)
             .map_err(|_| ProjectLoadError::InvalidTableSchema)
     }
 
@@ -761,17 +760,32 @@ impl ProjectLoader {
         Ok(project)
     }
 
-    /// Resolves a source-derived schema and owner-issued identities at one
-    /// verified commit. The persisted descriptor is consulted only for its
-    /// table and field IDs/names; its type nodes, roles, fallbacks, and
-    /// definitions do not contribute to the expected schema.
-    fn resolve_committed_table_schema_with_ids(
+
+    /// Resolves a table UUID from the identity manifest and source declaration at
+    /// one exact committed snapshot, then issues source-qualified binding authority.
+    pub fn resolve_committed_source_table_schema(
         &self,
         repository: &Repository,
         commit: &GitCommitRef,
-        declaration_name: &str,
         table_object_id: TableObjectId,
     ) -> Result<ResolvedTableSchema, ProjectLoadError> {
+        let manifest = ObjectIdentityManifest::read_committed(repository, commit)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let table_identity = manifest
+            .records()
+            .iter()
+            .find(|record| {
+                record.kind() == ObjectKind::Table
+                    && !record.is_retired()
+                    && record.id() == table_object_id.bytes()
+            })
+            .ok_or(ProjectLoadError::InvalidTableSchema)?;
+        let qualified_name = table_identity.qualified_name();
+        let (module_name, declaration_name) = match qualified_name.rsplit_once('.') {
+            Some((module_name, declaration_name)) => (module_name, declaration_name),
+            None => ("", qualified_name),
+        };
+
         let project = self.load_committed_snapshot(repository, commit)?;
         let source_commit = project
             .source_commit()
@@ -783,76 +797,37 @@ impl ProjectLoader {
         let snapshot_id = project
             .source_snapshot_id()
             .ok_or(ProjectLoadError::InvalidTableSchema)?;
-        let catalogue = project
-            .standard_catalogue(project.standard_sources().iter().cloned())
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        let analysis = match catalogue.as_ref() {
-            Some(catalogue) => analyze_with_catalogue(project.modules(), catalogue),
-            None => analyze(project.modules()),
-        };
-        if !analysis.is_ok() {
+        let table = project.source_table_schema(&manifest, module_name, declaration_name)?;
+        if table.table_object_id() != table_object_id.bytes() {
             return Err(ProjectLoadError::InvalidTableSchema);
         }
-        let module_name = source_table_module_name(&project, &analysis, declaration_name)?;
 
         let context = repository
             .open_pinned_format_context(commit.as_str())
             .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        if context.snapshot_pin().snapshot_id() != snapshot_id {
+        if context.snapshot_pin().snapshot_id() != &snapshot_id {
             return Err(ProjectLoadError::InvalidTableSchema);
         }
-        let database_id = *context
+        let expected_database_id = context
             .require_database_id()
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?
-            .as_bytes();
-
-        let unbound_binding = context
-            .resolve_committed_table_by_relation_id(table_object_id.bytes())
             .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        if unbound_binding.snapshot_id() != &snapshot_id
-            || unbound_binding.table_object_id() != &table_object_id.bytes()
-        {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        }
-
-        let field_ids = committed_field_ids(unbound_binding.descriptor(), table_object_id.bytes())?;
-        let table = source_table_schema_with_ids(
-            &analysis,
-            &module_name,
-            declaration_name,
-            table_object_id.bytes(),
-            &field_ids,
-        )
-        .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        if table.declaration_name() != declaration_name
-            || table.table_id() != &table_object_id.bytes()
-            || table.descriptor() != unbound_binding.descriptor()
-        {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        }
-        let source_path = project
-            .identities()
-            .iter()
-            .find(|identity| {
-                Namespace(identity.namespace().to_vec()).display() == module_name
-            })
-            .map(ModuleIdentity::logical_path)
-            .ok_or(ProjectLoadError::InvalidTableSchema)?;
         let binding = context
             .bind_committed_table(
-                &module_name,
-                source_path,
-                declaration_name,
-                table_object_id.bytes(),
+                table.module_name(),
+                table.source_path(),
+                table.declaration_name(),
+                *table.table_object_id(),
+                expected_database_id,
                 &snapshot_id,
                 table.descriptor(),
             )
             .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        if binding.snapshot_id() != &snapshot_id
-            || binding.declaration_name() != Some(declaration_name)
-            || binding.module_name() != Some(module_name.as_str())
-            || binding.source_path() != Some(source_path)
-            || binding.table_object_id() != &table_object_id.bytes()
+        if binding.database_id() != expected_database_id
+            || binding.snapshot_id() != &snapshot_id
+            || binding.declaration_name() != Some(table.declaration_name())
+            || binding.module_name() != Some(table.module_name())
+            || binding.source_path() != Some(table.source_path())
+            || binding.table_object_id() != table.table_object_id()
             || binding.descriptor() != table.descriptor()
         {
             return Err(ProjectLoadError::InvalidTableSchema);
@@ -860,41 +835,10 @@ impl ProjectLoader {
         Ok(ResolvedTableSchema {
             source_commit,
             snapshot_id,
+            database_id: *expected_database_id.as_bytes(),
             table,
-            database_id,
+            binding,
         })
-    }
-
-    /// Resolves a table using identities read from the exact committed source
-    /// snapshot, then binds the complete source schema to its repository context.
-    pub fn resolve_committed_source_table_schema(
-        &self,
-        repository: &Repository,
-        commit: &GitCommitRef,
-        module_name: &str,
-        declaration_name: &str,
-    ) -> Result<ResolvedTableSchema, ProjectLoadError> {
-        let manifest_bytes = repository
-            .read_committed_file(
-                commit,
-                OBJECT_IDENTITY_MANIFEST_PATH,
-                MAX_OBJECT_IDENTITY_MANIFEST_BYTES,
-            )
-            .map_err(ProjectLoadError::Repository)?;
-        let manifest = ObjectIdentityManifest::decode(&manifest_bytes)
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        let project = self.load_committed_snapshot(repository, commit)?;
-        let table = project.source_table_schema(&manifest, module_name, declaration_name)?;
-        let schema = self.resolve_committed_table_schema_with_ids(
-            repository,
-            commit,
-            declaration_name,
-            TableObjectId::new(*table.table_id()),
-        )?;
-        if schema.descriptor() != table.descriptor() {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        }
-        Ok(schema)
     }
 
     /// Loads the root module and reachable imports from the immutable tree of
@@ -1093,38 +1037,6 @@ fn source_table_module_name(
     resolved.ok_or(ProjectLoadError::InvalidTableSchema)
 }
 
-fn committed_field_ids(
-    descriptor: &SchemaDescriptor,
-    expected_table_id: [u8; 16],
-) -> Result<BTreeMap<String, [u8; 16]>, ProjectLoadError> {
-    let table_id = raw_map_value(descriptor.raw(), "1")
-        .and_then(committed_uuid)
-        .ok_or(ProjectLoadError::InvalidTableSchema)?;
-    if table_id != expected_table_id {
-        return Err(ProjectLoadError::InvalidTableSchema);
-    }
-    let Raw::Array(fields) = raw_map_value(descriptor.raw(), "3")
-        .ok_or(ProjectLoadError::InvalidTableSchema)?
-    else {
-        return Err(ProjectLoadError::InvalidTableSchema);
-    };
-
-    let mut ids = BTreeSet::new();
-    let mut field_ids = BTreeMap::new();
-    for field in fields {
-        let Raw::Array(parts) = field else {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        };
-        let [id, Raw::Text(name), _, _, _] = parts.as_slice() else {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        };
-        let id = committed_uuid(id).ok_or(ProjectLoadError::InvalidTableSchema)?;
-        if !ids.insert(id) || field_ids.insert(name.clone(), id).is_some() {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        }
-    }
-    Ok(field_ids)
-}
 
 fn raw_map_value<'a>(raw: &'a Raw, key: &str) -> Option<&'a Raw> {
     let Raw::Map(entries) = raw else {
