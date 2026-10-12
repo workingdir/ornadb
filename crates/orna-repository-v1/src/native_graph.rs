@@ -6810,7 +6810,7 @@ mod persisted_orp_tests {
             &NodeData::Schema {
                 encoded_length: schema_bytes.len() as u64,
                 schema_digest,
-                byte_root: schema_byte_root,
+                byte_root: schema_byte_root.clone(),
             },
         );
         let primary_root = fixture_git_node(
