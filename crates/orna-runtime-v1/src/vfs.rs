@@ -4944,6 +4944,14 @@ mod tests {
         );
     }
 
+    fn source_blob_mib_row(encoded_blob: &[u8]) -> Vec<u8> {
+        // Preserve the source row's Blob plus Float<MiB> tuple as one value.
+        let mut row = vec![0x84, 0x64, b'n', b'a', b'm', b'e'];
+        row.extend_from_slice(encoded_blob);
+        row.extend_from_slice(&[0x64, b's', b'i', b'z', b'e', 0xf9, 0x3e, 0x00]);
+        row
+    }
+
     #[tokio::test]
     async fn durable_blob_temp_rename_cas_commits_canonical_media_and_pin() {
         const PIXEL: &[u8] = include_bytes!("../tests/fixtures/media/pixel.png");
@@ -5129,8 +5137,7 @@ mod tests {
                     let expected_content_transfer = ProtectedContentTransferEvidence::from_transfer(
                         &encoded_blob.transfer_record(),
                     );
-                    let mut row_value = vec![0x82, 0x64, b'n', b'a', b'm', b'e'];
-                    row_value.extend_from_slice(encoded_blob.encoded_value());
+                    let row_value = source_blob_mib_row(encoded_blob.encoded_value());
                     let pin = encoded_blob.into_pin();
                     let mutation = TableMutation::new(
                         [0x64; 16],
@@ -5266,8 +5273,7 @@ mod tests {
                     let expected_content_transfer = ProtectedContentTransferEvidence::from_transfer(
                         &encoded_blob.transfer_record(),
                     );
-                    let mut row_value = vec![0x82, 0x64, b'n', b'a', b'm', b'e'];
-                    row_value.extend_from_slice(encoded_blob.encoded_value());
+                    let row_value = source_blob_mib_row(encoded_blob.encoded_value());
                     *encoded_row_for_admit.lock().unwrap() = Some(row_value.clone());
                     let pin = encoded_blob.into_pin();
                     let mutation = TableMutation::new(
@@ -5319,8 +5325,9 @@ mod tests {
         drop(old_handle);
         assert!(retained.upgrade().is_none());
         let encoded_row = encoded_row.lock().unwrap().clone().unwrap();
-        assert_eq!(&encoded_row[..6], &[0x82, 0x64, b'n', b'a', b'm', b'e']);
+        assert_eq!(&encoded_row[..6], &[0x84, 0x64, b'n', b'a', b'm', b'e']);
         assert_eq!(&encoded_row[6..9], &[0xd9, 0xea, 0xcf]);
+        assert!(encoded_row.ends_with(&[0x64, b's', b'i', b'z', b'e', 0xf9, 0x3e, 0x00]));
         let committed_rows = state
             .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
             .await
