@@ -2681,6 +2681,11 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
+        if super::activation::runtime_activation_active(runtime) {
+            return Err(VfsSaveError::Activation(TableActivationError::Runtime(
+                RuntimeError::AdminBusy,
+            )));
+        }
         let _operation = self.operation.lock().await;
         let _draft_operation = draft.operation.lock().await;
         self.commit_durable_save(
@@ -2960,6 +2965,11 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         }
         if save.expected_baseline_row.is_none() {
             return Err(VfsSaveError::MissingBaseline);
+        }
+        if super::activation::runtime_activation_active(runtime) {
+            return Err(VfsSaveError::Activation(TableActivationError::Runtime(
+                RuntimeError::AdminBusy,
+            )));
         }
         let _operation = self.operation.lock().await;
         let _scratch_operation = scratch.operation.lock().await;
@@ -5023,6 +5033,13 @@ mod tests {
         let state_for_admit = &state;
         let nested_save =
             VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone());
+        let nested_document_save = VfsDurableSave::new(
+            owner_id,
+            cwd_generation.clone(),
+            table.clone(),
+            key.clone(),
+        )
+        .with_expected_baseline_row(None);
         let save_key = key.clone();
         let saved = cache
             .commit_durable_blob_rename(
@@ -5060,6 +5077,26 @@ mod tests {
                         )
                         .await,
                         Err(TableActivationError::Runtime(RuntimeError::AdminBusy))
+                    ));
+                    let nested_draft = target_for_admit.open_draft(1 << 20).await;
+                    let nested_result = target_for_admit
+                        .commit_durable_document_save(
+                            &nested_draft,
+                            state_for_admit,
+                            nested_document_save,
+                            |_, _| async {
+                                Err::<VfsSaveCandidate, TableActivationError>(
+                                    TableActivationError::Runtime(RuntimeError::AdminBusy),
+                                )
+                            },
+                            &crate::NoFault,
+                        )
+                        .await;
+                    assert!(matches!(
+                        nested_result,
+                        Err(VfsSaveError::Activation(TableActivationError::Runtime(
+                            RuntimeError::AdminBusy
+                        )))
                     ));
                     let mut row_value = vec![0x81];
                     row_value.extend_from_slice(&encoded_blob);
