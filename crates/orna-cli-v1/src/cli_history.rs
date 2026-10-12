@@ -511,7 +511,7 @@ pub(super) fn bare_ref_selector_is_ambiguous(
     Ok(matches > 1)
 }
 
-/// One source-qualified logical field value and its optional Blob annotation.
+/// The payload-free content coordinate used to compare one logical field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FieldContent {
     Value(Raw),
@@ -747,14 +747,9 @@ fn run_diff(
             "source bindings must come from the exact history endpoint",
         ));
     }
-    let (before, before_read) = read_relation_rows(
-        &before_format,
-        &from_commit,
-        relation,
-        before_schema.binding(),
-    )?;
-    let (after, after_read) =
-        read_relation_rows(&after_format, &to_commit, relation, after_schema.binding())?;
+    let (before, before_read) =
+        read_relation_rows(&before_format, relation, before_schema.binding())?;
+    let (after, after_read) = read_relation_rows(&after_format, relation, after_schema.binding())?;
     let payload_bytes_read = before_read.payload_bytes_read + after_read.payload_bytes_read;
     let native_objects_read = before_read.objects_read + after_read.objects_read;
     let changes = compare_rows(before, after);
@@ -896,9 +891,6 @@ fn compare_rows(
     }
     changes
 }
-
-/// What makes two readings of one committed row the same row: the stored value
-/// beside the Blob annotation coordinate its tuple carries.
 
 /// One change as a JSON object. A `changed` entry separates the two
 /// coordinates so a content move and an annotation move are told apart.
