@@ -643,35 +643,6 @@ fn is_committed_row_path(path: &Path) -> bool {
     })
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 const MAX_LISTING_BRANCHES: usize = 100;
 
 fn commit_log_node(entry: &CommittedLogEntry) -> InspectionNode {
@@ -1621,7 +1592,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn selected_serve_entry_runs_through_the_live_evaluator_and_returns_a_typed_result() {
         let mut state = new_serve_state(
@@ -1744,21 +1714,6 @@ mod tests {
         );
         assert_eq!(query.status, 404);
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     #[test]
     fn listing_routes_serve_a_published_capture_artifact() {
