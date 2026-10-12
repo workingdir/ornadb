@@ -892,11 +892,11 @@ fn discovers_table_rows_with_dots_in_encoded_key_components() {
         ("main.orna", "use inventory;\npub fn main(): Int = 42;\n"),
         (
             "inventory.orna",
-            "pub table Resource(path: Str) {\n    value: Str,\n}\n",
+            include_str!("fixtures/inventory_resource_table.orna"),
         ),
         (
             "inventory/Resource/nested~2fworker.js.orna",
-            "{\n  path: \"nested/worker.js\",\n  value: \"ok\",\n}\n",
+            include_str!("fixtures/inventory_resource_nested_worker.orna"),
         ),
     ]);
     commit_all(&directory);
