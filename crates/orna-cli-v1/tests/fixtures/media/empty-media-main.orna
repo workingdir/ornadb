@@ -1,0 +1,1 @@
+pub table media(id: Str) { content: Blob, }
