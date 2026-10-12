@@ -429,6 +429,163 @@ fn complete_copy_preserves_secondary_native_roots_after_source_removal() {
         .expect("validate the copied native store root offline");
 }
 
+#[test]
+fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
+    const DEPENDENCY_PATH: &str = "deps/reference";
+    const DEPENDENCY_SOURCE: &[u8] = include_bytes!("fixtures/reference-project/main.orna");
+
+    let (root, repository, _) = empty_format3_repository();
+    let source = root.path();
+    let source_path = source.to_path_buf();
+    let dependency_source = TempDir::new().unwrap();
+    let dependency_source_path = dependency_source.path().to_path_buf();
+    git(dependency_source.path(), &["init", "--quiet"]);
+    git(
+        dependency_source.path(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
+    git(
+        dependency_source.path(),
+        &["config", "user.name", "kierandrewett"],
+    );
+    std::fs::write(
+        dependency_source.path().join("main.orna"),
+        DEPENDENCY_SOURCE,
+    )
+    .unwrap();
+    git(dependency_source.path(), &["add", "main.orna"]);
+    git(
+        dependency_source.path(),
+        &["commit", "--quiet", "-m", "checked-in dependency fixture"],
+    );
+    let dependency_commit = String::from_utf8(git_output(
+        dependency_source.path(),
+        &["rev-parse", "HEAD"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let parent = String::from_utf8(git_output(source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(
+        source,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            dependency_source_path.to_str().unwrap(),
+            DEPENDENCY_PATH,
+        ],
+    );
+    git(
+        source,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "pin checked-in dependency fixture",
+        ],
+    );
+    let snapshot = String::from_utf8(git_output(source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(
+        source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "file:///unavailable/superproject.git",
+        ],
+    );
+    git(
+        source,
+        &["update-ref", &format!("refs/replace/{snapshot}"), &parent],
+    );
+    let replaced_gitlinks = git_output(
+        source,
+        &["ls-tree", "-r", "-z", "--full-tree", &snapshot],
+        None,
+    );
+    assert!(
+        replaced_gitlinks
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .all(|entry| !entry.starts_with(b"160000 commit ")),
+        "ordinary tree traversal is redirected by the fixture's replace ref"
+    );
+
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("dependency-archive");
+    let exported = run(
+        source,
+        &["export", archive.to_str().unwrap(), "--at", &snapshot],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export failed: {}",
+        stderr(&exported)
+    );
+
+    drop(repository);
+    drop(root);
+    drop(dependency_source);
+    assert!(!source_path.exists(), "source is gone before restore");
+    assert!(
+        !dependency_source_path.exists(),
+        "the dependency origin is gone before restore"
+    );
+
+    let restored = outside.path().join("restored-dependency");
+    let restored_output = run(
+        outside.path(),
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--restore",
+            restored.to_str().unwrap(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        restored_output.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&restored_output)
+    );
+    let restored_dependency = restored.join(DEPENDENCY_PATH);
+    assert_eq!(
+        String::from_utf8(git_output(
+            &restored_dependency,
+            &["rev-parse", "HEAD"],
+            None,
+        ))
+        .unwrap()
+        .trim(),
+        dependency_commit,
+        "restored gitlink uses the commit pinned by the real snapshot"
+    );
+    assert_eq!(
+        std::fs::read(restored_dependency.join("main.orna")).unwrap(),
+        DEPENDENCY_SOURCE,
+        "the checked-in dependency source is restored without its remote"
+    );
+    assert_eq!(
+        String::from_utf8(git_output(&restored_dependency, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the restored dependency has no remote"
+    );
+}
+
 /// `orna publish` of a database holding an imported media row produces a
 /// complete copy whose history lists the publication commit and whose
 /// reconstructed copy reads the same row with no media fetch.
