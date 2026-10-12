@@ -245,7 +245,10 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             orna_application_v1::TableObjectId::new(relation),
         )
         .map_err(|error| {
-            query_error("Committed table source could not be resolved", format!("{error:?}"))
+            query_error(
+                "Committed table source could not be resolved",
+                format!("{error:?}"),
+            )
         })?;
     let table = resolved.binding();
     let row_map = format
@@ -284,7 +287,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             } else {
                 options.limit
             };
-            let range = KeyRange::new(None, None, candidate_limit)
+            let range = KeyRange::new(options.from.clone(), options.until.clone(), candidate_limit)
                 .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
             graph
                 .range_rows(&range, &scope)
