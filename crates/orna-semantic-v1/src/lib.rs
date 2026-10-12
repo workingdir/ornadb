@@ -24,6 +24,12 @@ use unicode_normalization::{UnicodeNormalization, is_nfc};
 mod repl;
 mod semantic_payload;
 mod system_api;
+mod object_identity;
+
+pub use object_identity::{
+    ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectKind,
+    OBJECT_IDENTITY_METADATA_PATH,
+};
 
 pub use semantic_payload::{
     DeclarationExplicitness, LocalSourceOrigin, NamedSemanticParameter, SEMANTIC_PAYLOAD_DOMAIN,
