@@ -33,7 +33,7 @@ use format3::*;
 
 #[path = "support/media_commit.rs"]
 mod media_commit;
-use media_commit::commit_capture;
+use media_commit::commit_source_captures;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const SONG_IMPORT_FIXTURE: &str = concat!(
@@ -194,7 +194,6 @@ fn assert_self_contained(copy: &Path) {
 
 #[tokio::test]
 async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
-    let (directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -203,6 +202,8 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
         )
         .unwrap();
     }
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(source.path());
 
     let runtime_identity = RuntimeIdentity {
         database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
@@ -219,23 +220,21 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
 
-    for (key, fixture, ordinal) in [
-        ("song", SONG_IMPORT_FIXTURE, 0x70_u8),
-        ("image", IMAGE_IMPORT_FIXTURE, 0x80_u8),
-    ] {
-        let expression = import_expression(fixture, source.path());
-        commit_capture(
-            &repository,
-            &state,
-            writer,
-            &mut bindings,
-            &expression,
-            key,
-            ordinal,
-            true,
-        )
-        .await;
-    }
+    let song_capture = import_expression(SONG_IMPORT_FIXTURE, source.path());
+    let image_capture = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
+    commit_source_captures(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        &[
+            (&song_capture, "song", 0x70),
+            (&image_capture, "image", 0x80),
+        ],
+    )
+    .await;
     drop(bindings);
     drop(state);
     let project = directory.path().to_path_buf();

@@ -27,7 +27,7 @@ use format3::*;
 
 #[path = "support/media_commit.rs"]
 mod media_commit;
-use media_commit::commit_capture;
+use media_commit::commit_source_captures;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 
@@ -52,7 +52,6 @@ fn committed_rows(repository: &Repository, relation_id: [u8; 16]) -> Vec<Admitte
 
 #[tokio::test]
 async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
-    let (directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -71,6 +70,8 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
             std::fs::read(source.path().join("pixel.png")).unwrap(),
         ),
     ];
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(source.path());
 
     // Capture and publish the song and image rows into one pinned snapshot.
     let runtime_identity = RuntimeIdentity {
@@ -96,29 +97,19 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     };
     let song_capture = capture_fixture("import-song.orna");
     let image_capture = capture_fixture("import-image.orna");
-    commit_capture(
+    commit_source_captures(
         &repository,
         &state,
         writer,
         &mut bindings,
-        &song_capture,
-        "song",
-        0x80,
-        true,
+        relation_id,
+        &format_context,
+        &[
+            (&song_capture, "song", 0x80),
+            (&image_capture, "image", 0x90),
+        ],
     )
     .await;
-    commit_capture(
-        &repository,
-        &state,
-        writer,
-        &mut bindings,
-        &image_capture,
-        "image",
-        0x90,
-        true,
-    )
-    .await;
-
     let source_rows = committed_rows(&repository, relation_id);
     assert_eq!(
         source_rows.len(),
