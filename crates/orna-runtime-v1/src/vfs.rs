@@ -3197,12 +3197,12 @@ mod tests {
                     field(
                         [0x11; 16],
                         "id",
-                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Bytes".into())]),
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]),
                         0,
                     ),
                     field(
                         [0x22; 16],
-                        "content",
+                        "payload",
                         Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".into())]),
                         1,
                     ),
