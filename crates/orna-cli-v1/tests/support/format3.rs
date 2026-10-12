@@ -16,7 +16,8 @@ use orna_storage_v1::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use orna_semantic_v1::{ModuleInput, ObjectIdentityManifest, analyze, source_table_schema};
+use orna_project_v1::ObjectIdentityManifest;
+use orna_semantic_v1::{ModuleInput, analyze};
 
 pub fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -94,8 +95,10 @@ pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16])
     let analysis = analyze(&modules);
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
     let manifest_bytes = identities.encode().unwrap();
-    let table = source_table_schema(&analysis, &identities, "", "media").unwrap();
-    let relation_id = *table.table_id();
+    let table = identities
+        .source_table_schema(&analysis, "", "main.orna", "media")
+        .unwrap();
+    let relation_id = *table.table_object_id();
     let schema_source = table.descriptor().encode().unwrap();
     std::fs::create_dir_all(root.join(".orna/store")).unwrap();
     std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
