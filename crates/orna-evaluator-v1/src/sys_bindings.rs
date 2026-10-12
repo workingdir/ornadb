@@ -1304,10 +1304,10 @@ fn mime1_for_path(path: &str) -> (&'static str, Option<String>) {
         "m4a" | "m4b" | "mpg4" => ("audio/mp4", (extension != "m4a").then_some(extension)),
         "mp1" | "mp2" | "mp3" => ("audio/mpeg", (extension != "mp3").then_some(extension)),
         "oga" | "ogg" | "opus" => ("audio/ogg", (extension != "ogg").then_some(extension)),
-        "wav" => ("audio/wav", None),
+        "wav" => ("audio/wav", Some(extension)),
         "gif" => ("image/gif", None),
         "jpe" | "jpeg" | "jpg" => ("image/jpeg", (extension != "jpg").then_some(extension)),
-        "png" => ("image/png", None),
+        "png" => ("image/png", Some(extension)),
         "svg" => ("image/svg+xml", None),
         "webp" => ("image/webp", None),
         "css" => ("text/css", None),
@@ -1429,6 +1429,14 @@ mod tests {
         assert_eq!(
             mime1_for_path("records/photo.jpeg"),
             ("image/jpeg", Some("jpeg".to_owned()))
+        );
+        assert_eq!(
+            mime1_for_path("records/tone.wav"),
+            ("audio/wav", Some("wav".to_owned()))
+        );
+        assert_eq!(
+            mime1_for_path("records/pixel.png"),
+            ("image/png", Some("png".to_owned()))
         );
         assert_eq!(
             mime1_for_path("records/unknown.custom"),
