@@ -140,10 +140,17 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let row_blob = row_value.blob().unwrap();
     assert_eq!(row_blob.media_type(), "audio/mp4");
     assert_eq!(row_blob.suffix(), Some("m4b"));
+    assert_eq!(
+        row_blob.content_identity(),
+        annotated_blob.content_identity()
+    );
+    assert!(!row_blob.is_hydrated());
     assert_eq!(resolver_bytes_read.load(Ordering::Relaxed), 0);
     let binding = bindings.accept_captured_blob_for_row(&row_value).unwrap();
     assert_eq!(resolver_bytes_read.load(Ordering::Relaxed), 0);
-    assert_eq!(row_value.blob().unwrap().read_to_end().unwrap(), payload);
+    // ROV-3 stores the descriptor, not a read-capable reference. The original
+    // authorized capture reference remains the explicit byte-read path.
+    assert_eq!(context_backed_blob.read_to_end().unwrap(), payload);
     assert_eq!(
         resolver_bytes_read.load(Ordering::Relaxed),
         payload.len() as u64
