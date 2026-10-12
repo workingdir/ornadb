@@ -19,11 +19,11 @@
 
 use std::path::{Path, PathBuf};
 
-use orna_repository_v1::complete_copy::{
-    export_complete_copy_of, materialize_complete_copy, read_complete_copy_manifest,
-    restore_complete_copy, CompleteCopyError, CompleteCopyManifest, DependencySource,
-};
 use orna_repository_v1::Repository;
+use orna_repository_v1::complete_copy::{
+    CompleteCopyError, CompleteCopyManifest, DependencySource, export_complete_copy_of,
+    materialize_complete_copy, read_complete_copy_manifest, restore_complete_copy,
+};
 
 use super::Diagnostic;
 
@@ -111,7 +111,9 @@ fn parse_options(arguments: &[String]) -> Result<Mode, Diagnostic> {
             flag if flag.starts_with("--") => {
                 return Err(export_error(
                     "Unknown export flag",
-                    format!("got {flag:?}; accepted: --at, --dependency, --check, --restore, --worktree"),
+                    format!(
+                        "got {flag:?}; accepted: --at, --dependency, --check, --restore, --worktree"
+                    ),
                 ));
             }
             path => positional.push(PathBuf::from(path)),
@@ -235,6 +237,7 @@ fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
         }
         CompleteCopyError::DependencyUnavailable { .. } => "A pinned dependency is unavailable",
         CompleteCopyError::ClosureTooLarge => "Snapshot closure exceeds the export bound",
+        CompleteCopyError::MissingObject { .. } => "A required Git object is unavailable offline",
         CompleteCopyError::IntegrityMismatch { .. } => "A recorded object failed verification",
         CompleteCopyError::GitUnavailable => "Git is unavailable or refused the export",
         CompleteCopyError::InvalidArchive(_) => "Archive is not a complete copy",
@@ -250,7 +253,7 @@ fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_options, run, Mode};
+    use super::{Mode, parse_options, run};
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
