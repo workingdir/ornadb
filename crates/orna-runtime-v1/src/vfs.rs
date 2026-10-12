@@ -5074,9 +5074,8 @@ mod tests {
             .await;
         let diagnostic = match stale {
             Err(VfsSaveError::Stale { diagnostic, .. }) => diagnostic,
-            _ => {
-                panic!("stale Blob temp rename must retain its retryable candidate")
-            }
+            Err(error) => panic!("stale Blob temp rename returned another error: {error:?}"),
+            Ok(_) => panic!("stale Blob temp rename must retain its retryable candidate"),
         };
         assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
         assert_eq!(
