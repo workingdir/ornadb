@@ -1197,7 +1197,7 @@ impl SourceMutationEffectHandler {
             let OvbRaw::Bytes(uuid) = uuid.as_ref() else {
                 return Err(ApplicationError::InvalidTableMetadata);
             };
-            let field_object_id = uuid
+            let field_object_id: [u8; 16] = uuid
                 .as_slice()
                 .try_into()
                 .map_err(|_| ApplicationError::InvalidTableMetadata)?;
