@@ -120,6 +120,11 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     .await;
 
     let source_rows = committed_rows(&repository, relation_id);
+    assert_eq!(
+        source_rows.len(),
+        expected_payloads.len(),
+        "the source producer must commit both media rows before export",
+    );
     drop(bindings);
     drop(state);
     // The source advertises an unavailable remote; restore must carry no remote
@@ -241,7 +246,8 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
 
     // The separate raw read traverses the same restored snapshot. Each payload
     // is compared with its source bytes and the hash returned by metadata.
-    let graph = selected_format
+    let graph = pin
+        .format_context()
         .open_native_graph(&row_map)
         .expect("open the selected member's authenticated graph");
     let scope = graph.open_read_scope().expect("open a payload read scope");
