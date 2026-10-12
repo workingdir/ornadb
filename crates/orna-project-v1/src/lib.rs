@@ -23,7 +23,7 @@ use orna_semantic_v1::{
     StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
     lower_row_unit_with_owner_fields,
 };
-use orna_syntax_v1::{Declaration, parse_module};
+use orna_syntax_v1::{Declaration, Expr, parse_module, parse_row};
 use orna_value_v1::{
     ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat,
     ROV3_BLOB_TAG,
@@ -162,8 +162,42 @@ impl ResolvedTableSchema {
     pub fn descriptor(&self) -> &SchemaDescriptor {
         self.table.descriptor()
     }
+
     pub fn binding(&self) -> &CommittedTableBinding {
         &self.binding
+    }
+}
+
+/// Source-owned path for one key under a committed table binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedLooseRowProjection {
+    schema: ResolvedTableSchema,
+    table_path: String,
+    logical_path: String,
+    key_path_components: Vec<String>,
+}
+
+impl CommittedLooseRowProjection {
+    pub fn schema(&self) -> &ResolvedTableSchema {
+        &self.schema
+    }
+
+    /// Single-component storage root; module namespaces stay in `table_path`.
+    pub fn table_root(&self) -> &str {
+        self.schema.declaration_name()
+    }
+
+    pub fn table_path(&self) -> &str {
+        &self.table_path
+    }
+
+    pub fn logical_path(&self) -> &str {
+        &self.logical_path
+    }
+
+    /// Encoded components exclude the table root and include `.orna` last.
+    pub fn key_path_components(&self) -> &[String] {
+        &self.key_path_components
     }
 }
 
@@ -766,7 +800,6 @@ impl ProjectLoader {
         Ok(project)
     }
 
-
     /// Resolves a table UUID from the identity manifest and source declaration at
     /// one exact committed snapshot, then issues source-qualified binding authority.
     pub fn resolve_committed_source_table_schema(
@@ -775,75 +808,45 @@ impl ProjectLoader {
         commit: &GitCommitRef,
         table_object_id: TableObjectId,
     ) -> Result<ResolvedTableSchema, ProjectLoadError> {
-        let manifest = ObjectIdentityManifest::read_committed(repository, commit)
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        let table_identity = manifest
-            .records()
-            .iter()
-            .find(|record| {
-                record.kind() == ObjectKind::Table
-                    && !record.is_retired()
-                    && *record.id() == table_object_id.bytes()
-            })
-            .ok_or(ProjectLoadError::InvalidTableSchema)?;
-        let qualified_name = table_identity.qualified_name();
-        let (module_name, declaration_name) = match qualified_name.rsplit_once('.') {
-            Some((module_name, declaration_name)) => (module_name, declaration_name),
-            None => ("", qualified_name),
-        };
-
         let project = self.load_committed_snapshot(repository, commit)?;
-        let source_commit = project
-            .source_commit()
-            .cloned()
-            .ok_or(ProjectLoadError::InvalidTableSchema)?;
-        if &source_commit != commit {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        }
-        let snapshot_id = project
-            .source_snapshot_id()
-            .ok_or(ProjectLoadError::InvalidTableSchema)?;
-        let table = project.source_table_schema(&manifest, module_name, declaration_name)?;
-        if *table.table_object_id() != table_object_id.bytes() {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        }
+        resolve_committed_source_table_schema_for_project(
+            repository,
+            commit,
+            &project,
+            table_object_id,
+        )
+    }
 
-        let context = repository
-            .open_pinned_format_context(commit.as_str())
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        if context.snapshot_pin().snapshot_id() != snapshot_id {
-            return Err(ProjectLoadError::InvalidTableSchema);
-        }
-        let expected_database_id = context
-            .require_database_id()
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        let binding = context
-            .bind_committed_table(
-                table.module_name(),
-                table.source_path(),
-                table.declaration_name(),
-                *table.table_object_id(),
-                expected_database_id,
-                &snapshot_id,
-                table.descriptor(),
-            )
-            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        if binding.database_id() != expected_database_id
-            || binding.snapshot_id() != &snapshot_id
-            || binding.declaration_name() != Some(table.declaration_name())
-            || binding.module_name() != Some(table.module_name())
-            || binding.source_path() != Some(table.source_path())
-            || binding.table_object_id() != table.table_object_id()
-            || binding.descriptor() != table.descriptor()
+    /// Resolves the frozen mutation's committed table identity and projects its
+    /// key to the exact source row path from that same committed snapshot.
+    pub fn resolve_committed_loose_row_projection(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+        mutation: &TableMutation,
+    ) -> Result<CommittedLooseRowProjection, ProjectLoadError> {
+        let table_object_id = mutation
+            .table_object_id()
+            .ok_or(ProjectLoadError::InvalidSourceRow)?;
+        let project = self.load_committed_snapshot(repository, commit)?;
+        let schema = resolve_committed_source_table_schema_for_project(
+            repository,
+            commit,
+            &project,
+            table_object_id,
+        )?;
+        if mutation.table() != schema.declaration_name()
+            || mutation.table_object_id() != Some(schema.table_object_id())
         {
-            return Err(ProjectLoadError::InvalidTableSchema);
+            return Err(ProjectLoadError::InvalidSourceRow);
         }
-        Ok(ResolvedTableSchema {
-            source_commit,
-            snapshot_id,
-            database_id: *expected_database_id.as_bytes(),
-            table,
-            binding,
+        let (table_path, logical_path, key_path_components) =
+            committed_source_row_path(&project, &schema, mutation.key())?;
+        Ok(CommittedLooseRowProjection {
+            schema,
+            table_path,
+            logical_path,
+            key_path_components,
         })
     }
 
@@ -1218,6 +1221,7 @@ fn find_committed_source_row_path(
     }
     matched.ok_or(ProjectLoadError::InvalidSourceRow)
 }
+
 fn source_table_module_name(
     project: &LoadedProject,
     analysis: &Analysis,
