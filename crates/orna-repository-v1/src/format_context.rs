@@ -467,14 +467,23 @@ impl RepositoryFormatContext {
     /// Binds a committed root-module table declaration to the schema sealed
     /// by its stable format-3 relation identity in this exact snapshot.
     ///
-    /// The schema descriptor is loaded through the owner-issued graph context;
-    /// callers must not treat the input ID or row contents as schema authority.
+    /// `expected_snapshot_id` and `expected_schema` must come from the caller's
+    /// resolved project analysis for this snapshot. The schema descriptor is
+    /// then authenticated through the owner-issued graph context; row contents
+    /// and source syntax are never used to infer schema identity.
     pub fn bind_committed_table(
         &self,
         declaration_name: &str,
         table_object_id: [u8; 16],
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
     ) -> Result<CommittedTableBinding, FormatContextError> {
         self.require_format3()?;
+        if *expected_snapshot_id != self.snapshot.snapshot_id()
+            || schema_descriptor_table_id(expected_schema) != Some(table_object_id)
+        {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
         let source = self
             .snapshot
             .read_file(&self.repository, MAIN_SOURCE_PATH, 64 * 1024)
@@ -482,26 +491,22 @@ impl RepositoryFormatContext {
                 RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
                 _ => FormatContextError::SchemaRootInvalid,
             })?;
-        let source = std::str::from_utf8(&source)
-            .map_err(|_| FormatContextError::SchemaRootInvalid)?;
+        let source =
+            std::str::from_utf8(&source).map_err(|_| FormatContextError::SchemaRootInvalid)?;
         let parsed = parse_module(source);
         if !parsed.is_ok() {
             return Err(FormatContextError::SchemaRootInvalid);
         }
-        let mut declarations = parsed.value.items.iter().filter_map(|item| {
-            match &item.declaration {
-                Declaration::Table {
-                    name,
-                    keys,
-                    members,
-                } if name == declaration_name => Some((keys, members)),
-                _ => None,
-            }
-        });
-        let Some((keys, members)) = declarations.next() else {
-            return Err(FormatContextError::TableBindingMismatch);
-        };
-        if declarations.next().is_some() {
+        let mut declarations =
+            parsed
+                .value
+                .items
+                .iter()
+                .filter_map(|item| match &item.declaration {
+                    Declaration::Table { name, .. } if name == declaration_name => Some(()),
+                    _ => None,
+                });
+        if declarations.next().is_none() || declarations.next().is_some() {
             return Err(FormatContextError::TableBindingMismatch);
         }
 
@@ -518,18 +523,8 @@ impl RepositoryFormatContext {
             .read_schema_descriptor(&scope)
             .map_err(|_| FormatContextError::GraphContextInvalid)?;
         if schema_descriptor_table_id(&descriptor) != Some(table_object_id)
-            || !schema_descriptor_matches_source_table(keys, members, &descriptor)
+            || &descriptor != expected_schema
         {
-            return Err(FormatContextError::TableBindingMismatch);
-        }
-        if parsed.value.items.iter().any(|item| {
-            matches!(
-                &item.declaration,
-                Declaration::Table { name, keys, members }
-                    if name != declaration_name
-                        && schema_descriptor_matches_source_table(keys, members, &descriptor)
-            )
-        }) {
             return Err(FormatContextError::TableBindingMismatch);
         }
         Ok(CommittedTableBinding {
@@ -728,16 +723,21 @@ impl HistoricalFormatContext {
         self.context.load_row_map(relation_id)
     }
 
-    /// Binds a committed table declaration through this exact historical
-    /// snapshot. The same read-only pinned source and schema authority used
-    /// by the current context is retained; workspace HEAD is never consulted.
+    /// Binds a committed declaration through this exact historical snapshot,
+    /// requiring its resolved-schema expectation to be tied to the same pin.
     pub fn bind_committed_table(
         &self,
         declaration_name: &str,
         table_object_id: [u8; 16],
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
     ) -> Result<CommittedTableBinding, FormatContextError> {
-        self.context
-            .bind_committed_table(declaration_name, table_object_id)
+        self.context.bind_committed_table(
+            declaration_name,
+            table_object_id,
+            expected_snapshot_id,
+            expected_schema,
+        )
     }
 
     /// Issues graph authority bound to this pinned snapshot. Rows, schema and
@@ -1147,7 +1147,10 @@ fn parse_database_id(value: &Expr) -> Result<DatabaseId, FormatContextError> {
 }
 
 fn schema_descriptor_table_id(descriptor: &SchemaDescriptor) -> Option<[u8; 16]> {
-    let Raw::Bytes(bytes) = schema_descriptor_entry(descriptor, 1)? else {
+    let Raw::Tag(37, value) = schema_descriptor_entry(descriptor, 1)? else {
+        return None;
+    };
+    let Raw::Bytes(bytes) = value.as_ref() else {
         return None;
     };
     bytes.as_slice().try_into().ok()
@@ -1162,187 +1165,6 @@ fn schema_descriptor_entry(descriptor: &SchemaDescriptor, field_number: u8) -> O
         .iter()
         .find_map(|(candidate, value)| (candidate == &key).then_some(value))
 }
-
-fn schema_descriptor_matches_source_table(
-    keys: &[orna_syntax_v1::Parameter],
-    members: &[orna_syntax_v1::TableMember],
-    descriptor: &SchemaDescriptor,
-) -> bool {
-    let Some(Raw::Array(key_ids)) = schema_descriptor_entry(descriptor, 2) else {
-        return false;
-    };
-    let Some(Raw::Array(field_values)) = schema_descriptor_entry(descriptor, 3) else {
-        return false;
-    };
-    let fields = field_values
-        .iter()
-        .map(|field| {
-            let Raw::Array(parts) = field else {
-                return None;
-            };
-            let [Raw::Bytes(id), Raw::Text(name), ty, role, _] = parts.as_slice() else {
-                return None;
-            };
-            Some((<[u8; 16]>::try_from(id.as_slice()).ok()?, name.as_str(), ty, schema_role(role)?))
-        })
-        .collect::<Option<Vec<_>>>();
-    let Some(fields) = fields else {
-        return false;
-    };
-    let source_field_count = members
-        .iter()
-        .filter(|member| matches!(member, orna_syntax_v1::TableMember::Field { .. }))
-        .count();
-    if keys.len() != key_ids.len() || fields.len() != keys.len() + source_field_count {
-        return false;
-    }
-    let mut source_names = Vec::with_capacity(keys.len() + members.len());
-    for (key, key_id) in keys.iter().zip(key_ids) {
-        let (orna_syntax_v1::Pattern::Name(name, _), Some(ty), Raw::Bytes(id)) =
-            (&key.pattern, key.annotation.as_ref(), key_id)
-        else {
-            return false;
-        };
-        let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) else {
-            return false;
-        };
-        let Some((_, descriptor_name, descriptor_type, role)) =
-            fields.iter().find(|(field_id, _, _, _)| *field_id == id)
-        else {
-            return false;
-        };
-        if *descriptor_name != name.as_str()
-            || *role != 0
-            || !source_type_matches_schema(ty, descriptor_type)
-        {
-            return false;
-        }
-        source_names.push(name.as_str());
-    }
-
-    for member in members {
-        let orna_syntax_v1::TableMember::Field {
-            name,
-            ty,
-            initializer,
-            ..
-        } = member
-        else {
-            continue;
-        };
-        let Some((_, _, descriptor_type, role)) =
-            fields
-                .iter()
-                .find(|(_, field_name, _, _)| *field_name == name.as_str())
-        else {
-            return false;
-        };
-        let expected_role = match initializer {
-            Some(orna_syntax_v1::FieldInitializer::Computed(_)) => 2,
-            Some(orna_syntax_v1::FieldInitializer::Default(_)) | None => 1,
-        };
-        if *role != expected_role || !source_type_matches_schema(ty, descriptor_type) {
-            return false;
-        }
-        source_names.push(name.as_str());
-    }
-
-    let mut descriptor_names = fields
-        .iter()
-        .map(|(_, name, _, _)| *name)
-        .collect::<Vec<_>>();
-    source_names.sort_unstable();
-    descriptor_names.sort_unstable();
-    source_names == descriptor_names
-}
-
-fn schema_role(raw: &Raw) -> Option<u8> {
-    let Raw::Int(value) = raw else {
-        return None;
-    };
-    if value == &0.into() {
-        Some(0)
-    } else if value == &1.into() {
-        Some(1)
-    } else if value == &2.into() {
-        Some(2)
-    } else {
-        None
-    }
-}
-
-fn source_type_matches_schema(source: &orna_syntax_v1::TypeExpr, schema: &Raw) -> bool {
-    source_type_node(source).is_some_and(|expected| expected == *schema)
-}
-
-fn source_type_node(source: &orna_syntax_v1::TypeExpr) -> Option<Raw> {
-    use orna_syntax_v1::TypeExpr;
-
-    match source {
-        TypeExpr::Name { path, arguments, .. }
-            if arguments.is_empty() && path.len() == 1 && is_storage_primitive(&path[0]) =>
-        {
-            Some(Raw::Array(vec![Raw::Int(0.into()), Raw::Text(path[0].clone())]))
-        }
-        TypeExpr::Name { .. } => None,
-        TypeExpr::List { inner, .. } => Some(Raw::Array(vec![
-            Raw::Int(1.into()),
-            source_type_node(inner)?,
-        ])),
-        TypeExpr::Optional { inner, .. } => Some(Raw::Array(vec![
-            Raw::Int(2.into()),
-            source_type_node(inner)?,
-        ])),
-        TypeExpr::Tuple { elements, .. } => Some(Raw::Array(vec![
-            Raw::Int(3.into()),
-            Raw::Array(
-                elements
-                    .iter()
-                    .map(source_type_node)
-                    .collect::<Option<Vec<_>>>()?,
-            ),
-        ])),
-        TypeExpr::Record { fields, .. } => {
-            let mut fields = fields
-                .iter()
-                .map(|(name, ty, _)| Some((name.clone(), source_type_node(ty)?)))
-                .collect::<Option<Vec<_>>>()?;
-            fields.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            Some(Raw::Array(vec![
-                Raw::Int(4.into()),
-                Raw::Array(
-                    fields
-                        .into_iter()
-                        .map(|(name, ty)| Raw::Array(vec![Raw::Text(name), ty]))
-                        .collect(),
-                ),
-            ]))
-        }
-        TypeExpr::Product { .. } | TypeExpr::Function { .. } => None,
-    }
-}
-
-fn is_storage_primitive(name: &str) -> bool {
-    matches!(
-        name,
-        "Bool"
-            | "Int"
-            | "Float"
-            | "Decimal"
-            | "Str"
-            | "Blob"
-            | "Uuid"
-            | "Date"
-            | "Instant"
-            | "LocalDateTime"
-            | "TimeOfDay"
-            | "Duration"
-            | "TimeZone"
-            | "ZonedDateTime"
-            | "Unit"
-    )
-}
-
 
 /// The one shared bounded Orna-record parser used by repository metadata
 /// initialization and this format-context admission path.
@@ -1517,13 +1339,14 @@ mod graph_bridge_tests {
     }
 
     #[test]
-    fn committed_table_binding_returns_pinned_schema_and_rejects_other_key_type() {
+    fn committed_table_binding_requires_matching_resolved_schema() {
         let relation_id = [0xa1; 16];
         let (directory, expected_descriptor, expected_oid, expected_digest) =
             seeded_table_binding("Int", relation_id);
         let first_context = context(directory.path());
+        let snapshot_id = first_context.snapshot_pin().snapshot_id();
         let binding = first_context
-            .bind_committed_table("Audio", relation_id)
+            .bind_committed_table("Audio", relation_id, &snapshot_id, &expected_descriptor)
             .expect("source declaration and pinned schema agree");
         assert_eq!(binding.declaration_name(), "Audio");
         assert_eq!(binding.relation_id(), &relation_id);
@@ -1531,27 +1354,14 @@ mod graph_bridge_tests {
         assert_eq!(binding.schema_digest(), &expected_digest);
         assert_eq!(binding.descriptor(), &expected_descriptor);
 
-        let (other_directory, _, _, _) = seeded_table_binding("Str", relation_id);
-        let other_context = context(other_directory.path());
+        let (_other_directory, other_descriptor, _, _) = seeded_table_binding("Str", relation_id);
         assert_eq!(
-            other_context.bind_committed_table("Audio", relation_id),
-            Err(super::FormatContextError::TableBindingMismatch)
-        );
-    }
-
-    #[test]
-    fn committed_table_binding_rejects_unresolved_nominal_source_type() {
-        let relation_id = [0xa3; 16];
-        let (directory, _, _, _) = seeded_table_binding("Int", relation_id);
-        let root = directory.path();
-        let source = include_str!("../tests/fixtures/committed-table-binding.orna")
-            .replace("id: Int", "id: Foo");
-        fs::write(root.join("main.orna"), source).expect("write unresolved nominal source");
-        commit(root);
-
-        let context = context(root);
-        assert_eq!(
-            context.bind_committed_table("Audio", relation_id),
+            first_context.bind_committed_table(
+                "Audio",
+                relation_id,
+                &snapshot_id,
+                &other_descriptor,
+            ),
             Err(super::FormatContextError::TableBindingMismatch)
         );
     }
@@ -1578,19 +1388,38 @@ mod graph_bridge_tests {
         let current = repository
             .open_format_context()
             .expect("open advanced HEAD context");
-        assert_ne!(
-            current.snapshot_pin().snapshot_id(),
-            historical_snapshot_id,
-            "the fixture advanced to a different committed source"
+        let current_snapshot_id = current.snapshot_pin().snapshot_id();
+        assert_ne!(current_snapshot_id, historical_snapshot_id);
+        let (_candidate_directory, candidate_schema, _, _) =
+            seeded_table_binding("Str", relation_id);
+        assert_eq!(
+            current.bind_committed_table(
+                "Audio",
+                relation_id,
+                &historical_snapshot_id,
+                &expected_descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "candidate HEAD cannot borrow an expectation from the historical snapshot"
         );
         assert_eq!(
-            current.bind_committed_table("Audio", relation_id),
+            current.bind_committed_table(
+                "Audio",
+                relation_id,
+                &current_snapshot_id,
+                &candidate_schema,
+            ),
             Err(super::FormatContextError::TableBindingMismatch),
-            "candidate HEAD must not borrow the historical schema binding"
+            "pinned HEAD rejects a resolved schema inconsistent with committed metadata"
         );
 
         let binding = historical
-            .bind_committed_table("Audio", relation_id)
+            .bind_committed_table(
+                "Audio",
+                relation_id,
+                &historical_snapshot_id,
+                &expected_descriptor,
+            )
             .expect("historical binding reads only its selected source and schema");
         assert_eq!(binding.declaration_name(), "Audio");
         assert_eq!(binding.relation_id(), &relation_id);
