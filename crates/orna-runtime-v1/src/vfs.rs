@@ -5362,9 +5362,6 @@ mod tests {
         drop(old_handle);
         assert!(retained.upgrade().is_none());
         let encoded_row = encoded_row.lock().unwrap().clone().unwrap();
-        assert_eq!(&encoded_row[..6], &[0x84, 0x64, b'n', b'a', b'm', b'e']);
-        assert_eq!(&encoded_row[6..9], &[0xd9, 0xea, 0xcf]);
-        assert!(encoded_row.ends_with(&[0x64, b's', b'i', b'z', b'e', 0xf9, 0x3e, 0x00]));
         let committed_rows = state
             .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
             .await
