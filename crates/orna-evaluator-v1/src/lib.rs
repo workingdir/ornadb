@@ -15029,9 +15029,12 @@ mod tests {
             }
         }
 
-        struct ReplaceBlob(ContextValue);
+        struct ReplaceAndConsume {
+            returned: ContextValue,
+            consumed_context: Option<[u8; 16]>,
+        }
 
-        impl EffectHandler for ReplaceBlob {
+        impl EffectHandler for ReplaceAndConsume {
             fn handle(
                 &mut self,
                 _callee: &Expr,
@@ -15041,15 +15044,30 @@ mod tests {
             }
         }
 
-        impl ContextValueEffectHandler for ReplaceBlob {
+        impl ContextValueEffectHandler for ReplaceAndConsume {
             fn handle_context(
                 &mut self,
-                _callee: &Expr,
+                callee: &Expr,
                 arguments: &[ContextValue],
             ) -> Result<Option<ContextValue>, EvaluationError> {
                 assert_eq!(arguments.len(), 1);
-                assert_eq!(arguments[0].format(), ValueFormat::Rov3);
-                Ok(Some(self.0.clone()))
+                match function_name(callee).as_deref() {
+                    Some("sys.test.replace_blob") => {
+                        assert_eq!(arguments[0].format(), ValueFormat::Rov3);
+                        Ok(Some(self.returned.clone()))
+                    }
+                    Some("sys.test.consume_blob") => {
+                        let owner = arguments[0]
+                            .context()
+                            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                        self.consumed_context = Some(owner.database_uuid());
+                        Ok(Some(
+                            ContextValue::new_in_context(owner, ValueFormat::Rov3, Raw::Bool(true))
+                                .map_err(|_| error("ORNA-EVAL-VALUE"))?,
+                        ))
+                    }
+                    _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+                }
             }
         }
 
@@ -15114,18 +15132,23 @@ mod tests {
             ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap(),
         )]);
 
+        let mut effects = ReplaceAndConsume {
+            returned,
+            consumed_context: None,
+        };
         let result = invoke_named_with_context_effects(
             "entry",
             &functions,
             &arguments,
             Limits::default(),
-            &mut ReplaceBlob(returned.clone()),
+            &mut effects,
         )
-        .expect("source call returns the effect's owner-bound Blob");
+        .expect("source consumer receives the effect's owner-bound Blob");
 
         assert_eq!(result.format(), ValueFormat::Rov3);
         assert_eq!(result.context().unwrap().database_uuid(), [0x41; 16]);
-        assert_eq!(result.raw(), returned.raw());
+        assert_eq!(result.raw(), &Raw::Bool(true));
+        assert_eq!(effects.consumed_context, Some([0x41; 16]));
     }
 
     #[test]
