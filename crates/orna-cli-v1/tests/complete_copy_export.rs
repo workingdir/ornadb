@@ -131,7 +131,10 @@ fn export_check_and_restore_carry_one_snapshot_offline() {
 
     // The checked-out code is the snapshot's own source, read from the copy.
     let source = std::fs::read_to_string(restored.join("main.orna")).unwrap();
-    assert_eq!(source, "capture test schema");
+    assert_eq!(
+        source,
+        std::fs::read_to_string(project.join("main.orna")).unwrap()
+    );
 }
 
 #[test]
@@ -586,6 +589,7 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
         "export failed: {}",
         stderr(&exported)
     );
+    let expected_source = std::fs::read_to_string(project.join("main.orna")).unwrap();
     drop(repository);
     drop(root);
     drop(source);
@@ -629,7 +633,7 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
                 None,
             ))
             .unwrap(),
-            "capture test schema",
+            expected_source,
             "each snapshot independently recovers its module source"
         );
         let database = String::from_utf8(git_output(
@@ -832,11 +836,11 @@ fn export_fails_locally_for_a_missing_promisor_object() {
     let exported = run(
         &partial,
         &[
+            "--debug",
             "export",
             archive.to_str().unwrap(),
             "--at",
             "HEAD",
-            "--debug",
         ],
     );
     assert_ne!(
