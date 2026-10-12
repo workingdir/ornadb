@@ -16,13 +16,13 @@ use std::{path::Path, process::Command};
 
 use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_repository_v1::{
+    AdmittedRow, GitHashAlgorithm, KeyRange, Repository, TypedKey,
     complete_copy::{export_complete_copy, materialize_complete_copy, restore_complete_copy},
     native_graph::{NativeOid, RangeVerification},
-    AdmittedRow, KeyRange, Repository, TypedKey,
 };
-use sha2::{Digest, Sha256};
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[path = "support/format3.rs"]
@@ -121,8 +121,22 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     // Freeze the snapshot, then reconstruct it somewhere else entirely.
     let outside = TempDir::new().unwrap();
     let archive = outside.path().join("archive");
-    let manifest = export_complete_copy(&repository, "HEAD", &archive, &[])
+    let source_snapshot = String::from_utf8(git_output(
+        directory.path(),
+        &["rev-parse", "HEAD"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let manifest = export_complete_copy(&repository, &source_snapshot, &archive, &[])
         .expect("export the pinned snapshot");
+    assert_eq!(manifest.snapshot, source_snapshot);
+    assert_eq!(
+        manifest.members.first().map(|member| member.commit.as_str()),
+        Some(source_snapshot.as_str()),
+        "the selected source commit is the primary archived member"
+    );
 
     // The runtime is closed and the source worktree is dropped before the copy
     // is read, so a read that needed the source could not succeed.
@@ -159,6 +173,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         .unwrap()
         .trim()
         .to_owned();
+    assert_eq!(selected_snapshot, source_snapshot);
     let query = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .current_dir(&restored)
         .args([
@@ -169,6 +184,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
             "--format",
             "json",
         ])
+        .env("GIT_ALLOW_PROTOCOL", "")
         .output()
         .unwrap();
     assert_eq!(
@@ -190,7 +206,9 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     let format = copy
         .open_pinned_format_context(&selected_snapshot)
         .expect("pin the restored snapshot for explicit Blob export");
-    let row_map = format.load_row_map(relation_id).expect("load pinned row map");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load pinned row map");
     let graph = format
         .open_native_graph(&row_map)
         .expect("open pinned native graph");
@@ -205,7 +223,18 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         .into_iter()
         .next()
         .expect("row retains its captured Blob descriptor");
-    let algorithm = format.validate_store_root().expect("pinned store root").oid.algorithm();
+    let algorithm = match String::from_utf8(git_output(
+        &restored,
+        &["rev-parse", "--show-object-format"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    {
+        "sha1" => GitHashAlgorithm::Sha1,
+        "sha256" => GitHashAlgorithm::Sha256,
+        other => panic!("unsupported Git object format {other:?}"),
+    };
     let descriptor = NativeOid::from_repository_id(algorithm, dependency.oid())
         .expect("parse the row's descriptor in the pinned hash mode");
     let stored = graph
