@@ -189,6 +189,44 @@ impl VfsRepositoryCache {
         target.rename_over(scratch, activate).await
     }
 
+    /// Commits a temporary Blob replacement through the owner of this view's
+    /// shared row transaction and projection epoch.
+    pub async fn commit_durable_blob_rename<S, A, AFut>(
+        &self,
+        target: &Arc<ManagedFile<S>>,
+        scratch: &TemporarySave<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        capture: &RepositoryCaptureCapability,
+        expected_identity: ContentIdentity,
+        media_type: &str,
+        suffix: Option<&str>,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        S: Send + Sync + 'static,
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, Arc<[u8]>) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
+    {
+        if !Arc::ptr_eq(&target.cache_epoch.generation, &self.epoch.generation) {
+            return Err(VfsSaveError::WrongRepositoryScope);
+        }
+        target
+            .commit_durable_temporary_blob_rename(
+                scratch,
+                runtime,
+                save,
+                capture,
+                expected_identity,
+                media_type,
+                suffix,
+                admit,
+                faults,
+            )
+            .await
+    }
+
     async fn has_current_projection<S>(&self, image: &VfsFileSnapshot<S>) -> bool {
         match image.pin.projection() {
             Some(projection) => projection.belongs_to(&self.epoch) && projection.is_current().await,
@@ -2590,6 +2628,8 @@ pub enum VfsSaveError<E> {
     MissingBaseline,
     /// The temporary file belongs to a different managed destination.
     WrongDestination,
+    /// The target belongs to another runtime's projection/cache scope.
+    WrongRepositoryScope,
     /// The admitted row lookup failed before any candidate commit.
     AdmissionLookup(RuntimeQueryError),
     /// Repository capture failed before the shared row-transaction boundary.
