@@ -15132,6 +15132,7 @@ mod tests {
             ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap(),
         )]);
 
+        let mut budget = StepBudget::new(Limits::default().max_steps);
         let mut effects = ReplaceAndConsume {
             returned,
             consumed_context: None,
@@ -15142,6 +15143,7 @@ mod tests {
             &arguments,
             Limits::default(),
             &mut effects,
+            &mut budget,
         )
         .expect("source consumer receives the effect's owner-bound Blob");
 
