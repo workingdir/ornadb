@@ -1531,11 +1531,7 @@ mod graph_bridge_tests {
     fn seeded_table_binding(relation_id: [u8; 16]) -> (TempDir, SchemaDescriptor) {
         let directory = repository();
         let root = directory.path();
-        let source = format!(
-            "{}{}",
-            MAIN_SOURCE,
-            include_str!("../tests/fixtures/committed-table-binding.orna")
-        );
+        let source = include_str!("../tests/fixtures/committed-table-binding.orna");
         fs::write(root.join("main.orna"), source).expect("write committed table declaration");
         commit(root);
         let initial = context(root);
@@ -2338,7 +2334,9 @@ mod graph_bridge_tests {
 
     fn commit_store_root(directory: &Path, algorithm: GitHashAlgorithm, store_root: &NativeOid) {
         let database_oid = write_git_object(directory, algorithm, "blob", DATABASE.as_bytes());
-        let main_oid = write_git_object(directory, algorithm, "blob", MAIN_SOURCE.as_bytes());
+        // Preserve the parent snapshot's module while replacing its store root.
+        let main_source = git_output(directory, &["show", "HEAD:main.orna"], None);
+        let main_oid = write_git_object(directory, algorithm, "blob", &main_source);
         let orna_tree_spec = format!(
             "100644 blob {}\tdatabase.orna\n040000 tree {}\tstore\n",
             database_oid.to_hex(),
