@@ -175,7 +175,7 @@ impl KeyRange {
         if lower_inclusive
             .as_ref()
             .zip(upper_exclusive.as_ref())
-            .is_some_and(|(lower, upper)| lower >= upper)
+            .is_some_and(|(lower, upper)| !lower.same_key_type(upper) || lower >= upper)
         {
             return Err(RowStoreError::InvalidKeyRange);
         }
@@ -594,6 +594,25 @@ pub enum TypedKey {
 }
 
 impl TypedKey {
+    fn same_key_type(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null)
+            | (Self::Bool(_), Self::Bool(_))
+            | (Self::Int(_), Self::Int(_))
+            | (Self::UInt(_), Self::UInt(_))
+            | (Self::Text(_), Self::Text(_))
+            | (Self::Bytes(_), Self::Bytes(_)) => true,
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| left.same_key_type(right))
+            }
+            _ => false,
+        }
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, RowStoreError> {
         let mut output = Vec::new();
         encode_key(self, &mut output)?;
@@ -1624,7 +1643,9 @@ impl fmt::Display for RowStoreError {
                 f,
                 "row range limit {limit} is outside 1..={MAX_ROW_RANGE_LIMIT}"
             ),
-            Self::InvalidKeyRange => f.write_str("row range lower bound is not below upper bound"),
+            Self::InvalidKeyRange => {
+                f.write_str("row range bounds must share one logical key type and be ordered")
+            }
             Self::RowsNotStrictlyOrdered => {
                 f.write_str("admitted row keys are not strictly logically ordered")
             }
@@ -1760,6 +1781,28 @@ mod tests {
             ]
         );
         assert!(rows.iter().all(|row| row.version() == &version));
+    }
+
+    #[test]
+    fn key_range_rejects_bounds_from_different_typed_key_domains() {
+        assert!(matches!(
+            KeyRange::new(Some(TypedKey::Int(1)), Some(TypedKey::UInt(2)), 1),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
+        assert!(matches!(
+            KeyRange::new(
+                Some(TypedKey::Tuple(vec![
+                    TypedKey::Text("id".into()),
+                    TypedKey::Int(1)
+                ])),
+                Some(TypedKey::Tuple(vec![
+                    TypedKey::Text("id".into()),
+                    TypedKey::UInt(2)
+                ])),
+                1,
+            ),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
     }
 
     #[test]
