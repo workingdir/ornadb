@@ -1126,7 +1126,11 @@ fn committed_source_row_path(
     let table_path = if module_name.is_empty() {
         schema.declaration_name().to_owned()
     } else {
-        format!("{}/{}", module_name.replace('.', "/"), schema.declaration_name())
+        format!(
+            "{}/{}",
+            module_name.replace('.', "/"),
+            schema.declaration_name()
+        )
     };
     let source_schema = schema.descriptor();
     let key_ids = match raw_map_value(source_schema.raw(), "2") {
@@ -1137,9 +1141,8 @@ fn committed_source_row_path(
         _ => return Err(ProjectLoadError::InvalidSourceRow),
     };
     let (_, fields) = source_schema_fields(source_schema)?;
-    let owner_fields = |candidate: &LooseRowCandidate| {
-        absent_source_owner_fields(candidate, &fields, &key_ids)
-    };
+    let owner_fields =
+        |candidate: &LooseRowCandidate| absent_source_owner_fields(candidate, &fields, &key_ids);
     find_committed_source_row_path(project, &analysis, &table_path, canonical_key, owner_fields)
 }
 
@@ -1152,7 +1155,10 @@ fn absent_source_owner_fields(
     if !parsed.diagnostics.is_empty() {
         return Ok(None);
     }
-    let Expr::Record { fields: row_fields, .. } = parsed.value else {
+    let Expr::Record {
+        fields: row_fields, ..
+    } = parsed.value
+    else {
         return Ok(None);
     };
     let present = row_fields
@@ -2167,8 +2173,12 @@ mod committed_loose_row_projection_tests {
             fs::write(path, source).unwrap();
         }
         git(root.path(), &["init", "--quiet"]);
-        git(root.path(), &["config", "user.email", "test@example.invalid"]);
-        git(root.path(), &["config", "user.name", "Project test"]);
+        git(
+            root.path(),
+            &["config", "user.email", "kieran@drewett.dev"],
+        );
+        git(root.path(), &["config", "user.name", "kierandrewett"]);
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
         git(root.path(), &["add", "."]);
         git(root.path(), &["commit", "--quiet", "-m", "fixture"]);
 
@@ -2180,39 +2190,38 @@ mod committed_loose_row_projection_tests {
         let analysis = analyze(project.modules());
         let key = Value::new(Raw::Int(42.into())).unwrap().encode().unwrap();
 
-        let (table_path, logical_path, key_path) = find_committed_source_row_path(
-            &project,
-            &analysis,
-            "contacts/Contact",
-            &key,
-            |_| Ok(Some(Vec::new())),
-        )
-        .unwrap();
+        let (table_path, logical_path, key_path) =
+            find_committed_source_row_path(&project, &analysis, "contacts/Contact", &key, |_| {
+                Ok(Some(Vec::new()))
+            })
+            .unwrap();
         assert_eq!(table_path, "contacts/Contact");
         assert_eq!(logical_path, "contacts/Contact/42.orna");
         assert_eq!(key_path, ["42.orna"]);
 
         let other_key = Value::new(Raw::Int(43.into())).unwrap().encode().unwrap();
-        assert!(find_committed_source_row_path(
-            &project,
-            &analysis,
-            "contacts/Contact",
-            &other_key,
-            |_| Ok(Some(Vec::new())),
-        )
-        .is_err());
+        assert!(
+            find_committed_source_row_path(
+                &project,
+                &analysis,
+                "contacts/Contact",
+                &other_key,
+                |_| Ok(Some(Vec::new())),
+            )
+            .is_err()
+        );
 
         let mut ambiguous = project.clone();
-        ambiguous
-            .loose_rows
-            .push(ambiguous.loose_rows[0].clone());
-        assert!(find_committed_source_row_path(
-            &ambiguous,
-            &analysis,
-            "contacts/Contact",
-            &key,
-            |_| Ok(Some(Vec::new())),
-        )
-        .is_err());
+        ambiguous.loose_rows.push(ambiguous.loose_rows[0].clone());
+        assert!(
+            find_committed_source_row_path(
+                &ambiguous,
+                &analysis,
+                "contacts/Contact",
+                &key,
+                |_| Ok(Some(Vec::new())),
+            )
+            .is_err()
+        );
     }
 }
