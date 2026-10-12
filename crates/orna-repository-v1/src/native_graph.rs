@@ -21,7 +21,7 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor, Value};
+use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor};
 use sha2::{Digest, Sha256};
 
 pub const REPOSITORY_FORMAT: u8 = 3;
@@ -5417,7 +5417,12 @@ pub(crate) fn load_format3_row_map(
             actual: schema_node.kind(),
         });
     };
-    reader.verify_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+    let schema_bytes = reader.read_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+    let descriptor =
+        SchemaDescriptor::decode(&schema_bytes).map_err(|_| GraphError::NonCanonicalData)?;
+    if schema_relation_id(&descriptor)? != relation_id {
+        return Err(GraphError::ContextMismatch);
+    }
 
 
     let rows_domain = canonical_domain(vec![
@@ -5460,6 +5465,28 @@ pub(crate) fn load_format3_row_map(
 
 
 
+
+fn schema_relation_id(schema: &SchemaDescriptor) -> Result<[u8; 16], GraphError> {
+    let relation_key = Raw::Int(1.into());
+    let Raw::Map(fields) = schema.raw() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let relation = fields
+        .iter()
+        .find(|(key, _)| key == &relation_key)
+        .map(|(_, value)| value)
+        .ok_or(GraphError::NonCanonicalData)?;
+    let Raw::Tag(37, relation) = relation else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let Raw::Bytes(bytes) = relation.as_ref() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| GraphError::NonCanonicalData)
+}
 
 fn canonical_domain(fields: Vec<CborValue>) -> Vec<u8> {
     canonical_value_bytes(&CborValue::Array(fields))
@@ -5679,6 +5706,36 @@ impl PinnedNativeGraphReader {
         Ok(output)
     }
 
+
+    fn read_full_byte_index(
+        &mut self,
+        root: &NativeObjectId,
+        expected_length: u64,
+        expected_digest: [u8; 32],
+    ) -> Result<Vec<u8>, GraphError> {
+        if expected_length > MAX_RANGE_METADATA_BYTES {
+            return Err(GraphError::MetadataQuotaExceeded);
+        }
+        let capacity =
+            usize::try_from(expected_length).map_err(|_| GraphError::MetadataQuotaExceeded)?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(capacity)
+            .map_err(|_| GraphError::MetadataQuotaExceeded)?;
+        let mut hasher = Sha256::new();
+        let (length, _) = self.walk_byte_index(
+            root,
+            None,
+            &mut hasher,
+            Some(&mut output),
+            Some(expected_length),
+        )?;
+        let digest: [u8; 32] = hasher.finalize().into();
+        if length != expected_length || digest != expected_digest {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        Ok(output)
+    }
 
     fn verify_full_byte_index(
         &mut self,
@@ -6867,6 +6924,27 @@ mod persisted_orp_tests {
         )
         .expect("load the primary map without traversing the secondary root");
         assert_eq!(loaded.version().primary_root(), &primary_root);
+    }
+
+    #[test]
+    fn schema_relation_identity_is_read_from_descriptor() {
+        let relation_id = [0x42; 16];
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (
+                Raw::Int(1.into()),
+                Raw::Tag(37, Box::new(Raw::Bytes(relation_id.to_vec()))),
+            ),
+            (Raw::Int(2.into()), Raw::Array(Vec::new())),
+            (Raw::Int(3.into()), Raw::Array(Vec::new())),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid relation schema descriptor");
+
+        assert_eq!(
+            schema_relation_id(&descriptor).expect("extract relation identity"),
+            relation_id
+        );
     }
 
     fn fixture_ref_exists(directory: &Path, reference: &str) -> bool {
