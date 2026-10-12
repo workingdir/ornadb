@@ -1230,20 +1230,17 @@ fn source_text_key_names(analysis: &orna_semantic_v1::Analysis) -> BTreeSet<Stri
     names
 }
 
-fn decode_source_text_key(encoded: &[u8]) -> Result<orna_repository_v1::TypedKey, Error> {
-    let decoded = orna_value_v1::Value::decode(encoded).map_err(|_| Error::InvalidKey)?;
-    if decoded.encode().map_err(|_| Error::InvalidKey)?.as_slice() != encoded {
-        return Err(Error::InvalidKey);
-    }
-    let orna_foundation_v1::OvbRaw::Text(key) = decoded.raw() else {
-        return Err(Error::InvalidKey);
-    };
-    Ok(orna_repository_v1::TypedKey::Text(key.clone()))
+fn decode_source_text_key(bytes: &[u8]) -> Result<orna_repository_v1::TypedKey, Error> {
+    // Runtime TableMutation keys use semantic Text payload bytes. Interpret
+    // them as Text only after the committed source admits the table's single
+    // explicit Text key.
+    let key = std::str::from_utf8(bytes).map_err(|_| Error::InvalidKey)?;
+    Ok(orna_repository_v1::TypedKey::Text(key.to_owned()))
 }
 
-/// Lowers protected media rows using the source-bound primary-key descriptor
-/// from the committed project and the pinned relation maps. Raw mutation key
-/// bytes are decoded as canonical OVB before the declared text type is used.
+/// Lowers protected media rows using the committed source's single-Text-key
+/// admission and the pinned relation maps. Mutation keys are runtime Text
+/// payload bytes, not encoded OVB values.
 pub fn lower_protected_blob_mutations_for_publication(
     repository: &Repository,
     head: &GitCommitRef,
@@ -3810,22 +3807,12 @@ mod tests {
     }
 
     #[test]
-    fn source_text_key_admission_rejects_raw_utf8_and_nontext_values() {
-        let source_text = orna_value_v1::Value::new(OvbRaw::Text("song".to_owned()))
-            .unwrap()
-            .encode()
-            .unwrap();
+    fn source_text_key_decoder_accepts_utf8_and_rejects_invalid_bytes() {
         assert_eq!(
-            decode_source_text_key(&source_text),
+            decode_source_text_key(b"song"),
             Ok(orna_repository_v1::TypedKey::Text("song".to_owned()))
         );
-        assert_eq!(decode_source_text_key(b"song"), Err(Error::InvalidKey));
-
-        let source_int = orna_value_v1::Value::new(OvbRaw::Int(7.into()))
-            .unwrap()
-            .encode()
-            .unwrap();
-        assert_eq!(decode_source_text_key(&source_int), Err(Error::InvalidKey));
+        assert_eq!(decode_source_text_key(&[0xff]), Err(Error::InvalidKey));
     }
 
     #[test]
