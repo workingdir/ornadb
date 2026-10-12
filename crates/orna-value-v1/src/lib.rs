@@ -4308,10 +4308,16 @@ fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
     if reader.at != bytes.len() {
         return Err(Error::TrailingBytes);
     }
-    if encode_raw(&raw)?.as_slice() != bytes {
+    if encode_canonical_storage_value(&raw)?.as_slice() != bytes {
         return Err(Error::NonCanonical);
     }
     Ok(raw)
+}
+
+fn encode_canonical_storage_value(raw: &Raw) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    write_raw(raw, &mut bytes)?;
+    Ok(bytes)
 }
 
 fn validate_schema_stored_row(
@@ -6264,7 +6270,8 @@ mod tests {
                 Raw::Bytes(vec![5; 20]),
             ])),
         );
-        let referenced_fields = encode_raw(&Raw::Array(vec![blob_reference])).unwrap();
+        let referenced_fields =
+            encode_canonical_storage_value(&Raw::Array(vec![blob_reference])).unwrap();
         assert!(
             schema
                 .validate_stored_row([9; 16], &key, &referenced_fields)
