@@ -107,6 +107,51 @@ fn dependency_repository(root: &Path) -> PathBuf {
     dependency
 }
 
+/// A dependency repository that pins a second repository in its own tree.
+fn nested_dependency_repositories(root: &Path) -> (PathBuf, PathBuf) {
+    let leaf = root.join("leaf-dependency");
+    fs::create_dir_all(&leaf).expect("create nested dependency");
+    init_repository(&leaf);
+    fs::write(leaf.join("payload.bin"), b"nested dependency payload\n")
+        .expect("write nested dependency payload");
+    git(&leaf, &["add", "--all"]);
+    git(
+        &leaf,
+        &["commit", "--quiet", "-m", "nested dependency content"],
+    );
+
+    let dependency = dependency_repository(root);
+    git(
+        &dependency,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            leaf.to_str().expect("nested dependency path is UTF-8"),
+            "tools/leaf",
+        ],
+    );
+    git(&dependency, &["add", "--all"]);
+    git(
+        &dependency,
+        &["commit", "--quiet", "-m", "pin nested dependency"],
+    );
+    git(
+        &dependency,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+    );
+    (dependency, leaf)
+}
+
 /// A format-3 superproject that pins `dependency` at `deps/std`.
 fn superproject(root: &Path, dependency: &Path) -> PathBuf {
     let project = root.join("library");
@@ -223,6 +268,79 @@ fn complete_copy_reconstructs_snapshot_and_dependency_without_the_source() {
     let explicit_manifest = export_complete_copy(&repository, "HEAD", &explicit, &sources)
         .expect("export with an explicit dependency source");
     assert_eq!(explicit_manifest, manifest);
+}
+
+#[test]
+fn complete_copy_carries_nested_pins_and_restores_them_offline() {
+    let root = TempDir::new().expect("create fixture root");
+    let (dependency, leaf) = nested_dependency_repositories(root.path());
+    let project = superproject(root.path(), &dependency);
+    git(
+        &project,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+    );
+
+    let repository = Repository::discover(&project).expect("discover superproject");
+    let snapshot = git_stdout(&project, &["rev-parse", "HEAD"]);
+    let dependency_commit = git_stdout(&dependency, &["rev-parse", "HEAD"]);
+    let nested_commit = git_stdout(&leaf, &["rev-parse", "HEAD"]);
+    let archive = root.path().join("nested-archive");
+    let manifest = export_complete_copy(&repository, "HEAD", &archive, &[])
+        .expect("export recursive dependency closure");
+
+    assert_eq!(manifest.snapshot, snapshot);
+    assert_eq!(manifest.dependencies.len(), 2);
+    assert_eq!(manifest.dependencies[0].path, "deps/std");
+    assert_eq!(manifest.dependencies[0].commit, dependency_commit);
+    assert_eq!(manifest.dependencies[1].path, "deps/std/tools/leaf");
+    assert_eq!(manifest.dependencies[1].commit, nested_commit);
+    for dependency in &manifest.dependencies {
+        assert!(archive.join(&dependency.bundle).is_file());
+    }
+    let explicit_archive = root.path().join("nested-explicit-archive");
+    let sources = [DependencySource {
+        path: "deps/std".to_owned(),
+        directory: dependency.clone(),
+    }];
+    let explicit_manifest = export_complete_copy(&repository, "HEAD", &explicit_archive, &sources)
+        .expect("export nested dependencies from the explicit parent source");
+    assert_eq!(explicit_manifest, manifest);
+
+    drop(repository);
+    fs::remove_dir_all(&project).expect("remove source superproject");
+    fs::remove_dir_all(&dependency).expect("remove first dependency source");
+    fs::remove_dir_all(&leaf).expect("remove nested dependency source");
+    let restored = root.path().join("restored-nested-copy");
+    let reconstructed =
+        restore_complete_copy(&archive, &restored).expect("restore only from archived bundles");
+    assert_eq!(reconstructed, manifest);
+
+    let restored_dependency = restored.join("deps/std");
+    let restored_nested = restored.join("deps/std/tools/leaf");
+    assert_eq!(
+        git_stdout(&restored_dependency, &["rev-parse", "HEAD"]),
+        dependency_commit
+    );
+    assert_eq!(
+        git_stdout(&restored_nested, &["rev-parse", "HEAD"]),
+        nested_commit
+    );
+    assert_eq!(git_stdout(&restored_dependency, &["remote"]), "");
+    assert_eq!(git_stdout(&restored_nested, &["remote"]), "");
+
+    materialize_complete_copy(&restored, &manifest).expect("materialise all pinned worktrees");
+    assert_eq!(
+        fs::read(restored_nested.join("payload.bin"))
+            .expect("read nested payload from restored worktree"),
+        b"nested dependency payload\n"
+    );
 }
 
 #[test]
