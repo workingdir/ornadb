@@ -3523,6 +3523,7 @@ c31e711dab3dc078b93eb49c11f1a374121a43315df58923b501997935062de4  crates/orna-pr
 6680eedf2960d2d93241ff971f30a4d23fc69c020fefa3d84b2701a276f53087  crates/orna-protocol-v1/tests/fixtures/secret-surface.orna
 c8d9d9650a8f2cf326c36f27df46c9d69b5268264d34a78b73ece6e2dde5159d  crates/orna-protocol/src/tests/fixtures/protocol-source.orna
 61d8257bb53ad1ed72fe00a36e2f5f14f2308b5c8ad4e934fac653d3888b4f4c  crates/orna-protocol/src/tests/fixtures/synthetic-standard-enum.orna
+5808d670f79229c9081dc7ed9fde023ba7c60b274040ff5161c01a709b90a958  crates/orna-repository-v1/tests/fixtures/committed-table-binding.orna
 4c238a6be0eba2ccc46c0e9f2345b608c6cd45c5ef2f6b73ddcee3db0818fb17  crates/orna-repository-v1/tests/fixtures/format-context/database-bad-uuid.orna
 61b7f164bafa0c6322d724dcbab379f8ee878b325def64b0e6db8fc3337c4d3e  crates/orna-repository-v1/tests/fixtures/format-context/database-compact.orna
 6214cdc92bb24f032cb0fc14d7011a25bffa1ab828c35aea7f5aabe0738d71c0  crates/orna-repository-v1/tests/fixtures/format-context/database-final.orna
