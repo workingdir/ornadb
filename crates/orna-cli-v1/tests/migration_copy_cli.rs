@@ -83,10 +83,13 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     let dependency_source = parent.path().join("dependency-source");
     fs::create_dir(&dependency_source).unwrap();
     git_output(&dependency_source, &["init", "-b", "main"]);
-    git_output(&dependency_source, &["config", "user.name", "dependency"]);
     git_output(
         &dependency_source,
-        &["config", "user.email", "dependency@orna.invalid"],
+        &["config", "user.name", "kierandrewett"],
+    );
+    git_output(
+        &dependency_source,
+        &["config", "user.email", "kieran@drewett.dev"],
     );
     fs::write(
         dependency_source.join("tracked.txt"),
