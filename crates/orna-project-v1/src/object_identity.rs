@@ -505,7 +505,10 @@ mod tests {
 
     #[test]
     fn manifest_reconciliation_persists_ids_and_retires_removed_declarations() {
-        let source = ModuleInput::new("main.orna", include_str!("fixtures/object-identity-original.orna"));
+        let source = ModuleInput::new(
+            "main.orna",
+            "pub table Object(id: Str) { payload: Blob, size: Float, }",
+        );
         let first = ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), None).unwrap();
         let encoded = first.encode().unwrap();
         assert_eq!(ObjectIdentityManifest::decode(&encoded).unwrap(), first);
