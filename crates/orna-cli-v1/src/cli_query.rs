@@ -522,10 +522,6 @@ fn render_bytes(bytes: &[u8]) -> String {
     }
 }
 
-/// The canonical keys one `--key` spelling names, in the order a lookup tries
-/// them: the text spelling, then the same spelling's own bytes, then the bytes
-/// a `0x` hex spelling names.
-
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
