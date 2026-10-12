@@ -17,9 +17,12 @@ on:
         type: choice
         default: orna-cli-v1
         options:
+          - orna-application-v1
           - orna-cli-v1
           - orna-evaluator-v1
+          - orna-project-v1
           - orna-repository-v1
+          - orna-runtime-v1
           - orna-storage-v1
       target_kind:
         description: Select library unit tests or one integration-test target.
@@ -42,7 +45,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: source-audits-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' && format('source-audits|focused|{0}|{1}|{2}|{3}|{4}', inputs.revision_sha, inputs.cargo_package, inputs.target_kind, inputs.integration_target, inputs.test_filter) || format('source-audits-{0}-{1}', github.workflow, github.ref) }}
   cancel-in-progress: true
 
 jobs:
@@ -147,7 +150,7 @@ jobs:
 
   focused-consumer:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' }}
-    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
@@ -169,7 +172,7 @@ jobs:
             exit 1
           fi
           case "$CARGO_PACKAGE" in
-            orna-cli-v1|orna-evaluator-v1|orna-repository-v1|orna-storage-v1) ;;
+            orna-application-v1|orna-cli-v1|orna-evaluator-v1|orna-project-v1|orna-repository-v1|orna-runtime-v1|orna-storage-v1) ;;
             *) echo "::error::cargo_package is not an allowed package"; exit 1 ;;
           esac
           case "$TARGET_KIND" in
