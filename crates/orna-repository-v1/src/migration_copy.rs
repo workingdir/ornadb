@@ -1172,12 +1172,12 @@ fn dependency_entries(
         .count())
 }
 
-/// Settles a stable content identity over every copied path, including ignored
-/// and untracked entries. `.git` metadata is excluded at each repository root;
-/// the file bytes, modes, symlink targets and relative paths remain included.
+/// Settles a stable identity over copied content and nested repository state.
+/// Main `.git` metadata is excluded; nested HEADs and indexes are included so
+/// prepared-copy recovery detects dirty submodule changes.
 fn working_tree_identity(copy: &Repository) -> Result<([u8; 32], usize), RepositoryError> {
     let mut hash = Sha256::new();
-    hash.update(b"orna.migration.working-tree-identity.v2\0");
+    hash.update(b"orna.migration.working-tree-identity.v3\0");
     let mut entries = 0;
     hash_working_tree(copy.worktree(), Path::new(""), &mut hash, &mut entries)?;
     Ok((hash.finalize().into(), entries))
@@ -1197,6 +1197,12 @@ fn hash_working_tree(
     for entry in entries {
         let name = entry.file_name();
         if name == ".git" {
+            if !relative.as_os_str().is_empty() {
+                *entry_count = entry_count
+                    .checked_add(1)
+                    .ok_or(RepositoryError::LocalStateUnavailable)?;
+                hash_nested_git_state(&directory, hash)?;
+            }
             continue;
         }
         let child = relative.join(name);
@@ -1250,6 +1256,100 @@ fn hash_working_tree(
                 return Err(RepositoryError::LocalStateUnavailable);
             }
         }
+    }
+    Ok(())
+}
+
+fn hash_nested_git_state(root: &Path, hash: &mut Sha256) -> Result<(), RepositoryError> {
+    hash.update(b"nested-git-state.v1\0");
+    let mut head = git_command(root);
+    head.args(["rev-parse", "--verify", "HEAD"]);
+    crate::scrub_git_routing_environment(&mut head);
+    let output = head.output().map_err(|_| RepositoryError::GitUnavailable)?;
+    if output.status.success() {
+        let object = crate::trim_output(&output.stdout);
+        hash.update(b"head\0");
+        hash.update((object.len() as u64).to_be_bytes());
+        hash.update(object);
+    } else {
+        hash.update(b"unborn-head\0");
+    }
+
+    let head_path = git_path(root, "HEAD")?;
+    hash_git_admin_file(&head_path, hash)?;
+    let index = git_path(root, "index")?;
+    hash_git_admin_file(&index, hash)?;
+    let parent = index
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    let entries = fs::read_dir(parent)
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    let mut shared_indexes = entries
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("sharedindex.")
+        })
+        .collect::<Vec<_>>();
+    shared_indexes.sort_by_key(|entry| entry.file_name());
+    for entry in shared_indexes {
+        let name = entry.file_name();
+        let name = name.as_encoded_bytes();
+        hash.update((name.len() as u64).to_be_bytes());
+        hash.update(name);
+        hash_git_admin_file(&entry.path(), hash)?;
+    }
+    Ok(())
+}
+
+fn hash_git_admin_file(path: &Path, hash: &mut Sha256) -> Result<(), RepositoryError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            hash.update(b"missing\0");
+            return Ok(());
+        }
+        Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        hash.update(b"symlink\0");
+        let target = fs::read_link(path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let target = target.as_os_str().as_encoded_bytes();
+        hash.update((target.len() as u64).to_be_bytes());
+        hash.update(target);
+        return Ok(());
+    }
+    if !file_type.is_file() {
+        return Err(RepositoryError::LocalStateUnavailable);
+    }
+    hash.update(b"file\0");
+    #[cfg(unix)]
+    hash.update(std::os::unix::fs::MetadataExt::mode(&metadata).to_be_bytes());
+    #[cfg(not(unix))]
+    hash.update([u8::from(metadata.permissions().readonly())]);
+    hash.update(metadata.len().to_be_bytes());
+    let mut file = fs::File::open(path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut bytes_read = 0u64;
+    loop {
+        let length = file
+            .read(&mut buffer)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if length == 0 {
+            break;
+        }
+        bytes_read = bytes_read
+            .checked_add(length as u64)
+            .ok_or(RepositoryError::LocalStateUnavailable)?;
+        hash.update(&buffer[..length]);
+    }
+    if bytes_read != metadata.len() {
+        return Err(RepositoryError::LocalStateUnavailable);
     }
     Ok(())
 }
