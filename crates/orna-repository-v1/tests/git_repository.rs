@@ -8713,11 +8713,42 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
         (include_str!("fixtures/format-context/format-2.orna"), 2u8),
     ] {
         let source = repository_with_legacy_format(format);
+        let module_source = TempDir::new().unwrap();
+        git(module_source.path(), &["init", "-b", "main"]);
+        test_support::configure_fixture_git_identity(module_source.path());
+        git(module_source.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(
+            module_source.path().join("main.orna"),
+            include_str!("fixtures/git-repository-main.orna"),
+        )
+        .unwrap();
+        fs::write(module_source.path().join("module.txt"), "module base\n").unwrap();
+        git(module_source.path(), &["add", "."]);
+        git(module_source.path(), &["commit", "-m", "module base"]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                module_source.path().to_str().unwrap(),
+                "deps/lib",
+            ],
+        );
+        git(source.path(), &["commit", "-m", "add module"]);
+        fs::write(source.path().join("removed.txt"), "tracked before removal\n").unwrap();
+        git(source.path(), &["add", "removed.txt"]);
+        git(source.path(), &["commit", "-m", "add tracked file"]);
         let repo = Repository::discover(source.path()).unwrap();
         let source_head = repo.head().unwrap().unwrap();
+        // Preserve an unrelated staged version separately from its later
+        // unstaged edit, plus untracked and ignored user data.
+        fs::write(source.path().join("ordinary.txt"), "staged\n").unwrap();
+        git(source.path(), &["add", "ordinary.txt"]);
+        fs::remove_file(source.path().join("removed.txt")).unwrap();
+        git(source.path(), &["add", "-u", "--", "removed.txt"]);
         let source_index = repo.index_generation().unwrap();
-        // Dirty, untracked and ignored source work that a migration must carry
-        // and a clean checkout must not overwrite.
         fs::write(source.path().join("ordinary.txt"), "dirty\n").unwrap();
         fs::write(source.path().join("untracked.txt"), "untracked\n").unwrap();
         fs::write(source.path().join(".gitignore"), "ignored/\n").unwrap();
@@ -8727,6 +8758,10 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             b"ignored payload",
         )
         .unwrap();
+        let module_worktree = source.path().join("deps/lib");
+        fs::write(module_worktree.join("module.txt"), "module staged\n").unwrap();
+        git(&module_worktree, &["add", "module.txt"]);
+        fs::write(module_worktree.join("module.txt"), "module dirty\n").unwrap();
         let directory = TempDir::new().unwrap();
         let continuity = MigrationContinuityRecord::new(vec![
             StreamCheckpointIdentityPredecessor::new(
@@ -8765,6 +8800,16 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             fs::read_to_string(source.path().join("ordinary.txt")).unwrap(),
             "dirty\n"
         );
+        assert_eq!(git(source.path(), &["show", ":ordinary.txt"]), "staged");
+        assert!(!source.path().join("removed.txt").exists());
+        assert_eq!(
+            git(&module_worktree, &["show", ":module.txt"]),
+            "module staged"
+        );
+        assert_eq!(
+            git(&module_worktree, &["diff", "--cached", "--name-only"]),
+            "module.txt"
+        );
         assert_eq!(
             fs::read(source.path().join("ignored/payload.bin")).unwrap(),
             b"ignored payload"
@@ -8775,6 +8820,40 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
         let migrated = Repository::discover(&copy.destination()).unwrap();
         assert_eq!(copy.source_commit(), &source_head);
         assert_eq!(migrated.head().unwrap(), Some(source_head.clone()));
+        assert_eq!(
+            git(copy.destination(), &["show", ":ordinary.txt"]),
+            "staged"
+        );
+        assert_eq!(
+            git(copy.destination(), &["diff", "--cached", "--name-only"]),
+            "ordinary.txt\nremoved.txt"
+        );
+        assert_eq!(
+            git(copy.destination(), &["diff", "--name-only"]),
+            "ordinary.txt"
+        );
+        assert!(!copy.destination().join("removed.txt").exists());
+        let migrated_module = copy.destination().join("deps/lib");
+        assert_eq!(
+            git(&migrated_module, &["rev-parse", "--show-toplevel"]),
+            migrated_module.to_string_lossy()
+        );
+        assert_eq!(
+            git(&migrated_module, &["show", ":module.txt"]),
+            "module staged"
+        );
+        assert_eq!(
+            git(&migrated_module, &["diff", "--cached", "--name-only"]),
+            "module.txt"
+        );
+        assert_eq!(
+            git(&migrated_module, &["diff", "--name-only"]),
+            "module.txt"
+        );
+        assert_eq!(
+            fs::read_to_string(migrated_module.join("module.txt")).unwrap(),
+            "module dirty\n"
+        );
         // The journalled migration commit is the one that establishes the
         // migrated representation, and it names its own coordinate as a Git
         // trailer so a history walk can report the transition instead of
@@ -8881,16 +8960,18 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
         // The whole copied tree includes untracked and ignored paths, not only
         // entries already present in the clone's Git index.
         assert!(copy.working_tree_entries() > 0);
-        fs::write(source.path().join("ignored/payload.bin"), b"changed ignored payload")
-            .unwrap();
-        let changed_copy =
-            orna_repository_v1::migration_copy::prepare_format3_migration(
-                &repo,
-                &directory.path().join("migrated-after-ignored-change"),
-                continuity.clone(),
-                defaults,
-            )
-            .unwrap();
+        fs::write(
+            source.path().join("ignored/payload.bin"),
+            b"changed ignored payload",
+        )
+        .unwrap();
+        let changed_copy = orna_repository_v1::migration_copy::prepare_format3_migration(
+            &repo,
+            &directory.path().join("migrated-after-ignored-change"),
+            continuity.clone(),
+            defaults,
+        )
+        .unwrap();
         assert_ne!(
             copy.working_tree_identity(),
             changed_copy.working_tree_identity(),
