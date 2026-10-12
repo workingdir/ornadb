@@ -22,9 +22,7 @@ use orna_protocol_v1::{
     Envelope, Message, PatchList, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey,
     ResultStatus,
 };
-use orna_repository_v1::{
-    GitCommitRef, OrpBlobBinding, ProtectedContentPin, RepositoryCaptureCapability,
-};
+use orna_repository_v1::{GitCommitRef, ProtectedContentPin, RepositoryCaptureCapability};
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
     RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
@@ -592,6 +590,7 @@ impl ApplicationAuthority {
         context: RuntimeActivationContext,
         mutations: Vec<TableMutation>,
         request: Option<RequestIdentity>,
+        source_row_schemas: &[SourceRowSchemaProvenance],
         protected_field_pins: &[RetainedSourceBlobPin],
     ) -> Result<StagedTableActivation, ApplicationError> {
         let activation_digest = Self::canonical_digest(&context, &mutations)?;
@@ -599,6 +598,12 @@ impl ApplicationAuthority {
             .iter()
             .enumerate()
             .map(|(ordinal, mutation)| {
+                if source_row_schemas
+                    .iter()
+                    .any(|source_row| source_row.mutation_id == mutation.id())
+                {
+                    return Ok(mutation.clone());
+                }
                 let mut digest = Sha256::new();
                 digest.update(b"ORNA-SOURCE-ACTIVATION-MUTATION\0");
                 digest.update(activation_digest);
@@ -677,14 +682,15 @@ pub struct StagedActivation {
     protected_field_pins: Vec<RetainedSourceBlobPin>,
 }
 
-/// One accepted Blob binding attached to a source field by the source-row producer.
+/// One field payload and the accepted pin returned by project admission.
 #[derive(Debug)]
-pub struct SourceBlobFieldBinding {
+pub struct SourceBlobFieldPin {
     pub field_object_id: [u8; 16],
-    pub binding: OrpBlobBinding,
+    pub encoded_value: Vec<u8>,
+    pub pin: ProtectedContentPin,
 }
 
-/// Complete source-owned row projection admitted without Object lowering here.
+/// Complete project-admitted row consumed without rebuilding its mutation.
 #[derive(Debug)]
 pub struct SourceRowMutationInput {
     pub table_name: String,
@@ -693,10 +699,8 @@ pub struct SourceRowMutationInput {
     pub source_snapshot_id: [u8; 32],
     pub declaration_name: String,
     pub schema: SchemaDescriptor,
-    pub canonical_key: Vec<u8>,
-    pub canonical_fields: Vec<u8>,
-    pub blob_fields: Vec<SourceBlobFieldBinding>,
-    pub insert_only: bool,
+    pub mutation: TableMutation,
+    pub blob_fields: Vec<SourceBlobFieldPin>,
 }
 
 /// Schema provenance retained for the durable consumer's expected-schema bind.
@@ -753,6 +757,7 @@ impl SourceRowSchemaProvenance {
 pub struct RetainedSourceBlobPin {
     mutation_id: [u8; 16],
     field_object_id: [u8; 16],
+    encoded_value: Vec<u8>,
     pin: Arc<ProtectedContentPin>,
 }
 
@@ -764,6 +769,11 @@ impl RetainedSourceBlobPin {
     #[must_use]
     pub const fn field_object_id(&self) -> [u8; 16] {
         self.field_object_id
+    }
+
+    #[must_use]
+    pub fn encoded_value(&self) -> &[u8] {
+        &self.encoded_value
     }
 
     #[must_use]
@@ -901,10 +911,8 @@ impl StagedActivation {
         self.stage_with_request(authority, context, None)
     }
 
-    /// Stages source mutations for one durable request. The request identity
-    /// keeps independently admitted requests from sharing mutation IDs even
-    /// when they reuse the same captured activation context; retrying the same
-    /// staged request with that context remains deterministic.
+    /// Stages ordinary effects under the request identity while preserving
+    /// project-admitted mutations and their provenance-bearing IDs.
     pub fn stage_for_request(
         &self,
         authority: &ApplicationAuthority,
@@ -928,13 +936,11 @@ impl StagedActivation {
                 "table rows and commit context refer to different CWD generations".into(),
             ));
         }
-        // Request identity supplements the activation pin so identical source
-        // writes from distinct request entries cannot alias durable mutation
-        // IDs even when a caller reuses one captured context.
         authority.stage_source_mutations(
             context.clone(),
             self.mutations.clone(),
             request,
+            &self.source_row_schemas,
             &self.protected_field_pins,
         )
     }
@@ -1088,10 +1094,9 @@ impl SourceMutationEffectHandler {
         handler.publication_rows = Some(publication_rows);
         Ok(handler)
     }
-    /// Admits a source-owner row projection without lowering or rewriting its Object.
-    /// The key and descriptor-ordered stored-field tuple are validated as-is;
-    /// every accepted Blob pin and the exact schema provenance remain attached
-    /// to the staged activation until its durable consumer finishes.
+    /// Admits a project-lowered row without rebuilding its mutation.
+    /// The project producer owns descriptor order and supplies transfer evidence;
+    /// this handler validates the full stored tuple and retains exact pins.
     pub fn record_source_row(
         &mut self,
         input: SourceRowMutationInput,
@@ -1103,83 +1108,56 @@ impl SourceMutationEffectHandler {
             source_snapshot_id,
             declaration_name,
             schema,
-            canonical_key,
-            canonical_fields,
+            mutation,
             blob_fields,
-            insert_only,
         } = input;
         if !self.tables.contains_key(&table_name)
             || self.table_object_ids.get(&table_name).copied() != Some(table_object_id)
+            || mutation.table() != table_name
+            || mutation.table_object_id() != Some(table_object_id)
         {
             return Err(ApplicationError::InvalidTableMetadata);
         }
+        let canonical_fields = mutation
+            .value()
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
         schema
-            .validate_stored_row(table_object_id.bytes(), &canonical_key, &canonical_fields)
+            .validate_stored_row(table_object_id.bytes(), mutation.key(), canonical_fields)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
 
         let ordinal = self.next_ordinal;
         let next_ordinal = ordinal
             .checked_add(1)
             .ok_or_else(|| ApplicationError::Runtime("source mutation limit reached".into()))?;
-        let schema_bytes = schema
-            .encode()
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let mut blob_fields = blob_fields;
-        blob_fields.sort_by_key(|field| field.field_object_id);
-        let mut digest = Sha256::new();
-        digest.update(SOURCE_MUTATION_DOMAIN);
-        digest.update(b"complete-source-row\0");
-        put_bytes(&mut digest, table_name.as_bytes());
-        digest.update(table_object_id.bytes());
-        put_bytes(&mut digest, source_commit.as_str().as_bytes());
-        digest.update(source_snapshot_id);
-        put_bytes(&mut digest, declaration_name.as_bytes());
-        put_bytes(&mut digest, &schema_bytes);
-        put_bytes(&mut digest, &canonical_key);
-        digest.update([u8::from(insert_only)]);
-        put_bytes(&mut digest, &canonical_fields);
-        for field in &blob_fields {
-            digest.update(field.field_object_id);
-            let transfer = field.binding.transfer_record();
-            digest.update(transfer.pin_id());
-            put_bytes(&mut digest, field.binding.encoded_value());
+        if self.mutations.iter().any(|existing| existing.id() == mutation.id()) {
+            return Err(ApplicationError::InvalidTableMetadata);
         }
-        digest.update(ordinal.to_be_bytes());
-        let mut id: [u8; 16] = digest.finalize()[..16]
-            .try_into()
-            .expect("SHA-256 prefix has the requested width");
-        if id == [0; 16] {
-            id[0] = 1;
-        }
-        let mut mutation = if insert_only {
-            TableMutation::insert(id, &table_name, canonical_key, canonical_fields)
-        } else {
-            TableMutation::new(id, &table_name, canonical_key, Some(canonical_fields))
-        }
-        .map_err(|error| ApplicationError::Runtime(error.to_string()))?
-        .with_table_object_id(table_object_id);
-
+        let mutation_id = mutation.id();
+        let transfers = mutation.protected_content_transfers();
         let mut retained_pins = Vec::with_capacity(blob_fields.len());
         let mut field_ids = BTreeSet::new();
+        let mut pin_ids = BTreeSet::new();
         for field in blob_fields {
-            if !field_ids.insert(field.field_object_id) {
+            if !field_ids.insert(field.field_object_id)
+                || !pin_ids.insert(*field.pin.pin_id())
+                || !transfers
+                    .iter()
+                    .any(|transfer| transfer.pin_id() == field.pin.pin_id())
+            {
                 return Err(ApplicationError::InvalidTableMetadata);
             }
-            let pin = Arc::new(field.binding.into_pin());
-            mutation = mutation
-                .with_protected_content_pin(&pin)
-                .map_err(|error| ApplicationError::Runtime(error.to_string()))?;
             retained_pins.push(RetainedSourceBlobPin {
-                mutation_id: id,
+                mutation_id,
                 field_object_id: field.field_object_id,
-                pin,
+                encoded_value: field.encoded_value,
+                pin: Arc::new(field.pin),
             });
         }
-
         self.next_ordinal = next_ordinal;
+
         self.mutations.push(mutation);
         self.source_row_schemas.push(SourceRowSchemaProvenance {
-            mutation_id: id,
+            mutation_id,
             table_name,
             table_object_id,
             source_commit,
