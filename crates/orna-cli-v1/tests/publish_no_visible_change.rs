@@ -775,3 +775,110 @@ async fn publish_recovers_compact_journal_without_receipt_before_tail_selection(
         .unwrap();
     assert_eq!(recovered.pending_count().await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
+    let (directory, repository, _) = empty_format3_repository();
+    let root_path = directory.path();
+    let old_head = repository.head().unwrap().unwrap();
+    let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let activation = state.begin_activation().await.unwrap();
+    let (table, schema_fingerprint, segment) = compact_segment();
+    let mutation = TableMutation::new(
+        [0xf4; 16],
+        "media",
+        CanonicalValue::int(1.into()).encode().unwrap(),
+        Some(
+            CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Int(1.into())]))
+                .encode()
+                .unwrap(),
+        ),
+    )
+    .unwrap()
+    .with_table_object_id(TableObjectId::new(*table.as_bytes()));
+    state
+        .commit_table_activation(writer, &activation, &[mutation], [0xf5; 32], &NoFault)
+        .await
+        .unwrap();
+    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+    let intent_id = [0xf6; 16];
+    let freeze = state.freeze(intent_id, &checkpoint).await.unwrap();
+    let candidate = repository
+        .prepare_compact_publication(
+            &old_head,
+            repository.index_generation().unwrap(),
+            CompactManifest::empty(table, schema_fingerprint),
+            intent_id,
+            freeze.checkpoint.digest,
+            &[segment],
+            "orna: interrupted compact publication",
+        )
+        .unwrap();
+    let pending = repository
+        .publish_compact_repository_boundary(candidate)
+        .unwrap();
+    let receipt = state
+        .complete_compact_publication(&pending, &freeze)
+        .await
+        .unwrap();
+    assert_eq!(receipt.commit(), pending.commit());
+    assert_eq!(state.pending_count().await.unwrap(), 0);
+    let published_head = head(root_path);
+    let journal = repository.read_publication_journal().unwrap().unwrap();
+    assert!(journal.compact_manifest().is_some());
+    assert_eq!(published_head, journal.new_head().as_str());
+
+    let unrelated = root_path.join("unrelated.orna");
+    std::fs::write(
+        &unrelated,
+        include_bytes!("fixtures/project-core-main.orna"),
+    )
+    .unwrap();
+    git(root_path, &["add", "unrelated.orna"]);
+    std::fs::write(
+        &unrelated,
+        include_bytes!("fixtures/project-run-zero.orna"),
+    )
+    .unwrap();
+    let concurrent = root_path.join("concurrent.orna");
+    std::fs::write(
+        &concurrent,
+        include_bytes!("fixtures/project-core-main.orna"),
+    )
+    .unwrap();
+    git(root_path, &["add", "concurrent.orna"]);
+    std::fs::write(
+        &concurrent,
+        include_bytes!("fixtures/project-run-zero.orna"),
+    )
+    .unwrap();
+    let staged_before = git_output(root_path, &["diff", "--cached", "--binary"], None);
+    let unstaged_before = git_output(root_path, &["diff", "--binary"], None);
+    drop(state);
+
+    let output = run(root_path, &["publish"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(head(root_path), published_head);
+    assert!(repository.read_publication_journal().unwrap().is_none());
+    assert_eq!(
+        git_output(root_path, &["diff", "--cached", "--binary"], None),
+        staged_before
+    );
+    assert_eq!(
+        git_output(root_path, &["diff", "--binary"], None),
+        unstaged_before
+    );
+
+    let recovered = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    assert_eq!(recovered.pending_count().await.unwrap(), 0);
+}
