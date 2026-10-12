@@ -2,10 +2,10 @@
 //! encode raw file bytes and their canonical MIME-1 annotation as an OVB-2 Blob.
 //! This command is repository-independent and never reads or writes a repository.
 
-use std::{io, path::Path};
+use std::path::Path;
 
-use orna_sys_v1::{CaptureFileError, CaptureFileReader, FilesystemProvider};
-use orna_value_v1::{Blob, MimeRegistry};
+use orna_sys_v1::{CaptureFileError, CaptureFileStream, FilesystemProvider};
+use orna_value_v1::{encode_ovb2_reader_to_writer, MimeRegistry};
 
 use super::Diagnostic;
 
@@ -88,20 +88,8 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         })?;
 
     let source_path = Path::new(options.source);
-    let captured_source = capture_source(source_path)?;
-    let blob = Blob::from_bytes_with_annotation(
-        captured_source,
-        annotation.media_type(),
-        annotation.suffix(),
-    )
-    .map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2001",
-            "annotate media annotation is invalid",
-            "choose a valid MIME-1 type and compatible suffix",
-            format!("{error:?}"),
-        )
-    })?;
+    let mut source = open_source(source_path)?;
+    let source_length = source.length();
 
     let output_path = Path::new(options.output);
     let output_parent = output_path
@@ -119,8 +107,18 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
                 format!("{}: {error}", output_parent.display()),
             )
         })?;
-    let encoded = blob.encode_ovb2_to_writer(&mut output, u64::MAX);
+    let encoded = encode_ovb2_reader_to_writer(
+        &mut source,
+        source_length,
+        &annotation,
+        &mut output,
+        u64::MAX,
+    );
     if let Err(error) = encoded {
+        if let Err(source_change) = source.verify_unchanged() {
+            let detail = cleanup_staging_file(output).err().unwrap_or_default();
+            return Err(source_error(source_path, source_change, detail));
+        }
         if let Err(cleanup) = cleanup_staging_file(output) {
             return Err(Diagnostic::target_with_detail(
                 "E2001",
@@ -136,26 +134,15 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
                 "choose a source smaller than 2^63 bytes",
             ));
         }
-        let (title, help) = match error {
-            orna_value_v1::Error::InvalidMediaType
-            | orna_value_v1::Error::InvalidSuffix
-            | orna_value_v1::Error::IncompatibleSuffix
-            | orna_value_v1::Error::NonCanonical => (
-                "annotate media annotation is invalid",
-                "choose a valid MIME-1 type and compatible suffix",
-            ),
-            _ => (
-                "annotated Blob could not be encoded",
-                "check the source file and destination storage",
-            ),
-        };
         return Err(Diagnostic::target_with_detail(
             "E2001",
-            title,
-            help,
+            "annotated Blob could not be encoded",
+            "check the source file and destination storage",
             format!("{error:?}"),
         ));
     }
+    let output = verify_source_before_install(source_path, &source, output)?;
+
     if let Err(error) = output.as_file().sync_all() {
         let cleanup = cleanup_staging_file(output).err();
         return Err(Diagnostic::target_with_detail(
@@ -184,7 +171,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn open_source(path: &Path) -> Result<CaptureFileReader, Diagnostic> {
+fn open_source(path: &Path) -> Result<CaptureFileStream, Diagnostic> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         source_error(
             path,
@@ -240,26 +227,20 @@ fn open_source(path: &Path) -> Result<CaptureFileReader, Diagnostic> {
         )
     })?;
     filesystem
-        .capture_file(root_text, relative_path, max_bytes)
+        .capture_file_stream(root_text, relative_path, max_bytes)
         .map_err(|error| source_error(path, error, String::new()))
 }
 
-fn capture_source(path: &Path) -> Result<Vec<u8>, Diagnostic> {
-    let mut source = open_source(path)?;
-    io::copy(&mut source, &mut io::sink()).map_err(|error| {
-        source_error(path, CaptureFileError::SourceUnavailable, error.to_string())
-    })?;
-    if source.exceeded() {
-        return Err(source_error(
-            path,
-            CaptureFileError::LimitExceeded,
-            String::new(),
-        ));
+fn verify_source_before_install(
+    path: &Path,
+    source: &CaptureFileStream,
+    output: tempfile::NamedTempFile,
+) -> Result<tempfile::NamedTempFile, Diagnostic> {
+    if let Err(error) = source.verify_unchanged() {
+        let detail = cleanup_staging_file(output).err().unwrap_or_default();
+        return Err(source_error(path, error, detail));
     }
-    source
-        .verify_unchanged()
-        .map_err(|error| source_error(path, error, String::new()))?;
-    Ok(source.into_captured_bytes())
+    Ok(output)
 }
 
 fn source_error(path: &Path, error: CaptureFileError, detail: String) -> Diagnostic {
@@ -315,12 +296,13 @@ fn usage(title: &'static str, help: &'static str) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
     #[test]
-    fn detects_same_length_source_mutation_using_mtime() {
+    fn rejects_same_length_source_mutation_before_installing_output() {
         use std::time::{Duration, SystemTime};
 
         let directory = tempfile::TempDir::new().unwrap();
@@ -333,7 +315,18 @@ mod tests {
         std::fs::write(&path, &fixture).unwrap();
 
         let mut source = open_source(&path).unwrap();
-        io::copy(&mut source, &mut io::sink()).unwrap();
+        assert_eq!(
+            io::copy(&mut source, &mut io::sink()).unwrap(),
+            fixture.len() as u64
+        );
+        let output_path = directory.path().join("annotated.ovb2");
+        std::fs::write(&output_path, b"existing output").unwrap();
+        let mut output = tempfile::Builder::new()
+            .prefix(".orna-annotate-")
+            .tempfile_in(directory.path())
+            .unwrap();
+        std::io::Write::write_all(&mut output, b"partial OVB-2").unwrap();
+
         let mut changed = fixture.clone();
         let last_byte = changed.len() - 1;
         changed[last_byte] ^= 1;
@@ -346,11 +339,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(source.captured_bytes(), fixture.as_slice());
-        assert_eq!(
-            source.verify_unchanged(),
-            Err(CaptureFileError::SourceChanged)
-        );
+        let error = verify_source_before_install(&path, &source, output).unwrap_err();
+        assert!(format!("{error:?}").contains("ORNA-INGEST-005"));
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"existing output");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     #[test]
