@@ -13033,20 +13033,14 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::InvalidCompactReceipt)
     }
     /// Reads and verifies a compact receipt already persisted for this exact
-    /// intent and checkpoint. Unlike completion, this never creates a receipt
-    /// or consumes the frozen mutation prefix.
+    /// repository recovery request. The original freeze is loaded from durable
+    /// runtime state; this lookup never reconstructs or consumes its prefix.
     pub async fn persisted_compact_publication_receipt(
         &self,
         pending: &CompactPublicationPending,
-        freeze: &PublicationFreeze,
     ) -> Result<Option<CompactRuntimeReceipt>, RuntimeError> {
-        validate_id(freeze.intent_id)?;
-        validate_digest(freeze.checkpoint.digest)?;
-        if pending.runtime_intent_id() != freeze.intent_id
-            || pending.cleanup_watermark() != freeze.checkpoint.digest
-        {
-            return Err(RuntimeError::ConflictingPublicationIntent);
-        }
+        validate_id(pending.runtime_intent_id())?;
+        validate_digest(pending.cleanup_watermark())?;
         let mut rows = self
             .connection
             .query(
@@ -13059,7 +13053,7 @@ impl RuntimeState {
                  LEFT JOIN publication_commit
                    ON publication_commit.intent_id = freeze.intent_id
                  WHERE freeze.intent_id = ?1",
-                params![freeze.intent_id.to_vec()],
+                params![pending.runtime_intent_id().to_vec()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -13083,11 +13077,12 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::RecoveryInvalid)?,
             digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
         };
-        if stored_checkpoint != freeze.checkpoint {
+        if stored_checkpoint.digest != pending.cleanup_watermark() {
             return Err(RuntimeError::ConflictingPublicationIntent);
         }
         let watermark: Option<Vec<u8>> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let bound_commit: Option<Vec<u8>> = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let bound_commit: Option<Vec<u8>> =
+            row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let verifier: Option<Vec<u8>> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let compact_binding_matches = match (watermark, bound_commit, verifier) {
             (None, None, None) => false,
@@ -13107,7 +13102,7 @@ impl RuntimeState {
         let Some(committed_intent) = committed_intent else {
             return Ok(None);
         };
-        if fixed::<16>(committed_intent)? != freeze.intent_id {
+        if fixed::<16>(committed_intent)? != pending.runtime_intent_id() {
             return Err(RuntimeError::RecoveryInvalid);
         }
         if !compact_binding_matches {
@@ -13127,8 +13122,8 @@ impl RuntimeState {
         )
         .map_err(|_| RuntimeError::InvalidCompactReceipt)?;
         self.verify_compact_receipt(&receipt)?;
-        if receipt.runtime_intent_id() != freeze.intent_id
-            || receipt.cleanup_watermark() != freeze.checkpoint.digest
+        if receipt.runtime_intent_id() != pending.runtime_intent_id()
+            || receipt.cleanup_watermark() != pending.cleanup_watermark()
             || receipt.commit() != pending.commit()
             || receipt.journal_verifier() != pending.journal_verifier()
         {
@@ -13136,7 +13131,6 @@ impl RuntimeState {
         }
         Ok(Some(receipt))
     }
-
 
     pub async fn validate_recovery(&self) -> Result<(), RuntimeError> {
         self.validate_recovery_with_pin_manifest()
