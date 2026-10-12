@@ -1174,8 +1174,19 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         limit: usize,
         budget: &mut StepBudget,
     ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
-        self.handler
-            .scan_context_relation_page_scoped(source, scope, after, limit, budget)
+        let page = self
+            .handler
+            .scan_context_relation_page_scoped(source, scope, after, limit, budget)?;
+        if let Some(row) = page.as_ref().and_then(|page| page.rows.first())
+            && matches!(row.format(), ValueFormat::Rov3 | ValueFormat::Sov3)
+            && let Some(context) = row.context()
+        {
+            self.format = row.format();
+            self.context = Some(context.clone());
+            self.source_format = row.format();
+            self.source_context = Some(context.clone());
+        }
+        Ok(page)
     }
 
     fn value_format(&self) -> ValueFormat {
@@ -15176,7 +15187,7 @@ mod tests {
                             .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
                         self.consumed_context = Some(owner.database_uuid());
                         Ok(Some(
-                            ContextValue::new_in_context(owner, ValueFormat::Rov3, Raw::Bool(true))
+                            ContextValue::new(ValueFormat::Ovb1, Raw::Bool(true))
                                 .map_err(|_| error("ORNA-EVAL-VALUE"))?,
                         ))
                     }
@@ -15230,7 +15241,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let returned = ContextValue::from_blob(
+        let indexed_row = ContextValue::from_blob(
             &orna_value_v1::Blob::from_reference(
                 result_context
                     .reference(
@@ -15243,7 +15254,8 @@ mod tests {
             ValueFormat::Rov3,
         )
         .unwrap();
-        let page_row = returned.clone();
+        let returned = ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap();
+        let page_row = indexed_row;
         let parsed = orna_syntax_v1::parse_module(include_str!(
             "../tests/fixtures/context-result-owner.orna"
         ));
