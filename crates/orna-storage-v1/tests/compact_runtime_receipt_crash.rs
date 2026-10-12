@@ -336,15 +336,10 @@ async fn recovery_uses_persisted_receipt_after_runtime_consumes_prefix() {
     assert!(repository.read_publication_journal().unwrap().is_some());
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
     assert!(
-        RuntimePublicationCoordinator::recover_compact_validated(
-            &repository,
-            &runtime,
-            &CompactOvbProfile::new(profile()).unwrap(),
-            &publication_identity(),
-        )
-        .await
-        .unwrap()
-        .is_some()
+        RuntimePublicationCoordinator::recover(&repository, &runtime)
+            .await
+            .unwrap()
+            .is_some()
     );
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
     assert!(repository.read_publication_journal().unwrap().is_none());
@@ -417,6 +412,38 @@ async fn recovery_preserves_rows_when_compact_freeze_identity_is_missing() {
     assert_eq!(
         repository.head().unwrap().as_ref(),
         Some(journal.new_head())
+    );
+    assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+    assert_eq!(runtime.pending().await.unwrap().len(), 2);
+    assert!(
+        orna_storage_v1::trusted_compact_schema_descriptor(
+            &repository,
+            journal.old_head(),
+            Uuid::from_u128(1),
+            schema_fingerprint(&profile()),
+            &journal,
+            journal.old_head(),
+        )
+        .is_err()
+    );
+    assert!(
+        orna_storage_v1::trusted_compact_schema_descriptor(
+            &repository,
+            journal.new_head(),
+            Uuid::from_u128(1),
+            schema_fingerprint(&profile()),
+            &journal,
+            journal.new_head(),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        repository.head().unwrap().as_ref(),
+        Some(journal.new_head())
+    );
+    assert_eq!(
+        repository.read_publication_journal().unwrap(),
+        Some(journal.clone())
     );
     assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
     assert_eq!(runtime.pending().await.unwrap().len(), 2);
