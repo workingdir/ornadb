@@ -1,0 +1,2 @@
+// Keep the captured bytes identical; only the MIME-1 declaration and suffix change.
+sys.blob.annotate(sys.blob.capture_file(__MEDIA_ROOT__, "tone.wav", 65536), "application/octet-stream", "wav")
