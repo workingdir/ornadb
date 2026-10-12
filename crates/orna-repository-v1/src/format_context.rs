@@ -3407,12 +3407,11 @@ mod graph_bridge_tests {
 
     #[test]
     fn pinned_orp_loader_issues_lazy_snapshot_and_reads_verified_overflow_by_point_and_range() {
-        let directory = repository();
+        let relation_id = [0x72; 16];
+        let (directory, _descriptor) = seeded_table_binding(relation_id);
         let root = directory.path();
         let initial = context(root);
-        let relation_id = [0x72; 16];
-        let (relation_id, expected_digest) =
-            install_overflow_row_store(root, &initial, relation_id, None);
+        let (_, expected_digest) = install_overflow_row_store(root, &initial, relation_id, None);
         let pinned = context(root);
         let snapshot = pinned
             .load_row_map(relation_id)
@@ -3442,6 +3441,7 @@ mod graph_bridge_tests {
             .expect("bounded ORP range lookup");
         assert_eq!(ranged, vec![row]);
 
+        assert_eq!(scope.payload_bytes_read_for_test(), 0);
         let bad_digest = [0x99; 32];
         install_overflow_row_store(root, &pinned, relation_id, Some(bad_digest));
         let tampered_context = context(root);
@@ -3645,7 +3645,7 @@ mod graph_bridge_tests {
 
         let (later_directory, _descriptor) = seeded_table_binding(relation_id);
         let later_root = later_directory.path();
-        install_nested_row_store(later_root, &context(later_root), relation_id, 1, 1, 4);
+        install_nested_row_store(later_root, &context(later_root), relation_id, 2, 1, 4);
         let later_pinned = context(later_root);
         let later_snapshot = later_pinned
             .load_row_map(relation_id)
