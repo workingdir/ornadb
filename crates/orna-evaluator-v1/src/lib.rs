@@ -24,8 +24,8 @@ use orna_syntax_v1::{
 };
 use orna_value_v1::{
     CANONICAL_NAN_BITS, ContextValue, Error as ValueError, ErrorValue as CanonicalErrorValue,
-    OVB2_BLOB_TAG, Raw, ValueFormat, domain_digest, float_max, float_min, float_ordinary_eq,
-    float_total_cmp,
+    OVB2_BLOB_TAG, ROV3_BLOB_TAG, Raw, SOV3_BLOB_TAG, ValueFormat, domain_digest, float_max,
+    float_min, float_ordinary_eq, float_total_cmp,
 };
 use serde::{
     Deserialize,
@@ -1827,6 +1827,12 @@ struct ProviderStream {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum EvaluatedBlob {
+    Wire(Raw),
+    Contextual(ContextValue),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     Null,
     Unit,
@@ -1840,9 +1846,9 @@ enum Value {
     Float(u64),
     String(String),
     Blob(Vec<u8>),
-    /// An OVB-2 annotated Blob retained as its already validated wire value,
-    /// independently from legacy byte strings.
-    AnnotatedBlob(Raw),
+    /// An annotated Blob retained either as its validated wire value or with
+    /// its original format and owner context.
+    AnnotatedBlob(EvaluatedBlob),
     Date(String),
     Uuid([u8; 16]),
     /// OVB's complete stored identity is retained, including its snapshot pin.
@@ -2168,7 +2174,8 @@ impl Value {
             Self::Float(bits) => Raw::Float(bits),
             Self::String(value) => Raw::Text(value),
             Self::Blob(value) => Raw::Bytes(value),
-            Self::AnnotatedBlob(value) => value,
+            Self::AnnotatedBlob(EvaluatedBlob::Wire(value)) => value,
+            Self::AnnotatedBlob(EvaluatedBlob::Contextual(value)) => value.raw().clone(),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
             Self::Reference(value) => value.raw().clone(),
@@ -2417,7 +2424,7 @@ impl Value {
                 // before evaluator conversion. Retain that validated raw
                 // Blob directly so we do not clone, hydrate, and hash its
                 // payload a second time here.
-                Ok(Self::AnnotatedBlob(raw.clone()))
+                Ok(Self::AnnotatedBlob(EvaluatedBlob::Wire(raw.clone())))
             }
             Raw::Array(values) => {
                 context.depth(depth)?;
@@ -2494,6 +2501,30 @@ impl Value {
                     CanonicalValue::new(raw.clone()).map_err(|_| error("ORNA-EVAL-VALUE"))?;
                 Self::from_canonical(&value, context, depth)
             }
+        }
+    }
+    /// Retains a contextual Blob as-is so annotation dispatch keeps its
+    /// original format and owner context instead of rebuilding it from raw.
+    fn from_context_value(
+        value: &ContextValue,
+        context: &mut Context,
+        depth: usize,
+    ) -> Result<Self, EvaluationError> {
+        match (value.format(), value.raw()) {
+            (ValueFormat::Ovb2, Raw::Tag(OVB2_BLOB_TAG, _)) => {
+                context.depth(depth)?;
+                Ok(Self::AnnotatedBlob(EvaluatedBlob::Wire(
+                    value.raw().clone(),
+                )))
+            }
+            (ValueFormat::Rov3, Raw::Tag(ROV3_BLOB_TAG, _))
+            | (ValueFormat::Sov3, Raw::Tag(SOV3_BLOB_TAG, _)) => {
+                context.depth(depth)?;
+                Ok(Self::AnnotatedBlob(EvaluatedBlob::Contextual(
+                    value.clone(),
+                )))
+            }
+            _ => Self::from_raw(value.raw(), context, depth),
         }
     }
     fn decimal_from_raw(raw: &Raw, context: &mut Context) -> Result<Self, EvaluationError> {
@@ -2699,7 +2730,7 @@ impl Scope {
             if value.format() != ValueFormat::Ovb2 {
                 return Err(error("ORNA-EVAL-VALUE"));
             }
-            let value = Value::from_raw(value.raw(), context, 0)?;
+            let value = Value::from_context_value(value, context, 0)?;
             values.insert(name.clone(), value);
         }
         Ok(Self(
@@ -2956,7 +2987,7 @@ impl Context<'_, '_> {
         if value.format() != ValueFormat::Ovb2 {
             return Err(error("ORNA-EVAL-VALUE"));
         }
-        Value::from_raw(value.raw(), self, 0)
+        Value::from_context_value(value, self, 0)
     }
 
     fn ovb2_context_value(value: Value) -> Result<ContextValue, EvaluationError> {
@@ -5941,16 +5972,15 @@ impl Context<'_, '_> {
             supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
         }
         let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
-        Value::from_raw(annotated.raw(), self, 0)
+        Value::from_context_value(&annotated, self, 0)
     }
 
-    /// Converts one source-level argument into the registry-typed OVB-2 value
-    /// a portable Blob operation accepts.
+    /// Converts one source-level argument into the value accepted by the
+    /// generated Blob ABI. A contextual Blob keeps its original profile.
     ///
     /// The declared type comes from the generated contract, so the conversion
-    /// cannot invent a shape the generated declaration does not allow. Bytes
-    /// without an OVB-2 annotation stay unsupported rather than being given a
-    /// lossy fallback annotation.
+    /// cannot invent a shape the declaration does not allow. Unannotated bytes
+    /// remain unsupported rather than receiving a lossy fallback annotation.
     fn blob_annotation_argument(
         value: Value,
         declared: &orna_sys_v1::AbiType,
@@ -5965,7 +5995,8 @@ impl Context<'_, '_> {
             _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         };
         let raw = match (expected, value) {
-            ("Blob", Value::AnnotatedBlob(raw)) => raw,
+            ("Blob", Value::AnnotatedBlob(EvaluatedBlob::Wire(raw))) => raw,
+            ("Blob", Value::AnnotatedBlob(EvaluatedBlob::Contextual(value))) => return Ok(value),
             ("Blob", Value::Blob(_)) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             ("Str", Value::String(text)) => Raw::Text(text),
             ("Str", Value::Null | Value::Option(None)) if optional => Raw::Null,
@@ -13715,6 +13746,81 @@ mod tests {
             namespace: None,
             transfer: None,
             cancellation: None,
+        }
+    }
+
+    #[test]
+    fn authored_annotation_preserves_format3_owner_context() {
+        struct EmptyResolver;
+
+        impl orna_value_v1::BlobResolver for EmptyResolver {
+            fn read_range(
+                &self,
+                _reference: &orna_value_v1::ContentReference,
+                _offset: u64,
+                _length: u64,
+            ) -> orna_value_v1::Result<Vec<u8>> {
+                Err(orna_value_v1::Error::ContentUnavailable)
+            }
+        }
+
+        let database = [0x21; 16];
+        let owner_context = orna_value_v1::Format3Context::from_persisted(
+            database,
+            orna_value_v1::Snapshot::cwd(database, [0x22; 16], 0.into())
+                .expect("format-3 snapshot"),
+            orna_value_v1::GitHash::Sha1,
+            orna_value_v1::NativeOid::from_bytes(&[0x23; 20]).unwrap(),
+            orna_value_v1::NativeOid::from_bytes(&[0x24; 20]).unwrap(),
+            orna_value_v1::AvailabilityState::Available,
+            orna_value_v1::OwnerLifetime::new([0x25; 16]),
+            orna_value_v1::Format3Quota::new(1024, 1 << 20).unwrap(),
+            Arc::new(EmptyResolver),
+        )
+        .expect("format-3 owner context");
+        let reference = owner_context
+            .reference(
+                orna_value_v1::ContentIdentity::from_bytes(b"protected payload"),
+                orna_value_v1::NativeOid::from_bytes(&[0x26; 20]).unwrap(),
+            )
+            .expect("owner-scoped Blob reference");
+        let blob = orna_value_v1::Blob::from_reference(reference).expect("owner-scoped Blob");
+        let source =
+            include_str!("../../orna-cli-v1/tests/fixtures/media/import-song-annotation.orna")
+                .replace(
+                    "sys.blob.capture_file(__MEDIA_ROOT__, \"note.wav\", 65536)",
+                    "blob",
+                );
+        let parsed = parse_expression(&source);
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+
+        for format in [ValueFormat::Rov3, ValueFormat::Sov3] {
+            let source_value = ContextValue::from_blob(&blob, format)
+                .expect("encode owner-scoped Blob in source format");
+            let functions = Functions::new();
+            let mut context = test_context(&functions);
+            let value = Value::from_context_value(&source_value, &mut context, 0)
+                .expect("retain source ContextValue");
+            let mut scope = Scope(
+                BTreeMap::from([(String::from("blob"), value)]),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                NominalDefinitions::new(),
+                BTreeSet::new(),
+            );
+            let result = context
+                .evaluate(&parsed.value, &mut scope, 0)
+                .expect("authored annotation call");
+            let Value::AnnotatedBlob(EvaluatedBlob::Contextual(annotated)) = result else {
+                panic!("annotation result must retain its contextual Blob");
+            };
+            assert_eq!(annotated.format(), format);
+            assert!(annotated.context().is_some());
+            let annotated_blob = annotated.blob().expect("decode annotated Blob");
+            assert_eq!(annotated_blob.content_identity(), blob.content_identity());
+            assert_eq!(annotated_blob.media_type(), "audio/mp4");
+            assert_eq!(annotated_blob.suffix(), Some("m4b"));
+            assert!(!annotated_blob.is_hydrated());
         }
     }
 
