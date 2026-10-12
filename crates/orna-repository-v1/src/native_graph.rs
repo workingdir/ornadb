@@ -9624,7 +9624,7 @@ fn stored_field_object_ids(descriptor: &SchemaDescriptor) -> Result<Vec<[u8; 16]
         let Raw::Array(parts) = field else {
             return Err(GraphError::NonCanonicalData);
         };
-        let [identity, _, _, role] = parts.as_slice() else {
+        let [identity, _, _, role, _flags] = parts.as_slice() else {
             return Err(GraphError::NonCanonicalData);
         };
         if role != &stored_role {
