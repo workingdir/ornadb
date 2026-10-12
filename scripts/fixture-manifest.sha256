@@ -3532,6 +3532,8 @@ c31e711dab3dc078b93eb49c11f1a374121a43315df58923b501997935062de4  crates/orna-pr
 6680eedf2960d2d93241ff971f30a4d23fc69c020fefa3d84b2701a276f53087  crates/orna-protocol-v1/tests/fixtures/secret-surface.orna
 c8d9d9650a8f2cf326c36f27df46c9d69b5268264d34a78b73ece6e2dde5159d  crates/orna-protocol/src/tests/fixtures/protocol-source.orna
 61d8257bb53ad1ed72fe00a36e2f5f14f2308b5c8ad4e934fac653d3888b4f4c  crates/orna-protocol/src/tests/fixtures/synthetic-standard-enum.orna
+4fb3ac84541ebd1054cb14789aad2dc8d3a39a3bc46accad7aecc609541f66a3  crates/orna-repository-v1/tests/fixtures/committed-table-binding-str.orna
+3fd55916ce6d51a978e55848d53b8da8732b81e3c9f10dcd1be1642b173055ea  crates/orna-repository-v1/tests/fixtures/committed-table-binding.orna
 4c238a6be0eba2ccc46c0e9f2345b608c6cd45c5ef2f6b73ddcee3db0818fb17  crates/orna-repository-v1/tests/fixtures/format-context/database-bad-uuid.orna
 61b7f164bafa0c6322d724dcbab379f8ee878b325def64b0e6db8fc3337c4d3e  crates/orna-repository-v1/tests/fixtures/format-context/database-compact.orna
 6214cdc92bb24f032cb0fc14d7011a25bffa1ab828c35aea7f5aabe0738d71c0  crates/orna-repository-v1/tests/fixtures/format-context/database-final.orna
@@ -3611,6 +3613,7 @@ f46caec53d00af428d8c37d6acfe3149ce5147d26d59264541713a1203adb296  crates/orna-ru
 cb4ef9254cc69fbfa51ee330af86b031195ec21f67ac46436247b7f9d23b7bde  crates/orna-runtime-v1/tests/fixtures/exact-query-unadmitted.orna
 ff66652e9d8358b944eebf88831f1d4ceaa0e4ce1baebb04e063e3138b1f0994  crates/orna-runtime-v1/tests/fixtures/historical_snapshot_main.orna
 b09cf283707c47768f21b474a074b581b33f3f448c80b611a8cafd477e400e2a  crates/orna-runtime-v1/tests/fixtures/history_governance_main.orna
+137630611e28a270c44bfa2947877bb3f739af22a4e3f6e6b28a2f2df342a528  crates/orna-runtime-v1/tests/fixtures/media/pixel.png
 a6a2675cad7aa29ffc89d7c28820cc453328514b7fd22bd4da4643ab8e4ebfb6  crates/orna-runtime-v1/tests/fixtures/parent_run_active_stream.orna
 90e99ee2fbcaf5534a94459ec508f7a35b34dab567e3d7a8a8bd33ce50db5fff  crates/orna-runtime-v1/tests/fixtures/procedure-invocation-lifecycle.orna
 c405b7f562fe81107ae7a9dfc7d07cca07f8281d2fc34f88131baed34786b03e  crates/orna-runtime-v1/tests/fixtures/provider-effect-once.orna
