@@ -12,7 +12,6 @@ use super::Diagnostic;
 const USAGE: &str = "usage: orna annotate FILE --type MEDIA_TYPE --output FILE [--suffix HINT]";
 
 const MAX_SOURCE_BYTES: u64 = i64::MAX as u64;
-
 #[derive(Debug, Eq, PartialEq)]
 struct AnnotateOptions<'a> {
     source: &'a str,
@@ -142,7 +141,6 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         ));
     }
     let output = verify_source_before_install(source_path, &source, output)?;
-
     if let Err(error) = output.as_file().sync_all() {
         let cleanup = cleanup_staging_file(output).err();
         return Err(Diagnostic::target_with_detail(
@@ -283,7 +281,6 @@ fn source_error(path: &Path, error: CaptureFileError, detail: String) -> Diagnos
         }
     }
 }
-
 fn cleanup_staging_file(output: tempfile::NamedTempFile) -> Result<(), String> {
     let path = output.path().display().to_string();
     output.close().map_err(|error| format!("{path}: {error}"))
