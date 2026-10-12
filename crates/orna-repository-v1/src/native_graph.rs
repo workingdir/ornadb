@@ -5401,8 +5401,9 @@ pub(crate) fn load_format3_row_map(
     let relation = reader
         .find_ordered_entry(&relation_map, &relations_domain, &relation_key)?
         .ok_or(GraphError::ContextMismatch)?;
-    let (schema_oid, primary_root, secondary_root, row_count) =
+    let (schema_oid, primary_root, _secondary_root, row_count) =
         decode_relation_value(&relation.value, algorithm)?;
+    // The secondary OID is parsed but never dereferenced by primary admission.
 
     let schema_node = reader.read_native_node(&schema_oid)?;
     let NodeData::Schema {
@@ -5416,17 +5417,7 @@ pub(crate) fn load_format3_row_map(
             actual: schema_node.kind(),
         });
     };
-    if let Some(secondary_root) = secondary_root.as_ref() {
-        let schema_bytes = reader.read_full_byte_index(&byte_root, encoded_length, schema_digest)?;
-        let descriptor = SchemaDescriptor::decode(&schema_bytes)
-            .map_err(|_| GraphError::NonCanonicalData)?;
-        if schema_relation_id(&descriptor)? != relation_id {
-            return Err(GraphError::ContextMismatch);
-        }
-        reader.validate_secondary_root(secondary_root, row_count)?;
-    } else {
-        reader.verify_full_byte_index(&byte_root, encoded_length, schema_digest)?;
-    }
+    reader.verify_full_byte_index(&byte_root, encoded_length, schema_digest)?;
 
 
     let rows_domain = canonical_domain(vec![
@@ -5468,24 +5459,6 @@ pub(crate) fn load_format3_row_map(
 }
 
 
-fn schema_relation_id(schema: &SchemaDescriptor) -> Result<[u8; 16], GraphError> {
-    let relation_key = Value::decode(&[1]).map_err(|_| GraphError::NonCanonicalData)?;
-    let Raw::Map(fields) = schema.raw() else {
-        return Err(GraphError::NonCanonicalData);
-    };
-    let relation = fields
-        .iter()
-        .find(|(key, _)| key == relation_key.raw())
-        .map(|(_, value)| value)
-        .ok_or(GraphError::NonCanonicalData)?;
-    let Raw::Tag(37, relation) = relation else {
-        return Err(GraphError::NonCanonicalData);
-    };
-    let Raw::Bytes(bytes) = relation.as_ref() else {
-        return Err(GraphError::NonCanonicalData);
-    };
-    bytes.as_slice().try_into().map_err(|_| GraphError::NonCanonicalData)
-}
 
 
 fn canonical_domain(fields: Vec<CborValue>) -> Vec<u8> {
@@ -5541,25 +5514,6 @@ impl PinnedNativeGraphReader {
         }
     }
 
-    fn validate_secondary_root(
-        &mut self,
-        root: &NativeObjectId,
-        expected_count: u64,
-    ) -> Result<(), GraphError> {
-        let node = self.read_native_node(root)?;
-        let domain = match &node {
-            NodeData::OrderedLeaf { domain, .. } | NodeData::OrderedBranch { domain, .. } => {
-                domain.clone()
-            }
-            actual => {
-                return Err(GraphError::WrongNodeKind {
-                    expected: NodeKind::OrderedLeaf,
-                    actual: actual.kind(),
-                });
-            }
-        };
-        self.validate_map_root(root, &domain, expected_count)
-    }
 
     fn validate_map_root(
         &mut self,
@@ -5725,32 +5679,6 @@ impl PinnedNativeGraphReader {
         Ok(output)
     }
 
-    fn read_full_byte_index(
-        &mut self,
-        root: &NativeObjectId,
-        expected_length: u64,
-        expected_digest: [u8; 32],
-    ) -> Result<Vec<u8>, GraphError> {
-        if expected_length > MAX_RANGE_METADATA_BYTES {
-            return Err(GraphError::MetadataQuotaExceeded);
-        }
-        let capacity = usize::try_from(expected_length).map_err(|_| GraphError::MetadataQuotaExceeded)?;
-        let mut output = Vec::new();
-        output.try_reserve_exact(capacity).map_err(|_| GraphError::MetadataQuotaExceeded)?;
-        let mut hasher = Sha256::new();
-        let (length, _) = self.walk_byte_index(
-            root,
-            None,
-            &mut hasher,
-            Some(&mut output),
-            Some(expected_length),
-        )?;
-        let digest: [u8; 32] = hasher.finalize().into();
-        if length != expected_length || digest != expected_digest {
-            return Err(GraphError::ContentIdentityMismatch);
-        }
-        Ok(output)
-    }
 
     fn verify_full_byte_index(
         &mut self,
@@ -6845,7 +6773,7 @@ mod persisted_orp_tests {
     }
 
     #[test]
-    fn load_format3_row_map_admits_authenticated_secondary_root() {
+    fn load_format3_row_map_keeps_secondary_root_opaque() {
         let (directory, graph) = capture_test_context();
         let version = graph.row_snapshot.version();
         let relation_id = *version.relation_id();
@@ -6892,17 +6820,17 @@ mod persisted_orp_tests {
                 entries: Vec::new(),
             },
         );
+        // This schema node is distinct from the selected schema and is not a
+        // secondary map. The primary-only loader must leave its OID opaque.
         let secondary_root = fixture_git_node(
             directory.path(),
-            &NodeData::OrderedLeaf {
-                domain: canonical_domain(vec![
-                    CborValue::Text("secondary".to_owned()),
-                    CborValue::Bytes(relation_id.to_vec()),
-                    CborValue::Bytes(schema_digest.to_vec()),
-                ]),
-                entries: Vec::new(),
+            &NodeData::Schema {
+                encoded_length: 0,
+                schema_digest,
+                byte_root: schema_byte_root,
             },
         );
+
         let relations_domain = canonical_domain(vec![
             CborValue::Text("relations".to_owned()),
             CborValue::Bytes(database_id.to_vec()),
@@ -6932,16 +6860,13 @@ mod persisted_orp_tests {
         let loaded = load_format3_row_map(
             &graph.repository,
             algorithm,
-            store_root.clone(),
+            store_root,
             database_id,
             graph.snapshot_id,
             relation_id,
         )
-        .expect("admit the schema-bound secondary root");
-        assert_eq!(loaded.version().store_root(), &store_root);
+        .expect("load the primary map without traversing the secondary root");
         assert_eq!(loaded.version().primary_root(), &primary_root);
-        assert_eq!(loaded.version().schema().schema_digest(), &schema_digest);
-        assert_eq!(loaded.version().row_count(), Some(0));
     }
 
     fn fixture_ref_exists(directory: &Path, reference: &str) -> bool {
