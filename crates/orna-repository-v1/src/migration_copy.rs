@@ -263,15 +263,19 @@ pub fn prepare_format3_migration(
         pin_migration_candidate(&repository, copy.candidate_journal.new_head())?;
         repository.write_publication_journal(&copy.candidate_journal)?;
         sync_tree(&staging)?;
-        if path_exists(&destination)? {
-            return Err(RepositoryError::PublicationRecoveryConflict);
-        }
-        fs::rename(&staging, &destination)
-            .map_err(|_| RepositoryError::PublicationRecoveryConflict)?;
-        sync_directory(
-            destination
-                .parent()
-                .ok_or(RepositoryError::LocalStateUnavailable)?,
+        let parent = destination
+            .parent()
+            .ok_or(RepositoryError::LocalStateUnavailable)?;
+        crate::init::publish_directory_noreplace(parent, &staging, &destination).map_err(
+            |error| match error {
+                crate::RepositoryInitError::MetadataChanged => {
+                    RepositoryError::PublicationRecoveryConflict
+                }
+                crate::RepositoryInitError::PlatformUnsupported => {
+                    RepositoryError::PlatformUnsupported
+                }
+                _ => RepositoryError::LocalStateUnavailable,
+            },
         )?;
         copy.destination = destination;
         Ok(copy)
