@@ -1158,6 +1158,11 @@ impl SourceMutationEffectHandler {
         if transfers.len() != bindings.len() {
             return Err(ApplicationError::InvalidTableMetadata);
         }
+        let fields = CanonicalValue::decode(canonical_fields)
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        let OvbRaw::Array(fields) = fields.raw() else {
+            return Err(ApplicationError::InvalidTableMetadata);
+        };
         let mut field_ids = BTreeSet::new();
         let mut pin_ids = BTreeSet::new();
         let mut retained_pins = Vec::with_capacity(bindings.len());
@@ -1165,11 +1170,6 @@ impl SourceMutationEffectHandler {
             let (field_object_id, encoded_value, pin) = binding.into_parts();
             let encoded_blob = CanonicalValue::decode(&encoded_value)
                 .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-            let fields = CanonicalValue::decode(canonical_fields)
-                .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-            let OvbRaw::Array(fields) = fields.raw() else {
-                return Err(ApplicationError::InvalidTableMetadata);
-            };
             let transfer = pin.transfer_record();
             if !field_ids.insert(field_object_id)
                 || !pin_ids.insert(*pin.pin_id())
