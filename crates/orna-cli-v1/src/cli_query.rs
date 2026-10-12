@@ -47,6 +47,16 @@ struct QueryOptions<'a> {
     limit: usize,
     format: QueryFormat,
     predicate: BlobMetadataFilter,
+    predicate_constraints: PredicateConstraints<'a>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct PredicateConstraints<'a> {
+    kind: Option<&'a str>,
+    not_kind: Vec<&'a str>,
+    suffix: Option<&'a str>,
+    min_length: Option<u64>,
+    max_length: Option<u64>,
 }
 
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
@@ -59,6 +69,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut limit = DEFAULT_QUERY_LIMIT;
     let mut format = QueryFormat::Human;
     let mut predicate = BlobMetadataFilter::new();
+    let mut predicate_constraints = PredicateConstraints::default();
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
@@ -117,34 +128,41 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                     .next()
                     .ok_or_else(|| query_error("--kind needs a value", "usage: --kind MIME"))?;
                 predicate = predicate.with_media_type(value);
+                predicate_constraints.kind = Some(value);
             }
             "--not-kind" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--not-kind needs a value", "usage: --not-kind MIME")
                 })?;
                 predicate = predicate.without_media_type(value);
+                predicate_constraints.not_kind.push(value);
             }
             "--suffix" => {
                 let value = words
                     .next()
                     .ok_or_else(|| query_error("--suffix needs a value", "usage: --suffix HINT"))?;
                 predicate = predicate.with_suffix(value);
+                predicate_constraints.suffix = Some(value);
             }
             "--min-length" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--min-length needs a value", "usage: --min-length BYTES")
                 })?;
-                predicate = predicate.with_min_length(value.parse::<u64>().map_err(|_| {
+                let length = value.parse::<u64>().map_err(|_| {
                     query_error("--min-length is not a byte count", format!("got {value:?}"))
-                })?);
+                })?;
+                predicate = predicate.with_min_length(length);
+                predicate_constraints.min_length = Some(length);
             }
             "--max-length" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--max-length needs a value", "usage: --max-length BYTES")
                 })?;
-                predicate = predicate.with_max_length(value.parse::<u64>().map_err(|_| {
+                let length = value.parse::<u64>().map_err(|_| {
                     query_error("--max-length is not a byte count", format!("got {value:?}"))
-                })?);
+                })?;
+                predicate = predicate.with_max_length(length);
+                predicate_constraints.max_length = Some(length);
             }
             "--limit" => {
                 let value = words.next().ok_or_else(|| {
@@ -214,6 +232,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
         limit,
         format,
         predicate,
+        predicate_constraints,
     })
 }
 
@@ -325,12 +344,11 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             format!("no row with key {:?}", options.key.unwrap_or_default()),
         ));
     }
-    // Each field is projected from the row's own stored tuple; a field that
-    // is not a Blob in canonical shape is not a Blob, so it is skipped rather
-    // than reported with a fabricated summary. Naming a field decodes only
-    // that field; otherwise the row is walked once so a Blob at any index is
-    // reported with the index it actually occupies.
+    // Project each row once and apply the annotation predicate while each
+    // Blob's stored metadata is decoded. Non-matches never enter the listing
+    // buffer, and predicate evaluation never opens a descriptor or payload.
     let mut listings = Vec::new();
+    let mut candidates = 0;
     for row in &rows {
         match options.field {
             Some(field) => {
@@ -338,35 +356,40 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     query_error("Row fields could not be decoded", format!("{error:?}"))
                 })?;
                 if let Some(metadata) = metadata {
-                    listings.push((row.key().clone(), field, metadata));
+                    candidates += 1;
+                    if options.predicate.matches(&metadata) {
+                        listings.push((row.key().clone(), field, metadata));
+                    }
                 }
             }
             None => {
                 for (field, metadata) in row.blob_fields().map_err(|error| {
                     query_error("Row fields could not be decoded", format!("{error:?}"))
                 })? {
-                    listings.push((row.key().clone(), field, metadata));
+                    candidates += 1;
+                    if options.predicate.matches(&metadata) {
+                        listings.push((row.key().clone(), field, metadata));
+                    }
                 }
             }
         }
     }
-    // The predicate is evaluated over the same stored annotation
-    // coordinates the listing already decoded, so narrowing a listing costs no
-    // additional read and never enters a descriptor or a payload chunk. A
-    // candidate that does not match is dropped rather than reported, and the
-    // plan below states which coordinates answered it.
-    let candidates = listings.len();
     let subject = options
         .field
         .map_or_else(|| "all fields".to_owned(), |field| format!("field {field}"));
-    listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
     let matched = listings.len();
     // Count matches before applying the presentation window, so `--limit`
     // cannot hide matching rows that occur later in the scanned relation.
     if filter_active {
         listings.truncate(options.limit);
     }
-    let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
+    let plan = PredicatePlan::new(
+        &options.predicate,
+        &options.predicate_constraints,
+        &subject,
+        candidates,
+        matched,
+    );
     match options.format {
         QueryFormat::Human => {
             for (key, field, metadata) in &listings {
@@ -439,6 +462,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
 /// payload figure is the read seam's own count for this process.
 struct PredicatePlan<'a> {
     predicate: &'a BlobMetadataFilter,
+    constraints: &'a PredicateConstraints<'a>,
     subject: &'a str,
     candidates: usize,
     matched: usize,
@@ -447,12 +471,14 @@ struct PredicatePlan<'a> {
 impl<'a> PredicatePlan<'a> {
     const fn new(
         predicate: &'a BlobMetadataFilter,
+        constraints: &'a PredicateConstraints<'a>,
         subject: &'a str,
         candidates: usize,
         matched: usize,
     ) -> Self {
         Self {
             predicate,
+            constraints,
             subject,
             candidates,
             matched,
@@ -473,13 +499,14 @@ impl<'a> PredicatePlan<'a> {
 
     fn human_line(&self) -> String {
         format!(
-            "plan: annotation predicate; coordinates {}; decode-required coordinates {}; \
-             candidates {} matched {}; subject {}",
+            "plan: annotation predicate; subject {}; coordinates {}; constraints {}; \
+             decode-required coordinates {}; candidates {} matched {}; payload-fetch none",
+            self.subject,
             self.coordinates().join(","),
+            self.constraints.human_line(),
             Self::decode_required_coordinates().join(","),
             self.candidates,
             self.matched,
-            self.subject,
         )
     }
 
@@ -488,11 +515,52 @@ impl<'a> PredicatePlan<'a> {
             "kind": "annotation-predicate",
             "subject": self.subject,
             "coordinates": self.coordinates(),
+            "constraints": {
+                "kind": self.constraints.kind,
+                "not_kind": self.constraints.not_kind,
+                "suffix": self.constraints.suffix,
+                "min_length": self.constraints.min_length,
+                "max_length": self.constraints.max_length,
+            },
             "decode_required_coordinates": Self::decode_required_coordinates(),
             "candidates": self.candidates,
             "matched": self.matched,
             "payload_fetch": "none",
         })
+    }
+}
+
+impl PredicateConstraints<'_> {
+    fn append(output: &mut String, label: &str, value: impl std::fmt::Debug) {
+        use std::fmt::Write as _;
+
+        if !output.is_empty() {
+            output.push_str(", ");
+        }
+        write!(output, "{label}={value:?}").expect("String formatting cannot fail");
+    }
+
+    fn human_line(&self) -> String {
+        let mut output = String::new();
+        if let Some(kind) = self.kind {
+            Self::append(&mut output, "kind", kind);
+        }
+        for kind in &self.not_kind {
+            Self::append(&mut output, "not-kind", kind);
+        }
+        if let Some(suffix) = self.suffix {
+            Self::append(&mut output, "suffix", suffix);
+        }
+        if let Some(length) = self.min_length {
+            Self::append(&mut output, "min-length", length);
+        }
+        if let Some(length) = self.max_length {
+            Self::append(&mut output, "max-length", length);
+        }
+        if output.is_empty() {
+            output.push_str("none");
+        }
+        output
     }
 }
 

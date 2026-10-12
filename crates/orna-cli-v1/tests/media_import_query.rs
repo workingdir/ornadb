@@ -2001,9 +2001,33 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     // row satisfies is an empty result rather than an unfiltered one.
     let narrow = query_json(
         directory.path(),
-        &[&relation, "--kind", "audio/mp4", "--suffix", "m4b"],
+        &[
+            &relation,
+            "--kind",
+            "audio/mp4",
+            "--not-kind",
+            "image/png",
+            "--suffix",
+            "m4b",
+            "--min-length",
+            "1",
+            "--max-length",
+            "1000000",
+        ],
     );
     assert_eq!(narrow["blobs"].as_u64(), Some(1), "one row: {narrow}");
+    assert_eq!(
+        narrow["plan"]["constraints"],
+        serde_json::json!({
+            "kind": "audio/mp4",
+            "not_kind": ["image/png"],
+            "suffix": "m4b",
+            "min_length": 1,
+            "max_length": 1_000_000,
+        }),
+        "the query summary exposes the effective metadata constraints"
+    );
+    assert_eq!(narrow["media_payload_bytes_read"], 0);
     let contradictory = query_json(
         directory.path(),
         &[&relation, "--kind", "audio/wav", "--not-kind", "audio/wav"],
