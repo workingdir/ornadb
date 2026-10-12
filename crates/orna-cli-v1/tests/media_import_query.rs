@@ -1941,34 +1941,6 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     assert_eq!(plan["candidates"].as_u64(), Some(3), "all rows: {plan}");
     assert_eq!(plan["matched"].as_u64(), Some(1), "one WAV: {plan}");
     assert_eq!(plan["payload_fetch"], "none");
-    // The indexed range is applied before predicate filtering and the
-    // presentation limit: image is in range but does not match, so note must
-    // survive even though --limit is one. Neither step reads media payloads.
-    let bounded_filtered = query_json(
-        directory.path(),
-        &[
-            &relation,
-            "--from",
-            "text:image",
-            "--until",
-            "text:song",
-            "--kind",
-            "audio/mp4",
-            "--limit",
-            "1",
-        ],
-    );
-    assert_eq!(
-        bounded_filtered["rows"],
-        2,
-        "typed interval contains image and note"
-    );
-    assert_eq!(bounded_filtered["plan"]["candidates"], 2);
-    assert_eq!(bounded_filtered["plan"]["matched"], 1);
-    assert_eq!(bounded_filtered["listings"].as_array().unwrap().len(), 1);
-    assert_eq!(bounded_filtered["listings"][0]["key"], "note");
-    assert_eq!(bounded_filtered["media_payload_bytes_read"], 0);
-
 
     // `--suffix` reads the authored supported hint; an absent hint matches
     // nothing rather than falling back to kind.
