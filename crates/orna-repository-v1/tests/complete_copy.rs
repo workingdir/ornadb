@@ -17,18 +17,19 @@ mod extractor;
 
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use orna_repository_v1::{
-    complete_copy::{
-        export_complete_copy, export_complete_copy_of, materialize_complete_copy,
-        read_complete_copy_manifest, restore_complete_copy, CompleteCopyObjectKind,
-        DependencySource,
-    },
     Repository,
+    complete_copy::{
+        CompleteCopyObjectKind, DependencySource, export_complete_copy, export_complete_copy_of,
+        materialize_complete_copy, read_complete_copy_manifest, restore_complete_copy,
+    },
 };
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const DATABASE: &str = include_str!("fixtures/format-context/database-final.orna");
@@ -473,8 +474,10 @@ fn complete_copy_verifies_every_object_id_and_refuses_a_truncated_or_substituted
         "the recorded closure shrank"
     );
     fs::write(truncated.join("manifest.tsv"), &truncated_document).expect("write manifest");
-    let error = restore_complete_copy(&truncated, &root.path().join("copy-truncated"))
-        .expect_err("a truncated recording is refused");
+    let refused = root.path().join("copy-truncated");
+    fs::create_dir(&refused).expect("make the empty restore destination");
+    let error =
+        restore_complete_copy(&truncated, &refused).expect_err("a truncated recording is refused");
     assert!(
         matches!(
             error,
@@ -482,12 +485,12 @@ fn complete_copy_verifies_every_object_id_and_refuses_a_truncated_or_substituted
         ),
         "the failure is a typed integrity diagnostic: {error}"
     );
-    // The destination was created by the fetch and then refused: a partial
-    // object database may remain, but no snapshot tree may be materialised.
-    let refused = root.path().join("copy-truncated");
     assert!(
-        !refused.join("main.orna").exists(),
-        "a refused reconstruction writes no snapshot tree: {error}"
+        fs::read_dir(&refused)
+            .expect("the original destination remains readable")
+            .next()
+            .is_none(),
+        "a refused reconstruction preserves the existing empty destination: {error}"
     );
 
     // 2. Substituted: re-point one object record at another real object of the
@@ -536,4 +539,86 @@ fn complete_copy_verifies_every_object_id_and_refuses_a_truncated_or_substituted
         ),
         "the failure is a typed integrity diagnostic: {error}"
     );
+}
+
+#[test]
+fn complete_copy_reconstructs_large_blob_after_source_and_origin_are_gone() {
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    let unavailable_origin = root.path().join("unavailable-origin");
+    git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            unavailable_origin.to_str().expect("origin path is UTF-8"),
+        ],
+    );
+
+    let payload_length = 8 * 1024 * 1024;
+    let payload: Vec<u8> = (0..payload_length)
+        .map(|index| ((index * 31 + (index >> 8)) & 0xff) as u8)
+        .collect();
+    let expected_sha256: [u8; 32] = Sha256::digest(&payload).into();
+    fs::write(project.join("large-payload.bin"), &payload).expect("write large payload");
+    git(&project, &["add", "large-payload.bin"]);
+    git(
+        &project,
+        &["commit", "--quiet", "-m", "large offline payload"],
+    );
+    let snapshot = git_stdout(&project, &["rev-parse", "HEAD"]);
+    let source_oid = git_stdout(&project, &["rev-parse", "HEAD:large-payload.bin"]);
+    let repository = Repository::discover(&project).expect("discover source repository");
+    let archive = root.path().join("large-archive");
+    let manifest = export_complete_copy(&repository, "HEAD", &archive, &[])
+        .expect("export while the configured remote is unavailable");
+    assert_eq!(manifest.snapshot, snapshot);
+    assert_eq!(
+        git_stdout(&project, &["remote", "get-url", "origin"]),
+        unavailable_origin.to_string_lossy().into_owned()
+    );
+    assert!(
+        !unavailable_origin.exists(),
+        "the source remote is unavailable"
+    );
+
+    drop(repository);
+    fs::remove_dir_all(&project).expect("remove the source repository");
+    fs::remove_dir_all(&dependency).expect("remove the dependency source");
+    let restored = root.path().join("restored-large-copy");
+    fs::create_dir(&restored).expect("create existing empty destination");
+    let reconstructed = restore_complete_copy(&archive, &restored)
+        .expect("restore and verify from the archive alone");
+    assert_eq!(reconstructed, manifest);
+    assert_eq!(git_stdout(&restored, &["remote"]), "");
+    assert_eq!(
+        git_stdout(
+            &restored,
+            &["rev-parse", &format!("{snapshot}:large-payload.bin")]
+        ),
+        source_oid,
+        "the restored snapshot preserves the large blob object"
+    );
+    materialize_complete_copy(&restored, &manifest).expect("materialise verified snapshot");
+
+    let mut payload_file = fs::File::open(restored.join("large-payload.bin"))
+        .expect("open materialised large payload");
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut restored_length = 0_u64;
+    loop {
+        let count = payload_file
+            .read(&mut buffer)
+            .expect("stream restored payload");
+        if count == 0 {
+            break;
+        }
+        restored_length += count as u64;
+        hasher.update(&buffer[..count]);
+    }
+    assert_eq!(restored_length, payload_length as u64);
+    let restored_sha256: [u8; 32] = hasher.finalize().into();
+    assert_eq!(restored_sha256, expected_sha256, "restored raw blob hash");
 }
