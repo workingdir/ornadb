@@ -335,12 +335,17 @@ async fn recovery_uses_persisted_receipt_after_runtime_consumes_prefix() {
     // receipt and consumes the prefix but before repository journal finalization.
     assert!(repository.read_publication_journal().unwrap().is_some());
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
+    let mut mismatched_identity = publication_identity();
+    mismatched_identity.table_id = [80; 16];
+    mismatched_identity.schema_fingerprint[0] ^= 1;
+    mismatched_identity.candidate_generation += 1;
+    // A persisted receipt no longer needs source schema identity to finalize.
     assert!(
         RuntimePublicationCoordinator::recover_compact_validated(
             &repository,
             &runtime,
             &CompactOvbProfile::new(profile()).unwrap(),
-            &publication_identity(),
+            &mismatched_identity,
         )
         .await
         .unwrap()
