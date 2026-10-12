@@ -16,6 +16,8 @@ use orna_storage_v1::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use orna_semantic_v1::{ModuleInput, ObjectIdentityManifest, analyze, source_table_schema};
+
 pub fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -81,23 +83,28 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     git(root, &["config", "commit.gpgsign", "false"]);
 
     let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
-    let relation_id = [0x43; 16];
     let database_uuid = "00000000-0000-4000-8000-000000000001";
     let database =
         format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-    let schema_source = include_bytes!("../fixtures/reference-project/main.orna");
+    let media_source = "pub table media(id: Str) { content: Blob, }\n";
+    let modules = [ModuleInput::new("main.orna", media_source)];
+    let analysis = analyze(&modules);
+    let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
+    let table = source_table_schema(&analysis, &identities, "", "media").unwrap();
+    let relation_id = *table.table_id();
+    let schema_source = table.descriptor().encode().unwrap();
     std::fs::create_dir_all(root.join(".orna/store")).unwrap();
     std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
     std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
-    std::fs::write(root.join("main.orna"), schema_source).unwrap();
+    std::fs::write(root.join("main.orna"), media_source).unwrap();
     git(root, &["add", "--all"]);
     git(
         root,
         &["commit", "--quiet", "-m", "format3 capture fixture"],
     );
 
-    let schema_digest: [u8; 32] = Sha256::digest(schema_source).into();
-    let chunk_oid = git_object(root, "blob", schema_source);
+    let schema_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    let chunk_oid = git_object(root, "blob", &schema_source);
     let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
     append_cbor_head(&mut byte_index, 0, schema_source.len());
     byte_index.push(0x81);
