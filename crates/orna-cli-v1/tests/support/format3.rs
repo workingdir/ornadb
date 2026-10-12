@@ -100,6 +100,7 @@ pub fn object_format3_repository(
     for (name, fixture) in [
         ("song", include_str!("../fixtures/media/source-song.orna")),
         ("image", include_str!("../fixtures/media/source-image.orna")),
+        ("overflow", include_str!("../fixtures/media/overflow.orna")),
     ] {
         let source = fixture.replace("__MEDIA_ROOT__", &media_root);
         let path = root.join("Object").join(format!("{name}.orna"));
