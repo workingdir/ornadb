@@ -507,6 +507,10 @@ impl RowMapSnapshot {
         range: &KeyRange,
     ) -> Result<Vec<AdmittedRow>, RowStoreError> {
         let version = &self.version;
+        if context.row_map_version() != version {
+            return Err(RowStoreError::BoundaryMismatch);
+        }
+
         let row_count = version.row_count.ok_or(RowStoreError::RowCountMismatch)?;
         let mut authority = Sha256::new();
         authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
@@ -526,11 +530,9 @@ impl RowMapSnapshot {
             return Err(RowStoreError::BoundaryMismatch);
         }
 
-        let rows = context.range_rows(range, scope)?;
-        if rows.iter().any(|row| row.version() != version) {
-            return Err(RowStoreError::BoundaryMismatch);
-        }
-        Ok(rows)
+        context
+            .range_rows(range, scope)
+            .map_err(RowStoreError::from)
     }
 }
 
