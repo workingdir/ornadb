@@ -278,6 +278,16 @@ impl AdmittedRow {
         }
         Ok(projected)
     }
+
+    /// Compares the committed row value while treating a Blob's MIME-1
+    /// annotation as metadata rather than content.
+    ///
+    /// Blob length and SHA-256 remain part of the content identity; the
+    /// descriptor and MIME/suffix annotation do not. Overflow values require
+    /// graph context and return [`RowStoreError::BlobMetadataRequiresGraphContext`].
+    pub fn same_content(&self, other: &Self) -> Result<bool, RowStoreError> {
+        Ok(content_fields(self)? == content_fields(other)?)
+    }
 }
 
 /// Durable production identity for one VFS row directory. The address is
@@ -1499,6 +1509,33 @@ pub(crate) fn decode_canonical_fields_of(encoded: &[u8]) -> Result<Vec<CborValue
     }
 }
 
+/// Decodes one inline row and removes only Blob annotation and descriptor
+/// coordinates, leaving length, digest, and every non-Blob value unchanged.
+fn content_fields(row: &AdmittedRow) -> Result<Vec<CborValue>, RowStoreError> {
+    let encoded = row
+        .value()
+        .encoded_fields()
+        .ok_or(RowStoreError::BlobMetadataRequiresGraphContext)?;
+    let mut fields = decode_canonical_fields_of(encoded)?;
+    for field in &mut fields {
+        if matches!(field, CborValue::Tag(ROV3_BLOB_TAG, _)) {
+            decode_blob_field_metadata(field)?;
+            let CborValue::Tag(_, payload) = field else {
+                return Err(RowStoreError::InvalidCanonicalRowValue);
+            };
+            let CborValue::Array(parts) = payload.as_mut() else {
+                return Err(RowStoreError::InvalidCanonicalRowValue);
+            };
+            let [_, _, media_type, suffix, descriptor] = parts.as_mut_slice() else {
+                return Err(RowStoreError::InvalidCanonicalRowValue);
+            };
+            *media_type = CborValue::Null;
+            *suffix = CborValue::Null;
+            *descriptor = CborValue::Null;
+        }
+    }
+    Ok(fields)
+}
 /// Projects one stored row field to payload-free Blob metadata.
 ///
 /// A Blob field is the format-3 ROV-3 tag 60111: `[length, sha256,
