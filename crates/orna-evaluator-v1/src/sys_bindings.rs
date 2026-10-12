@@ -109,23 +109,24 @@ impl SysHostBindingRegistry {
         self
     }
 
-    /// Accepts the exact OVB-2 capture produced by this binding as a
-    /// graph-backed ORP Blob value. This consumes its scratch candidate and
-    /// returns the value and pin evidence that a table mutation must commit
-    /// together.
+    /// Accepts a captured Blob with matching content identity as a graph-backed
+    /// ORP Blob value. Context-bound Format 3 references need not be hydrated:
+    /// identity and annotation are sufficient to select the captured candidate.
+    /// This consumes its scratch candidate and returns the value and pin
+    /// evidence that a table mutation must commit together.
     pub fn accept_captured_blob_for_row(
         &self,
         value: &ContextValue,
     ) -> Result<OrpBlobBinding, EvaluationError> {
-        if value.format() != ValueFormat::Ovb2 {
+        if !matches!(
+            value.format(),
+            ValueFormat::Ovb2 | ValueFormat::Rov3 | ValueFormat::Sov3
+        ) {
             return Err(redacted_error("ORNA-EVAL-VALUE"));
         }
         let blob = value
             .blob()
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
-        if !blob.is_hydrated() {
-            return Err(redacted_error("ORNA-EVAL-VALUE"));
-        }
         let candidate = {
             let mut candidates = self
                 .capture_candidates
@@ -1022,6 +1023,8 @@ const BLOB_ANNOTATION_ROLE: &str = "langitem.sys.blob.annotate";
 /// defaults, the result type and the declared failure vocabulary all come from
 /// the build-generated typed registry, never from this module.
 const BLOB_ANNOTATION_OPERATION: &str = "sys.blob.annotate";
+/// Generated semantic contract consumed by the native Blob annotation binding.
+const BLOB_ANNOTATION_CONTRACT: &str = "annotated-blob-format-3";
 
 /// True when `operation` is the generated portable Blob annotation operation.
 pub(crate) fn is_blob_annotation_operation(operation: &str) -> bool {
@@ -1044,9 +1047,9 @@ fn static_failure(code: &'static str) -> FailureCode {
 
 /// Resolves one portable Blob operation from the generated typed registry.
 ///
-/// Admission requires both a generated contract and that contract's binding to
-/// the portable Blob annotation role, so dispatch follows the same typed
-/// metadata that emits the language declaration.
+/// Admission requires the generated `annotated-blob-format-3` contract and its
+/// binding to the portable Blob annotation role, so dispatch follows the same
+/// semantic metadata that emits the language declaration.
 fn blob_annotation_contract(
     operation: &str,
 ) -> Result<&'static OperationContract, EvaluationError> {
@@ -1056,7 +1059,9 @@ fn blob_annotation_contract(
     let contract = orna_sys_v1::system_dispatch_table()
         .operation(operation)
         .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-    if contract.role.as_ref().map(|role| role.as_str()) != Some(BLOB_ANNOTATION_ROLE) {
+    if contract.role.as_ref().map(|role| role.as_str()) != Some(BLOB_ANNOTATION_ROLE)
+        || contract.contract.as_deref() != Some(BLOB_ANNOTATION_CONTRACT)
+    {
         return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
     }
     Ok(contract)

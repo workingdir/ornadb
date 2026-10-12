@@ -2014,7 +2014,6 @@ impl RuntimePublicationCoordinator {
             return Ok(None);
         };
         if journal.compact_manifest().is_some() {
-            let (profile, table_identity) = compact_profile.ok_or(Error::InvalidTransition)?;
             let recovery = repository
                 .recover_compact_publication_boundary()
                 .map_err(map_publication_repository_error)?;
@@ -2030,6 +2029,8 @@ impl RuntimePublicationCoordinator {
                     return Err(Error::RefConflict);
                 }
             };
+            // A validated receipt is enough to finalize; schema identity is needed only
+            // to rebuild an unconsumed prefix.
             if let Some(receipt) = runtime
                 .persisted_compact_publication_receipt(&pending)
                 .await
@@ -2040,6 +2041,7 @@ impl RuntimePublicationCoordinator {
                     .map(Some)
                     .map_err(map_publication_repository_error);
             }
+            let (profile, table_identity) = compact_profile.ok_or(Error::InvalidTransition)?;
             let trusted_schema = trusted_compact_schema_descriptor(
                 repository,
                 journal.old_head(),
