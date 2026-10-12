@@ -3,7 +3,8 @@ use std::path::Path;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository_v1::{KeyRange, Repository, RowRevision, TypedKey};
 use orna_runtime_v1::{
-    RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
+    vfs::project_content_name, RequestIdentity, RequestState, RuntimeIdentity, RuntimeState,
+    TableMutation, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{BlobMetadataFilter, compare_blob_metadata, decode_rov3_blob_metadata};
@@ -1240,8 +1241,8 @@ async fn filter_media(state: &RuntimeState, filter: &BlobMetadataFilter) -> Vec<
         .collect()
 }
 
-/// Lists every committed media row as payload-free metadata. Rows are decoded
-/// as Blob references only; no read or hydration call is made.
+/// Lists committed media metadata and its canonical projected content suffix.
+/// Blob references are decoded without reading or hydrating payloads.
 async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
     state
         .committed_table_rows("media")
@@ -1250,10 +1251,15 @@ async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
         .into_iter()
         .map(|(key, row)| {
             let metadata = decode_rov3_blob_metadata(&row).unwrap();
+            let projected_name =
+                project_content_name("content", metadata.media_type(), metadata.suffix());
+            let suffix = projected_name
+                .rsplit_once('.')
+                .map(|(_, suffix)| suffix.to_owned());
             MediaListing {
                 key,
                 media_type: metadata.media_type().to_owned(),
-                suffix: metadata.suffix().map(str::to_owned),
+                suffix,
                 length: metadata.length(),
                 sha256: metadata.sha256(),
                 hydrated: metadata.is_hydrated(),
