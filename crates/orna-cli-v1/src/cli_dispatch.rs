@@ -156,6 +156,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::Run(Invocation::Seed) => {
             run_project_invocation(&parsed.endpoint, "main.seed", parsed.color.stdout_enabled())
         }
+        Command::Annotate(arguments) => cli_annotate::run(&arguments),
         Command::Run(Invocation::Exercise) => run_project_invocation(
             &parsed.endpoint,
             "main.exercise",
