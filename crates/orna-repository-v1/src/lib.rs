@@ -2678,6 +2678,7 @@ impl Repository {
         let mut row_maps = Vec::with_capacity(mutations.len());
         let mut graphs = Vec::with_capacity(mutations.len());
         let mut scopes = Vec::with_capacity(mutations.len());
+        let mut bound_relations = BTreeSet::new();
         for mutation in mutations {
             let binding = format
                 .bind_committed_table(mutation.declaration_name(), mutation.table_object_id)
@@ -2688,6 +2689,11 @@ impl Repository {
                 ));
             }
             let relation_id = *binding.relation_id();
+            if !bound_relations.insert(relation_id) {
+                return Err(RepositoryError::FormatContext(
+                    FormatContextError::RowMapMismatch,
+                ));
+            }
             let row_map = format
                 .load_row_map(relation_id)
                 .map_err(RepositoryError::FormatContext)?;
