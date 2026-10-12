@@ -1378,9 +1378,9 @@ fn schema_descriptor_fields(
                 return None;
             };
             let field_object_id = id.as_slice().try_into().ok()?;
-            let role = if role == &Raw::Int(0.into()) {
+            let role = if role == &0.into() {
                 CommittedTableFieldRole::PrimaryKey
-            } else if role == &Raw::Int(1.into()) {
+            } else if role == &1.into() {
                 CommittedTableFieldRole::Stored
             } else {
                 return None;
