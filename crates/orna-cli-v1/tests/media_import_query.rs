@@ -1890,8 +1890,22 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     // An unfiltered listing is the control: the predicate below must not add a
     // single payload byte on top of it.
     let all = query_json(directory.path(), &[&relation]);
-    assert_eq!(all["blobs"].as_u64(), Some(3), "three committed rows: {all}");
+    assert_eq!(
+        all["blobs"].as_u64(),
+        Some(3),
+        "three committed rows: {all}"
+    );
     assert_eq!(all["media_payload_bytes_read"], 0);
+    assert_eq!(
+        all["plan"]["constraints"],
+        serde_json::json!({
+            "kind": null,
+            "not_kind": [],
+            "suffix": null,
+            "min_length": null,
+            "max_length": null,
+        })
+    );
 
     // `--kind` selects on the canonical media type the annotation binds.
     let wavs = query_json(directory.path(), &[&relation, "--kind", "audio/wav"]);
@@ -1901,7 +1915,11 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         .iter()
         .map(|listing| listing["key"].as_str().unwrap())
         .collect();
-    assert_eq!(keys, vec!["note", "song"], "both WAV rows and no PNG: {wavs}");
+    assert_eq!(
+        keys,
+        vec!["note", "song"],
+        "both WAV rows and no PNG: {wavs}"
+    );
     assert_eq!(
         wavs["media_payload_bytes_read"], 0,
         "the kind predicate fetched media bytes"
@@ -1926,6 +1944,16 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     assert_eq!(plan["candidates"].as_u64(), Some(3), "all rows: {plan}");
     assert_eq!(plan["matched"].as_u64(), Some(2), "two WAVs: {plan}");
     assert_eq!(plan["payload_fetch"], "none");
+    assert_eq!(
+        plan["constraints"],
+        serde_json::json!({
+            "kind": "audio/wav",
+            "not_kind": [],
+            "suffix": null,
+            "min_length": null,
+            "max_length": null,
+        })
+    );
 
     // `--suffix` discriminates the two WAVs by their authored annotation, and
     // an unauthored hint selects nothing rather than falling back to kind.
@@ -1939,6 +1967,7 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     assert_eq!(annotated_keys, vec!["note"], "only the annotated row");
     assert_eq!(annotated_only["listings"][0]["suffix"], "note");
     assert_eq!(annotated_only["media_payload_bytes_read"], 0);
+    assert_eq!(annotated_only["plan"]["constraints"]["suffix"], "note");
 
     let absent_suffix = query_json(directory.path(), &[&relation, "--suffix", "absent"]);
     assert!(
@@ -1975,12 +2004,18 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         Some(all_lengths.iter().filter(|length| **length < bound).count() as u64),
         "max-length keeps exactly the rows below the bound"
     );
+    assert_eq!(at_least["plan"]["constraints"]["min_length"], bound);
+    assert_eq!(at_most["plan"]["constraints"]["max_length"], bound - 1);
     assert_eq!(at_least["media_payload_bytes_read"], 0);
     assert_eq!(at_most["media_payload_bytes_read"], 0);
 
     // `--not-kind` excludes the named annotation from the same coordinate.
     let not_png = query_json(directory.path(), &[&relation, "--not-kind", "image/png"]);
     assert_eq!(not_png["blobs"].as_u64(), Some(2), "the PNG is excluded");
+    assert_eq!(
+        not_png["plan"]["constraints"]["not_kind"],
+        serde_json::json!(["image/png"])
+    );
 
     // Combining coordinates selects on all of them, and a conjunction that no
     // row satisfies is an empty result rather than an unfiltered one.
@@ -2010,6 +2045,8 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         text.contains("media payload bytes read: 0"),
         "the human summary must report the payload it avoided: {text}"
     );
+    assert!(text.contains("constraints kind=\"audio/wav\""));
+    assert_eq!(text.matches("subject all fields").count(), 1, "{text}");
 
     // A flag that names no coordinate the annotation binds is refused rather
     // than silently ignored.

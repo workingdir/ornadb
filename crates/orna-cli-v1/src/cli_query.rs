@@ -45,6 +45,16 @@ struct QueryOptions<'a> {
     limit: usize,
     format: QueryFormat,
     predicate: BlobMetadataFilter,
+    predicate_constraints: PredicateConstraints<'a>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct PredicateConstraints<'a> {
+    kind: Option<&'a str>,
+    not_kind: Vec<&'a str>,
+    suffix: Option<&'a str>,
+    min_length: Option<u64>,
+    max_length: Option<u64>,
 }
 
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
@@ -55,6 +65,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut limit = DEFAULT_QUERY_LIMIT;
     let mut format = QueryFormat::Human;
     let mut predicate = BlobMetadataFilter::new();
+    let mut predicate_constraints = PredicateConstraints::default();
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
@@ -85,38 +96,45 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 at = Some(value);
             }
             "--kind" => {
-                let value = words.next().ok_or_else(|| {
-                    query_error("--kind needs a value", "usage: --kind MIME")
-                })?;
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--kind needs a value", "usage: --kind MIME"))?;
                 predicate = predicate.with_media_type(value);
+                predicate_constraints.kind = Some(value);
             }
             "--not-kind" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--not-kind needs a value", "usage: --not-kind MIME")
                 })?;
                 predicate = predicate.without_media_type(value);
+                predicate_constraints.not_kind.push(value);
             }
             "--suffix" => {
-                let value = words.next().ok_or_else(|| {
-                    query_error("--suffix needs a value", "usage: --suffix HINT")
-                })?;
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--suffix needs a value", "usage: --suffix HINT"))?;
                 predicate = predicate.with_suffix(value);
+                predicate_constraints.suffix = Some(value);
             }
             "--min-length" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--min-length needs a value", "usage: --min-length BYTES")
                 })?;
-                predicate = predicate.with_min_length(value.parse::<u64>().map_err(|_| {
+                let length = value.parse::<u64>().map_err(|_| {
                     query_error("--min-length is not a byte count", format!("got {value:?}"))
-                })?);
+                })?;
+                predicate = predicate.with_min_length(length);
+                predicate_constraints.min_length = Some(length);
             }
             "--max-length" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--max-length needs a value", "usage: --max-length BYTES")
                 })?;
-                predicate = predicate.with_max_length(value.parse::<u64>().map_err(|_| {
+                let length = value.parse::<u64>().map_err(|_| {
                     query_error("--max-length is not a byte count", format!("got {value:?}"))
-                })?);
+                })?;
+                predicate = predicate.with_max_length(length);
+                predicate_constraints.max_length = Some(length);
             }
             "--limit" => {
                 let value = words.next().ok_or_else(|| {
@@ -171,6 +189,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
         limit,
         format,
         predicate,
+        predicate_constraints,
     })
 }
 
@@ -310,7 +329,13 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         |field| format!("field {field}"),
     );
     let matched = listings.len();
-    let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
+    let plan = PredicatePlan::new(
+        &options.predicate,
+        &options.predicate_constraints,
+        &subject,
+        candidates,
+        matched,
+    );
     match options.format {
         QueryFormat::Human => {
             for (key, field, metadata) in &listings {
@@ -383,6 +408,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
 /// payload figure is the read seam's own count for this process.
 struct PredicatePlan<'a> {
     predicate: &'a BlobMetadataFilter,
+    constraints: &'a PredicateConstraints<'a>,
     subject: &'a str,
     candidates: usize,
     matched: usize,
@@ -391,12 +417,14 @@ struct PredicatePlan<'a> {
 impl<'a> PredicatePlan<'a> {
     const fn new(
         predicate: &'a BlobMetadataFilter,
+        constraints: &'a PredicateConstraints<'a>,
         subject: &'a str,
         candidates: usize,
         matched: usize,
     ) -> Self {
         Self {
             predicate,
+            constraints,
             subject,
             candidates,
             matched,
@@ -417,14 +445,14 @@ impl<'a> PredicatePlan<'a> {
 
     fn human_line(&self) -> String {
         format!(
-            "plan: annotation predicate over {}; coordinates {}; decode-required coordinates {}; \
-             candidates {} matched {}; subject {}",
+            "plan: annotation predicate; subject {}; coordinates {}; constraints {}; \
+             decode-required coordinates {}; candidates {} matched {}; payload-fetch none",
             self.subject,
             self.coordinates().join(","),
+            self.constraints.human_line(),
             Self::decode_required_coordinates().join(","),
             self.candidates,
             self.matched,
-            self.subject,
         )
     }
 
@@ -433,11 +461,52 @@ impl<'a> PredicatePlan<'a> {
             "kind": "annotation-predicate",
             "subject": self.subject,
             "coordinates": self.coordinates(),
+            "constraints": {
+                "kind": self.constraints.kind,
+                "not_kind": self.constraints.not_kind,
+                "suffix": self.constraints.suffix,
+                "min_length": self.constraints.min_length,
+                "max_length": self.constraints.max_length,
+            },
             "decode_required_coordinates": Self::decode_required_coordinates(),
             "candidates": self.candidates,
             "matched": self.matched,
             "payload_fetch": "none",
         })
+    }
+}
+
+impl PredicateConstraints<'_> {
+    fn append(output: &mut String, label: &str, value: impl std::fmt::Debug) {
+        use std::fmt::Write as _;
+
+        if !output.is_empty() {
+            output.push_str(", ");
+        }
+        write!(output, "{label}={value:?}").expect("String formatting cannot fail");
+    }
+
+    fn human_line(&self) -> String {
+        let mut output = String::new();
+        if let Some(kind) = self.kind {
+            Self::append(&mut output, "kind", kind);
+        }
+        for kind in &self.not_kind {
+            Self::append(&mut output, "not-kind", kind);
+        }
+        if let Some(suffix) = self.suffix {
+            Self::append(&mut output, "suffix", suffix);
+        }
+        if let Some(length) = self.min_length {
+            Self::append(&mut output, "min-length", length);
+        }
+        if let Some(length) = self.max_length {
+            Self::append(&mut output, "max-length", length);
+        }
+        if output.is_empty() {
+            output.push_str("none");
+        }
+        output
     }
 }
 
@@ -512,9 +581,7 @@ fn query_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_options, parse_relation_id, render_key, QueryFormat, DEFAULT_QUERY_LIMIT,
-    };
+    use super::{DEFAULT_QUERY_LIMIT, PredicatePlan, QueryFormat, parse_options, parse_relation_id, render_key};
     use crate::Exit;
     use orna_repository_v1::TypedKey;
 
@@ -575,6 +642,58 @@ mod tests {
         assert_eq!(parsed.field, Some(0));
     }
 
+
+    #[test]
+    fn query_plan_reports_effective_annotation_constraints() {
+        let arguments = words(&[
+            "000102030405060708090a0b0c0d0e0f",
+            "--kind",
+            "audio/old",
+            "--kind",
+            "audio/wav",
+            "--not-kind",
+            "image/jpeg",
+            "--not-kind",
+            "image/png",
+            "--suffix",
+            "old",
+            "--suffix",
+            "note",
+            "--min-length",
+            "1",
+            "--min-length",
+            "7",
+            "--max-length",
+            "9000",
+            "--max-length",
+            "8192",
+        ]);
+        let options = parse_options(&arguments).unwrap();
+        let plan = PredicatePlan::new(
+            &options.predicate,
+            &options.predicate_constraints,
+            "all fields",
+            3,
+            2,
+        );
+
+        assert_eq!(
+            plan.to_json()["constraints"],
+            serde_json::json!({
+                "kind": "audio/wav",
+                "not_kind": ["image/jpeg", "image/png"],
+                "suffix": "note",
+                "min_length": 7,
+                "max_length": 8192,
+            })
+        );
+        let human = plan.human_line();
+        assert!(human.contains(
+            "constraints kind=\"audio/wav\", not-kind=\"image/jpeg\", \
+             not-kind=\"image/png\", suffix=\"note\", min-length=7, max-length=8192"
+        ));
+        assert_eq!(human.matches("subject all fields").count(), 1, "{human}");
+    }
 
     #[test]
     fn rendered_keys_follow_the_spelling_the_row_carries() {
