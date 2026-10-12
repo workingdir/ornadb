@@ -16,7 +16,7 @@ use orna_sys_v1::{
     ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
     SystemOperationProvider, TypeId, TypedValue, system_host_operation_registry,
 };
-use orna_value_v1::{Blob, ContextValue, Error as ValueError, OVB2_BLOB_TAG, ValueFormat};
+use orna_value_v1::{Blob, ContextValue, Error as ValueError, ValueFormat};
 
 use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
 
@@ -1064,19 +1064,25 @@ fn blob_annotation_contract(
 
 /// Native provider linked to the generated portable Blob annotation role.
 ///
-/// The role is a language-level contract over an already validated
-/// OVB-2/ROV-3/SOV-3 Blob: it needs no filesystem, network, clock or process
-/// grant, so it never crosses the host-operation effect boundary. The work
-/// happens in `invoke`, because a protected Blob's bytes and its
-/// `(length, SHA-256)` identity never cross this ABI as anything but already
-/// validated canonical OVB-2 bytes.
-struct BlobAnnotationProvider {
+/// The provider keeps the evaluator's validated OVB-2 source alongside the
+/// typed invocation. It applies the MIME-1 metadata edit to that source with
+/// `ContextValue::with_blob_annotation`, preserving raw identity and capture
+/// provenance instead of rebuilding a Blob from bytes. This pure language
+/// operation needs no host-operation effect grant.
+struct BlobAnnotationProvider<'a> {
     offer: ProviderOffer,
+    source: &'a ContextValue,
 }
 
-impl BlobAnnotationProvider {
-    /// Links a provider offer to the generated role's own offer.
-    fn linked(role: &SemanticRoleContract) -> Result<Self, EvaluationError> {
+impl<'a> BlobAnnotationProvider<'a> {
+    /// Links a provider offer to the generated role and source Blob.
+    fn linked(
+        role: &SemanticRoleContract,
+        source: &'a ContextValue,
+    ) -> Result<Self, EvaluationError> {
+        if source.format() != ValueFormat::Ovb2 {
+            return Err(redacted_error("ORNA-EVAL-VALUE"));
+        }
         Ok(Self {
             offer: ProviderOffer {
                 provider: role
@@ -1087,11 +1093,12 @@ impl BlobAnnotationProvider {
                 version: role.version,
                 effects: role.effects.clone(),
             },
+            source,
         })
     }
 }
 
-impl SystemOperationProvider for BlobAnnotationProvider {
+impl SystemOperationProvider for BlobAnnotationProvider<'_> {
     fn offer(&self) -> &ProviderOffer {
         &self.offer
     }
@@ -1108,27 +1115,48 @@ impl SystemOperationProvider for BlobAnnotationProvider {
                 payload: None,
             });
         };
-        let mut values = Vec::with_capacity(arguments.len());
-        for argument in arguments {
+        let [_, media_type, suffix] = arguments else {
+            return Err(provider_failure());
+        };
+        let decode_argument = |argument: &TypedValue| {
             let Some(canonical) = argument.canonical() else {
                 return Err(provider_failure());
             };
-            let value = ContextValue::decode(canonical, ValueFormat::Ovb2)
-                .map_err(|_| provider_failure())?;
-            values.push(value.into_raw());
-        }
-        let raw =
-            apply_blob_annotation(operation.as_str(), &values).map_err(|code| ProviderFailure {
-                code,
-                payload: None,
-            })?;
-        let value = ContextValue::new(ValueFormat::Ovb2, raw).map_err(|_| provider_failure())?;
-        let canonical = value.encode().map_err(|_| provider_failure())?;
+            ContextValue::decode(canonical, ValueFormat::Ovb2).map_err(|_| provider_failure())
+        };
+        let media_type = decode_argument(media_type)?;
+        let OvbRaw::Text(media_type) = media_type.raw() else {
+            return Err(provider_failure());
+        };
+        let suffix = decode_argument(suffix)?;
+        let annotated =
+            apply_blob_annotation(operation.as_str(), self.source, media_type, suffix.raw())
+                .map_err(|code| ProviderFailure {
+                    code,
+                    payload: None,
+                })?;
+        let canonical = annotated.encode().map_err(|_| provider_failure())?;
         Ok(TypedValue::public(
             TypeId::new(contract.signature.result.canonical()),
             canonical,
         ))
     }
+}
+
+/// Applies the portable MIME-1 annotation without reconstructing Blob bytes.
+fn apply_blob_annotation(
+    operation: &str,
+    source: &ContextValue,
+    media_type: &str,
+    suffix: &OvbRaw,
+) -> Result<ContextValue, FailureCode> {
+    if operation != BLOB_ANNOTATION_OPERATION {
+        return Err(static_failure("sys.abi.unavailable"));
+    }
+    let suffix = blob_suffix_argument(suffix)?;
+    source
+        .with_blob_annotation(media_type, suffix)
+        .map_err(blob_value_failure)
 }
 
 fn provider_failure() -> ProviderFailure {
@@ -1158,7 +1186,10 @@ pub(crate) fn dispatch_blob_annotation(
     let role = table
         .role(BLOB_ANNOTATION_ROLE)
         .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
-    let provider = BlobAnnotationProvider::linked(role)?;
+    let source = arguments
+        .first()
+        .ok_or_else(|| redacted_error("ORNA-EVAL-ARGUMENT"))?;
+    let provider = BlobAnnotationProvider::linked(role, source)?;
     let mut typed = Vec::with_capacity(parameters.len());
     for (parameter, argument) in parameters.iter().zip(arguments) {
         let canonical = argument
@@ -1177,8 +1208,13 @@ pub(crate) fn dispatch_blob_annotation(
             let canonical = value
                 .canonical()
                 .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
-            ContextValue::decode(canonical, ValueFormat::Ovb2)
-                .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
+            let decoded = match source.context() {
+                Some(context) => {
+                    ContextValue::decode_in_context(canonical, ValueFormat::Ovb2, context)
+                }
+                None => ContextValue::decode(canonical, ValueFormat::Ovb2),
+            };
+            decoded.map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
         }
         Ok(orna_sys_v1::SystemDispatchResult::Failed(code)) => Err(redacted_code(code.as_str())),
         Err(ProviderDiagnostic::PreconditionFailed { code, .. }) => {
@@ -1186,26 +1222,6 @@ pub(crate) fn dispatch_blob_annotation(
         }
         Err(_) => Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
     }
-}
-
-/// Applies the value-level semantics of the portable Blob annotation.
-///
-/// Annotation delegates to [`orna_value_v1`], which owns MIME-1
-/// canonicalisation and the `(length, SHA-256)` content identity, so an
-/// annotation-only edit never rehashes or re-materialises payload bytes.
-fn apply_blob_annotation(operation: &str, values: &[OvbRaw]) -> Result<OvbRaw, FailureCode> {
-    if operation != BLOB_ANNOTATION_OPERATION {
-        return Err(static_failure("sys.abi.unavailable"));
-    }
-    let [value, OvbRaw::Text(media_type), suffix] = values else {
-        return Err(static_failure("sys.abi.provider_failed"));
-    };
-    let suffix = blob_suffix_argument(suffix)?;
-    let blob = ContextValue::new(ValueFormat::Ovb2, value.clone()).map_err(blob_value_failure)?;
-    let annotated = blob
-        .with_blob_annotation(media_type, suffix)
-        .map_err(blob_value_failure)?;
-    Ok(annotated.into_raw())
 }
 
 /// Reads the `suffix: Str?` argument of `sys.blob.annotate`.
