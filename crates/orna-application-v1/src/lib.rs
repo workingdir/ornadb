@@ -707,7 +707,7 @@ impl ApplicationAuthority {
 
 /// The evaluated result of one admitted source activation together with the
 /// ordered table mutations it performed.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct StagedActivation {
     value: CanonicalValue,
     mutations: Vec<TableMutation>,
@@ -764,12 +764,12 @@ impl SourceRowSchemaProvenance {
 }
 
 /// A field-bound pin retained through owner-fenced durable row admission.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RetainedSourceBlobPin {
     mutation_id: [u8; 16],
     field_object_id: [u8; 16],
     encoded_value: Vec<u8>,
-    pin: Arc<ProtectedContentPin>,
+    pin: ProtectedContentPin,
 }
 
 impl RetainedSourceBlobPin {
@@ -791,6 +791,17 @@ impl RetainedSourceBlobPin {
     #[must_use]
     pub fn pin(&self) -> &ProtectedContentPin {
         &self.pin
+    }
+
+    /// Consumes the retained metadata and pin for a durable VFS handoff.
+    #[must_use]
+    pub fn into_parts(self) -> ([u8; 16], [u8; 16], Vec<u8>, ProtectedContentPin) {
+        (
+            self.mutation_id,
+            self.field_object_id,
+            self.encoded_value,
+            self.pin,
+        )
     }
 }
 
@@ -909,6 +920,26 @@ impl StagedActivation {
     #[must_use]
     pub fn protected_field_pins(&self) -> &[RetainedSourceBlobPin] {
         &self.protected_field_pins
+    }
+
+    /// Consumes the activation so callers can transfer pins without cloning.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        CanonicalValue,
+        Vec<TableMutation>,
+        Option<[u8; 32]>,
+        Vec<SourceRowSchemaProvenance>,
+        Vec<RetainedSourceBlobPin>,
+    ) {
+        (
+            self.value,
+            self.mutations,
+            self.snapshot_generation,
+            self.source_row_schemas,
+            self.protected_field_pins,
+        )
     }
 
     /// Stages this activation's mutations against the captured context for
@@ -1185,7 +1216,7 @@ impl SourceMutationEffectHandler {
                 mutation_id,
                 field_object_id,
                 encoded_value,
-                pin: Arc::new(pin),
+                pin,
             });
         }
         let next_ordinal = self
