@@ -420,8 +420,8 @@ impl RepositoryFormatContext {
     }
 
     /// Issues native Git graph authority only for a sealed row-map snapshot
-    /// whose database, schema identity and store root match this pinned
-    /// format-3 repository snapshot.
+    /// whose repository, database, schema, store root, and exact snapshot
+    /// authority match this pinned format-3 context.
     pub fn open_native_graph(
         &self,
         rows: &RowMapSnapshot,
@@ -438,6 +438,23 @@ impl RepositoryFormatContext {
             return Err(FormatContextError::RowMapMismatch);
         }
         let schema_digest = *version.schema().schema_digest();
+        let snapshot_id = self.snapshot.snapshot_id();
+        let row_count = version
+            .row_count()
+            .ok_or(FormatContextError::RowMapMismatch)?;
+        let mut row_authority = Sha256::new();
+        row_authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
+        row_authority.update(database_id.as_bytes());
+        row_authority.update(snapshot_id);
+        row_authority.update(store.oid.as_bytes());
+        row_authority.update(version.relation_id());
+        row_authority.update(version.primary_root().as_bytes());
+        row_authority.update(schema_digest);
+        row_authority.update(row_count.to_be_bytes());
+        let expected_authority: [u8; 32] = row_authority.finalize().into();
+        if rows.authority() != &expected_authority {
+            return Err(FormatContextError::RowMapMismatch);
+        }
         let algorithm = store.oid.algorithm();
         if version.schema().schema_oid().algorithm() != algorithm {
             return Err(FormatContextError::GraphContextInvalid);
@@ -452,8 +469,6 @@ impl RepositoryFormatContext {
         repository_hash.update(repository_path.to_string_lossy().as_bytes());
         repository_hash.update(database_id.as_bytes());
         let repository_id: [u8; 32] = repository_hash.finalize().into();
-
-        let snapshot_id: [u8; 32] = self.snapshot.snapshot_id();
 
         let authority = rows.authority();
         let mut owner_hash = Sha256::new();
@@ -3428,17 +3443,32 @@ mod graph_bridge_tests {
             );
         }
 
-        // Cross-root boundary: a row committed under this store root must not
-        // resolve through a graph admitted at a later store root.
-        fs::write(root.join(".orna/store/data"), b"store root two")
-            .expect("write later store root");
-        commit(root);
+        // Advance to a different, valid OGS-1 store root while keeping a
+        // committed row at the same key. A loose worktree marker under
+        // `.orna/store` would instead turn the root into a non-OGS tree.
+        let later_text = vec![b'y'; crate::row_store::ROW_INLINE_LIMIT + 1];
+        let mut later_value = vec![0x81];
+        cbor_head(&mut later_value, 3, later_text.len() as u64);
+        later_value.extend_from_slice(&later_text);
+        install_overflow_row_store_with_bytes(
+            root,
+            &admitted_context,
+            relation_id,
+            &later_value,
+            None,
+        );
         let later_context = context(root);
-        let (later_schema, later_digest) = schema_node(root, &later_context);
-        let later_rows = sealed_rows(&later_context, &later_schema, later_digest);
+        let later_rows = later_context
+            .load_row_map(relation_id)
+            .expect("load the later committed row-map identity");
         let later_graph = later_context
             .open_native_graph(&later_rows)
-            .expect("admit the later fixture root");
+            .expect("admit the later committed graph");
+        assert_ne!(
+            admitted_context.validate_store_root().unwrap().oid,
+            later_context.validate_store_root().unwrap().oid,
+            "the committed OGS-1 store root advanced"
+        );
         let later_scope = later_graph.open_read_scope().expect("later read scope");
         assert!(matches!(
             later_graph.resolve_row_node(&row, &descriptor_oid, &later_scope),

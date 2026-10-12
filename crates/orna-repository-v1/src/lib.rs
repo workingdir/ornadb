@@ -6489,12 +6489,12 @@ impl Repository {
     }
 
     /// Acquires the process-lifetime owner lock for this worktree's local
-    /// runtime.
+    /// runtime. The lock is separate from short-lived repository coordination
+    /// locks and remains held for the runtime lifetime.
     ///
-    /// The lock is intentionally separate from short-lived repository
-    /// coordination locks. A live embedded owner retains it for its complete
-    /// lifetime; successful acquisition after an abrupt owner exit is the
-    /// host-level liveness witness needed before a runtime lease takeover.
+    /// Current and departed identities are written as one atomic state update.
+    /// Replacing the current identity therefore cannot erase a prior owner
+    /// before manifest validation and guarded reclamation succeed.
     pub fn acquire_runtime_owner_lock(
         &self,
         owner_id: [u8; 16],
@@ -6504,38 +6504,28 @@ impl Repository {
         }
         let locks = self.runtime.locks();
         fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let path = locks.join("runtime-owner.lock");
         let mut file = fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(&path)
+            .open(locks.join("runtime-owner.lock"))
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         file.try_lock_exclusive()
             .map_err(|_| RepositoryError::RepositoryBusy)?;
-        let mut previous = Vec::new();
-        (&file)
-            .take(16 + 1)
-            .read_to_end(&mut previous)
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let previous_owner = match previous.as_slice() {
-            [] => None,
-            bytes if bytes.len() == 16 => Some(
-                bytes
-                    .try_into()
-                    .map_err(|_| RepositoryError::LocalStateUnavailable)?,
-            ),
-            _ => return Err(RepositoryError::LocalStateUnavailable),
-        };
-        // Keep the departed identity observable until the durable runtime
-        // manifest is available. In particular, lock acquisition cannot
-        // distinguish accepted pending pins from unaccepted private refs.
+        let state_path = locks.join("runtime-owner.state");
+        let (current_owner, mut departed_owners) =
+            read_runtime_owner_state(&state_path, &mut file)?;
+        let previous_owner = (current_owner != [0; 16]).then_some(current_owner);
+        if let Some(previous_owner) = previous_owner
+            && !departed_owners.contains(&previous_owner)
+        {
+            departed_owners.push(previous_owner);
+        }
+        persist_runtime_owner_state(&state_path, owner_id, &departed_owners)?;
+        // Migrate the legacy lock-file payload only after the atomic state is
+        // durable; the file itself remains the stable advisory-lock inode.
         file.set_len(0)
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        file.write_all(&owner_id)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         file.sync_all()
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -6543,6 +6533,9 @@ impl Repository {
             file,
             repository: self.clone(),
             previous_owner,
+            current_owner: owner_id,
+            departed_owners,
+            owner_state_path: state_path,
         })
     }
 
@@ -6896,17 +6889,171 @@ impl Drop for CoordinationLock {
     }
 }
 
+const RUNTIME_OWNER_STATE_MAGIC: &[u8; 8] = b"ORNAOWN2";
+const RUNTIME_OWNER_CHAIN_MAX_ENTRIES: usize = 65_536;
+
+fn read_runtime_owner_state(
+    path: &Path,
+    legacy_lock: &mut fs::File,
+) -> Result<([u8; 16], Vec<[u8; 16]>), RepositoryError> {
+    let bytes = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            fs::read(path).map_err(|_| RepositoryError::LocalStateUnavailable)?
+        }
+        Ok(_) => return Err(RepositoryError::LocalStateUnavailable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            legacy_lock
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            let mut legacy = Vec::new();
+            (&*legacy_lock)
+                .take(17)
+                .read_to_end(&mut legacy)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            return match legacy.as_slice() {
+                bytes if bytes.len() == 16 => Ok((
+                    bytes
+                        .try_into()
+                        .map_err(|_| RepositoryError::LocalStateUnavailable)?,
+                    Vec::new(),
+                )),
+                [] => Ok(([0; 16], Vec::new())),
+                _ => Err(RepositoryError::LocalStateUnavailable),
+            };
+        }
+        Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+    };
+    if bytes.len() < 28 || &bytes[..8] != RUNTIME_OWNER_STATE_MAGIC {
+        return Err(RepositoryError::LocalStateUnavailable);
+    }
+    let current: [u8; 16] = bytes[8..24]
+        .try_into()
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    let count = u32::from_le_bytes(
+        bytes[24..28]
+            .try_into()
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?,
+    ) as usize;
+    let expected_length = 28usize
+        .checked_add(
+            count
+                .checked_mul(16)
+                .ok_or(RepositoryError::LocalStateUnavailable)?,
+        )
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    if current == [0; 16]
+        || count > RUNTIME_OWNER_CHAIN_MAX_ENTRIES
+        || bytes.len() != expected_length
+    {
+        return Err(RepositoryError::LocalStateUnavailable);
+    }
+    let mut seen = BTreeSet::new();
+    let mut departed = Vec::with_capacity(count);
+    for chunk in bytes[28..].chunks_exact(16) {
+        let owner: [u8; 16] = chunk
+            .try_into()
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if owner == [0; 16] || !seen.insert(owner) {
+            return Err(RepositoryError::LocalStateUnavailable);
+        }
+        departed.push(owner);
+    }
+    Ok((current, departed))
+}
+
+fn persist_runtime_owner_state(
+    path: &Path,
+    current: [u8; 16],
+    departed: &[[u8; 16]],
+) -> Result<(), RepositoryError> {
+    if current == [0; 16] || departed.len() > RUNTIME_OWNER_CHAIN_MAX_ENTRIES {
+        return Err(RepositoryError::LocalStateUnavailable);
+    }
+    let count = u32::try_from(departed.len()).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    let mut bytes = Vec::with_capacity(28 + departed.len() * 16);
+    bytes.extend_from_slice(RUNTIME_OWNER_STATE_MAGIC);
+    bytes.extend_from_slice(&current);
+    bytes.extend_from_slice(&count.to_le_bytes());
+    let mut seen = BTreeSet::new();
+    for owner in departed {
+        if *owner == [0; 16] || !seen.insert(*owner) {
+            return Err(RepositoryError::LocalStateUnavailable);
+        }
+        bytes.extend_from_slice(owner);
+    }
+    let parent = path.parent().ok_or(RepositoryError::LocalStateUnavailable)?;
+    let temporary = parent.join("runtime-owner-state.next");
+    match fs::symlink_metadata(&temporary) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            fs::remove_file(&temporary).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        }
+        Ok(_) => return Err(RepositoryError::LocalStateUnavailable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    fs::rename(&temporary, path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| RepositoryError::LocalStateUnavailable)
+}
+
 /// A process-lifetime local runtime owner lock.
 pub struct RuntimeOwnerLock {
     file: fs::File,
     repository: Repository,
     previous_owner: Option<[u8; 16]>,
+    current_owner: [u8; 16],
+    departed_owners: Vec<[u8; 16]>,
+    owner_state_path: PathBuf,
 }
 
 impl RuntimeOwnerLock {
     /// Returns the owner identity recorded by the previous holder, if any.
     pub fn previous_owner(&self) -> Option<[u8; 16]> {
         self.previous_owner
+    }
+
+    /// Returns the persisted departed owners awaiting manifest-backed cleanup.
+    pub fn departed_owners(&self) -> &[[u8; 16]] {
+        &self.departed_owners
+    }
+
+    /// Reconciles every departed owner's refs against a fully validated pin
+    /// manifest grouped by owner. Returns `None` while a publication journal
+    /// remains authoritative; the durable chain is retained for retry.
+    pub fn reclaim_departed_owner_pins(
+        &self,
+        accepted_by_owner: &BTreeMap<[u8; 16], BTreeMap<[u8; 16], native_graph::NativeOid>>,
+    ) -> Result<Option<usize>, RepositoryError> {
+        let empty = BTreeMap::new();
+        let mut reclaimed = 0usize;
+        for owner in &self.departed_owners {
+            let accepted = accepted_by_owner.get(owner).unwrap_or(&empty);
+            let count = match native_graph::reclaim_dead_owner_pin_refs(
+                &self.repository,
+                *owner,
+                accepted,
+            ) {
+                Ok(count) => count,
+                Err(native_graph::GraphError::PublicationNotTerminal) => return Ok(None),
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            };
+            reclaimed = reclaimed
+                .checked_add(count)
+                .ok_or(RepositoryError::LocalStateUnavailable)?;
+        }
+        if !self.departed_owners.is_empty() {
+            persist_runtime_owner_state(&self.owner_state_path, self.current_owner, &[])?;
+        }
+        Ok(Some(reclaimed))
     }
 
     /// Reconciles the previous owner's pins against an already-validated
@@ -8443,6 +8590,58 @@ mod tests {
         drop(first);
         let second = repository.acquire_runtime_owner_lock([2; 16]).unwrap();
         assert_eq!(second.previous_owner(), Some([1; 16]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_owner_chain_survives_repeated_startup_crashes() {
+        use std::os::unix::process::ExitStatusExt;
+
+        const REPOSITORY_ENV: &str = "ORNA_RUNTIME_OWNER_CRASH_REPOSITORY";
+        const OWNER_ENV: &str = "ORNA_RUNTIME_OWNER_CRASH_ID";
+        const TEST_FILTER: &str = "runtime_owner_chain_survives_repeated_startup_crashes";
+        if let (Ok(path), Ok(owner)) = (std::env::var(REPOSITORY_ENV), std::env::var(OWNER_ENV)) {
+            let owner = owner.parse::<u8>().unwrap();
+            let repository = Repository::discover(path).unwrap();
+            let _lock = repository.acquire_runtime_owner_lock([owner; 16]).unwrap();
+            std::process::abort();
+        }
+
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let binary = std::env::current_exe().unwrap();
+        for owner in [1_u8, 2, 3] {
+            let status = Command::new("/bin/sh")
+                .arg("-c")
+                .arg("ulimit -c 0 2>/dev/null; exec \"$0\" \"$@\"")
+                .arg(&binary)
+                .args([TEST_FILTER, "--nocapture", "--test-threads=1"])
+                .env(REPOSITORY_ENV, root.path())
+                .env(OWNER_ENV, owner.to_string())
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), Some(6), "startup child must abort");
+        }
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let recovered = repository.acquire_runtime_owner_lock([4; 16]).unwrap();
+        assert_eq!(recovered.departed_owners(), &[[1; 16], [2; 16], [3; 16]]);
+        assert_eq!(
+            recovered
+                .reclaim_departed_owner_pins(&BTreeMap::new())
+                .unwrap(),
+            Some(0)
+        );
+        drop(recovered);
+
+        let retried = repository.acquire_runtime_owner_lock([5; 16]).unwrap();
+        assert_eq!(retried.departed_owners(), &[[4; 16]]);
     }
 
     fn git(directory: &Path, arguments: &[&str]) -> String {

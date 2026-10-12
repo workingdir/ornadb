@@ -8364,7 +8364,7 @@ mod persisted_orp_tests {
     fn requested_range_verifies_only_intersecting_real_media_chunks() {
         let (_directory, graph) = capture_test_context();
         let scope = graph.open_read_scope().expect("capture scope");
-        let wave = include_bytes!("../../orna-cli-v1/tests/fixtures/media/tone.wav");
+        let wave = include_bytes!("../tests/fixtures/media/tone.wav");
         assert_eq!(&wave[..4], b"RIFF");
         assert_eq!(&wave[8..12], b"WAVE");
         let mut payload = wave.to_vec();
