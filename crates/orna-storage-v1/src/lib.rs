@@ -851,7 +851,7 @@ pub struct FrozenBatch {
     pub mutations: Vec<LooseMutation>,
     pub watermark: u64,
     // The loose candidate stores opaque row bytes; retain protected transfer
-    // evidence beside them until runtime completion commits the transfer.
+    // evidence beside them until runtime completion consumes the frozen prefix.
     protected_source_mutations: Vec<TableMutation>,
 }
 
@@ -1247,8 +1247,8 @@ pub struct RuntimePublicationCoordinator {
     expected_index: IndexGeneration,
     candidate: PrivateCommit,
     journal: PublicationJournal,
-    // Retain protected transfer evidence across publication until the journal
-    // records successful runtime completion.
+    // Retain protected transfer evidence across publication until both runtime
+    // and journal completion have succeeded.
     protected_source_mutations: Vec<TableMutation>,
 }
 /// The committed snapshot and pending-mutation window a logical compact reader
