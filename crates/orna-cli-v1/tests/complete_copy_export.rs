@@ -559,9 +559,13 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
     let publication_store = format!("{publication}:.orna/store");
     let parent_store = format!("{parent}:.orna/store");
     assert_eq!(
-        String::from_utf8(git_output(project, &["rev-parse", &publication_store], None))
-            .unwrap()
-            .trim(),
+        String::from_utf8(git_output(
+            project,
+            &["rev-parse", &publication_store],
+            None
+        ))
+        .unwrap()
+        .trim(),
         String::from_utf8(git_output(project, &["rev-parse", &parent_store], None))
             .unwrap()
             .trim(),
