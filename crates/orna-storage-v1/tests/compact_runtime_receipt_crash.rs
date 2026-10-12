@@ -7,7 +7,9 @@ use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
     CompactManifest, CompactSegment, CompactSegmentRole, ManagedPath, Repository, Uuid,
 };
-use orna_runtime_v1::{Checkpoint, RuntimeIdentity, RuntimeState, TableMutation};
+use orna_runtime_v1::{
+    Checkpoint, PublicationTableIdentity, RuntimeIdentity, RuntimeState, TableMutation,
+};
 use orna_storage_v1::{CompactOvbProfile, CompactTailWindow, RuntimePublicationCoordinator};
 use parquet::file::{
     metadata::{FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataWriter},
@@ -96,6 +98,15 @@ fn schema_fingerprint(schema: &SchemaDescriptor) -> [u8; 32] {
     digest.update(b"orna.schema.v1\0");
     digest.update(schema.encode().unwrap());
     digest.finalize().into()
+}
+
+fn publication_identity() -> PublicationTableIdentity {
+    PublicationTableIdentity {
+        table: "Contact".to_owned(),
+        table_id: TABLE,
+        schema_fingerprint: schema_fingerprint(&profile()),
+        candidate_generation: 1,
+    }
 }
 
 fn decode_base64(value: &str) -> Vec<u8> {
@@ -192,7 +203,7 @@ fn plan(
 }
 
 #[tokio::test]
-async fn recovery_rejects_compact_freeze_without_typed_identity() {
+async fn recovery_uses_persisted_receipt_after_runtime_consumes_prefix() {
     let (_temp, repository) = repository();
     let runtime = RuntimeState::open(
         &repository,
@@ -254,6 +265,60 @@ async fn recovery_rejects_compact_freeze_without_typed_identity() {
     repository
         .publish_compact_repository_boundary(plan(&repository, &freeze))
         .unwrap();
+    let pending = match repository
+        .recover_compact_publication_boundary()
+        .unwrap()
+        .unwrap()
+    {
+        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(pending) => pending,
+        orna_repository_v1::CompactPublicationRecovery::ReconciliationRequired(_) => {
+            panic!("freshly published candidate needs no reconciliation")
+        }
+    };
+    let journal = repository.read_publication_journal().unwrap().unwrap();
+    let source = journal.old_head().clone();
+    assert_eq!(
+        orna_storage_v1::trusted_compact_schema_descriptor(
+            &repository,
+            &source,
+            Uuid::from_u128(1),
+            schema_fingerprint(&profile()),
+            &journal,
+            pending.commit(),
+        )
+        .unwrap(),
+        profile()
+    );
+    let mut mismatched_schema = schema_fingerprint(&profile());
+    mismatched_schema[0] ^= 1;
+    assert!(
+        orna_storage_v1::trusted_compact_schema_descriptor(
+            &repository,
+            &source,
+            Uuid::from_u128(1),
+            mismatched_schema,
+            &journal,
+            pending.commit(),
+        )
+        .is_err()
+    );
+    assert!(
+        orna_storage_v1::trusted_compact_schema_descriptor(
+            &repository,
+            pending.commit(),
+            Uuid::from_u128(1),
+            schema_fingerprint(&profile()),
+            &journal,
+            pending.commit(),
+        )
+        .is_err()
+    );
+    runtime
+        .complete_compact_publication(&pending, &freeze)
+        .await
+        .unwrap();
+    assert!(runtime.pending_through(&freeze).await.unwrap().is_empty());
+    assert_eq!(runtime.pending().await.unwrap().len(), 1);
     drop(runtime);
     let runtime = RuntimeState::open(
         &repository,
@@ -266,22 +331,23 @@ async fn recovery_rejects_compact_freeze_without_typed_identity() {
     .await
     .unwrap();
 
-    // Simulate process loss after Turso commits the prefix receipt and before
-    // the repository journal accepts it. Recovery must verify that same
-    // receipt, finish the journal, and leave post-freeze mutations pending.
+    // Simulate process loss after the runtime atomically persists the signed
+    // receipt and consumes the prefix but before repository journal finalization.
     assert!(repository.read_publication_journal().unwrap().is_some());
-    assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
-    assert_eq!(runtime.pending().await.unwrap().len(), 2);
-    assert_eq!(
+    assert_eq!(runtime.pending().await.unwrap().len(), 1);
+    assert!(
         RuntimePublicationCoordinator::recover_compact_validated(
             &repository,
             &runtime,
             &CompactOvbProfile::new(profile()).unwrap(),
+            &publication_identity(),
         )
-        .await,
-        Err(orna_storage_v1::Error::InvalidTransition)
+        .await
+        .unwrap()
+        .is_some()
     );
-    assert!(repository.read_publication_journal().unwrap().is_some());
+    assert_eq!(runtime.pending().await.unwrap().len(), 1);
+    assert!(repository.read_publication_journal().unwrap().is_none());
 }
 
 #[tokio::test]
@@ -348,7 +414,10 @@ async fn recovery_preserves_rows_when_compact_freeze_identity_is_missing() {
     let journal = repository.read_publication_journal().unwrap().unwrap();
     assert_ne!(journal.old_head(), journal.new_head());
     assert_eq!(journal.old_head(), &old_head);
-    assert_eq!(repository.head().unwrap().as_ref(), Some(journal.new_head()));
+    assert_eq!(
+        repository.head().unwrap().as_ref(),
+        Some(journal.new_head())
+    );
     assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
     assert_eq!(runtime.pending().await.unwrap().len(), 2);
     assert_eq!(
@@ -370,6 +439,7 @@ async fn recovery_preserves_rows_when_compact_freeze_identity_is_missing() {
             &repository,
             &runtime,
             &CompactOvbProfile::new(profile()).unwrap(),
+            &publication_identity(),
         )
         .await,
         Err(orna_storage_v1::Error::InvalidTransition)
@@ -378,7 +448,10 @@ async fn recovery_preserves_rows_when_compact_freeze_identity_is_missing() {
     let pending = runtime.pending().await.unwrap();
     assert_eq!(pending.len(), 2);
     assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
-    assert_eq!(repository.head().unwrap().as_ref(), Some(journal.new_head()));
+    assert_eq!(
+        repository.head().unwrap().as_ref(),
+        Some(journal.new_head())
+    );
     assert!(repository.worktree_state().unwrap().is_clean());
 }
 
@@ -450,4 +523,90 @@ async fn stale_candidate_before_ref_advance_preserves_frozen_rows_and_new_head()
     assert!(repository.read_publication_journal().unwrap().is_none());
     assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
+    let (temp, repository) = repository();
+    let identity = RuntimeIdentity {
+        database_id: [101; 16],
+        repository_id: [102; 16],
+    };
+    let runtime = RuntimeState::open(&repository, identity, [103; 32])
+        .await
+        .unwrap();
+    let lease = runtime.acquire_lease([104; 16]).await.unwrap();
+    let context = runtime.begin_activation().await.unwrap();
+    runtime
+        .commit_table_activation(
+            lease,
+            &context,
+            &[TableMutation::new(
+                [105; 16],
+                "Contact",
+                b"compact row".to_vec(),
+                Some(b"compact row".to_vec()),
+            )
+            .unwrap()],
+            [106; 32],
+            &orna_runtime_v1::NoFault,
+        )
+        .await
+        .unwrap();
+    let freeze = runtime
+        .freeze(
+            [107; 16],
+            &Checkpoint {
+                generation: 1,
+                digest: [106; 32],
+                mutation_sequence: 1,
+            },
+        )
+        .await
+        .unwrap();
+    repository
+        .publish_compact_repository_boundary(plan(&repository, &freeze))
+        .unwrap();
+    let pending = match repository
+        .recover_compact_publication_boundary()
+        .unwrap()
+        .unwrap()
+    {
+        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(pending) => pending,
+        orna_repository_v1::CompactPublicationRecovery::ReconciliationRequired(_) => {
+            panic!("newly published compact candidate needs no reconciliation")
+        }
+    };
+    let receipt = runtime
+        .complete_compact_publication(&pending, &freeze)
+        .await
+        .unwrap();
+    assert_eq!(receipt.commit(), pending.commit());
+
+    fs::write(
+        temp.path().join("ordinary.txt"),
+        "branch update after runtime commit\n",
+    )
+    .unwrap();
+    git(temp.path(), &["add", "ordinary.txt"]);
+    git(
+        temp.path(),
+        &["commit", "-m", "branch update after receipt"],
+    );
+    let branch_head = repository.head().unwrap().unwrap();
+    assert_ne!(branch_head, *pending.commit());
+    assert!(runtime.pending().await.unwrap().is_empty());
+    assert_eq!(
+        RuntimePublicationCoordinator::recover_compact_validated(
+            &repository,
+            &runtime,
+            &CompactOvbProfile::new(profile()).unwrap(),
+            &publication_identity(),
+        )
+        .await,
+        Err(orna_storage_v1::Error::RefConflict)
+    );
+    assert_eq!(repository.head().unwrap(), Some(branch_head));
+    assert!(repository.read_publication_journal().unwrap().is_some());
+    assert!(runtime.pending().await.unwrap().is_empty());
 }
