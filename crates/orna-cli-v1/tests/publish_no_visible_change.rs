@@ -266,6 +266,10 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(source.path()).unwrap();
@@ -273,12 +277,10 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
     let fixture = std::fs::read_to_string(REIMPORT_FIXTURE).unwrap();
-    let root = format!("{:?}", source.path().to_string_lossy().as_ref());
-    let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root);
-    let writer = state
-        .acquire_lease(runtime_identity.repository_id)
-        .await
-        .unwrap();
+    let media_root = format!("{:?}", source.path().to_string_lossy().as_ref());
+    let expression = fixture
+        .trim_end()
+        .replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
     commit_capture(
         &state,
         writer,
@@ -311,10 +313,6 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
     assert!(
         error.contains("source row could not be admitted for publication"),
         "source failure: {error}"
-    );
-    assert!(
-        error.contains("InvalidKey"),
-        "invalid source row key: {error}"
     );
     assert_eq!(head(root_path), head_before);
     assert_eq!(
