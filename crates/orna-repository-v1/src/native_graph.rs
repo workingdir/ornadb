@@ -7296,7 +7296,7 @@ mod persisted_orp_tests {
         let candidate_ref = cleanup
             .iter()
             .map(|(reference, _)| reference)
-            .find(|reference| reference.contains("/pending/row-"))
+            .find(|reference| reference.contains("/scratch/row-"))
             .expect("candidate cleanup identity");
         assert!(fixture_ref_exists(directory.path(), &pin_ref));
         assert!(fixture_ref_exists(directory.path(), candidate_ref));
