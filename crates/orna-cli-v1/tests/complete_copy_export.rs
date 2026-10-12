@@ -8,6 +8,7 @@
 //! than to a private one.
 
 use std::{
+    io::Read,
     path::Path,
     process::{Command, Output},
 };
@@ -601,6 +602,7 @@ fn export_fails_locally_for_a_missing_promisor_object() {
     );
 
     let archive = outside.path().join("incomplete-copy");
+    std::fs::create_dir(&archive).unwrap();
     let exported = run(
         &partial,
         &["export", archive.to_str().unwrap(), "--at", "HEAD"],
@@ -613,11 +615,178 @@ fn export_fails_locally_for_a_missing_promisor_object() {
         stderr(&exported)
     );
     assert!(
-        !archive.join("manifest.tsv").exists(),
-        "a failed export writes no completeness manifest"
+        stderr(&exported).contains(&oid),
+        "diagnostic names missing object {oid}: {}",
+        stderr(&exported)
+    );
+    assert!(
+        std::fs::read_dir(&archive).unwrap().next().is_none(),
+        "a failed export preserves its existing empty destination"
     );
     assert!(
         !has_local_object(),
         "export does not fetch the promised object from origin"
+    );
+
+    // An actual offline source: the promisor URL no longer resolves, but the
+    // export still reports the missing object rather than a host-file fallback.
+    let disabled_origin = outside.path().join("disabled-origin");
+    git(
+        &partial,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            disabled_origin.to_str().unwrap(),
+        ],
+    );
+    let offline_archive = outside.path().join("offline-copy");
+    let offline_export = run(
+        &partial,
+        &["export", offline_archive.to_str().unwrap(), "--at", "HEAD"],
+    );
+    assert_ne!(
+        offline_export.status.code(),
+        Some(0),
+        "offline export must fail"
+    );
+    assert!(
+        stderr(&offline_export).contains(&oid),
+        "offline diagnostic names missing object {oid}: {}",
+        stderr(&offline_export)
+    );
+    assert!(
+        !offline_archive.exists(),
+        "offline failure creates no destination"
+    );
+    assert!(
+        !has_local_object(),
+        "offline export keeps the object absent locally"
+    );
+}
+
+/// A streamed blob remains byte-identical after the source and its configured
+/// origin are unavailable; restore publishes only the verified local copy.
+#[test]
+fn restore_streams_large_blob_after_source_and_origin_are_gone() {
+    let (root, repository, _) = empty_format3_repository();
+    let source = root.path();
+    let outside = TempDir::new().unwrap();
+    let unavailable_origin = outside.path().join("unavailable-origin");
+    git(
+        source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            unavailable_origin.to_str().unwrap(),
+        ],
+    );
+
+    let payload_length = 8 * 1024 * 1024;
+    let payload: Vec<u8> = (0..payload_length)
+        .map(|index| ((index * 31 + (index >> 8)) & 0xff) as u8)
+        .collect();
+    let expected_sha256: [u8; 32] = Sha256::digest(&payload).into();
+    std::fs::write(source.join("large-payload.bin"), &payload).unwrap();
+    git(source, &["add", "large-payload.bin"]);
+    git(
+        source,
+        &["commit", "--quiet", "-m", "large offline payload"],
+    );
+    let source_oid = String::from_utf8(git_output(
+        source,
+        &["rev-parse", "HEAD:large-payload.bin"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let archive = outside.path().join("archive");
+    let exported = run(
+        source,
+        &["export", archive.to_str().unwrap(), "--at", "HEAD"],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "offline-local export failed: {}",
+        stderr(&exported)
+    );
+    assert_eq!(
+        String::from_utf8(git_output(source, &["remote", "get-url", "origin"], None))
+            .unwrap()
+            .trim(),
+        unavailable_origin.to_str().unwrap(),
+        "the source remote is explicitly unavailable"
+    );
+
+    drop(repository);
+    std::fs::remove_dir_all(source).unwrap();
+    assert!(
+        !source.exists(),
+        "the source repository is gone before restore"
+    );
+    assert!(
+        !unavailable_origin.exists(),
+        "the configured origin is unavailable"
+    );
+
+    let restored = outside.path().join("restored");
+    std::fs::create_dir(&restored).unwrap();
+    let restored_output = run(
+        outside.path(),
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--restore",
+            restored.to_str().unwrap(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        restored_output.status.code(),
+        Some(0),
+        "offline restore failed: {}",
+        stderr(&restored_output)
+    );
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the reconstructed repository has no remote"
+    );
+    let restored_oid = String::from_utf8(git_output(
+        &restored,
+        &["rev-parse", "HEAD:large-payload.bin"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert_eq!(
+        restored_oid, source_oid,
+        "the pinned blob object is preserved"
+    );
+
+    let mut payload_file = std::fs::File::open(restored.join("large-payload.bin")).unwrap();
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut restored_length = 0_u64;
+    loop {
+        let count = payload_file.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        restored_length += count as u64;
+        hasher.update(&buffer[..count]);
+    }
+    assert_eq!(restored_length, payload_length as u64);
+    let restored_sha256: [u8; 32] = hasher.finalize().into();
+    assert_eq!(
+        restored_sha256, expected_sha256,
+        "streamed raw payload hash"
     );
 }
