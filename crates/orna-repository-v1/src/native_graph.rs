@@ -2025,6 +2025,7 @@ impl NativeGraphContext {
                 descriptor.identity.length(),
                 None,
                 0,
+                descriptor.identity.length(),
                 &range,
                 scope,
                 &mut objects,
@@ -2607,6 +2608,7 @@ impl NativeGraphContext {
         expected_length: u64,
         expected_height: Option<u8>,
         base_offset: u64,
+        blob_length: u64,
         requested: &Range<u64>,
         scope: &RepositoryReadScope,
         objects: &mut ObjectBudget,
@@ -2647,7 +2649,10 @@ impl NativeGraphContext {
                 continue;
             }
             if height == 0 {
-                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64
+                    || (child_end != blob_length
+                        && entry.span_length < crate::blob_store::GEAR_MINIMUM as u64)
+                {
                     return Err(GraphError::InvalidByteIndex);
                 }
                 let reservation = scope.reserve_payload(entry.span_length)?;
@@ -2675,6 +2680,7 @@ impl NativeGraphContext {
                     entry.span_length,
                     Some(height - 1),
                     child_start,
+                    blob_length,
                     requested,
                     scope,
                     objects,
@@ -8288,11 +8294,23 @@ mod persisted_orp_tests {
         let bounded_objects = bounded_scope.objects_read();
 
         let full_scope = graph.open_read_scope().expect("full query scope");
-        let full_range = crate::row_store::KeyRange::new(None, None, 700)
-            .expect("valid complete key interval");
-        let full_rows = graph
-            .range_rows(&full_range, &full_scope)
-            .expect("read complete row map for traffic comparison");
+        let mut full_rows = Vec::with_capacity(700);
+        for (lower, upper) in [
+            (None, Some(TypedKey::Text("row-0256".to_owned()))),
+            (
+                Some(TypedKey::Text("row-0256".to_owned())),
+                Some(TypedKey::Text("row-0512".to_owned())),
+            ),
+            (Some(TypedKey::Text("row-0512".to_owned())), None),
+        ] {
+            let page = crate::row_store::KeyRange::new(lower, upper, 256)
+                .expect("valid bounded key page");
+            full_rows.extend(
+                graph
+                    .range_rows(&page, &full_scope)
+                    .expect("read one valid row-map page"),
+            );
+        }
         assert_eq!(full_rows.len(), 700);
         assert!(
             bounded_objects < full_scope.objects_read(),
@@ -8300,6 +8318,160 @@ mod persisted_orp_tests {
             full_scope.objects_read()
         );
         assert_eq!(bounded_scope.payload_bytes_read(), 0);
+    }
+
+    #[test]
+    fn requested_range_verifies_only_intersecting_real_media_chunks() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("capture scope");
+        let wave = include_bytes!("../../orna-cli-v1/tests/fixtures/media/tone.wav");
+        assert_eq!(&wave[..4], b"RIFF");
+        assert_eq!(&wave[8..12], b"WAVE");
+        let mut payload = wave.to_vec();
+        let pcm = payload[44..].to_vec();
+        let target_length = 2 * crate::blob_store::GEAR_MAXIMUM + 73;
+        while payload.len() < target_length {
+            let remaining = target_length - payload.len();
+            payload.extend_from_slice(&pcm[..remaining.min(pcm.len())]);
+        }
+        payload.truncate(target_length);
+        let riff_length = (payload.len() - 8) as u32;
+        let pcm_length = (payload.len() - 44) as u32;
+        payload[4..8].copy_from_slice(&riff_length.to_le_bytes());
+        payload[40..44].copy_from_slice(&pcm_length.to_le_bytes());
+        let spans = crate::blob_store::GearChunker::new()
+            .spans(&payload)
+            .expect("chunk valid expanded PCM waveform");
+        assert!(spans.len() > 1, "waveform fixture must span multiple chunks");
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture actual WAV media payload");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("verify and protect media closure");
+        let binding = graph
+            .accept_protected_blob_pin(pin)
+            .expect("admit captured media descriptor");
+        let mut objects = graph.stats_budget(&scope);
+        let descriptor = graph
+            .read_blob_descriptor(binding.descriptor_oid(), &scope, &mut objects)
+            .expect("read pinned media descriptor");
+        let reference = graph.admit_blob(descriptor).expect("bind media descriptor");
+        let selected = spans[0].length()..spans[0].length() + 32;
+        let range_scope = graph.open_read_scope().expect("range scope");
+        let before_objects = range_scope.objects_read();
+        let result = graph
+            .read_blob_range(&reference, selected.clone(), &range_scope)
+            .expect("read media bytes from selected chunk");
+        assert_eq!(
+            result.bytes(),
+            &payload[selected.start as usize..selected.end as usize]
+        );
+        assert_eq!(range_scope.payload_bytes_read(), spans[1].length());
+        assert!(range_scope.objects_read() > before_objects);
+        assert!(range_scope.payload_bytes_read() < payload.len() as u64);
+
+        let empty_scope = graph.open_read_scope().expect("empty range scope");
+        let before_empty = empty_scope.payload_bytes_read();
+        let empty = graph
+            .read_blob_range(&reference, 7..7, &empty_scope)
+            .expect("empty requested range still validates its descriptor");
+        assert!(empty.bytes().is_empty());
+        assert!(empty_scope.objects_read() > 0);
+        assert_eq!(empty_scope.payload_bytes_read() - before_empty, 0);
+    }
+
+    #[test]
+    fn requested_range_rejects_a_fetched_chunk_with_wrong_raw_digest() {
+        let (directory, graph) = capture_test_context();
+        let chunk = b"content-addressed object with corrupt OGB-2 leaf digest";
+        let target = fixture_git_object(directory.path(), "blob", chunk);
+        let byte_root = fixture_git_node(
+            directory.path(),
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: chunk.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: chunk.len() as u64,
+                    target,
+                    chunk_sha256: Some([0; 32]),
+                }],
+            },
+        );
+        let identity = crate::blob_store::digest_bytes(chunk);
+        let descriptor_oid = fixture_git_node(
+            directory.path(),
+            &NodeData::BlobDescriptor {
+                length: identity.length(),
+                raw_sha256: identity.sha256(),
+                byte_root: Some(byte_root),
+            },
+        );
+        let reference = AdmittedBlobReference {
+            context: graph.identity,
+            database_id: graph.database_id,
+            owner_id: graph.owner_id,
+            snapshot_id: graph.snapshot_id,
+            descriptor_oid,
+            identity,
+        };
+        let scope = graph.open_read_scope().expect("range scope");
+        assert!(matches!(
+            graph.read_blob_range(&reference, 0..identity.length(), &scope),
+            Err(GraphError::ChunkDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn requested_range_rejects_short_nonfinal_chunk_without_fetching_it() {
+        let (directory, graph) = capture_test_context();
+        let first = b"tiny";
+        let last = b"tail";
+        let first_oid = fixture_git_object(directory.path(), "blob", first);
+        let last_oid = fixture_git_object(directory.path(), "blob", last);
+        let byte_root = fixture_git_node(
+            directory.path(),
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: (first.len() + last.len()) as u64,
+                entries: vec![
+                    ByteIndexEntry {
+                        span_length: first.len() as u64,
+                        target: first_oid,
+                        chunk_sha256: Some(crate::blob_store::digest_bytes(first).sha256()),
+                    },
+                    ByteIndexEntry {
+                        span_length: last.len() as u64,
+                        target: last_oid,
+                        chunk_sha256: Some(crate::blob_store::digest_bytes(last).sha256()),
+                    },
+                ],
+            },
+        );
+        let payload = [first.as_slice(), last.as_slice()].concat();
+        let identity = crate::blob_store::digest_bytes(&payload);
+        let descriptor_oid = fixture_git_node(
+            directory.path(),
+            &NodeData::BlobDescriptor {
+                length: identity.length(),
+                raw_sha256: identity.sha256(),
+                byte_root: Some(byte_root),
+            },
+        );
+        let reference = AdmittedBlobReference {
+            context: graph.identity,
+            database_id: graph.database_id,
+            owner_id: graph.owner_id,
+            snapshot_id: graph.snapshot_id,
+            descriptor_oid,
+            identity,
+        };
+        let scope = graph.open_read_scope().expect("range scope");
+        assert!(matches!(
+            graph.read_blob_range(&reference, 0..1, &scope),
+            Err(GraphError::InvalidByteIndex)
+        ));
+        assert_eq!(scope.payload_bytes_read(), 0);
     }
 
     #[test]
