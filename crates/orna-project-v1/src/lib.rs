@@ -765,7 +765,7 @@ impl ProjectLoader {
     /// verified commit. The persisted descriptor is consulted only for its
     /// table and field IDs/names; its type nodes, roles, fallbacks, and
     /// definitions do not contribute to the expected schema.
-    pub fn resolve_committed_table_schema(
+    fn resolve_committed_table_schema_with_ids(
         &self,
         repository: &Repository,
         commit: &GitCommitRef,
@@ -885,7 +885,7 @@ impl ProjectLoader {
             .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
         let project = self.load_committed_snapshot(repository, commit)?;
         let table = project.source_table_schema(&manifest, module_name, declaration_name)?;
-        let schema = self.resolve_committed_table_schema(
+        let schema = self.resolve_committed_table_schema_with_ids(
             repository,
             commit,
             declaration_name,
