@@ -19,9 +19,9 @@ use uuid::Uuid;
 
 use super::{
     CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, RuntimeActivationContext,
-    RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
-    SafeDiagnostic, TableActivationCandidateValidator, TableActivationError, TableMutation,
-    ValidatedTableActivationCommit, WriterLease,
+    RuntimeError, RuntimeQueryError, RuntimeState, RuntimeTableActivationSnapshot,
+    RuntimeTableIdentity, SafeDiagnostic, TableActivationCandidateValidator, TableActivationError,
+    TableMutation, ValidatedTableActivationCommit, WriterLease,
 };
 use orna_repository_v1::{CwdGeneration, ProtectedContentPin};
 
@@ -2465,11 +2465,9 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
     /// the candidate before committing, so replaying such a save reports the
     /// accepted outcome instead of committing the same mutation a second time
     /// (VFS-008, VFS-021).
-    pub fn admitted_row(&self) -> Option<&[u8]> {
+    pub fn admitted_row(&self) -> Result<Option<&[u8]>, RuntimeQueryError> {
         self.snapshot
             .query_exact(self.save.table.table(), &self.save.key)
-            .ok()
-            .flatten()
     }
     fn expected_baseline_matches(&self, current: Option<&[u8]>) -> Option<bool> {
         self.expected_baseline_row
@@ -2554,6 +2552,8 @@ pub enum VfsSaveError<E> {
     MissingBaseline,
     /// The temporary file belongs to a different managed destination.
     WrongDestination,
+    /// The admitted row lookup failed before any candidate commit.
+    AdmissionLookup(RuntimeQueryError),
     /// The runtime refused the activation itself.
     Activation(E),
 }
@@ -2651,7 +2651,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         // that state is idempotent: the accepted image is published again
         // without appending a second mutation or advancing the durable
         // generation twice (VFS-008, VFS-021).
-        let admitted_row = admission.admitted_row();
+        let admitted_row = admission
+            .admitted_row()
+            .map_err(VfsSaveError::AdmissionLookup)?;
         let already_durable = admitted_row == candidate.replacement().value();
         if admission
             .expected_baseline_matches(admitted_row)
@@ -4322,6 +4324,26 @@ mod tests {
             TemporaryRenameOutcome::Applied { generation: 2, .. }
         ));
         assert_eq!(state.pending().await.unwrap().len(), 2);
+
+        let mut failed_lookup = VfsSaveAdmission::<u64>::begin(
+            &state,
+            VfsDurableSave::new(
+                [4; 16],
+                cwd_generation.clone(),
+                identity.clone(),
+                key.clone(),
+            ),
+            &crate::NoFault,
+        )
+        .await
+        .unwrap();
+        failed_lookup.snapshot.table_rows.clear();
+        assert_eq!(
+            failed_lookup.admitted_row(),
+            Err(RuntimeQueryError::TableNotAdmitted),
+            "an unverifiable admitted row must remain a lookup error, not an absent row"
+        );
+        drop(failed_lookup);
 
         drop(state);
         let reopened = RuntimeState::open(
