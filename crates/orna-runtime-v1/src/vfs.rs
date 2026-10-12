@@ -5033,13 +5033,9 @@ mod tests {
         let state_for_admit = &state;
         let nested_save =
             VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone());
-        let nested_document_save = VfsDurableSave::new(
-            owner_id,
-            cwd_generation.clone(),
-            table.clone(),
-            key.clone(),
-        )
-        .with_expected_baseline_row(None);
+        let nested_document_save =
+            VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
+                .with_expected_baseline_row(None);
         let save_key = key.clone();
         let saved = cache
             .commit_durable_blob_rename(
