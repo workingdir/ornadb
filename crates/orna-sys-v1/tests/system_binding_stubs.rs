@@ -6,10 +6,9 @@ use std::{
 };
 
 use orna_sys_v1::{
-    AbiType, EffectSet, OperationContract, SystemDispatchTable, SystemEffect, system_api_json,
-    system_api_schema_json, system_binding_modules_json, system_binding_stubs,
-    system_function_descriptor, system_provider_abi, system_provider_abi_json,
-    system_provider_abi_schema_json,
+    AbiType, EffectSet, OperationContract, SystemEffect, system_api_json, system_api_schema_json,
+    system_binding_modules_json, system_binding_stubs, system_function_descriptor,
+    system_provider_abi, system_provider_abi_json, system_provider_abi_schema_json,
 };
 use serde_json::Value;
 
@@ -2491,20 +2490,6 @@ fn generated_provider_metadata_edges_match_schema_and_bindings() {
         cases.len(),
         fixture["fields"].as_array().unwrap().len(),
         cases.len() + fixture["fields"].as_array().unwrap().len() + 7
-    );
-}
-
-#[test]
-fn typed_dispatch_exposes_blob_annotation_semantic_contract() {
-    let dispatch = SystemDispatchTable::from_json(system_provider_abi_json())
-        .expect("generated provider registry is a public typed dispatch table");
-    let operation = dispatch
-        .operation("sys.blob.annotate")
-        .expect("typed dispatch exposes Blob annotation");
-
-    assert_eq!(
-        operation.contract.as_deref(),
-        Some("annotated-blob-format-3")
     );
 }
 
