@@ -21,8 +21,9 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_value_v1::{BlobMetadata, MediaAnnotation};
+use orna_value_v1::{BlobMetadata, MediaAnnotation, SchemaDescriptor};
 use sha2::{Digest, Sha256};
+
 
 pub const REPOSITORY_FORMAT: u8 = 3;
 pub const NODE_DATA_LIMIT: usize = 65_536;
@@ -483,6 +484,61 @@ impl NativeGraphContext {
             MAX_FULL_VERIFY_OBJECTS,
             MAX_FULL_METADATA_BYTES,
         )
+    }
+
+    /// Decodes the schema descriptor retained by this graph's sealed row map.
+    /// The caller cannot substitute an OID or bytes from another snapshot.
+    pub(crate) fn read_schema_descriptor(
+        &self,
+        scope: &RepositoryReadScope,
+    ) -> Result<SchemaDescriptor, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let schema_oid = version.schema().schema_oid();
+        let mut objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let node = self.read_native_node(schema_oid, scope, &mut objects)?;
+        let NodeData::Schema {
+            encoded_length,
+            schema_digest,
+            byte_root,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::Schema,
+                actual: node.kind(),
+            });
+        };
+        if schema_digest != self.schema_digest
+            || schema_digest != *version.schema().schema_digest()
+            || encoded_length > MAX_FULL_METADATA_BYTES
+        {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        objects.record_metadata(encoded_length)?;
+        let capacity = usize::try_from(encoded_length)
+            .map_err(|_| GraphError::InvalidLength(encoded_length))?;
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(capacity)
+            .map_err(|_| GraphError::ReadQuotaExceeded)?;
+        self.read_full_index_bytes(
+            &byte_root,
+            encoded_length,
+            None,
+            scope,
+            &mut objects,
+            &mut encoded,
+        )?;
+        if encoded.len() as u64 != encoded_length {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        SchemaDescriptor::decode(&encoded).map_err(|_| GraphError::NonCanonicalData)
     }
 
     /// Cancels every read scope opened from this repository graph context.
