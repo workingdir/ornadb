@@ -4285,6 +4285,255 @@ impl SchemaDescriptor {
         let v = Value::decode(bytes)?;
         Self::new(v.0)
     }
+
+    /// Validates one canonical ORP key and complete ROV stored-field tuple
+    /// against this descriptor and its relation identity. The key is a CBOR
+    /// scalar for a one-component primary key, or an array in primary-key
+    /// order for a composite key. Stored fields are a CBOR array containing
+    /// every role-1 field in descriptor order. The repository owner remains
+    /// responsible for authenticating the descriptor bytes and their snapshot.
+    pub fn validate_stored_row(
+        &self,
+        relation_id: [u8; 16],
+        canonical_key: &[u8],
+        canonical_fields: &[u8],
+    ) -> Result<()> {
+        validate_schema_stored_row(&self.0, relation_id, canonical_key, canonical_fields)
+    }
+}
+
+fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
+    let mut reader = Reader::new(bytes);
+    let raw = reader.raw(0)?;
+    if reader.at != bytes.len() {
+        return Err(Error::TrailingBytes);
+    }
+    if encode_raw(&raw)?.as_slice() != bytes {
+        return Err(Error::NonCanonical);
+    }
+    Ok(raw)
+}
+
+fn validate_schema_stored_row(
+    schema: &Raw,
+    relation_id: [u8; 16],
+    canonical_key: &[u8],
+    canonical_fields: &[u8],
+) -> Result<()> {
+    let mut schema_map = BTreeMap::new();
+    for (key, value) in map(schema)? {
+        schema_map.insert(int_u64(key)?, value);
+    }
+    if uuid_array(schema_map.get(&1).ok_or(Error::InvalidSchema)?)? != relation_id {
+        return Err(Error::InvalidSchema);
+    }
+    let key_ids = array(schema_map.get(&2).ok_or(Error::InvalidSchema)?)?;
+    let declared_fields = array(schema_map.get(&3).ok_or(Error::InvalidSchema)?)?;
+    let definitions = array(schema_map.get(&4).ok_or(Error::InvalidSchema)?)?;
+    let key = decode_canonical_storage_value(canonical_key)?;
+    let values = decode_canonical_storage_value(canonical_fields)?;
+    let values = array(&values)?;
+
+    let mut key_types = Vec::with_capacity(key_ids.len());
+    for key_id in key_ids {
+        let key_id = uuid_array(key_id)?;
+        let field = declared_fields
+            .iter()
+            .find(|field| {
+                let Ok(fields) = array(field) else {
+                    return false;
+                };
+                fields.first().and_then(|id| uuid_array(id).ok()) == Some(key_id)
+            })
+            .ok_or(Error::InvalidSchema)?;
+        key_types.push(array(field)?.get(2).ok_or(Error::InvalidSchema)?);
+    }
+    if key_types.is_empty() {
+        return Err(Error::InvalidSchema);
+    }
+    if key_types.len() == 1 {
+        validate_stored_value_as_type(&key, key_types[0], definitions)?;
+    } else {
+        let key_values = array(&key)?;
+        if key_values.len() != key_types.len() {
+            return Err(Error::InvalidValue);
+        }
+        for (value, ty) in key_values.iter().zip(key_types) {
+            validate_stored_value_as_type(value, ty, definitions)?;
+        }
+    }
+
+    let stored_types = declared_fields
+        .iter()
+        .filter_map(|field| {
+            let field = array(field).ok()?;
+            (int_u64(field.get(3)?).ok()? == 1)
+                .then(|| field.get(2))
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if values.len() != stored_types.len() {
+        return Err(Error::InvalidValue);
+    }
+    for (value, ty) in values.iter().zip(stored_types) {
+        validate_stored_value_as_type(value, ty, definitions)?;
+    }
+    Ok(())
+}
+
+fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> Result<()> {
+    let node = array(ty)?;
+    let code = int_u64(node.first().ok_or(Error::InvalidSchema)?)?;
+    if code == 0 && matches!(node.get(1), Some(Raw::Text(name)) if name == "Blob") {
+        if matches!(value, Raw::Tag(ROV3_BLOB_TAG, payload) if valid_stored_blob_reference(payload))
+        {
+            return Ok(());
+        }
+    }
+    validate_value_as_type(value, ty).or_else(|error| match code {
+        5 => validate_nominal_stored_value(
+            value,
+            uuid_array(node.get(1).ok_or(Error::InvalidSchema)?)?,
+            definitions,
+        ),
+        6 => validate_table_reference_value(value, node, definitions),
+        _ => Err(error),
+    })
+}
+
+fn valid_stored_blob_reference(payload: &Raw) -> bool {
+    let Ok(fields) = array(payload) else {
+        return false;
+    };
+    fields.len() == 5
+        && int_u64(&fields[0]).is_ok_and(|length| length < MAX_BLOB_LENGTH)
+        && bytes(&fields[1]).is_ok_and(|digest| digest.len() == 32)
+        && text(&fields[2]).is_ok()
+        && matches!(fields[3], Raw::Null | Raw::Text(_))
+        && bytes(&fields[4]).is_ok_and(|oid| matches!(oid.len(), 20 | 32))
+}
+
+fn validate_table_reference_value(value: &Raw, node: &[Raw], definitions: &[Raw]) -> Result<()> {
+    let Raw::Tag(60021, reference) = value else {
+        return Err(Error::InvalidValue);
+    };
+    let reference = array(reference)?;
+    if reference.len() != 3
+        || uuid_array(&reference[0])? != uuid_array(node.get(1).ok_or(Error::InvalidSchema)?)?
+        || uuid_array(&reference[1])? != uuid_array(node.get(2).ok_or(Error::InvalidSchema)?)?
+    {
+        return Err(Error::InvalidValue);
+    }
+    let key_types = array(node.get(3).ok_or(Error::InvalidSchema)?)?;
+    match key_types.as_slice() {
+        [] => {
+            if !matches!(&reference[2], Raw::Tag(60014, unit) if array(unit).is_ok_and(|items| items.is_empty()))
+            {
+                return Err(Error::InvalidValue);
+            }
+        }
+        [ty] => validate_stored_value_as_type(&reference[2], ty, definitions)?,
+        types => {
+            let values = match &reference[2] {
+                Raw::Tag(60015, values) => array(values)?,
+                _ => return Err(Error::InvalidValue),
+            };
+            if values.len() != types.len() {
+                return Err(Error::InvalidValue);
+            }
+            for (value, ty) in values.iter().zip(types) {
+                validate_stored_value_as_type(value, ty, definitions)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_nominal_stored_value(value: &Raw, id: [u8; 16], definitions: &[Raw]) -> Result<()> {
+    let definition = definitions
+        .iter()
+        .find(|definition| {
+            let Ok(fields) = array(definition) else {
+                return false;
+            };
+            fields.first().and_then(|raw| uuid_array(raw).ok()) == Some(id)
+        })
+        .ok_or(Error::InvalidSchema)?;
+    let definition = array(definition)?;
+    let kind = int_u64(definition.get(1).ok_or(Error::InvalidSchema)?)?;
+    let body = definition.get(2).ok_or(Error::InvalidSchema)?;
+    match kind {
+        0 => validate_record_fields(value, id, array(body)?, definitions),
+        1 => validate_enum_fields(value, id, array(body)?, definitions),
+        2 => validate_stored_value_as_type(
+            value,
+            array(body)?.first().ok_or(Error::InvalidSchema)?,
+            definitions,
+        ),
+        _ => Err(Error::InvalidSchema),
+    }
+}
+
+fn validate_record_fields(
+    value: &Raw,
+    id: [u8; 16],
+    fields: &[Raw],
+    definitions: &[Raw],
+) -> Result<()> {
+    let Raw::Tag(60009, payload) = value else {
+        return Err(Error::InvalidValue);
+    };
+    let record = array(payload)?;
+    if record.len() != 2 || uuid_array(&record[0])? != id {
+        return Err(Error::InvalidValue);
+    }
+    let values = array(&record[1])?;
+    if values.len() != fields.len() {
+        return Err(Error::InvalidValue);
+    }
+    for (field, value) in fields.iter().zip(values) {
+        let field = array(field)?;
+        let entry = array(value)?;
+        if entry.len() != 2 || entry[0] != field[0] {
+            return Err(Error::InvalidValue);
+        }
+        validate_stored_value_as_type(&entry[1], &field[2], definitions)?;
+    }
+    Ok(())
+}
+
+fn validate_enum_fields(
+    value: &Raw,
+    id: [u8; 16],
+    variants: &[Raw],
+    definitions: &[Raw],
+) -> Result<()> {
+    let Raw::Tag(60008, payload) = value else {
+        return Err(Error::InvalidValue);
+    };
+    let encoded = array(payload)?;
+    if encoded.len() != 3 || uuid_array(&encoded[0])? != id {
+        return Err(Error::InvalidValue);
+    }
+    let variant_id = uuid_array(&encoded[1])?;
+    let variant = variants
+        .iter()
+        .find(|variant| {
+            let Ok(fields) = array(variant) else {
+                return false;
+            };
+            fields.first().and_then(|raw| uuid_array(raw).ok()) == Some(variant_id)
+        })
+        .ok_or(Error::InvalidValue)?;
+    let variant_fields = array(array(variant)?.get(2).ok_or(Error::InvalidSchema)?)?;
+    if variant_fields.is_empty() {
+        return if matches!(encoded[2], Raw::Null) {
+            Ok(())
+        } else {
+            Err(Error::InvalidValue)
+        };
+    }
+    validate_record_fields(&encoded[2], variant_id, variant_fields, definitions)
 }
 
 /// Repository key path component codec (ORNA-PATH-001 through 012).
@@ -5967,6 +6216,60 @@ mod tests {
             ),
             (Raw::Int(4.into()), Raw::Array(definitions)),
         ])
+    }
+
+    #[test]
+    fn schema_descriptor_validates_complete_stored_row_binding() {
+        let schema = SchemaDescriptor::new(schema_for_type(
+            schema_type(0, Raw::Text("Blob".into())),
+            vec![],
+        ))
+        .unwrap();
+        let key = encode_raw(&Raw::Int(7.into())).unwrap();
+        let fields = encode_raw(&Raw::Array(vec![Raw::Bytes(vec![1, 2, 3])])).unwrap();
+
+        assert!(schema.validate_stored_row([9; 16], &key, &fields).is_ok());
+        assert!(schema.validate_stored_row([8; 16], &key, &fields).is_err());
+        assert!(
+            schema
+                .validate_stored_row(
+                    [9; 16],
+                    &encode_raw(&Raw::Text("7".into())).unwrap(),
+                    &fields
+                )
+                .is_err()
+        );
+        assert!(
+            schema
+                .validate_stored_row([9; 16], &key, &encode_raw(&Raw::Array(vec![])).unwrap())
+                .is_err()
+        );
+        assert!(
+            schema
+                .validate_stored_row(
+                    [9; 16],
+                    &key,
+                    &encode_raw(&Raw::Array(vec![Raw::Text("bad".into())])).unwrap()
+                )
+                .is_err()
+        );
+
+        let blob_reference = Raw::Tag(
+            ROV3_BLOB_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int(3.into()),
+                Raw::Bytes(vec![4; 32]),
+                Raw::Text("image/png".into()),
+                Raw::Null,
+                Raw::Bytes(vec![5; 20]),
+            ])),
+        );
+        let referenced_fields = encode_raw(&Raw::Array(vec![blob_reference])).unwrap();
+        assert!(
+            schema
+                .validate_stored_row([9; 16], &key, &referenced_fields)
+                .is_ok()
+        );
     }
 
     #[test]
