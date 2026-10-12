@@ -9,13 +9,15 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+use num_bigint::BigInt;
+use num_traits::{One, Signed, ToPrimitive, Zero};
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_value_v1::{Decimal, Raw, SchemaDescriptor, path_decode_key_components};
 use orna_syntax_v1::{
-    AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
-    LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan, Statement,
-    StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility,
-    parse_module_with_file,
+    AssignmentOperator, AssignmentTarget, ControlKind, Declaration, DimensionExpr, Expr,
+    FieldInitializer, Item, LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan,
+    Statement, StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UnitDefinition,
+    UseTail, Visibility, parse_module_with_file,
 };
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
@@ -1501,10 +1503,53 @@ pub struct AssertionPlan {
     pub dependencies: BTreeSet<String>,
     pub effects: EffectSummary,
 }
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SourceUnitIdentity {
+    pub namespace: Namespace,
+    pub name: String,
+}
+impl SourceUnitIdentity {
+    pub fn display(&self) -> String {
+        format!("{}.{}", self.namespace.display(), self.name)
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SourceDimensionIdentity {
+    pub namespace: Namespace,
+    pub name: String,
+}
+impl SourceDimensionIdentity {
+    pub fn display(&self) -> String {
+        format!("{}.{}", self.namespace.display(), self.name)
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUnitRational {
+    /// Canonical base-10 integer numerator.
+    pub numerator: String,
+    /// Canonical positive base-10 integer denominator.
+    pub denominator: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUnitProvenance {
+    pub logical_path: String,
+    pub span: SyntaxSpan,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUnitMetadata {
+    pub identity: SourceUnitIdentity,
+    /// Exponents over declared base dimensions; never inferred from names.
+    pub dimension_basis: BTreeMap<SourceDimensionIdentity, i64>,
+    pub scale: SourceUnitRational,
+    pub offset: SourceUnitRational,
+    pub affine: bool,
+    pub provenance: SourceUnitProvenance,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Analysis {
     pub modules: BTreeMap<Namespace, ModuleHeader>,
     pub assertions: BTreeMap<Namespace, Vec<AssertionPlan>>,
+    pub source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
     pub diagnostics: Vec<Diagnostic>,
 }
 impl Analysis {
@@ -2269,6 +2314,7 @@ fn analyze_retaining_context(
         ..Analysis::default()
     };
     let mut parsed = Vec::new();
+    let mut source_unit_items = Vec::new();
     let mut siblings: BTreeMap<Vec<String>, BTreeMap<String, String>> = BTreeMap::new();
     for input in inputs {
         let Some(namespace) = namespace_for_path(&input.logical_path, &mut result.diagnostics)
@@ -2319,8 +2365,13 @@ fn analyze_retaining_context(
             &mut result.diagnostics,
         );
         result.modules.insert(namespace.clone(), header);
+        source_unit_items.extend(parse.value.items.iter().filter_map(|item| {
+            matches!(&item.declaration, Declaration::Dimension { .. } | Declaration::Unit { .. })
+                .then(|| (namespace.clone(), input.logical_path.clone(), item.clone()))
+        }));
         parsed.push((namespace, parse.value));
     }
+    result.source_units = analyze_source_units(&source_unit_items);
     let mut dependency_summaries = BTreeMap::new();
     let source_payload_enums = parsed
         .iter()
@@ -2398,6 +2449,294 @@ fn analyze_retaining_context(
         .diagnostics
         .sort_by(|a, b| a.code().cmp(b.code()).then(a.message().cmp(b.message())));
     (result, contexts)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnitFraction {
+    numerator: BigInt,
+    denominator: BigInt,
+}
+impl UnitFraction {
+    fn new(mut numerator: BigInt, mut denominator: BigInt) -> Option<Self> {
+        if denominator.is_zero() {
+            return None;
+        }
+        if denominator.is_negative() {
+            numerator = -numerator;
+            denominator = -denominator;
+        }
+        let mut left = numerator.abs();
+        let mut right = denominator.clone();
+        while !right.is_zero() {
+            let remainder = &left % &right;
+            left = right;
+            right = remainder;
+        }
+        if !left.is_zero() {
+            numerator /= &left;
+            denominator /= left;
+        }
+        Some(Self { numerator, denominator })
+    }
+    fn one() -> Self {
+        Self { numerator: BigInt::one(), denominator: BigInt::one() }
+    }
+    fn zero() -> Self {
+        Self { numerator: BigInt::zero(), denominator: BigInt::one() }
+    }
+    fn multiply(&self, other: &Self) -> Option<Self> {
+        Self::new(&self.numerator * &other.numerator, &self.denominator * &other.denominator)
+    }
+    fn divide(&self, other: &Self) -> Option<Self> {
+        Self::new(&self.numerator * &other.denominator, &self.denominator * &other.numerator)
+    }
+    fn power(&self, exponent: i64) -> Option<Self> {
+        let magnitude = u32::try_from(exponent.unsigned_abs()).ok()?;
+        if magnitude > 100_000 {
+            return None;
+        }
+        if exponent < 0 {
+            Self::new(self.denominator.pow(magnitude), self.numerator.pow(magnitude))
+        } else {
+            Self::new(self.numerator.pow(magnitude), self.denominator.pow(magnitude))
+        }
+    }
+    fn public(&self) -> SourceUnitRational {
+        SourceUnitRational {
+            numerator: self.numerator.to_string(),
+            denominator: self.denominator.to_string(),
+        }
+    }
+    fn decimal(text: &str) -> Option<Self> {
+        let text = text.replace('_', "");
+        let exponent_index = text.find('e').or_else(|| text.find('E'));
+        let (mantissa, exponent) = exponent_index.map_or((text.as_str(), 0i64), |index| {
+            let (mantissa, exponent) = text.split_at(index);
+            (mantissa, exponent[1..].parse::<i64>().unwrap_or(i64::MAX))
+        });
+        if exponent == i64::MAX || exponent.unsigned_abs() > 1_000_000 {
+            return None;
+        }
+        let (negative, mantissa) = mantissa.strip_prefix('-').map_or((false, mantissa), |rest| (true, rest));
+        let mantissa = mantissa.strip_prefix('+').unwrap_or(mantissa);
+        let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        if whole.is_empty() && fraction.is_empty() {
+            return None;
+        }
+        let digits = format!("{whole}{fraction}");
+        let mut numerator = digits.parse::<BigInt>().ok()?;
+        if negative {
+            numerator = -numerator;
+        }
+        let decimal_exponent = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+        if decimal_exponent >= 0 {
+            if decimal_exponent > 1_000_000 { return None; }
+            numerator *= BigInt::from(10u8).pow(decimal_exponent as u32);
+            Self::new(numerator, BigInt::one())
+        } else {
+            let magnitude = decimal_exponent.unsigned_abs();
+            if magnitude > 1_000_000 { return None; }
+            Self::new(numerator, BigInt::from(10u8).pow(magnitude as u32))
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SourceDimensionDecl {
+    expression: Option<DimensionExpr>,
+}
+#[derive(Clone)]
+struct SourceUnitDecl {
+    identity: SourceUnitIdentity,
+    dimension: TypeExpr,
+    definition: UnitDefinition,
+    provenance: SourceUnitProvenance,
+}
+
+fn analyze_source_units(items: &[(Namespace, String, Item)]) -> BTreeMap<SourceUnitIdentity, SourceUnitMetadata> {
+    let mut dimensions = BTreeMap::new();
+    let mut units = BTreeMap::new();
+    let mut duplicate_dimensions = BTreeSet::new();
+    let mut duplicate_units = BTreeSet::new();
+    for (namespace, logical_path, item) in items {
+        match &item.declaration {
+            Declaration::Dimension { name, expression } => {
+                if dimensions.insert(identity.clone(), SourceDimensionDecl { expression: expression.clone() }).is_some() {
+                    duplicate_dimensions.insert(identity);
+                }
+            }
+            Declaration::Unit { name, dimension, definition } => {
+                let identity = SourceUnitIdentity { namespace: namespace.clone(), name: name.clone() };
+                let declaration = SourceUnitDecl {
+                    identity: identity.clone(),
+                    dimension: dimension.clone(),
+                    definition: definition.clone(),
+                    provenance: SourceUnitProvenance { logical_path: logical_path.clone(), span: item.span.clone() },
+                };
+                if units.insert(identity.clone(), declaration).is_some() {
+                    duplicate_units.insert(identity);
+                }
+            }
+            _ => {}
+        }
+    }
+    for identity in duplicate_dimensions { dimensions.remove(&identity); }
+    for identity in duplicate_units { units.remove(&identity); }
+
+    let mut result = BTreeMap::new();
+    for declaration in units.values() {
+        let mut resolving_units = BTreeSet::new();
+        let Some(scale) = source_unit_scale(&declaration.identity, &units, &mut resolving_units) else { continue };
+        let (offset, affine) = match &declaration.definition {
+            UnitDefinition::Base => (UnitFraction::zero(), false),
+            UnitDefinition::Derived { offset, affine, .. } => {
+                let offset = match offset {
+                    Some(expression) => match source_numeric_value(expression) { Some(value) => value, None => continue },
+                    None => UnitFraction::zero(),
+                };
+                (offset, *affine)
+            }
+        };
+        let Some(dimension) = source_dimension_path(&declaration.dimension) else { continue };
+        let mut resolving_dimensions = BTreeSet::new();
+        let Some(dimension_basis) = source_dimension_basis(&dimension, &dimensions, &mut resolving_dimensions) else { continue };
+        result.insert(declaration.identity.clone(), SourceUnitMetadata {
+            identity: declaration.identity.clone(),
+            dimension_basis,
+            scale: scale.public(),
+            offset: offset.public(),
+            affine,
+            provenance: declaration.provenance.clone(),
+        });
+    }
+    result
+}
+
+fn source_dimension_path(ty: &TypeExpr) -> Option<Vec<String>> {
+    match ty {
+        TypeExpr::Name { path, arguments, .. } if arguments.is_empty() => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn source_dimension_identity(namespace: &Namespace, path: &[String], dimensions: &BTreeMap<SourceDimensionIdentity, SourceDimensionDecl>) -> Option<SourceDimensionIdentity> {
+    let name = path.last()?.clone();
+    let candidate = if path.len() == 1 {
+        SourceDimensionIdentity { namespace: namespace.clone(), name: name.clone() }
+    } else {
+        SourceDimensionIdentity { namespace: Namespace(path[..path.len() - 1].to_vec()), name: name.clone() }
+    };
+    if dimensions.contains_key(&candidate) { return Some(candidate); }
+    let mut matches = dimensions.keys().filter(|identity| identity.name == name);
+    let identity = matches.next()?.clone();
+    matches.next().is_none().then_some(identity)
+}
+
+fn source_dimension_basis(identity: &SourceDimensionIdentity, dimensions: &BTreeMap<SourceDimensionIdentity, SourceDimensionDecl>, stack: &mut BTreeSet<SourceDimensionIdentity>) -> Option<BTreeMap<SourceDimensionIdentity, i64>> {
+    if !stack.insert(identity.clone()) { return None; }
+    let declaration = dimensions.get(identity)?;
+    let result = if let Some(expression) = &declaration.expression {
+        let mut result = BTreeMap::new();
+        for (index, (_, ty, exponent, _)) in expression.terms.iter().enumerate() {
+            let path = source_dimension_path(ty)?;
+            let target = source_dimension_identity(&identity.namespace, &path, dimensions)?;
+            let mut power = match exponent {
+                Some(exponent) => exponent.parse::<i64>().ok()?,
+                None => 1,
+            };
+            if index > 0 && expression.operators.get(index - 1).is_some_and(|operator| operator == "/") {
+                power = power.checked_neg()?;
+            }
+            let term = source_dimension_basis(&target, dimensions, stack)?;
+            for (axis, exponent) in term {
+                let combined = result.get(&axis).copied().unwrap_or(0i64).checked_add(exponent.checked_mul(power)?)?;
+                if combined == 0 { result.remove(&axis); } else { result.insert(axis, combined); }
+            }
+        }
+        result
+    } else {
+        BTreeMap::from([(identity.clone(), 1)])
+    };
+    stack.remove(identity);
+    Some(result)
+}
+
+fn source_unit_identity(namespace: &Namespace, name: &str, units: &BTreeMap<SourceUnitIdentity, SourceUnitDecl>) -> Option<SourceUnitIdentity> {
+    let candidate = SourceUnitIdentity { namespace: namespace.clone(), name: name.to_owned() };
+    if units.contains_key(&candidate) { return Some(candidate); }
+    let mut matches = units.keys().filter(|identity| identity.name == name);
+    let identity = matches.next()?.clone();
+    matches.next().is_none().then_some(identity)
+}
+
+fn source_unit_scale(identity: &SourceUnitIdentity, units: &BTreeMap<SourceUnitIdentity, SourceUnitDecl>, stack: &mut BTreeSet<SourceUnitIdentity>) -> Option<UnitFraction> {
+    if !stack.insert(identity.clone()) { return None; }
+    let declaration = units.get(identity)?;
+    let value = match &declaration.definition {
+        UnitDefinition::Base => Some(UnitFraction::one()),
+        UnitDefinition::Derived { value, .. } => source_scale_expression(value, &identity.namespace, units, stack),
+    };
+    stack.remove(identity);
+    value
+}
+
+fn source_numeric_value(expression: &Expr) -> Option<UnitFraction> {
+    match expression {
+        Expr::Literal { text, kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float, .. } => UnitFraction::decimal(text),
+        Expr::Group { inner, .. } => source_numeric_value(inner),
+        Expr::Unary { op, rhs, .. } if op == "+" || op == "-" => {
+            let mut value = source_numeric_value(rhs)?;
+            if op == "-" { value.numerator = -value.numerator; }
+            Some(value)
+        }
+        Expr::Binary { lhs, op, rhs, .. } if op == "+" || op == "-" || op == "*" || op == "/" => {
+            let left = source_numeric_value(lhs)?;
+            let right = source_numeric_value(rhs)?;
+            match op.as_str() {
+                "+" | "-" => {
+                    let sign = if op == "+" { BigInt::one() } else { -BigInt::one() };
+                    UnitFraction::new(&left.numerator * &right.denominator + sign * &right.numerator * &left.denominator, &left.denominator * &right.denominator)
+                }
+                "*" => left.multiply(&right),
+                "/" => left.divide(&right),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn source_scale_expression(expression: &Expr, namespace: &Namespace, units: &BTreeMap<SourceUnitIdentity, SourceUnitDecl>, stack: &mut BTreeSet<SourceUnitIdentity>) -> Option<UnitFraction> {
+    match expression {
+        Expr::Literal { text, kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float, .. } => UnitFraction::decimal(text),
+        Expr::Group { inner, .. } => source_scale_expression(inner, namespace, units, stack),
+        Expr::Name { text, .. } => {
+            let identity = source_unit_identity(namespace, text, units)?;
+            source_unit_scale(&identity, units, stack)
+        }
+        Expr::Field { base, name, .. } => {
+            let base = source_scale_expression(base, namespace, units, stack)?;
+            let identity = source_unit_identity(namespace, name, units)?;
+            base.multiply(&source_unit_scale(&identity, units, stack)?)
+        }
+        Expr::Unary { op, rhs, .. } if op == "+" || op == "-" => {
+            let mut value = source_scale_expression(rhs, namespace, units, stack)?;
+            if op == "-" { value.numerator = -value.numerator; }
+            Some(value)
+        }
+        Expr::Binary { lhs, op, rhs, .. } => {
+            if op == "^" {
+                let base = source_scale_expression(lhs, namespace, units, stack)?;
+                let exponent = source_numeric_value(rhs)?;
+                if exponent.denominator != BigInt::one() { return None; }
+                return base.power(exponent.numerator.to_i64()?);
+            }
+            let left = source_scale_expression(lhs, namespace, units, stack)?;
+            let right = source_scale_expression(rhs, namespace, units, stack)?;
+            match op.as_str() { "*" => left.multiply(&right), "/" => left.divide(&right), _ => None }
+        }
+        _ => None,
+    }
 }
 
 /// Function bodies may depend on inferred summaries declared later in their
@@ -24746,6 +25085,33 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_unit_analysis_retains_exact_source_basis_scale_and_provenance() {
+        let analysis = checked(&[ModuleInput::new(
+            "units/main.orna",
+            "pub dim Information; pub unit B : Information base; pub unit MiB : Information = 1048576.B; pub dim Temperature; pub unit K : Temperature base; pub unit C : Temperature = K offset 273.15 affine;",
+        )]);
+        assert!(analysis.is_ok(), "diagnostics: {:?}", analysis.diagnostics);
+
+        let mebibyte = &analysis.source_units[&SourceUnitIdentity {
+            namespace: Namespace(vec!["units".into()]),
+            name: "MiB".into(),
+        }];
+        assert_eq!(mebibyte.scale.numerator, "1048576");
+        assert_eq!(mebibyte.scale.denominator, "1");
+        assert_eq!(mebibyte.dimension_basis.len(), 1);
+        assert_eq!(mebibyte.dimension_basis.values().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(mebibyte.provenance.logical_path, "units/main.orna");
+
+        let celsius = &analysis.source_units[&SourceUnitIdentity {
+            namespace: Namespace(vec!["units".into()]),
+            name: "C".into(),
+        }];
+        assert_eq!(celsius.offset.numerator, "5463");
+        assert_eq!(celsius.offset.denominator, "20");
+        assert!(celsius.affine);
+    }
 
     #[test]
     fn sparse_checkpoint_seeding_crosses_relation_window_boundaries() {
