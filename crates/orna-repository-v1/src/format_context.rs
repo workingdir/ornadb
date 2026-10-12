@@ -1378,16 +1378,20 @@ fn schema_descriptor_fields(
                 return None;
             };
             let field_object_id = id.as_slice().try_into().ok()?;
-            let role = match role {
-                0 => CommittedTableFieldRole::PrimaryKey,
-                1 => CommittedTableFieldRole::Stored,
-                _ => return None,
+            let role = if role == &Raw::Int(0.into()) {
+                CommittedTableFieldRole::PrimaryKey
+            } else if role == &Raw::Int(1.into()) {
+                CommittedTableFieldRole::Stored
+            } else {
+                return None;
             };
-            let is_blob = matches!(
-                ty,
-                Raw::Array(parts)
-                    if matches!(parts.as_slice(), [Raw::Int(0), Raw::Text(name)] if name == "Blob")
-            );
+            let is_blob = match ty {
+                Raw::Array(parts) if parts.len() == 2 => {
+                    matches!(&parts[0], Raw::Int(kind) if kind == &0.into())
+                        && matches!(&parts[1], Raw::Text(name) if name == "Blob")
+                }
+                _ => false,
+            };
             Some(CommittedTableFieldIdentity {
                 field_object_id,
                 name: name.clone(),
