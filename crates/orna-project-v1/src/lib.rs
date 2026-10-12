@@ -21,7 +21,7 @@ use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
     Analysis, Catalogue, ModuleInput, Namespace, RowUnitInput, SourceTableSchemaArtifact,
     StandardCatalogueError, StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
-    lower_row_unit, source_table_schema_with_ids,
+    lower_row_unit, lower_row_unit_with_owner_fields, source_table_schema_with_ids,
 };
 use orna_syntax_v1::{Declaration, parse_module};
 use orna_value_v1::{
@@ -182,6 +182,12 @@ impl SourceBlobFieldBinding {
     pub fn pin(&self) -> &ProtectedContentPin {
         &self.pin
     }
+
+    /// Moves the exact source field identity, encoded value and pin into the
+    /// owner-fenced publication path.
+    pub fn into_parts(self) -> ([u8; 16], Vec<u8>, ProtectedContentPin) {
+        (self.field_object_id, self.encoded_value, self.pin)
+    }
 }
 
 /// A source row admitted against one committed schema and format-3 context.
@@ -202,16 +208,44 @@ pub struct AdmittedSourceRow {
 }
 
 impl AdmittedSourceRow {
-    pub fn table_name(&self) -> &str { &self.table_name }
-    pub const fn table_object_id(&self) -> TableObjectId { self.table_object_id }
-    pub const fn database_id(&self) -> &[u8; 16] { &self.database_id }
-    pub fn source_commit(&self) -> &GitCommitRef { &self.source_commit }
-    pub const fn snapshot_id(&self) -> &[u8; 32] { &self.snapshot_id }
-    pub fn schema(&self) -> &SchemaDescriptor { &self.schema }
-    pub fn canonical_key(&self) -> &[u8] { &self.canonical_key }
-    pub fn canonical_fields(&self) -> &[u8] { &self.canonical_fields }
-    pub fn blob_bindings(&self) -> &[SourceBlobFieldBinding] { &self.blob_bindings }
-    pub fn mutation(&self) -> &TableMutation { &self.mutation }
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+    pub const fn table_object_id(&self) -> TableObjectId {
+        self.table_object_id
+    }
+    pub const fn database_id(&self) -> &[u8; 16] {
+        &self.database_id
+    }
+    pub fn source_commit(&self) -> &GitCommitRef {
+        &self.source_commit
+    }
+    pub const fn snapshot_id(&self) -> &[u8; 32] {
+        &self.snapshot_id
+    }
+    pub fn schema(&self) -> &SchemaDescriptor {
+        &self.schema
+    }
+    pub fn canonical_key(&self) -> &[u8] {
+        &self.canonical_key
+    }
+    pub fn canonical_fields(&self) -> &[u8] {
+        &self.canonical_fields
+    }
+    pub fn blob_bindings(&self) -> &[SourceBlobFieldBinding] {
+        &self.blob_bindings
+    }
+    pub fn mutation(&self) -> &TableMutation {
+        &self.mutation
+    }
+
+    /// Moves the complete canonical mutation and field-bound content pins to
+    /// the durable publication owner.
+    pub fn into_mutation_and_bindings(
+        self,
+    ) -> (TableMutation, Vec<SourceBlobFieldBinding>) {
+        (self.mutation, self.blob_bindings)
+    }
 }
 
 /// The deterministic source inputs suitable for `analyze_with_catalogue`.
@@ -305,10 +339,8 @@ impl LoadedProject {
             .transpose()
     }
 }
-/// Admit a source row expression and its accepted captured Blob bindings as
-/// one canonical mutation. Bindings are named by authored field, not inferred
-/// storage identities; this boundary resolves committed IDs and field order
-/// and retains each pin through durable publication.
+/// Admit a source row expression and accepted captured Blob bindings as one
+/// canonical mutation. This variant accepts no source-owner scalar fields.
 pub fn admit_source_row(
     project: &LoadedProject,
     logical_path: &str,
@@ -318,10 +350,62 @@ pub fn admit_source_row(
     blob_bindings: Vec<(String, OrpBlobBinding)>,
     mutation_id: [u8; 16],
 ) -> Result<AdmittedSourceRow, ProjectLoadError> {
+    admit_source_row_with_owner_fields_inner(
+        project,
+        logical_path,
+        source,
+        schema,
+        context,
+        blob_bindings,
+        Vec::new(),
+        mutation_id,
+    )
+}
+
+/// Admit a source row while filling additional stored scalar fields supplied
+/// by the trusted source owner (for example, payload size derived from a Blob).
+pub fn admit_source_row_with_owner_fields(
+    project: &LoadedProject,
+    logical_path: &str,
+    source: &str,
+    schema: &ResolvedTableSchema,
+    context: &Format3Context,
+    blob_bindings: Vec<(String, OrpBlobBinding)>,
+    owner_field_values: Vec<(String, Raw)>,
+    mutation_id: [u8; 16],
+) -> Result<AdmittedSourceRow, ProjectLoadError> {
+    admit_source_row_with_owner_fields_inner(
+        project,
+        logical_path,
+        source,
+        schema,
+        context,
+        blob_bindings,
+        owner_field_values,
+        mutation_id,
+    )
+}
+
+fn admit_source_row_with_owner_fields_inner(
+    project: &LoadedProject,
+    logical_path: &str,
+    source: &str,
+    schema: &ResolvedTableSchema,
+    context: &Format3Context,
+    blob_bindings: Vec<(String, OrpBlobBinding)>,
+    owner_field_values: Vec<(String, Raw)>,
+    mutation_id: [u8; 16],
+) -> Result<AdmittedSourceRow, ProjectLoadError> {
     if project.source_commit() != Some(schema.source_commit())
         || project.source_snapshot_id().as_ref() != Some(schema.snapshot_id())
         || context.database_uuid() != schema.database_id
         || !format_context_matches_commit(context, schema.source_commit())
+    {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    if blob_bindings
+        .iter()
+        .any(|(_, binding)| binding.transfer_record().database_id() != schema.database_id())
     {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
@@ -339,7 +423,11 @@ pub fn admit_source_row(
     let table_path = if module_name.is_empty() {
         schema.declaration_name().to_owned()
     } else {
-        format!("{}/{}", module_name.replace('.', "/"), schema.declaration_name())
+        format!(
+            "{}/{}",
+            module_name.replace('.', "/"),
+            schema.declaration_name()
+        )
     };
     let row_prefix = format!("{table_path}/");
     let key_path = logical_path
@@ -355,7 +443,19 @@ pub fn admit_source_row(
         source_bytes: source.as_bytes(),
         parse_as: "row_unit",
     };
-    let lowered = lower_row_unit(&analysis, &input).map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    let mut owner_field_names = BTreeSet::new();
+    if owner_field_values
+        .iter()
+        .any(|(name, _)| !owner_field_names.insert(name.clone()))
+    {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let owner_field_names = owner_field_values
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let lowered = lower_row_unit_with_owner_fields(&analysis, &input, &owner_field_names)
+        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     if lowered.owner != table_path {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
@@ -364,11 +464,18 @@ pub fn admit_source_row(
     if &descriptor_table_id != schema.table.table_id() {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
-    let mut pending_bindings = BTreeMap::new();
-    for (field_name, binding) in blob_bindings {
-        if binding.transfer_record().database_id() != schema.database_id() {
+    for field_name in &owner_field_names {
+        if !fields
+            .iter()
+            .any(|field| field.name == *field_name && field.role == 1 && !field.is_blob)
+        {
             return Err(ProjectLoadError::InvalidSourceRow);
         }
+    }
+    let mut pending_owner_fields = owner_field_values.into_iter().collect::<BTreeMap<_, _>>();
+    let owner_field_count = pending_owner_fields.len();
+    let mut pending_bindings = BTreeMap::new();
+    for (field_name, binding) in blob_bindings {
         let field = fields
             .iter()
             .find(|field| field.name == field_name && field.role == 1 && field.is_blob)
@@ -381,15 +488,18 @@ pub fn admit_source_row(
     let mut retained_bindings = Vec::new();
     for field in fields.iter().filter(|field| field.role == 1) {
         if field.is_blob {
-            if lowered.fields.contains_key(&field.name) {
+            if lowered.fields.contains_key(&field.name)
+                || pending_owner_fields.contains_key(&field.name)
+            {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
             let binding = pending_bindings
                 .remove(&field.id)
                 .ok_or(ProjectLoadError::InvalidSourceRow)?;
             let encoded_value = binding.encoded_value().to_vec();
-            let decoded = ContextValue::decode_in_context(&encoded_value, ValueFormat::Rov3, context)
-                .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+            let decoded =
+                ContextValue::decode_in_context(&encoded_value, ValueFormat::Rov3, context)
+                    .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
             if !matches!(decoded.raw(), Raw::Tag(ROV3_BLOB_TAG, _)) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
@@ -403,21 +513,21 @@ pub fn admit_source_row(
             if pending_bindings.contains_key(&field.id) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
-            stored_fields.push(
-                lowered
-                    .fields
-                    .get(&field.name)
-                    .cloned()
-                    .ok_or(ProjectLoadError::InvalidSourceRow)?,
-            );
+            let value = pending_owner_fields
+                .remove(&field.name)
+                .or_else(|| lowered.fields.get(&field.name).cloned())
+                .ok_or(ProjectLoadError::InvalidSourceRow)?;
+            stored_fields.push(value);
         }
     }
     if !pending_bindings.is_empty()
-        || lowered.fields.len() + retained_bindings.len()
+        || !pending_owner_fields.is_empty()
+        || lowered.fields.len() + retained_bindings.len() + owner_field_count
             != fields.iter().filter(|field| field.role == 1).count()
     {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
+
     let canonical_fields = Value::new(Raw::Array(stored_fields))
         .and_then(|value| value.encode())
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
