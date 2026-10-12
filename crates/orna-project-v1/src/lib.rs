@@ -21,7 +21,7 @@ use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
     Analysis, Catalogue, ModuleInput, Namespace, RowUnitInput, SourceTableSchemaArtifact,
     StandardCatalogueError, StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
-    lower_row_unit, lower_row_unit_with_owner_fields, source_table_schema_with_ids,
+    lower_row_unit_with_owner_fields, source_table_schema_with_ids,
 };
 use orna_syntax_v1::{Declaration, parse_module};
 use orna_value_v1::{
@@ -774,17 +774,17 @@ impl ProjectLoader {
             .require_database_id()
             .map_err(|_| ProjectLoadError::InvalidTableSchema)?
             .as_bytes();
-        let binding = context
-            .resolve_committed_table_descriptor(declaration_name, table_object_id.bytes())
+
+        let unbound_binding = context
+            .resolve_committed_table_by_relation_id(table_object_id.bytes())
             .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        if binding.snapshot_id() != &snapshot_id
-            || binding.declaration_name() != declaration_name
-            || binding.table_object_id() != &table_object_id.bytes()
+        if unbound_binding.snapshot_id() != &snapshot_id
+            || unbound_binding.table_object_id() != &table_object_id.bytes()
         {
             return Err(ProjectLoadError::InvalidTableSchema);
         }
 
-        let field_ids = committed_field_ids(binding.descriptor(), table_object_id.bytes())?;
+        let field_ids = committed_field_ids(unbound_binding.descriptor(), table_object_id.bytes())?;
         let table = source_table_schema_with_ids(
             &analysis,
             &module_name,
@@ -795,7 +795,34 @@ impl ProjectLoader {
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
         if table.declaration_name() != declaration_name
             || table.table_id() != &table_object_id.bytes()
-            || table.descriptor() != binding.descriptor()
+            || table.descriptor() != unbound_binding.descriptor()
+        {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+        let source_path = project
+            .identities()
+            .iter()
+            .find(|identity| {
+                Namespace(identity.namespace().to_vec()).display() == module_name
+            })
+            .map(ModuleIdentity::logical_path)
+            .ok_or(ProjectLoadError::InvalidTableSchema)?;
+        let binding = context
+            .bind_committed_table(
+                &module_name,
+                source_path,
+                declaration_name,
+                table_object_id.bytes(),
+                &snapshot_id,
+                table.descriptor(),
+            )
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        if binding.snapshot_id() != &snapshot_id
+            || binding.declaration_name() != Some(declaration_name)
+            || binding.module_name() != Some(module_name.as_str())
+            || binding.source_path() != Some(source_path)
+            || binding.table_object_id() != &table_object_id.bytes()
+            || binding.descriptor() != table.descriptor()
         {
             return Err(ProjectLoadError::InvalidTableSchema);
         }
