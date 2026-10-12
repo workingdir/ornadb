@@ -428,8 +428,11 @@ fn admit_source_row_with_owner_fields_inner(
 ) -> Result<AdmittedSourceRow, ProjectLoadError> {
     if project.source_commit() != Some(schema.source_commit())
         || project.source_snapshot_id().as_ref() != Some(schema.snapshot_id())
-        || context.database_uuid() != schema.database_id
-        || !format_context_matches_commit(context, schema.source_commit())
+        || !format_context_matches_source_schema(
+            context,
+            schema.database_id(),
+            schema.source_commit().as_str(),
+        )
     {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
@@ -632,10 +635,18 @@ fn source_schema_fields(
     Ok((table_id, fields))
 }
 
-fn format_context_matches_commit(context: &Format3Context, commit: &GitCommitRef) -> bool {
-    let (algorithm, oid) = match commit.as_str().len() {
-        40 => (orna_value_v1::GitHash::Sha1, decode_source_oid(commit.as_str())),
-        64 => (orna_value_v1::GitHash::Sha256, decode_source_oid(commit.as_str())),
+fn format_context_matches_source_schema(
+    context: &Format3Context,
+    expected_database_id: &[u8; 16],
+    commit: &str,
+) -> bool {
+    context.database_uuid() == *expected_database_id && format_context_matches_commit(context, commit)
+}
+
+fn format_context_matches_commit(context: &Format3Context, commit: &str) -> bool {
+    let (algorithm, oid) = match commit.len() {
+        40 => (orna_value_v1::GitHash::Sha1, decode_source_oid(commit)),
+        64 => (orna_value_v1::GitHash::Sha256, decode_source_oid(commit)),
         _ => return false,
     };
     let Some(oid) = oid else { return false; };
@@ -1851,4 +1862,68 @@ fn portable_component(component: &str) -> bool {
 /// Host-independent NFKC case-fold key for portable sibling ownership.
 fn unicode_sibling_key(component: &str) -> String {
     unicode16::to_nfkc_casefold(component)
+}
+
+#[cfg(test)]
+mod source_row_admission_tests {
+    use super::{Format3Context, format_context_matches_commit, format_context_matches_source_schema};
+    use std::sync::Arc;
+    use orna_value_v1::{
+        AvailabilityState, BlobResolver, ContentReference, Error as ValueError, Format3Quota,
+        GitHash, NativeOid, OwnerLifetime, Snapshot,
+    };
+
+    struct UnusedResolver;
+
+    impl BlobResolver for UnusedResolver {
+        fn read_range(
+            &self,
+            _reference: &ContentReference,
+            _offset: u64,
+            _length: u64,
+        ) -> orna_value_v1::Result<Vec<u8>> {
+            Err(ValueError::ContentUnavailable)
+        }
+    }
+
+    fn context(database_id: [u8; 16]) -> Format3Context {
+        let algorithm = GitHash::Sha1;
+        let oid = vec![0x11; algorithm.oid_width()];
+        let root = NativeOid::from_bytes(&vec![0x55; algorithm.oid_width()]).unwrap();
+        Format3Context::from_persisted(
+            database_id,
+            Snapshot::Commit {
+                database: database_id,
+                algorithm,
+                oid,
+            },
+            algorithm,
+            root.clone(),
+            root,
+            AvailabilityState::Available,
+            OwnerLifetime::new([0x66; 16]),
+            Format3Quota::new(1, 0).unwrap(),
+            Arc::new(UnusedResolver),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn source_row_context_rejects_same_commit_from_another_database() {
+        const COMMIT: &str = "1111111111111111111111111111111111111111";
+        let expected_database_id = [0x22; 16];
+        let foreign_context = context([0x33; 16]);
+
+        assert!(format_context_matches_commit(&foreign_context, COMMIT));
+        assert!(!format_context_matches_source_schema(
+            &foreign_context,
+            &expected_database_id,
+            COMMIT,
+        ));
+        assert!(format_context_matches_source_schema(
+            &context(expected_database_id),
+            &expected_database_id,
+            COMMIT,
+        ));
+    }
 }
