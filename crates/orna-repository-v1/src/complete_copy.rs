@@ -1371,6 +1371,9 @@ fn verify_blob(directory: &Path, oid: &str, size: u64) -> Result<(), CompleteCop
     // A recovery export is deliberately local-only: never lazily fetch missing
     // objects from a promisor remote recorded by the source repository.
     command.env("GIT_NO_LAZY_FETCH", "1");
+    // Replacement refs can redirect a snapshot walk away from its committed
+    // native graph, silently dropping secondary row-map roots from the copy.
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
     command.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command
         .spawn()
@@ -1658,6 +1661,8 @@ fn git_output_stdin(
     // Read only objects already present in this repository; the archive must
     // not depend on a configured remote being reachable.
     command.env("GIT_NO_LAZY_FETCH", "1");
+    // Resolve the immutable object graph, not a local refs/replace overlay.
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
     command.stdin(if stdin.is_some() {
         Stdio::piped()
     } else {
