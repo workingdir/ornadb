@@ -1064,8 +1064,7 @@ impl ContextValueEffectHandlerAdapter<'_> {
         }
     }
     fn profile(&self) -> (ValueFormat, Option<&Format3Context>) {
-        if matches!(self.format, ValueFormat::Rov3 | ValueFormat::Sov3)
-            && self.context.is_some()
+        if matches!(self.format, ValueFormat::Rov3 | ValueFormat::Sov3) && self.context.is_some()
         {
             (self.format, self.context.as_ref())
         } else if matches!(self.source_format, ValueFormat::Rov3 | ValueFormat::Sov3) {
