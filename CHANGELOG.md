@@ -97,6 +97,12 @@ release gate has passed.
   digests, and post-apply reproduction. Historical source and standard
   snapshots are immutable inputs to this verification; hand-editing retained
   rows is unsupported.
+- The CLI's `migrate copy` command prepares or recovers a journalled candidate
+  in a separate directory from a local format-1/2 repository, leaving the
+  source commit and workspace unchanged. It requires an explicit decoded
+  annotation-default count and no-persistent-consumers choice. This preparation
+  step does not convert legacy rows into a format-3 store or activate a writable
+  format-3 repository.
 - Product selection retains standard-library snapshots through `orna.std/9`.
   The pre-1.0 V10 `std/cli.orna` source and V9-to-V10 upgrade constructor are
   retired; a stored V10 revision can only be verified when supplied directly
