@@ -17,18 +17,19 @@ mod extractor;
 
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use orna_repository_v1::{
-    complete_copy::{
-        export_complete_copy, export_complete_copy_of, materialize_complete_copy,
-        read_complete_copy_manifest, restore_complete_copy, CompleteCopyObjectKind,
-        DependencySource,
-    },
     Repository,
+    complete_copy::{
+        CompleteCopyObjectKind, DependencySource, export_complete_copy, export_complete_copy_of,
+        materialize_complete_copy, read_complete_copy_manifest, restore_complete_copy,
+    },
 };
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const DATABASE: &str = include_str!("fixtures/format-context/database-final.orna");
@@ -104,6 +105,51 @@ fn dependency_repository(root: &Path) -> PathBuf {
         &["commit", "--quiet", "-m", "dependency content"],
     );
     dependency
+}
+
+/// A dependency repository that pins a second repository in its own tree.
+fn nested_dependency_repositories(root: &Path) -> (PathBuf, PathBuf) {
+    let leaf = root.join("leaf-dependency");
+    fs::create_dir_all(&leaf).expect("create nested dependency");
+    init_repository(&leaf);
+    fs::write(leaf.join("payload.bin"), b"nested dependency payload\n")
+        .expect("write nested dependency payload");
+    git(&leaf, &["add", "--all"]);
+    git(
+        &leaf,
+        &["commit", "--quiet", "-m", "nested dependency content"],
+    );
+
+    let dependency = dependency_repository(root);
+    git(
+        &dependency,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            leaf.to_str().expect("nested dependency path is UTF-8"),
+            "tools/leaf",
+        ],
+    );
+    git(&dependency, &["add", "--all"]);
+    git(
+        &dependency,
+        &["commit", "--quiet", "-m", "pin nested dependency"],
+    );
+    git(
+        &dependency,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+    );
+    (dependency, leaf)
 }
 
 /// A format-3 superproject that pins `dependency` at `deps/std`.
@@ -222,6 +268,79 @@ fn complete_copy_reconstructs_snapshot_and_dependency_without_the_source() {
     let explicit_manifest = export_complete_copy(&repository, "HEAD", &explicit, &sources)
         .expect("export with an explicit dependency source");
     assert_eq!(explicit_manifest, manifest);
+}
+
+#[test]
+fn complete_copy_carries_nested_pins_and_restores_them_offline() {
+    let root = TempDir::new().expect("create fixture root");
+    let (dependency, leaf) = nested_dependency_repositories(root.path());
+    let project = superproject(root.path(), &dependency);
+    git(
+        &project,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+    );
+
+    let repository = Repository::discover(&project).expect("discover superproject");
+    let snapshot = git_stdout(&project, &["rev-parse", "HEAD"]);
+    let dependency_commit = git_stdout(&dependency, &["rev-parse", "HEAD"]);
+    let nested_commit = git_stdout(&leaf, &["rev-parse", "HEAD"]);
+    let archive = root.path().join("nested-archive");
+    let manifest = export_complete_copy(&repository, "HEAD", &archive, &[])
+        .expect("export recursive dependency closure");
+
+    assert_eq!(manifest.snapshot, snapshot);
+    assert_eq!(manifest.dependencies.len(), 2);
+    assert_eq!(manifest.dependencies[0].path, "deps/std");
+    assert_eq!(manifest.dependencies[0].commit, dependency_commit);
+    assert_eq!(manifest.dependencies[1].path, "deps/std/tools/leaf");
+    assert_eq!(manifest.dependencies[1].commit, nested_commit);
+    for dependency in &manifest.dependencies {
+        assert!(archive.join(&dependency.bundle).is_file());
+    }
+    let explicit_archive = root.path().join("nested-explicit-archive");
+    let sources = [DependencySource {
+        path: "deps/std".to_owned(),
+        directory: dependency.clone(),
+    }];
+    let explicit_manifest = export_complete_copy(&repository, "HEAD", &explicit_archive, &sources)
+        .expect("export nested dependencies from the explicit parent source");
+    assert_eq!(explicit_manifest, manifest);
+
+    drop(repository);
+    fs::remove_dir_all(&project).expect("remove source superproject");
+    fs::remove_dir_all(&dependency).expect("remove first dependency source");
+    fs::remove_dir_all(&leaf).expect("remove nested dependency source");
+    let restored = root.path().join("restored-nested-copy");
+    let reconstructed =
+        restore_complete_copy(&archive, &restored).expect("restore only from archived bundles");
+    assert_eq!(reconstructed, manifest);
+
+    let restored_dependency = restored.join("deps/std");
+    let restored_nested = restored.join("deps/std/tools/leaf");
+    assert_eq!(
+        git_stdout(&restored_dependency, &["rev-parse", "HEAD"]),
+        dependency_commit
+    );
+    assert_eq!(
+        git_stdout(&restored_nested, &["rev-parse", "HEAD"]),
+        nested_commit
+    );
+    assert_eq!(git_stdout(&restored_dependency, &["remote"]), "");
+    assert_eq!(git_stdout(&restored_nested, &["remote"]), "");
+
+    materialize_complete_copy(&restored, &manifest).expect("materialise all pinned worktrees");
+    assert_eq!(
+        fs::read(restored_nested.join("payload.bin"))
+            .expect("read nested payload from restored worktree"),
+        b"nested dependency payload\n"
+    );
 }
 
 #[test]
@@ -473,8 +592,10 @@ fn complete_copy_verifies_every_object_id_and_refuses_a_truncated_or_substituted
         "the recorded closure shrank"
     );
     fs::write(truncated.join("manifest.tsv"), &truncated_document).expect("write manifest");
-    let error = restore_complete_copy(&truncated, &root.path().join("copy-truncated"))
-        .expect_err("a truncated recording is refused");
+    let refused = root.path().join("copy-truncated");
+    fs::create_dir(&refused).expect("make the empty restore destination");
+    let error =
+        restore_complete_copy(&truncated, &refused).expect_err("a truncated recording is refused");
     assert!(
         matches!(
             error,
@@ -482,12 +603,12 @@ fn complete_copy_verifies_every_object_id_and_refuses_a_truncated_or_substituted
         ),
         "the failure is a typed integrity diagnostic: {error}"
     );
-    // The destination was created by the fetch and then refused: a partial
-    // object database may remain, but no snapshot tree may be materialised.
-    let refused = root.path().join("copy-truncated");
     assert!(
-        !refused.join("main.orna").exists(),
-        "a refused reconstruction writes no snapshot tree: {error}"
+        fs::read_dir(&refused)
+            .expect("the original destination remains readable")
+            .next()
+            .is_none(),
+        "a refused reconstruction preserves the existing empty destination: {error}"
     );
 
     // 2. Substituted: re-point one object record at another real object of the
@@ -536,4 +657,86 @@ fn complete_copy_verifies_every_object_id_and_refuses_a_truncated_or_substituted
         ),
         "the failure is a typed integrity diagnostic: {error}"
     );
+}
+
+#[test]
+fn complete_copy_reconstructs_large_blob_after_source_and_origin_are_gone() {
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    let unavailable_origin = root.path().join("unavailable-origin");
+    git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            unavailable_origin.to_str().expect("origin path is UTF-8"),
+        ],
+    );
+
+    let payload_length = 8 * 1024 * 1024;
+    let payload: Vec<u8> = (0..payload_length)
+        .map(|index| ((index * 31 + (index >> 8)) & 0xff) as u8)
+        .collect();
+    let expected_sha256: [u8; 32] = Sha256::digest(&payload).into();
+    fs::write(project.join("large-payload.bin"), &payload).expect("write large payload");
+    git(&project, &["add", "large-payload.bin"]);
+    git(
+        &project,
+        &["commit", "--quiet", "-m", "large offline payload"],
+    );
+    let snapshot = git_stdout(&project, &["rev-parse", "HEAD"]);
+    let source_oid = git_stdout(&project, &["rev-parse", "HEAD:large-payload.bin"]);
+    let repository = Repository::discover(&project).expect("discover source repository");
+    let archive = root.path().join("large-archive");
+    let manifest = export_complete_copy(&repository, "HEAD", &archive, &[])
+        .expect("export while the configured remote is unavailable");
+    assert_eq!(manifest.snapshot, snapshot);
+    assert_eq!(
+        git_stdout(&project, &["remote", "get-url", "origin"]),
+        unavailable_origin.to_string_lossy().into_owned()
+    );
+    assert!(
+        !unavailable_origin.exists(),
+        "the source remote is unavailable"
+    );
+
+    drop(repository);
+    fs::remove_dir_all(&project).expect("remove the source repository");
+    fs::remove_dir_all(&dependency).expect("remove the dependency source");
+    let restored = root.path().join("restored-large-copy");
+    fs::create_dir(&restored).expect("create existing empty destination");
+    let reconstructed = restore_complete_copy(&archive, &restored)
+        .expect("restore and verify from the archive alone");
+    assert_eq!(reconstructed, manifest);
+    assert_eq!(git_stdout(&restored, &["remote"]), "");
+    assert_eq!(
+        git_stdout(
+            &restored,
+            &["rev-parse", &format!("{snapshot}:large-payload.bin")]
+        ),
+        source_oid,
+        "the restored snapshot preserves the large blob object"
+    );
+    materialize_complete_copy(&restored, &manifest).expect("materialise verified snapshot");
+
+    let mut payload_file = fs::File::open(restored.join("large-payload.bin"))
+        .expect("open materialised large payload");
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut restored_length = 0_u64;
+    loop {
+        let count = payload_file
+            .read(&mut buffer)
+            .expect("stream restored payload");
+        if count == 0 {
+            break;
+        }
+        restored_length += count as u64;
+        hasher.update(&buffer[..count]);
+    }
+    assert_eq!(restored_length, payload_length as u64);
+    let restored_sha256: [u8; 32] = hasher.finalize().into();
+    assert_eq!(restored_sha256, expected_sha256, "restored raw blob hash");
 }

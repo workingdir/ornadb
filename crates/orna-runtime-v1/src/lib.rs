@@ -36,7 +36,7 @@ use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
 use orna_repository_v1::{
     CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, ContentIdentity,
     CwdGeneration, GitCommitRef, GitHashAlgorithm, NativeOid, OrpBlobBinding, ProtectedContentPin,
-    ProtectedContentTransfer, Repository,
+    ProtectedContentTransfer, Repository, RuntimeOwnerLock,
 };
 use orna_stream_v1::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
@@ -2479,6 +2479,7 @@ pub enum TableActivationError {
 pub struct RuntimeState {
     connection: Connection,
     graph_repository_id: Option<[u8; 32]>,
+    runtime_owner_lock: Option<RuntimeOwnerLock>,
     compact_receipt_signing_key: SigningKey,
     system_dispatch: &'static orna_sys_v1::SystemDispatchTable,
     system_provider_roles: orna_sys_v1::ProviderRoleRegistry,
@@ -4354,6 +4355,9 @@ impl RuntimeState {
             .runtime_paths()
             .ensure_exists()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let runtime_owner_lock = repository
+            .acquire_runtime_owner_lock(*Uuid::new_v4().as_bytes())
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
         let graph_repository_id = current_graph_repository_id(repository, identity.database_id)?;
         Self::open_path_with_graph_repository_id(
             &repository.runtime_paths().state_db(),
@@ -4365,6 +4369,7 @@ impl RuntimeState {
                     .runtime_paths()
                     .compact_runtime_receipt_public_key(),
             ),
+            Some(runtime_owner_lock),
         )
         .await
     }
@@ -4381,16 +4386,17 @@ impl RuntimeState {
             initial_digest,
             None,
             public_key_path,
+            None,
         )
         .await
     }
-
     async fn open_path_with_graph_repository_id(
         path: &Path,
         identity: RuntimeIdentity,
         initial_digest: [u8; 32],
         graph_repository_id: Option<[u8; 32]>,
         public_key_path: Option<PathBuf>,
+        runtime_owner_lock: Option<RuntimeOwnerLock>,
     ) -> Result<Self, RuntimeError> {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
@@ -4428,6 +4434,7 @@ impl RuntimeState {
             system_dispatch,
             system_provider_roles,
             vfs_repository_cache: vfs::VfsRepositoryCache::new(),
+            runtime_owner_lock,
         };
         state.migrate_observation_projection_schema().await?;
         state.migrate_stream_observation_failure_identity().await?;
@@ -4437,7 +4444,15 @@ impl RuntimeState {
         state.migrate_nullable_stream_partitions().await?;
         state.migrate_stream_observation_checkpoint_reuse().await?;
         state.migrate_catalogue_identity_schema().await?;
-        state.validate_recovery().await?;
+        let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
+        // Receipt recovery opens runtime while the repository journal can still
+        // be pending. Owner cleanup defers in that state and retains the full
+        // departed-owner chain until publication becomes terminal.
+        if let Some(owner_lock) = &state.runtime_owner_lock {
+            owner_lock
+                .reclaim_departed_owner_pins(&accepted_pending)
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
         Ok(state)
     }
 
@@ -13019,8 +13034,115 @@ impl RuntimeState {
         key.verify(&payload, &Signature::from_bytes(receipt.signature()))
             .map_err(|_| RuntimeError::InvalidCompactReceipt)
     }
+    /// Reads and verifies a compact receipt already persisted for this exact
+    /// repository recovery request. The original freeze is loaded from durable
+    /// runtime state; this lookup never reconstructs or consumes its prefix.
+    pub async fn persisted_compact_publication_receipt(
+        &self,
+        pending: &CompactPublicationPending,
+    ) -> Result<Option<CompactRuntimeReceipt>, RuntimeError> {
+        validate_id(pending.runtime_intent_id())?;
+        validate_digest(pending.cleanup_watermark())?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT freeze.checkpoint_generation, freeze.checkpoint_mutation_sequence,
+                        freeze.checkpoint_digest, freeze.compact_watermark,
+                        freeze.compact_commit_id, freeze.compact_journal_verifier,
+                        publication_commit.intent_id, publication_commit.commit_id,
+                        publication_commit.compact_receipt
+                 FROM publication_freeze AS freeze
+                 LEFT JOIN publication_commit
+                   ON publication_commit.intent_id = freeze.intent_id
+                 WHERE freeze.intent_id = ?1",
+                params![pending.runtime_intent_id().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            return Err(RuntimeError::RecoveryInvalid);
+        };
+        let stored_checkpoint = Checkpoint {
+            generation: u64::try_from(
+                row.get::<i64>(0)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            mutation_sequence: u64::try_from(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            digest: fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        };
+        if stored_checkpoint.digest != pending.cleanup_watermark() {
+            return Err(RuntimeError::ConflictingPublicationIntent);
+        }
+        let watermark: Option<Vec<u8>> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let bound_commit: Option<Vec<u8>> =
+            row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let verifier: Option<Vec<u8>> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let compact_binding_matches = match (watermark, bound_commit, verifier) {
+            (None, None, None) => false,
+            (Some(watermark), Some(commit), Some(verifier)) => {
+                if fixed::<32>(watermark)? != pending.cleanup_watermark()
+                    || commit != pending.commit().as_str().as_bytes()
+                    || fixed::<32>(verifier)? != pending.journal_verifier()
+                {
+                    return Err(RuntimeError::ConflictingPublicationIntent);
+                }
+                true
+            }
+            _ => return Err(RuntimeError::RecoveryInvalid),
+        };
+        let committed_intent: Option<Vec<u8>> =
+            row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let Some(committed_intent) = committed_intent else {
+            return Ok(None);
+        };
+        if fixed::<16>(committed_intent)? != pending.runtime_intent_id() {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        if !compact_binding_matches {
+            return Err(RuntimeError::RecoveryInvalid);
+        }
+        let committed_id: Vec<u8> = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        PublicationCommitId::new(committed_id.clone())
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if committed_id != pending.commit().as_str().as_bytes() {
+            return Err(RuntimeError::ConflictingPublicationCommit);
+        }
+        let encoded: Option<Vec<u8>> = row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let receipt = CompactRuntimeReceipt::decode(
+            encoded
+                .as_deref()
+                .ok_or(RuntimeError::InvalidCompactReceipt)?,
+        )
+        .map_err(|_| RuntimeError::InvalidCompactReceipt)?;
+        self.verify_compact_receipt(&receipt)?;
+        if receipt.runtime_intent_id() != pending.runtime_intent_id()
+            || receipt.cleanup_watermark() != pending.cleanup_watermark()
+            || receipt.commit() != pending.commit()
+            || receipt.journal_verifier() != pending.journal_verifier()
+        {
+            return Err(RuntimeError::ConflictingPublicationCommit);
+        }
+        Ok(Some(receipt))
+    }
 
     pub async fn validate_recovery(&self) -> Result<(), RuntimeError> {
+        self.validate_recovery_with_pin_manifest()
+            .await
+            .map(|_| ())
+    }
+
+    async fn validate_recovery_with_pin_manifest(
+        &self,
+    ) -> Result<BTreeMap<[u8; 16], BTreeMap<[u8; 16], NativeOid>>, RuntimeError> {
         let capture = self.capture().await?;
         let generation = capture
             .generation()
@@ -13066,7 +13188,8 @@ impl RuntimeState {
             _ => return Err(RuntimeError::RecoveryInvalid),
         }
         self.validate_checkpoint_anchors().await?;
-        self.validate_accepted_content_pin_recovery(generation)
+        let accepted_pending = self
+            .validate_accepted_content_pin_recovery(generation)
             .await?;
         self.validate_stream_checkpoint_history(&capture, generation)
             .await?;
@@ -13096,13 +13219,15 @@ impl RuntimeState {
             let evidence = decode_request_execution_evidence(&row, 5)?;
             validate_request_execution_evidence(&status, evidence)?;
         }
-        Ok(())
+        Ok(accepted_pending)
     }
 
     async fn validate_accepted_content_pin_recovery(
         &self,
         current_generation: u64,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<BTreeMap<[u8; 16], BTreeMap<[u8; 16], NativeOid>>, RuntimeError> {
+        let mut accepted_pending = BTreeMap::<[u8; 16], BTreeMap<[u8; 16], NativeOid>>::new();
+        let mut accepted_pin_ids = BTreeSet::new();
         let mut entries_by_generation: BTreeMap<i64, Vec<AcceptedContentPinManifestEntry>> =
             BTreeMap::new();
         let mut rows = self
@@ -13174,6 +13299,13 @@ impl RuntimeState {
             {
                 return Err(RuntimeError::RecoveryInvalid);
             }
+            let algorithm = match descriptor_oid_algorithm {
+                1 => GitHashAlgorithm::Sha1,
+                2 => GitHashAlgorithm::Sha256,
+                _ => return Err(RuntimeError::RecoveryInvalid),
+            };
+            let accepted_oid = NativeOid::new(algorithm, &descriptor_oid)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?;
             entries_by_generation
                 .entry(checkpoint_generation)
                 .or_default()
@@ -13189,6 +13321,17 @@ impl RuntimeState {
                     owner_epoch,
                     checkpoint_generation,
                 });
+            if !accepted_pin_ids.insert(pin_id) {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            if accepted_pending
+                .entry(owner_id)
+                .or_default()
+                .insert(pin_id, accepted_oid)
+                .is_some()
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
 
         let mut checkpoints = self
@@ -13223,7 +13366,7 @@ impl RuntimeState {
         if !entries_by_generation.is_empty() {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        Ok(())
+        Ok(accepted_pending)
     }
 
     async fn validate_request_admissions(

@@ -14,8 +14,8 @@
 //!
 //! - `manifest.tsv`: one header line, one `snapshot` line naming the primary
 //!   member, one `archive` line per carried snapshot plus that member's `object`
-//!   lines (kind, object ID, size), and one `dependency` line per recorded
-//!   gitlink (path, pinned commit, origin, bundle file, owning member).
+//!   lines (kind, object ID, size), and one `dependency` line per recursive
+//!   gitlink (worktree-relative path, pinned commit, origin, bundle, owner).
 //! - `snapshots/<commit>.bundle`: one self-contained Git bundle per carried
 //!   snapshot, holding that commit's complete reachable object closure.
 //! - `dependencies/<commit>.bundle`: one self-contained bundle per pinned
@@ -31,11 +31,12 @@
 //! without configuring a remote and without retaining any object from the
 //! source: the archive's bundles are resolved by ordinary Git transfer (which
 //! verifies every object ID as it indexes it), never through shared storage.
-//! The reconstructed object databases are then checked against the manifest:
-//! every recorded object must be present at the recorded kind and size, and
-//! every recorded blob's bytes are read back and re-hashed by this module's own
-//! SHA-1/SHA-256 implementation. An absent object, a changed object ID, or
-//! tampered bytes fails the reconstruction instead of reporting a complete copy.
+//! The reconstructed object databases are checked against the manifest before
+//! installation: every recorded object must be present at the recorded kind
+//! and size, and every recorded blob's bytes are read back and re-hashed by this
+//! module's own SHA-1/SHA-256 implementation. An absent object, a changed object
+//! ID, or tampered bytes fails the reconstruction without publishing a partial
+//! destination.
 //!
 //! Recovery is also readable: a reconstructed copy is an ordinary Git
 //! repository for its pinned commit and can be materialised into a CWD with
@@ -59,7 +60,7 @@ use std::{
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
-use crate::{scrub_git_routing_environment, CommittedTreeEntryKind, GitCommitRef, Repository};
+use crate::{GitCommitRef, Repository, scrub_git_routing_environment};
 
 const MANIFEST_FILE: &str = "manifest.tsv";
 const SUPERPROJECT_BUNDLE: &str = "superproject.bundle";
@@ -79,7 +80,7 @@ const RESTORED_BRANCH: &str = "orna-complete-copy";
 pub const MAX_EXPORT_OBJECTS: usize = 1_000_000;
 /// Largest number of snapshots one archive may carry.
 pub const MAX_EXPORT_SNAPSHOTS: usize = 64;
-/// Largest number of pinned dependencies one snapshot may record.
+/// Largest number of distinct dependencies one archive may record.
 pub const MAX_EXPORT_DEPENDENCIES: usize = 4096;
 /// Largest `.gitmodules` file read while resolving dependency origins.
 pub const MAX_GITMODULES_BYTES: usize = 1 << 20;
@@ -247,7 +248,7 @@ impl CompleteCopyManifest {
                 }
                 ["dependency", path, commit, origin, bundle] => {
                     if !valid_object_id(commit)
-                        || path.is_empty()
+                        || !valid_dependency_path(path)
                         || origin.is_empty()
                         || !valid_dependency_bundle(bundle)
                     {
@@ -273,7 +274,7 @@ impl CompleteCopyManifest {
                 // because two members may pin the same path differently.
                 ["dependency", path, commit, origin, bundle, member] => {
                     if !valid_object_id(commit)
-                        || path.is_empty()
+                        || !valid_dependency_path(path)
                         || origin.is_empty()
                         || !valid_dependency_bundle(bundle)
                         || !valid_object_id(member)
@@ -396,8 +397,21 @@ pub enum CompleteCopyError {
     DependencyUnavailable {
         path: String,
     },
+    /// A gitlink dependency path is unsafe or malformed.
+    InvalidDependencyPath {
+        path: String,
+    },
+    /// The pinned dependency graph contains a cycle.
+    DependencyCycle {
+        path: String,
+    },
     /// The closure exceeds the recorded object or dependency bound.
     ClosureTooLarge,
+    /// A reachable commit refers to an object absent from the local database.
+    MissingObject {
+        oid: String,
+        scope: String,
+    },
     /// A recorded integrity check failed. `scope` names what is unavailable.
     IntegrityMismatch {
         scope: String,
@@ -425,7 +439,16 @@ impl fmt::Display for CompleteCopyError {
             Self::DependencyUnavailable { path } => {
                 write!(formatter, "dependency {path} is unavailable")
             }
+            Self::InvalidDependencyPath { path } => {
+                write!(formatter, "dependency path {path} is invalid")
+            }
+            Self::DependencyCycle { path } => {
+                write!(formatter, "dependency graph cycles at {path}")
+            }
             Self::ClosureTooLarge => write!(formatter, "snapshot closure exceeds the export bound"),
+            Self::MissingObject { oid, scope } => {
+                write!(formatter, "missing Git object {oid} in {scope}")
+            }
             Self::IntegrityMismatch { scope } => {
                 write!(formatter, "integrity check failed for {scope}")
             }
@@ -450,11 +473,12 @@ impl From<std::io::Error> for CompleteCopyError {
     }
 }
 
-/// One dependency repository the exporter may read from: the pinned gitlink
-/// path and the local repository directory holding that dependency's objects.
+/// One local repository that can supply a pinned dependency and its populated
+/// descendants.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DependencySource {
-    /// Worktree-relative submodule path, matching the gitlink.
+    /// Worktree-relative dependency path; a source also covers nested paths
+    /// beneath it unless a more specific source is supplied.
     pub path: String,
     /// Local directory containing the dependency repository.
     pub directory: PathBuf,
@@ -462,11 +486,12 @@ pub struct DependencySource {
 
 /// Writes a complete copy of `selector` into `destination`.
 ///
-/// `destination` must be absent or empty. `sources` names the local
-/// directories for the snapshot's pinned dependencies; every gitlink in the
-/// snapshot must have a matching source whose repository carries the pinned
-/// commit, otherwise the export fails without writing a claimed-complete
-/// archive (ORNA-GIT-007, ORNA-GIT-012).
+/// `destination` must be absent or empty. `sources` names local repositories
+/// for pinned dependencies; a source at a dependency path also supplies nested
+/// dependencies from their corresponding subdirectories. Every recursively
+/// recorded gitlink must resolve to a local repository carrying its pinned
+/// commit, or export fails without publishing a claimed-complete archive
+/// (ORNA-GIT-007, ORNA-GIT-012).
 ///
 /// The source repository's refs, index, and worktree are not modified.
 ///
@@ -531,8 +556,9 @@ pub fn export_complete_copy_of(
         if exported.iter().any(|member| member.name == name) {
             return Err(CompleteCopyError::InvalidArchive("repeated snapshot"));
         }
+        let objects = closure_objects(&source_root, &name, &format!("snapshot {name}"))?;
         exported.push(ExportedMember {
-            objects: closure_objects(&source_root, &name)?,
+            objects,
             bundle: snapshot_bundle(&name),
             snapshot: commit,
             name,
@@ -540,34 +566,23 @@ pub fn export_complete_copy_of(
     }
 
     let dependencies = resolve_dependencies_of(repository, &exported, sources)?;
-
-    fs::create_dir_all(destination)?;
-    // Every member bundle lives under `snapshots/`, so the directory must exist
-    // before the first `git bundle create` writes into it.
-    fs::create_dir_all(destination.join(SNAPSHOTS_DIR))?;
-    for member in &exported {
-        write_bundle(
-            &source_root,
-            &member.name,
-            &destination.join(&member.bundle),
-        )?;
-    }
-    if !dependencies.is_empty() {
-        fs::create_dir_all(destination.join(DEPENDENCIES_DIR))?;
-    }
-    for dependency in &dependencies {
-        let source = dependency_directory(repository, sources, &dependency.path);
-        write_bundle(
-            &source,
-            &dependency.commit,
-            &destination.join(&dependency.bundle),
-        )?;
-    }
-
     let members = exported
         .into_iter()
         .map(ExportedMember::into_member)
         .collect::<Vec<_>>();
+    for member in &members {
+        verify_closure(
+            &source_root,
+            &member.objects,
+            &format!("snapshot {}", member.commit),
+        )?;
+    }
+    for dependency in &dependencies {
+        let source = dependency_directory(repository, sources, &dependency.path);
+        let scope = format!("dependency {} at {}", dependency.path, dependency.commit);
+        let objects = closure_objects(&source, &dependency.commit, &scope)?;
+        verify_closure(&source, &objects, &scope)?;
+    }
     let mut document = format!("{HEADER}\n");
     document.push_str(&format!("snapshot\t{}\n", members[0].commit));
     for member in &members {
@@ -591,11 +606,37 @@ pub fn export_complete_copy_of(
             dependency.member
         ));
     }
-    // The manifest is written last, so an interrupted export leaves an archive
-    // without a manifest: visibly incomplete rather than silently partial.
-    let mut file = fs::File::create(destination.join(MANIFEST_FILE))?;
+
+    // Build beside the target, then publish the complete directory with one
+    // same-filesystem rename. Failures never expose a partial archive.
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".orna-copy-")
+        .tempdir_in(parent)?;
+    let staged = staging.path();
+    fs::create_dir_all(staged.join(SNAPSHOTS_DIR))?;
+    for member in &members {
+        write_bundle(&source_root, &member.commit, &staged.join(&member.bundle))?;
+    }
+    if !dependencies.is_empty() {
+        fs::create_dir_all(staged.join(DEPENDENCIES_DIR))?;
+    }
+    for dependency in &dependencies {
+        let source = dependency_directory(repository, sources, &dependency.path);
+        write_bundle(
+            &source,
+            &dependency.commit,
+            &staged.join(&dependency.bundle),
+        )?;
+    }
+    let mut file = fs::File::create(staged.join(MANIFEST_FILE))?;
     file.write_all(document.as_bytes())?;
     file.sync_all()?;
+    fs::rename(staged, destination)?;
     Ok(CompleteCopyManifest {
         snapshot: members[0].commit.clone(),
         objects: union_objects(&members),
@@ -644,6 +685,8 @@ pub fn read_complete_copy_manifest(
 ///
 /// `destination` must be absent or empty. No remote is configured and no
 /// source-repository path is consulted; only the archive's bundles are read.
+/// Reconstruction is built in a sibling staging directory. The destination is
+/// installed only after every pinned object closure and blob has been verified.
 /// Every recorded object of every member is then re-verified against the
 /// reconstructed object databases, and the closure each member reaches is
 /// required to equal its recorded closure (see the module documentation).
@@ -653,54 +696,69 @@ pub fn restore_complete_copy(
 ) -> Result<CompleteCopyManifest, CompleteCopyError> {
     require_empty(destination)?;
     let manifest = read_complete_copy_manifest(archive)?;
-    fs::create_dir_all(destination)?;
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".orna-restore-")
+        .tempdir_in(parent)?;
+    let restored = staging.path();
 
     // The primary member is fetched first so the copy's own branch and HEAD
     // name it; the remaining members are fetched into the same object database
     // under their own bundle refs, so both snapshots are readable from one copy.
     fetch_bundle_into(
         &archive.join(&manifest.members[0].bundle),
-        destination,
+        restored,
         &manifest.members[0].commit,
     )?;
     for member in manifest.members.iter().skip(1) {
         fetch_member_into(
             &archive.join(&member.bundle),
-            destination,
+            restored,
             &member.commit,
             &member_bundle_ref(&member.commit),
         )?;
     }
     for member in &manifest.members {
         verify_closure(
-            destination,
+            restored,
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
         verify_recorded_closure(
-            destination,
+            restored,
             &member.commit,
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
-        verify_format3_snapshot(destination, &member.commit)?;
+        verify_format3_snapshot(restored, &member.commit)?;
     }
 
     for dependency in &manifest.dependencies {
-        let directory = destination.join(&dependency.path);
+        let directory = restored.join(&dependency.path);
         fs::create_dir_all(&directory)?;
         fetch_bundle_into(
             &archive.join(&dependency.bundle),
             &directory,
             &dependency.commit,
         )?;
-        let objects = closure_objects(&directory, &dependency.commit)?;
+        let objects = closure_objects(
+            &directory,
+            &dependency.commit,
+            &format!("dependency {} at {}", dependency.path, dependency.commit),
+        )?;
         verify_closure(
             &directory,
             &objects,
             &format!("dependency {}", dependency.path),
         )?;
     }
+    // The destination becomes visible only after every pinned closure and blob
+    // has been read back and verified in the isolated local reconstruction.
+    fs::rename(restored, destination)?;
     Ok(manifest)
 }
 
@@ -754,82 +812,108 @@ fn checkout(repository: &Path, commit: &str) -> Result<(), CompleteCopyError> {
     Ok(())
 }
 
-/// Resolves the gitlinks of every exported member into recorded dependencies.
+/// Resolves every exported member's gitlinks and their recursively pinned
+/// dependencies into the archive's explicit dependency map.
 ///
-/// Each distinct worktree path is recorded once. The pinned commit comes from
-/// the primary member that records it, so a member that predates a dependency
-/// bump still exports that member's own dependency commit rather than the
-/// primary member's newer one.
+/// Each dependency path is resolved against the commit that pins it. Nested
+/// repositories are inspected from their own committed tree, never from the
+/// working tree or by fetching their configured origins.
 fn resolve_dependencies_of(
     repository: &Repository,
     members: &[ExportedMember],
     sources: &[DependencySource],
 ) -> Result<Vec<CompleteCopyDependency>, CompleteCopyError> {
-    let mut dependencies: Vec<CompleteCopyDependency> = Vec::new();
+    let mut dependencies = Vec::new();
+    let mut recorded = BTreeSet::new();
+
     for exported in members {
-        let entries = repository
-            .list_committed_tree(&exported.snapshot, MAX_EXPORT_OBJECTS)
-            .map_err(|_| CompleteCopyError::GitUnavailable)?;
-        let mut gitlink_paths = Vec::new();
-        for entry in &entries {
-            if entry.kind() == CommittedTreeEntryKind::Submodule {
-                let path = entry
-                    .path()
-                    .as_path()
-                    .to_str()
-                    .ok_or(CompleteCopyError::InvalidArchive(
-                        "dependency path is not UTF-8",
-                    ))?
-                    .to_owned();
-                gitlink_paths.push(path);
-            }
-        }
-        if gitlink_paths.is_empty() {
+        // Repository's committed-tree convenience methods spawn their own Git
+        // processes after scrubbing routing variables, which also discards
+        // GIT_NO_REPLACE_OBJECTS. Read the pinned commit directly through this
+        // module's replacement-safe Git wrapper instead.
+        let snapshot = exported.snapshot.as_str();
+        let gitlinks = committed_gitlinks(repository.worktree(), snapshot)?;
+        if gitlinks.is_empty() {
             continue;
         }
-        let origins = read_gitmodules(repository, &exported.snapshot)?;
-        for path in gitlink_paths {
-            let origin = origins
-                .iter()
-                .find(|(candidate, _)| *candidate == path)
-                .map(|(_, origin)| origin.clone())
-                .ok_or_else(|| CompleteCopyError::MissingDependencyOrigin { path: path.clone() })?;
-            let source = dependency_directory(repository, sources, &path);
-            if !is_repository(&source) {
-                return Err(CompleteCopyError::DependencyUnavailable { path });
+        let origins = read_gitmodules_from(repository.worktree(), snapshot)?;
+        let mut work = Vec::new();
+        for (path, commit) in gitlinks {
+            if !valid_dependency_path(&path) {
+                return Err(CompleteCopyError::InvalidDependencyPath { path });
             }
-            let commit = repository
-                .committed_submodule_commit(&exported.snapshot, &path)
-                .map_err(|_| CompleteCopyError::DependencyUnavailable { path: path.clone() })?;
-            let commit = commit.as_str().to_owned();
-            // The pinned commit must be present in the dependency's own object
-            // database before this export may claim to carry it.
-            if object_at(&source, &commit)?.is_none() {
-                return Err(CompleteCopyError::DependencyUnavailable { path });
-            }
-            // Two members may pin the same dependency differently; both commits
-            // are carried, each under its own bundle.
-            if dependencies
-                .iter()
-                .any(|existing| existing.path == path && existing.commit == commit)
-            {
-                continue;
-            }
-            if dependencies.len() == MAX_EXPORT_DEPENDENCIES {
-                return Err(CompleteCopyError::ClosureTooLarge);
-            }
-            dependencies.push(CompleteCopyDependency {
+            let origin = dependency_origin(&origins, &path)?;
+            work.push(DependencyWork::Enter(DependencyCandidate {
                 path,
-                bundle: format!("{DEPENDENCIES_DIR}/{commit}.bundle"),
                 commit,
                 origin,
                 member: exported.name.clone(),
-            });
+            }));
         }
-        if dependencies.len() > MAX_EXPORT_DEPENDENCIES {
-            return Err(CompleteCopyError::ClosureTooLarge);
+
+        let mut active = BTreeSet::from([exported.name.clone()]);
+        while let Some(event) = work.pop() {
+            match event {
+                DependencyWork::Exit(commit) => {
+                    active.remove(&commit);
+                }
+                DependencyWork::Enter(candidate) => {
+                    if active.contains(&candidate.commit) {
+                        return Err(CompleteCopyError::DependencyCycle {
+                            path: candidate.path,
+                        });
+                    }
+                    if !recorded.insert((candidate.path.clone(), candidate.commit.clone())) {
+                        continue;
+                    }
+                    let source = dependency_directory(repository, sources, &candidate.path);
+                    if !is_repository(&source) {
+                        return Err(CompleteCopyError::DependencyUnavailable {
+                            path: candidate.path,
+                        });
+                    }
+                    if object_at(&source, &candidate.commit)?.is_none() {
+                        return Err(CompleteCopyError::MissingObject {
+                            oid: candidate.commit,
+                            scope: format!("dependency {}", candidate.path),
+                        });
+                    }
+                    if dependencies.len() == MAX_EXPORT_DEPENDENCIES {
+                        return Err(CompleteCopyError::ClosureTooLarge);
+                    }
+                    dependencies.push(CompleteCopyDependency {
+                        path: candidate.path.clone(),
+                        bundle: format!("{DEPENDENCIES_DIR}/{}.bundle", candidate.commit),
+                        commit: candidate.commit.clone(),
+                        origin: candidate.origin,
+                        member: candidate.member.clone(),
+                    });
+
+                    let gitlinks = committed_gitlinks(&source, &candidate.commit)?;
+                    if gitlinks.is_empty() {
+                        continue;
+                    }
+                    let nested_origins = read_gitmodules_from(&source, &candidate.commit)?;
+                    active.insert(candidate.commit.clone());
+                    work.push(DependencyWork::Exit(candidate.commit));
+                    for (relative_path, commit) in gitlinks.into_iter().rev() {
+                        let path = format!("{}/{relative_path}", candidate.path);
+                        if !valid_dependency_path(&path) {
+                            return Err(CompleteCopyError::InvalidDependencyPath { path });
+                        }
+                        let origin = dependency_origin(&nested_origins, &relative_path)?;
+                        work.push(DependencyWork::Enter(DependencyCandidate {
+                            path,
+                            commit,
+                            origin,
+                            member: candidate.member.clone(),
+                        }));
+                    }
+                }
+            }
         }
     }
+
     dependencies.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
@@ -838,12 +922,33 @@ fn resolve_dependencies_of(
     Ok(dependencies)
 }
 
-/// The local repository directory for one gitlink path.
-///
-/// The pinned commit is read through the worktree, but a dependency's objects
-/// are read from a local repository: the exported source when the caller names
-/// one, otherwise the dependency checked out at that very gitlink path, which
-/// is where a repository with populated dependencies keeps it.
+struct DependencyCandidate {
+    path: String,
+    commit: String,
+    origin: String,
+    member: String,
+}
+
+enum DependencyWork {
+    Enter(DependencyCandidate),
+    Exit(String),
+}
+
+fn dependency_origin(
+    origins: &[(String, String)],
+    path: &str,
+) -> Result<String, CompleteCopyError> {
+    origins
+        .iter()
+        .find(|(candidate, _)| candidate == path)
+        .map(|(_, origin)| origin.clone())
+        .ok_or_else(|| CompleteCopyError::MissingDependencyOrigin {
+            path: path.to_owned(),
+        })
+}
+
+/// The local repository directory for one gitlink path. An explicit source
+/// covers that path and its nested gitlinks; the longest matching source wins.
 fn dependency_directory(
     repository: &Repository,
     sources: &[DependencySource],
@@ -851,8 +956,16 @@ fn dependency_directory(
 ) -> PathBuf {
     sources
         .iter()
-        .find(|source| source.path == path)
-        .map(|source| source.directory.clone())
+        .filter_map(|source| {
+            let relative = if path == source.path {
+                ""
+            } else {
+                path.strip_prefix(&source.path)?.strip_prefix('/')?
+            };
+            Some((source.path.len(), source.directory.join(relative)))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, directory)| directory)
         .unwrap_or_else(|| repository.worktree().join(path))
 }
 
@@ -874,84 +987,171 @@ fn is_repository(directory: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Reads the committed `.gitmodules` file as `path`/`url` pairs. A snapshot
-/// without `.gitmodules` records no origins.
-fn read_gitmodules(
-    repository: &Repository,
-    snapshot: &GitCommitRef,
+/// Lists the committed gitlinks without consulting a checkout or remote.
+fn committed_gitlinks(
+    directory: &Path,
+    commit: &str,
 ) -> Result<Vec<(String, String)>, CompleteCopyError> {
-    let bytes = match repository.read_committed_file(snapshot, ".gitmodules", MAX_GITMODULES_BYTES)
+    let output = git_output(directory, &["ls-tree", "-r", "-z", "--full-tree", commit])?;
+    let mut gitlinks = Vec::new();
+    let mut entries = 0;
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
     {
+        entries += 1;
+        if entries > MAX_EXPORT_OBJECTS {
+            return Err(CompleteCopyError::ClosureTooLarge);
+        }
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or(CompleteCopyError::GitUnavailable)?;
+        let mut fields = record[..separator].split(|byte| *byte == b' ');
+        let (Some(mode), Some(kind), Some(oid), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(CompleteCopyError::GitUnavailable);
+        };
+        if mode != b"160000" {
+            continue;
+        }
+        let path = std::str::from_utf8(&record[separator + 1..])
+            .map_err(|_| CompleteCopyError::InvalidArchive("dependency path is not UTF-8"))?
+            .to_owned();
+        let commit = std::str::from_utf8(oid).map_err(|_| CompleteCopyError::GitUnavailable)?;
+        if kind != b"commit" || !valid_object_id(commit) || !valid_dependency_path(&path) {
+            return Err(CompleteCopyError::InvalidDependencyPath { path });
+        }
+        gitlinks.push((path, commit.to_owned()));
+        if gitlinks.len() > MAX_EXPORT_DEPENDENCIES {
+            return Err(CompleteCopyError::ClosureTooLarge);
+        }
+    }
+    Ok(gitlinks)
+}
+
+fn read_gitmodules_from(
+    directory: &Path,
+    commit: &str,
+) -> Result<Vec<(String, String)>, CompleteCopyError> {
+    let spec = format!("{commit}:.gitmodules");
+    let bytes = match git_output(directory, &["show", &spec]) {
         Ok(bytes) => bytes,
         Err(_) => return Ok(Vec::new()),
     };
+    if bytes.len() > MAX_GITMODULES_BYTES {
+        return Err(CompleteCopyError::InvalidArchive(
+            "`.gitmodules` exceeds bound",
+        ));
+    }
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"))?;
     parse_gitmodules(text)
 }
 
-/// Parses `[submodule ...]` sections, one `path`/`url` pair each. A value is a
-/// single token; a value containing a control character is refused rather than
-/// truncated into the manifest.
+fn valid_dependency_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.contains(':')
+        && !path.bytes().any(|byte| byte.is_ascii_control())
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+/// Parses committed `.gitmodules` with Git's config parser so quoted paths and
+/// URLs are decoded before they are matched to gitlinks.
 fn parse_gitmodules(text: &str) -> Result<Vec<(String, String)>, CompleteCopyError> {
-    let mut pairs = Vec::new();
-    let mut in_section = false;
-    let mut path: Option<String> = None;
-    let mut url: Option<String> = None;
-    let flush = |path: &mut Option<String>, url: &mut Option<String>, pairs: &mut Vec<_>| {
-        if let (Some(path), Some(url)) = (path.take(), url.take()) {
-            pairs.push((path, url));
-        }
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            if in_section {
-                flush(&mut path, &mut url, &mut pairs);
-            }
-            in_section = line.starts_with("[submodule ");
-            path = None;
-            url = None;
-            continue;
-        }
-        if !in_section || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
+    let output = git_output_stdin(
+        Path::new("."),
+        &["config", "--no-includes", "--null", "--list", "--file", "-"],
+        Some(text.as_bytes()),
+    )?;
+    let mut sections: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or(CompleteCopyError::GitUnavailable)?;
+        let key = std::str::from_utf8(&record[..separator])
+            .map_err(|_| CompleteCopyError::GitUnavailable)?;
+        let value = std::str::from_utf8(&record[separator + 1..])
+            .map_err(|_| CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"))?;
+        let Some(key) = key.get("submodule.".len()..).filter(|_| {
+            key.get(.."submodule.".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("submodule."))
+        }) else {
             continue;
         };
-        let value = value.trim();
-        if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control()) {
+        let (name, is_path) = if key.len() >= ".path".len()
+            && key
+                .get(key.len() - ".path".len()..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".path"))
+        {
+            (&key[..key.len() - ".path".len()], true)
+        } else if key.len() >= ".url".len()
+            && key
+                .get(key.len() - ".url".len()..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".url"))
+        {
+            (&key[..key.len() - ".url".len()], false)
+        } else {
+            continue;
+        };
+        if name.is_empty() || value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control())
+        {
             return Err(CompleteCopyError::InvalidArchive("`.gitmodules` value"));
         }
-        match key.trim() {
-            "path" => path = Some(value.to_owned()),
-            "url" => url = Some(value.to_owned()),
-            _ => {}
+        let pair = sections.entry(name.to_owned()).or_default();
+        if is_path {
+            pair.0 = Some(value.to_owned());
+        } else {
+            pair.1 = Some(value.to_owned());
         }
     }
-    if in_section {
-        flush(&mut path, &mut url, &mut pairs);
-    }
-    Ok(pairs)
+    Ok(sections
+        .into_values()
+        .filter_map(|(path, url)| path.zip(url))
+        .collect())
 }
 
 /// Lists every object reachable from `commit`, ordered by object ID.
 fn closure_objects(
     directory: &Path,
     commit: &str,
+    scope: &str,
 ) -> Result<Vec<CompleteCopyObject>, CompleteCopyError> {
     let listing = git_output(
         directory,
-        &["rev-list", "--objects", "--no-object-names", commit],
+        &[
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+            "--missing=print",
+            commit,
+        ],
     )?;
     let text = std::str::from_utf8(&listing).map_err(|_| CompleteCopyError::GitUnavailable)?;
     let mut unique = BTreeSet::new();
-    for oid in text.split_ascii_whitespace() {
-        if !valid_object_id(oid) {
+    for listed_oid in text.split_ascii_whitespace() {
+        if let Some(oid) = listed_oid.strip_prefix('?') {
+            if !valid_object_id(oid) {
+                return Err(CompleteCopyError::GitUnavailable);
+            }
+            return Err(CompleteCopyError::MissingObject {
+                oid: oid.to_owned(),
+                scope: scope.to_owned(),
+            });
+        }
+        if !valid_object_id(listed_oid) {
             return Err(CompleteCopyError::GitUnavailable);
         }
-        unique.insert(oid.to_owned());
+        unique.insert(listed_oid.to_owned());
     }
     if unique.len() > MAX_EXPORT_OBJECTS {
         return Err(CompleteCopyError::ClosureTooLarge);
@@ -959,8 +1159,9 @@ fn closure_objects(
     let mut objects = Vec::with_capacity(unique.len());
     for oid in unique {
         let Some((kind, size)) = object_at(directory, &oid)? else {
-            return Err(CompleteCopyError::IntegrityMismatch {
-                scope: format!("object {oid}"),
+            return Err(CompleteCopyError::MissingObject {
+                oid,
+                scope: scope.to_owned(),
             });
         };
         objects.push(CompleteCopyObject { kind, oid, size });
@@ -1075,7 +1276,7 @@ fn verify_recorded_closure(
             scope: format!("{scope}: no object is recorded"),
         });
     }
-    let reached = closure_objects(directory, commit)?;
+    let reached = closure_objects(directory, commit, scope)?;
     let reached: BTreeMap<&str, (CompleteCopyObjectKind, u64)> = reached
         .iter()
         .map(|object| (object.oid.as_str(), (object.kind, object.size)))
@@ -1085,12 +1286,12 @@ fn verify_recorded_closure(
             None => {
                 return Err(CompleteCopyError::IntegrityMismatch {
                     scope: format!("{scope}: object {} is not reachable", object.oid),
-                })
+                });
             }
             Some((kind, size)) if *kind != object.kind || *size != object.size => {
                 return Err(CompleteCopyError::IntegrityMismatch {
                     scope: format!("{scope}: object {}", object.oid),
-                })
+                });
             }
             Some(_) => {}
         }
@@ -1156,6 +1357,9 @@ fn verify_blob(directory: &Path, oid: &str, size: u64) -> Result<(), CompleteCop
     // A recovery export is deliberately local-only: never lazily fetch missing
     // objects from a promisor remote recorded by the source repository.
     command.env("GIT_NO_LAZY_FETCH", "1");
+    // Replacement refs can redirect a snapshot walk away from its committed
+    // native graph, silently dropping secondary row-map roots from the copy.
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
     command.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command
         .spawn()
@@ -1443,6 +1647,8 @@ fn git_output_stdin(
     // Read only objects already present in this repository; the archive must
     // not depend on a configured remote being reachable.
     command.env("GIT_NO_LAZY_FETCH", "1");
+    // Resolve the immutable object graph, not a local refs/replace overlay.
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
     command.stdin(if stdin.is_some() {
         Stdio::piped()
     } else {
@@ -1474,14 +1680,13 @@ fn git_output_stdin(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_gitmodules, valid_dependency_bundle, valid_object_id, valid_snapshot_bundle,
-        CompleteCopyManifest,
+        CompleteCopyError, CompleteCopyManifest, parse_gitmodules, valid_dependency_bundle,
+        valid_object_id, valid_snapshot_bundle,
     };
 
     #[test]
     fn gitmodules_pairs_are_read_one_section_at_a_time() {
-        let text =
-            "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/std.git\n\
+        let text = "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/std.git\n\
                     [submodule \"tools\"]\n\tpath = tools\n\turl = ../tools.git\n\tbranch = main\n";
         assert_eq!(
             parse_gitmodules(text).unwrap(),
@@ -1492,6 +1697,18 @@ mod tests {
                 ),
                 ("tools".to_owned(), "../tools.git".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn gitmodules_quoted_values_are_decoded() {
+        let text = "[submodule \"reference\"]\n\tpath = \"deps/reference project\"\n\turl = \"file:///tmp/reference project\"\n";
+        assert_eq!(
+            parse_gitmodules(text).unwrap(),
+            vec![(
+                "deps/reference project".to_owned(),
+                "file:///tmp/reference project".to_owned()
+            )]
         );
     }
 
@@ -1550,6 +1767,19 @@ mod tests {
     }
 
     #[test]
+    fn manifest_rejects_dependency_paths_outside_the_restored_tree() {
+        let document = "orna-complete-copy 2\n\
+             snapshot\t0123456789012345678901234567890123456789\n\
+             archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\n\
+             object\tcommit\t0123456789012345678901234567890123456789\t120\n\
+             dependency\t../../outside\tabcdef0123456789abcdef0123456789abcdef01\thttps://example.invalid/dep.git\tdependencies/abcdef0123456789abcdef0123456789abcdef01.bundle\t0123456789012345678901234567890123456789\n";
+        assert!(matches!(
+            CompleteCopyManifest::decode(document),
+            Err(CompleteCopyError::InvalidArchive("dependency line"))
+        ));
+    }
+
+    #[test]
     fn header_1_archives_still_decode_as_one_member() {
         // An archive written before members existed carries one closure under a
         // fixed bundle name and names no member on its dependency line.
@@ -1574,16 +1804,20 @@ mod tests {
         assert!(
             CompleteCopyManifest::decode("orna-complete-copy 1\nobject\tblob\tzz\t1\n").is_err()
         );
-        assert!(CompleteCopyManifest::decode(
-            "orna-complete-copy 1\nsnapshot\t0123456789012345678901234567890123456789\nrow\tx\n"
-        )
-        .is_err());
+        assert!(
+            CompleteCopyManifest::decode(
+                "orna-complete-copy 1\nsnapshot\t0123456789012345678901234567890123456789\nrow\tx\n"
+            )
+            .is_err()
+        );
         // A current archive names its members; a missing one is not a copy.
-        assert!(CompleteCopyManifest::decode(
-            "orna-complete-copy 2\nsnapshot\t0123456789012345678901234567890123456789\n\
+        assert!(
+            CompleteCopyManifest::decode(
+                "orna-complete-copy 2\nsnapshot\t0123456789012345678901234567890123456789\n\
              object\tcommit\t0123456789012345678901234567890123456789\t120\n"
-        )
-        .is_err());
+            )
+            .is_err()
+        );
         // The primary member must be the snapshot the header line names.
         assert!(CompleteCopyManifest::decode(
             "orna-complete-copy 2\nsnapshot\t0123456789012345678901234567890123456789\n\
@@ -1598,11 +1832,13 @@ mod tests {
         )
         .is_err());
         // A member bundle may not point outside the archive.
-        assert!(CompleteCopyManifest::decode(
-            "orna-complete-copy 2\nsnapshot\t0123456789012345678901234567890123456789\n\
+        assert!(
+            CompleteCopyManifest::decode(
+                "orna-complete-copy 2\nsnapshot\t0123456789012345678901234567890123456789\n\
              archive\t0123456789012345678901234567890123456789\t../../escape.bundle\n"
-        )
-        .is_err());
+            )
+            .is_err()
+        );
         assert!(!valid_object_id("0123456789"));
         assert!(valid_object_id("0123456789012345678901234567890123456789"));
     }

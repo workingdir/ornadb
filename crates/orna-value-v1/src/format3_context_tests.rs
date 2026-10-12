@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    io::Cursor,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use super::*;
@@ -28,19 +31,80 @@ fn test_context(resolver: Arc<dyn BlobResolver>) -> Format3Context {
 }
 
 fn test_context_with_quota(resolver: Arc<dyn BlobResolver>, quota: Format3Quota) -> Format3Context {
+    test_context_with_store_root(resolver, NativeOid::from_bytes(&[8; 20]).unwrap(), quota)
+}
+
+fn test_context_with_store_root(
+    resolver: Arc<dyn BlobResolver>,
+    store_root: NativeOid,
+    quota: Format3Quota,
+) -> Format3Context {
     let database = [1; 16];
     Format3Context::from_persisted(
         database,
         Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
         GitHash::Sha1,
         NativeOid::from_bytes(&[9; 20]).unwrap(),
-        NativeOid::from_bytes(&[8; 20]).unwrap(),
+        store_root,
         AvailabilityState::Available,
         OwnerLifetime::new([3; 16]),
         quota,
         resolver,
     )
     .unwrap()
+}
+
+#[test]
+fn context_backed_resolver_rejects_foreign_store_root_bindings() {
+    let bytes = b"protected payload";
+    let identity = ContentIdentity::from_bytes(bytes);
+    let descriptor_oid = NativeOid::from_bytes(&[0x42; 20]).unwrap();
+    let store_root = NativeOid::from_bytes(&[0x43; 20]).unwrap();
+    let resolver = Arc::new(ContextBoundResolver {
+        store_root: store_root.clone(),
+        descriptor_oid: descriptor_oid.clone(),
+        identity,
+        bytes: bytes.to_vec(),
+        reads: AtomicUsize::new(0),
+    });
+
+    let context = test_context_with_store_root(
+        resolver.clone(),
+        store_root,
+        Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+    );
+    let reference = context.reference(identity, descriptor_oid.clone()).unwrap();
+    let blob = Blob::from_reference_with_annotation(reference, "audio/mpeg", Some("mp3")).unwrap();
+    assert_eq!(blob.read_to_end().unwrap(), bytes);
+    assert_eq!(blob.media_type(), "audio/mpeg");
+    assert_eq!(blob.suffix(), Some("mp3"));
+    let decoded = decode_rov3_in_context(&encode_rov3(&blob).unwrap(), &context).unwrap();
+    assert_eq!(decoded.content_identity(), identity);
+    assert_eq!(decoded.descriptor_oid(), Some(&descriptor_oid));
+    assert_eq!(decoded.media_type(), "audio/mpeg");
+    assert_eq!(decoded.suffix(), Some("mp3"));
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
+
+    let uncommitted_descriptor = context
+        .reference(identity, NativeOid::from_bytes(&[0x45; 20]).unwrap())
+        .unwrap();
+    assert_eq!(
+        resolver.read_range(&uncommitted_descriptor, 0, identity.length()),
+        Err(Error::InvalidContext)
+    );
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
+
+    let foreign_context = test_context_with_store_root(
+        resolver.clone(),
+        NativeOid::from_bytes(&[0x44; 20]).unwrap(),
+        Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+    );
+    let foreign_reference = foreign_context.reference(identity, descriptor_oid).unwrap();
+    assert_eq!(
+        resolver.read_range(&foreign_reference, 0, identity.length()),
+        Err(Error::InvalidContext)
+    );
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -166,6 +230,57 @@ fn ovb2_blob_encoder_preflights_sink_and_streams_public_encoding() {
 }
 
 #[test]
+fn reader_ovb2_encoder_preflights_and_requires_exact_source_length() {
+    let annotation = MimeRegistry::mime1()
+        .annotation("text/plain;charset=utf-8", None)
+        .unwrap();
+    let expected =
+        hex_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6");
+    let mut reader = Cursor::new(&b"abc"[..]);
+    let mut output = Vec::new();
+
+    assert_eq!(
+        encode_ovb2_reader_to_writer(
+            &mut reader,
+            3,
+            &annotation,
+            &mut output,
+            (expected.len() - 1) as u64,
+        ),
+        Err(Error::QuotaExceeded)
+    );
+    assert_eq!(reader.position(), 0);
+    assert!(output.is_empty());
+
+    let encoded_length = encode_ovb2_reader_to_writer(
+        &mut reader,
+        3,
+        &annotation,
+        &mut output,
+        expected.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(encoded_length, expected.len() as u64);
+    assert_eq!(output, expected);
+    let decoded = decode_ovb2(&output).unwrap();
+    assert_eq!(decoded.read_to_end().unwrap(), b"abc");
+
+    let mut short = Cursor::new(&b"ab"[..]);
+    let mut discarded = Vec::new();
+    assert_eq!(
+        encode_ovb2_reader_to_writer(&mut short, 3, &annotation, &mut discarded, u64::MAX,),
+        Err(Error::ContentUnavailable)
+    );
+
+    let mut long = Cursor::new(&b"abcd"[..]);
+    let mut discarded = Vec::new();
+    assert_eq!(
+        encode_ovb2_reader_to_writer(&mut long, 3, &annotation, &mut discarded, u64::MAX,),
+        Err(Error::InvalidRange)
+    );
+}
+
+#[test]
 fn mime1_annotations_reject_noncanonical_and_unsafe_inputs() {
     assert_eq!(
         decode_typed::<Vec<u8>>(&hex_bytes("436a7067")).unwrap(),
@@ -259,8 +374,14 @@ fn mime1_annotations_reject_noncanonical_and_unsafe_inputs() {
     assert_eq!(blob.content_identity(), annotated.content_identity());
     assert!(blob.same_content(&annotated).unwrap());
     assert!(!blob.value_eq(&annotated).unwrap());
-    assert_ne!(encode_rov3(&blob).unwrap(), encode_rov3(&annotated).unwrap());
-    assert_ne!(encode_sov3(&blob).unwrap(), encode_sov3(&annotated).unwrap());
+    assert_ne!(
+        encode_rov3(&blob).unwrap(),
+        encode_rov3(&annotated).unwrap()
+    );
+    assert_ne!(
+        encode_sov3(&blob).unwrap(),
+        encode_sov3(&annotated).unwrap()
+    );
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
     assert_eq!(
         Blob::from_semantic_commitment_in_context(identity, &context, "image/jpeg", Some("png")),
@@ -384,7 +505,11 @@ fn annotate_canonicalizes_mime_and_suffix_without_hydrating_content() {
         .annotate("Application/JavaScript;CHARSET=\"UTF-8\"", Some("JS"))
         .unwrap();
     assert_eq!(javascript.media_type(), "text/javascript;charset=utf-8");
-    assert_eq!(javascript.suffix(), None, "preferred suffix is stored as no hint");
+    assert_eq!(
+        javascript.suffix(),
+        None,
+        "preferred suffix is stored as no hint"
+    );
     assert_eq!(javascript.content_identity(), identity);
 
     let gzip = blob.annotate("application/gzip", Some("TAR.GZ")).unwrap();
@@ -689,6 +814,28 @@ fn content_identity_is_separate_from_annotated_value_equality() {
     assert_eq!(first.value_eq(&second), Err(Error::ContentUnavailable));
 }
 
+#[test]
+fn identical_reference_bindings_short_circuit_only_within_one_context() {
+    let bytes = b"payload";
+    let identity = ContentIdentity::from_bytes(bytes);
+    let resolver = counting_resolver(bytes);
+    let context = test_context(resolver.clone());
+    let descriptor_oid = NativeOid::from_bytes(&[0x42; 20]).unwrap();
+    let left_reference = context.reference(identity, descriptor_oid.clone()).unwrap();
+    let same_context_reference = context.reference(identity, descriptor_oid.clone()).unwrap();
+    assert_eq!(left_reference, same_context_reference);
+
+    let left = Blob::from_reference(left_reference).unwrap();
+    let same_context = Blob::from_reference(same_context_reference).unwrap();
+    assert!(left.same_content(&same_context).unwrap());
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
+    let foreign_context = test_context(resolver.clone());
+    let foreign =
+        Blob::from_reference(foreign_context.reference(identity, descriptor_oid).unwrap()).unwrap();
+    assert!(left.same_content(&foreign).unwrap());
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 2);
+}
+
 struct CountingResolver {
     bytes: Vec<u8>,
     reads: AtomicUsize,
@@ -708,5 +855,35 @@ impl BlobResolver for CountingResolver {
         let start = offset as usize;
         let end = start + length as usize;
         Ok(self.bytes[start..end].to_vec())
+    }
+}
+struct ContextBoundResolver {
+    store_root: NativeOid,
+    descriptor_oid: NativeOid,
+    identity: ContentIdentity,
+    bytes: Vec<u8>,
+    reads: AtomicUsize,
+}
+
+impl BlobResolver for ContextBoundResolver {
+    fn read_range(
+        &self,
+        reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>> {
+        let context = reference.context();
+        if context.store_root() != &self.store_root
+            || reference.descriptor_oid() != &self.descriptor_oid
+            || reference.identity() != self.identity
+        {
+            return Err(Error::InvalidContext);
+        }
+        let start = usize::try_from(offset).map_err(|_| Error::InvalidRange)?;
+        let length = usize::try_from(length).map_err(|_| Error::InvalidRange)?;
+        let end = start.checked_add(length).ok_or(Error::InvalidRange)?;
+        let bytes = self.bytes.get(start..end).ok_or(Error::InvalidRange)?;
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(bytes.to_vec())
     }
 }
