@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use num_traits::ToPrimitive;
 use orna_syntax_v1::{Declaration, TypeMember, TypeRepresentation, parse_module_with_file};
 use orna_value_v1::{Raw, Value};
 use uuid::Uuid;
@@ -243,7 +244,10 @@ fn qualify(namespace: &str, name: &str) -> String {
 }
 
 fn int_u64(raw: &Raw) -> Option<u64> {
-    if let Raw::Int(value) = raw { value.to_string().parse().ok() } else { None }
+    match raw {
+        Raw::Int(value) => value.to_u64(),
+        _ => None,
+    }
 }
 
 fn validate_records(records: &[ObjectIdentity]) -> Result<(), ObjectIdentityError> {
@@ -252,7 +256,8 @@ fn validate_records(records: &[ObjectIdentity]) -> Result<(), ObjectIdentityErro
     for record in records {
         if record.qualified_name.is_empty()
             || record.qualified_name.contains('\0')
-            || (!record.retired && !active_keys.insert((record.kind, record.qualified_name.as_str())))
+            || (!record.retired
+                && !active_keys.insert((record.kind, record.qualified_name.as_str())))
             || !ids.insert(record.id)
         {
             return Err(ObjectIdentityError::IdentityCollision);
