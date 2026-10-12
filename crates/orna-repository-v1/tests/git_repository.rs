@@ -7106,6 +7106,97 @@ fn compact_post_ref_recovery_preserves_unrelated_partial_staging() {
 }
 
 #[test]
+fn compact_post_ref_worktree_conflict_retains_journal_and_retries_reconciliation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::new_v4();
+    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
+    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
+    let staged_before = git(root.path(), &["diff", "--cached", "--binary"]);
+    let unstaged_before = git(root.path(), &["diff", "--binary"]);
+
+    let segment = compact_segment(table, 1, b"compact object\n".to_vec());
+    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+    let segment_path = PathBuf::from(format!(
+        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
+        &segment_id.to_string()[..2]
+    ));
+    let plan = compact_plan(&repo, table, [54; 16], &[segment]);
+    let old_head = repo.head().unwrap().unwrap();
+    let candidate = plan.candidate_commit().clone();
+    repo.persist_compact_publication(&plan).unwrap();
+    git(
+        root.path(),
+        &[
+            "update-ref",
+            "refs/heads/main",
+            candidate.as_str(),
+            old_head.as_str(),
+        ],
+    );
+
+    let conflict = root.path().join(&segment_path);
+    fs::create_dir_all(conflict.parent().unwrap()).unwrap();
+    fs::write(&conflict, b"concurrent worktree content\n").unwrap();
+    assert!(matches!(
+        repo.recover_compact_publication_boundary(),
+        Err(RepositoryError::ManagedContentConflict)
+    ));
+    let retained = repo.read_publication_journal().unwrap().unwrap();
+    assert_eq!(retained.stage(), PublicationJournalStage::IndexReconciled);
+    assert_eq!(repo.head().unwrap(), Some(candidate.clone()));
+    assert_eq!(
+        fs::read(&conflict).unwrap(),
+        b"concurrent worktree content\n"
+    );
+    assert_eq!(
+        git(root.path(), &["diff", "--cached", "--binary"]),
+        staged_before
+    );
+    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
+    assert_eq!(
+        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
+        "untracked ordinary\n"
+    );
+
+    fs::remove_file(conflict).unwrap();
+    let recovery = repo
+        .recover_compact_publication_boundary()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        recovery,
+        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(pending)
+            if pending.commit() == &candidate
+    ));
+    let completed = repo.read_publication_journal().unwrap().unwrap();
+    assert_eq!(
+        completed.stage(),
+        PublicationJournalStage::WorktreeReconciled
+    );
+    let published_segment = Command::new("git")
+        .current_dir(root.path())
+        .args([
+            "show",
+            &format!("{}:{}", candidate.as_str(), segment_path.display()),
+        ])
+        .output()
+        .unwrap();
+    assert!(published_segment.status.success());
+    assert_eq!(
+        fs::read(root.path().join(&segment_path)).unwrap(),
+        published_segment.stdout
+    );
+    assert_eq!(
+        git(root.path(), &["diff", "--cached", "--binary"]),
+        staged_before
+    );
+    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
+}
+
+#[test]
 fn compact_prepared_publication_stale_head_retains_journal_and_requires_reconciliation() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
