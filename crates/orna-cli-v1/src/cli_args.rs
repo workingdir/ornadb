@@ -52,8 +52,13 @@ impl StatusFormat {
 pub(super) enum Command {
     Repl(Option<String>),
     Init(Option<PathBuf>),
-    Status { format: StatusFormat },
-    Fetch { remote: String, branch: String },
+    Status {
+        format: StatusFormat,
+    },
+    Fetch {
+        remote: String,
+        branch: String,
+    },
     /// `push [REMOTE] [BRANCH]`: publish the ordinary branch ref together with
     /// the continuity refs an ordinary push synchronizes (ORNA-GIT-008).
     Push {
@@ -64,7 +69,9 @@ pub(super) enum Command {
         format: LegendFormat,
         limit: Option<usize>,
     },
-    Serve { port: u16 },
+    Serve {
+        port: u16,
+    },
     /// `mount DIR --at SELECTOR`: one read-only view of an exactly-resolved
     /// snapshot (VFS-1).
     Mount {
@@ -72,9 +79,13 @@ pub(super) enum Command {
         selector: String,
     },
     /// `mount status [--json]`: the attached read-only views.
-    MountStatus { json: bool },
+    MountStatus {
+        json: bool,
+    },
     /// `unmount DIR`: release the view's record, nothing else.
-    Unmount { mountpoint: PathBuf },
+    Unmount {
+        mountpoint: PathBuf,
+    },
     Diff(Vec<String>),
     Log(Vec<String>),
     History(Vec<String>),
@@ -82,6 +93,7 @@ pub(super) enum Command {
     Import(Vec<String>),
     Export(Vec<String>),
     Publish(Vec<String>),
+    Migrate(Vec<String>),
     Check,
     Explain(String),
     Invoke(String),
@@ -170,13 +182,17 @@ fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Dia
         )
     };
     let limit = |value: &str| {
-        value.parse::<usize>().ok().filter(|count| *count > 0).ok_or_else(|| {
-            Diagnostic::usage(
-                "E1002",
-                "invalid `semantic-legend --limit` value",
-                "use a positive integer, such as `--limit 5`",
-            )
-        })
+        value
+            .parse::<usize>()
+            .ok()
+            .filter(|count| *count > 0)
+            .ok_or_else(|| {
+                Diagnostic::usage(
+                    "E1002",
+                    "invalid `semantic-legend --limit` value",
+                    "use a positive integer, such as `--limit 5`",
+                )
+            })
     };
     match args {
         [] => Ok((LegendFormat::Text, None)),
@@ -322,7 +338,9 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 ));
             }
             Command::Status {
-                format: local_format.or(output_format).unwrap_or(StatusFormat::Human),
+                format: local_format
+                    .or(output_format)
+                    .unwrap_or(StatusFormat::Human),
             }
         }
         Some("semantic-legend") => {
@@ -431,11 +449,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         }
         Some("unmount") => {
             let mountpoint = words.next().ok_or_else(|| {
-                Diagnostic::usage(
-                    "E1001",
-                    "`unmount` needs a mountpoint",
-                    "use `unmount DIR`",
-                )
+                Diagnostic::usage("E1001", "`unmount` needs a mountpoint", "use `unmount DIR`")
             })?;
             if words.next().is_some() {
                 return Err(Diagnostic::usage(
@@ -451,6 +465,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         Some("import") => Command::Import(words.by_ref().map(str::to_owned).collect()),
         Some("export") => Command::Export(words.by_ref().map(str::to_owned).collect()),
         Some("publish") => Command::Publish(words.by_ref().map(str::to_owned).collect()),
+        Some("migrate") => Command::Migrate(words.by_ref().map(str::to_owned).collect()),
         Some("serve") => {
             let mut port = 8080;
             while let Some(option) = words.next() {
@@ -580,7 +595,9 @@ mod tests {
     #[test]
     fn semantic_legend_limit_is_positive_and_text_or_quiet_only() {
         assert_eq!(
-            parse_cli(&args(&["semantic-legend", "--limit", "3"])).unwrap().command,
+            parse_cli(&args(&["semantic-legend", "--limit", "3"]))
+                .unwrap()
+                .command,
             Command::SemanticLegend {
                 format: LegendFormat::Text,
                 limit: Some(3),
@@ -594,7 +611,9 @@ mod tests {
     #[test]
     fn semantic_legend_count_flag_selects_counts() {
         assert_eq!(
-            parse_cli(&args(&["semantic-legend", "--count"])).unwrap().command,
+            parse_cli(&args(&["semantic-legend", "--count"]))
+                .unwrap()
+                .command,
             Command::SemanticLegend {
                 format: LegendFormat::Count,
                 limit: None,
@@ -606,19 +625,32 @@ mod tests {
     #[test]
     fn semantic_legend_format_table_is_a_distinct_mode() {
         assert_eq!(
-            parse_cli(&args(&["semantic-legend", "--format", "table"])).unwrap().command,
+            parse_cli(&args(&["semantic-legend", "--format", "table"]))
+                .unwrap()
+                .command,
             Command::SemanticLegend {
                 format: LegendFormat::Table,
                 limit: None,
             }
         );
-        assert!(parse_cli(&args(&["semantic-legend", "--format", "table", "--limit", "2"])).is_err());
+        assert!(
+            parse_cli(&args(&[
+                "semantic-legend",
+                "--format",
+                "table",
+                "--limit",
+                "2"
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
     fn semantic_legend_version_flag_selects_version_output() {
         assert_eq!(
-            parse_cli(&args(&["semantic-legend", "--version"])).unwrap().command,
+            parse_cli(&args(&["semantic-legend", "--version"]))
+                .unwrap()
+                .command,
             Command::SemanticLegend {
                 format: LegendFormat::Version,
                 limit: None,
@@ -630,7 +662,9 @@ mod tests {
     #[test]
     fn semantic_legend_quiet_flag_selects_bare_names() {
         assert_eq!(
-            parse_cli(&args(&["semantic-legend", "--quiet"])).unwrap().command,
+            parse_cli(&args(&["semantic-legend", "--quiet"]))
+                .unwrap()
+                .command,
             Command::SemanticLegend {
                 format: LegendFormat::Quiet,
                 limit: None,
@@ -683,7 +717,11 @@ mod tests {
         let invalid_format = parse_cli(&args(&["status", "--format", "xml"]))
             .expect_err("unsupported output format is rejected");
         assert_eq!(
-            (invalid_format.code, invalid_format.title, invalid_format.help),
+            (
+                invalid_format.code,
+                invalid_format.title,
+                invalid_format.help
+            ),
             (
                 "E1002",
                 "unsupported value for `status --format`",

@@ -75,14 +75,19 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             format: LegendFormat::Version,
             ..
         } => {
-            println!("orna-syntax-v1 {}", orna_syntax_v1::editor::SEMANTIC_LEGEND_VERSION);
+            println!(
+                "orna-syntax-v1 {}",
+                orna_syntax_v1::editor::SEMANTIC_LEGEND_VERSION
+            );
             Ok(())
         }
         Command::SemanticLegend {
             format: LegendFormat::Quiet,
             limit,
         } => {
-            for token_type in orna_syntax_v1::editor::legend_token_types().take(limit.unwrap_or(usize::MAX)) {
+            for token_type in
+                orna_syntax_v1::editor::legend_token_types().take(limit.unwrap_or(usize::MAX))
+            {
                 println!("{token_type}");
             }
             for modifier in orna_syntax_v1::editor::TOKEN_MODIFIERS {
@@ -95,7 +100,9 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             limit,
         } => {
             println!("Token types:");
-            for token_type in orna_syntax_v1::editor::legend_token_types().take(limit.unwrap_or(usize::MAX)) {
+            for token_type in
+                orna_syntax_v1::editor::legend_token_types().take(limit.unwrap_or(usize::MAX))
+            {
                 println!("  {token_type}");
             }
             println!("Token modifiers:");
@@ -110,17 +117,17 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             ref selector,
         } => cli_mount::run_mount(&parsed.endpoint, mountpoint, selector),
         Command::MountStatus { json } => cli_mount::run_mount_status(&parsed.endpoint, json),
-        Command::Unmount { ref mountpoint } => {
-            cli_mount::run_unmount(&parsed.endpoint, mountpoint)
-        }
+        Command::Unmount { ref mountpoint } => cli_mount::run_unmount(&parsed.endpoint, mountpoint),
         Command::Diff(ref arguments) => run_git_diff(arguments),
         Command::Log(ref arguments) => run_git_log(arguments),
         Command::History(arguments) => cli_history::run(&parsed.endpoint, &arguments),
         Command::Query(arguments) => cli_query::run(&parsed.endpoint, &arguments),
         Command::Import(ref arguments) => cli_import::run(arguments),
-        Command::Export(ref arguments) => {
-            cli_export::run(std::path::Path::new(local_project_path(&parsed.endpoint)?), arguments)
-        }
+        Command::Export(ref arguments) => cli_export::run(
+            std::path::Path::new(local_project_path(&parsed.endpoint)?),
+            arguments,
+        ),
+        Command::Migrate(ref arguments) => run_migrate(&parsed.endpoint, arguments),
         Command::Publish(ref arguments) => cli_publish::run(&parsed.endpoint, arguments),
         Command::Status {
             format: StatusFormat::Human,
@@ -130,10 +137,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         } => run_status(&parsed.endpoint),
         Command::Status {
             format: StatusFormat::Short,
-        } => run_status_short_with_runtime_summary(
-            &parsed.endpoint,
-            parsed.color.stdout_enabled(),
-        ),
+        } => run_status_short_with_runtime_summary(&parsed.endpoint, parsed.color.stdout_enabled()),
         Command::Status {
             format: StatusFormat::Json,
         } => run_status_json(&parsed.endpoint),
@@ -203,6 +207,118 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     }
 }
 
+fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
+    let usage = || {
+        Diagnostic::usage(
+            "E1002",
+            "unsupported `migrate copy` arguments",
+            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers`",
+        )
+    };
+    let mut arguments = arguments.iter().map(String::as_str);
+    if arguments.next() != Some("copy") {
+        return Err(usage());
+    }
+    let destination = arguments.next().ok_or_else(|| {
+        Diagnostic::usage(
+            "E1001",
+            "`migrate copy` needs a destination",
+            "supply DEST after `migrate copy`",
+        )
+    })?;
+    let mut annotation_defaults = None;
+    let mut no_persistent_consumers = false;
+    while let Some(option) = arguments.next() {
+        match option {
+            "--annotation-defaults" if annotation_defaults.is_none() => {
+                let value = arguments.next().ok_or_else(|| {
+                    Diagnostic::usage(
+                        "E1001",
+                        "`--annotation-defaults` needs a count",
+                        "supply the legacy metadata entry count after `--annotation-defaults`",
+                    )
+                })?;
+                annotation_defaults = Some(value.parse::<u32>().map_err(|_| {
+                    Diagnostic::usage(
+                        "E1002",
+                        "invalid `--annotation-defaults` count",
+                        "supply a nonnegative integer",
+                    )
+                })?);
+            }
+            "--no-persistent-consumers" if !no_persistent_consumers => {
+                no_persistent_consumers = true;
+            }
+            _ => return Err(usage()),
+        }
+    }
+    if !no_persistent_consumers {
+        return Err(Diagnostic::usage(
+            "E1001",
+            "`migrate copy` needs an explicit consumer-continuity choice",
+            "supply `--no-persistent-consumers` when no persistent consumer state must be carried",
+        ));
+    }
+    let annotation_defaults = annotation_defaults.ok_or_else(|| {
+        Diagnostic::usage(
+            "E1001",
+            "`migrate copy` needs an annotation-default count",
+            "supply `--annotation-defaults N` from decoded legacy metadata",
+        )
+    })?;
+    let source = std::path::Path::new(local_project_path(endpoint)?);
+    let repository = orna_repository_v1::Repository::discover(source).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "legacy migration source could not be opened",
+            "run the command from a local format-1 or format-2 worktree",
+            format!("{error:?}"),
+        )
+    })?;
+    let annotation_defaults = orna_repository_v1::MigrationAnnotationDefaults::new(
+        annotation_defaults,
+    )
+    .map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "migration annotation metadata was invalid",
+            "supply the count derived from decoded legacy metadata",
+            format!("{error:?}"),
+        )
+    })?;
+    let continuity =
+        orna_repository_v1::MigrationContinuityRecord::new(Vec::new()).map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "migration consumer continuity could not be represented",
+                "retry with the migration continuity inventory available",
+                format!("{error:?}"),
+            )
+        })?;
+    let copy = orna_repository_v1::migration_copy::prepare_format3_migration(
+        &repository,
+        &std::path::PathBuf::from(destination),
+        continuity,
+        annotation_defaults,
+    )
+    .map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "migration copy could not be prepared or recovered",
+            "verify the source worktree and retry with the same migration coordinates",
+            format!("{error:?}"),
+        )
+    })?;
+    println!(
+        "prepared or recovered format-3 migration copy: source_format={} source_commit={} candidate_commit={} destination={}",
+        copy.source_format_number(),
+        copy.source_commit().as_str(),
+        copy.candidate_journal().new_head().as_str(),
+        copy.destination().display(),
+    );
+    Ok(())
+}
+
 fn run_status_short_with_runtime_summary(
     endpoint: &Endpoint,
     color_enabled: bool,
@@ -217,7 +333,12 @@ fn run_status_short_with_runtime_summary(
     })?;
     let unpublished_count = unpublished_mutation_count(&repository)?;
     run_status_short(endpoint, color_enabled)?;
-    writeln!(io::stdout().lock(), "{}", short_runtime_summary(unpublished_count)).map_err(|_| {
+    writeln!(
+        io::stdout().lock(),
+        "{}",
+        short_runtime_summary(unpublished_count)
+    )
+    .map_err(|_| {
         Diagnostic::target(
             "E2100",
             "local Git worktree status could not be written",
@@ -228,11 +349,7 @@ fn run_status_short_with_runtime_summary(
 }
 
 fn short_runtime_summary(count: usize) -> String {
-    let noun = if count == 1 {
-        "mutation"
-    } else {
-        "mutations"
-    };
+    let noun = if count == 1 { "mutation" } else { "mutations" };
     format!("RM {count} runtime {noun}")
 }
 
