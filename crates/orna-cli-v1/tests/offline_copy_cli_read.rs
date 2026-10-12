@@ -118,13 +118,18 @@ fn open(repository: &Repository, relation_id: [u8; 16]) -> (NativeGraphContext, 
 /// The descriptor object of one committed row: the native tree its stored value
 /// depends on.
 fn descriptor_of(row: &AdmittedRow) -> NativeOid {
-    row.value()
+    let descriptors = row
+        .value()
         .dependencies()
         .into_iter()
-        .find(|dependency| dependency.kind() == NativeObjectKind::Tree)
-        .expect("the committed row depends on a descriptor tree")
-        .oid()
-        .clone()
+        .filter(|dependency| dependency.kind() == NativeObjectKind::Tree)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        descriptors.len(),
+        1,
+        "a fixture row has exactly one payload Blob descriptor"
+    );
+    descriptors[0].oid().clone()
 }
 
 /// Reads one row's committed payload bytes out of `repository`.
@@ -140,40 +145,34 @@ fn read_committed_payload(
     let (graph, rows) = open(repository, relation_id);
     let scope = graph.open_read_scope().expect("open a read scope");
     let row = committed_row(&rows, key);
-
-    // The payload-free projection reads the row's own field tuple: it reports
-    // the committed length and charges no payload byte.
-    let (_, mut metadata) = graph
-        .project_blob_metadata(row.key(), 0, &scope)
-        .expect("project the committed row's Blob metadata")
-        .expect("the committed row has a Blob field");
+    let descriptor = descriptor_of(row);
+    let stored_blob = graph
+        .read_stored_blob_value(row, &descriptor, &scope)
+        .expect("resolve the Blob value through the committed row");
+    let identity = stored_blob.content_identity();
     assert_eq!(
         scope.payload_bytes_read(),
         0,
-        "{key}: projecting metadata must not read a payload byte"
+        "{key}: reading Blob metadata must not read a payload byte"
     );
 
-    let reference = graph
-        .admit_blob_reference(row, &descriptor_of(row), &scope)
-        .expect("admit the descriptor through its stored row");
     let bytes = graph
-        .read_blob_range(&reference, 0..metadata.length(), &scope)
+        .read_blob_range(stored_blob.reference(), 0..identity.length(), &scope)
         .expect("read the committed payload out of the copy")
         .bytes()
         .to_vec();
     assert_eq!(
         scope.payload_bytes_read(),
-        metadata.length(),
+        identity.length(),
         "{key}: reading the bytes charges every payload byte"
     );
-    let mut digest = [0_u8; 32];
-    digest.copy_from_slice(&Sha256::digest(&bytes));
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
     assert_eq!(
-        metadata.sha256(),
+        identity.sha256(),
         digest,
         "{key}: the bytes read back are the payload the row records"
     );
-    (scope.payload_bytes_read(), metadata.length(), bytes)
+    (scope.payload_bytes_read(), identity.length(), bytes)
 }
 
 /// No fetch can answer a read of this copy: it names no remote and its object
