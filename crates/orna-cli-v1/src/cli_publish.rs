@@ -179,7 +179,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         let index = repository.index_generation().map_err(|error| {
             publish_error("ordinary index could not be read", format!("{error:?}"))
         })?;
-        let prepared = RuntimePublicationCoordinator::prepare_from_runtime_allow_noop(
+        let prepared = RuntimePublicationCoordinator::prepare_allow_noop(
             &repository,
             &state,
             &head,
