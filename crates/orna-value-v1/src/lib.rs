@@ -4390,21 +4390,139 @@ fn validate_schema_stored_row(
 fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> Result<()> {
     let node = array(ty)?;
     let code = int_u64(node.first().ok_or(Error::InvalidSchema)?)?;
-    if code == 0 && matches!(node.get(1), Some(Raw::Text(name)) if name == "Blob") {
-        if matches!(value, Raw::Tag(ROV3_BLOB_TAG, payload) if valid_stored_blob_reference(payload))
-        {
-            return Ok(());
+    match code {
+        0 => {
+            if matches!(node.get(1), Some(Raw::Text(name)) if name == "Blob")
+                && matches!(value, Raw::Tag(ROV3_BLOB_TAG, payload) if valid_stored_blob_reference(payload))
+            {
+                return Ok(());
+            }
+            if let Raw::Tag(tag, payload) = value {
+                validate_tag(*tag, payload)?;
+            }
+            validate_value_as_type(value, ty)
         }
-    }
-    validate_value_as_type(value, ty).or_else(|error| match code {
+        1 => {
+            for item in array(value)? {
+                validate_stored_value_as_type(
+                    item,
+                    node.get(1).ok_or(Error::InvalidSchema)?,
+                    definitions,
+                )?;
+            }
+            Ok(())
+        }
+        2 => validate_stored_option(value, node.get(1).ok_or(Error::InvalidSchema)?, definitions),
+        3 => {
+            let types = array(node.get(1).ok_or(Error::InvalidSchema)?)?;
+            if types.is_empty() {
+                let Raw::Tag(60014, unit) = value else {
+                    return Err(Error::InvalidValue);
+                };
+                return validate_tag(60014, unit);
+            }
+            let Raw::Tag(60015, tuple) = value else {
+                return Err(Error::InvalidValue);
+            };
+            validate_tag(60015, tuple)?;
+            let values = array(tuple)?;
+            if values.len() != types.len() {
+                return Err(Error::InvalidValue);
+            }
+            for (value, ty) in values.iter().zip(types) {
+                validate_stored_value_as_type(value, ty, definitions)?;
+            }
+            Ok(())
+        }
+        4 => validate_anonymous_record(
+            value,
+            array(node.get(1).ok_or(Error::InvalidSchema)?)?,
+            definitions,
+        ),
         5 => validate_nominal_stored_value(
             value,
             uuid_array(node.get(1).ok_or(Error::InvalidSchema)?)?,
             definitions,
         ),
         6 => validate_table_reference_value(value, node, definitions),
-        _ => Err(error),
-    })
+        7 => {
+            let Raw::Tag(60006, quantity) = value else {
+                return Err(Error::InvalidValue);
+            };
+            validate_tag(60006, quantity)?;
+            let quantity = array(quantity)?;
+            if quantity[1] != node[2] {
+                return Err(Error::InvalidValue);
+            }
+            validate_stored_value_as_type(&quantity[0], &node[1], definitions)
+        }
+        8 => {
+            let currency = uuid_array(node.get(1).ok_or(Error::InvalidSchema)?)?;
+            let Raw::Tag(60007, money) = value else {
+                return Err(Error::InvalidValue);
+            };
+            validate_tag(60007, money)?;
+            let money = array(money)?;
+            if uuid_array(&money[1])? != currency {
+                return Err(Error::InvalidValue);
+            }
+            let Raw::Tag(60000, decimal) = &money[0] else {
+                return Err(Error::InvalidValue);
+            };
+            validate_tag(60000, decimal)
+        }
+        9 => {
+            let Raw::Tag(60019, range) = value else {
+                return Err(Error::InvalidValue);
+            };
+            validate_tag(60019, range)?;
+            let endpoints = array(range)?;
+            validate_stored_option(&endpoints[0], &node[1], definitions)?;
+            validate_stored_option(&endpoints[1], &node[1], definitions)
+        }
+        _ => Err(Error::InvalidSchema),
+    }
+}
+
+fn validate_stored_option(value: &Raw, ty: &Raw, definitions: &[Raw]) -> Result<()> {
+    let Raw::Tag(60013, option) = value else {
+        return Err(Error::InvalidValue);
+    };
+    validate_tag(60013, option)?;
+    match array(option)?.as_slice() {
+        [Raw::Int(index)] if index.is_zero() => Ok(()),
+        [Raw::Int(index), value] if *index == BigInt::from(1) => {
+            validate_stored_value_as_type(value, ty, definitions)
+        }
+        _ => Err(Error::InvalidValue),
+    }
+}
+
+fn validate_anonymous_record(value: &Raw, fields: &[Raw], definitions: &[Raw]) -> Result<()> {
+    let Raw::Tag(60009, record) = value else {
+        return Err(Error::InvalidValue);
+    };
+    let record = array(record)?;
+    if record.len() != 2 || !matches!(record[0], Raw::Null) {
+        return Err(Error::InvalidValue);
+    }
+    let values = array(&record[1])?;
+    if values.len() != fields.len() {
+        return Err(Error::InvalidValue);
+    }
+    for (field, value) in fields.iter().zip(values) {
+        let field = array(field)?;
+        let entry = array(value)?;
+        if entry.len() != 2 || entry[0] != field[0] {
+            return Err(Error::InvalidValue);
+        }
+        validate_stored_value_as_type(
+            &entry[1],
+            field.get(1).ok_or(Error::InvalidSchema)?,
+            definitions,
+        )?;
+    }
+    Ok(())
 }
 
 fn valid_stored_blob_reference(payload: &Raw) -> bool {
@@ -6224,6 +6342,19 @@ mod tests {
         ])
     }
 
+    fn stored_blob_reference() -> Raw {
+        Raw::Tag(
+            ROV3_BLOB_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int(3.into()),
+                Raw::Bytes(vec![4; 32]),
+                Raw::Text("image/png".into()),
+                Raw::Null,
+                Raw::Bytes(vec![5; 20]),
+            ])),
+        )
+    }
+
     #[test]
     fn schema_descriptor_validates_complete_stored_row_binding() {
         let schema = SchemaDescriptor::new(schema_for_type(
@@ -6260,16 +6391,7 @@ mod tests {
                 .is_err()
         );
 
-        let blob_reference = Raw::Tag(
-            ROV3_BLOB_TAG,
-            Box::new(Raw::Array(vec![
-                Raw::Int(3.into()),
-                Raw::Bytes(vec![4; 32]),
-                Raw::Text("image/png".into()),
-                Raw::Null,
-                Raw::Bytes(vec![5; 20]),
-            ])),
-        );
+        let blob_reference = stored_blob_reference();
         let referenced_fields =
             encode_canonical_storage_value(&Raw::Array(vec![blob_reference])).unwrap();
         assert!(
@@ -6277,6 +6399,48 @@ mod tests {
                 .validate_stored_row([9; 16], &key, &referenced_fields)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn schema_descriptor_validates_nested_stored_blob_references() {
+        let key = encode_raw(&Raw::Int(7.into())).unwrap();
+        let blob_type = schema_type(0, Raw::Text("Blob".into()));
+
+        let list_schema = SchemaDescriptor::new(schema_for_type(
+            schema_type(1, blob_type.clone()),
+            vec![],
+        ))
+        .unwrap();
+        let list_fields = encode_canonical_storage_value(&Raw::Array(vec![Raw::Array(vec![
+            stored_blob_reference(),
+        ])]))
+        .unwrap();
+        assert!(list_schema
+            .validate_stored_row([9; 16], &key, &list_fields)
+            .is_ok());
+
+        let option_schema = SchemaDescriptor::new(schema_for_type(
+            schema_type(2, blob_type),
+            vec![],
+        ))
+        .unwrap();
+        let option_fields = encode_canonical_storage_value(&Raw::Array(vec![Raw::Tag(
+            60013,
+            Box::new(Raw::Array(vec![Raw::Int(1.into()), stored_blob_reference()])),
+        )]))
+        .unwrap();
+        assert!(option_schema
+            .validate_stored_row([9; 16], &key, &option_fields)
+            .is_ok());
+
+        let malformed_none = encode_canonical_storage_value(&Raw::Array(vec![Raw::Tag(
+            60013,
+            Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Null])),
+        )]))
+        .unwrap();
+        assert!(option_schema
+            .validate_stored_row([9; 16], &key, &malformed_none)
+            .is_err());
     }
 
     #[test]
