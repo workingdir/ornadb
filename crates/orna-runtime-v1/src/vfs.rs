@@ -2943,7 +2943,12 @@ mod tests {
         Mutex as TestMutex,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::{collections::BTreeMap, process::Command};
+    use std::{
+        collections::BTreeMap,
+        io::Write,
+        path::Path,
+        process::{Command, Stdio},
+    };
 
     fn fixture_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/publication-repository-main.orna");
@@ -2951,6 +2956,215 @@ mod tests {
             SnapshotPin::capture(Arc::new(7)),
             Arc::<[u8]>::from(contents.as_bytes()),
         ))
+    }
+
+    fn test_git(path: &Path, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?} succeeds"
+        );
+    }
+
+    fn test_git_output(path: &Path, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Some(input) = input {
+            child.stdin.take().unwrap().write_all(input).unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn test_git_object(path: &Path, kind: &str, bytes: &[u8]) -> String {
+        String::from_utf8(test_git_output(
+            path,
+            &["hash-object", "-w", "-t", kind, "--stdin"],
+            Some(bytes),
+        ))
+        .unwrap()
+        .trim()
+        .to_owned()
+    }
+
+    fn test_git_tree(path: &Path, entries: &str) -> String {
+        String::from_utf8(test_git_output(path, &["mktree"], Some(entries.as_bytes())))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn test_native_node(path: &Path, data: &[u8], dependencies: &[(&str, &str)]) -> String {
+        let data_oid = test_git_object(path, "blob", data);
+        let mut dependencies = dependencies.to_vec();
+        dependencies.sort_by_key(|(oid, _)| *oid);
+        let refs_oid = if dependencies.is_empty() {
+            None
+        } else {
+            let refs = dependencies
+                .iter()
+                .map(|(oid, kind)| {
+                    let mode = if *kind == "tree" { "040000" } else { "100644" };
+                    format!("{mode} {kind} {oid}\t{oid}\n")
+                })
+                .collect::<String>();
+            Some(test_git_tree(path, &refs))
+        };
+        let mut envelope = format!("100644 blob {data_oid}\tdata\n");
+        if let Some(refs_oid) = refs_oid {
+            envelope.push_str(&format!("040000 tree {refs_oid}\trefs\n"));
+        }
+        test_git_tree(path, &envelope)
+    }
+
+    fn append_fixture_cbor_head(output: &mut Vec<u8>, major: u8, value: usize) {
+        let prefix = major << 5;
+        match value {
+            0..=23 => output.push(prefix | value as u8),
+            24..=255 => output.extend_from_slice(&[prefix | 24, value as u8]),
+            _ => panic!("fixture CBOR value is unexpectedly large"),
+        }
+    }
+
+    fn append_fixture_cbor_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
+        append_fixture_cbor_head(output, 2, bytes.len());
+        output.extend_from_slice(bytes);
+    }
+
+    fn fixture_oid_bytes(oid: &str) -> Vec<u8> {
+        oid.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn format3_blob_repository() -> (tempfile::TempDir, Repository, [u8; 16]) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        test_git(root, &["init", "--quiet"]);
+        test_git(root, &["config", "user.email", "kieran@drewett.dev"]);
+        test_git(root, &["config", "user.name", "kierandrewett"]);
+        test_git(root, &["config", "commit.gpgsign", "false"]);
+
+        let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
+        let relation_id = [0x43; 16];
+        let database_uuid = "00000000-0000-4000-8000-000000000001";
+        let database =
+            format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
+        let schema_source = b"capture transaction test schema";
+        std::fs::create_dir_all(root.join(".orna/store")).unwrap();
+        std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
+        std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
+        std::fs::write(root.join("main.orna"), schema_source).unwrap();
+        test_git(root, &["add", "--all"]);
+        test_git(root, &["commit", "--quiet", "-m", "format3 Blob fixture"]);
+
+        let schema_digest: [u8; 32] = Sha256::digest(schema_source).into();
+        let chunk_oid = test_git_object(root, "blob", schema_source);
+        let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
+        append_fixture_cbor_head(&mut byte_index, 0, schema_source.len());
+        byte_index.extend_from_slice(&[0x81, 0x83]);
+        append_fixture_cbor_head(&mut byte_index, 0, schema_source.len());
+        append_fixture_cbor_bytes(&mut byte_index, &fixture_oid_bytes(&chunk_oid));
+        append_fixture_cbor_bytes(&mut byte_index, &schema_digest);
+        let byte_index_oid = test_native_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
+
+        let mut schema = vec![0x85, 0x01, 0x06];
+        append_fixture_cbor_head(&mut schema, 0, schema_source.len());
+        append_fixture_cbor_bytes(&mut schema, &schema_digest);
+        append_fixture_cbor_bytes(&mut schema, &fixture_oid_bytes(&byte_index_oid));
+        let schema_oid = test_native_node(root, &schema, &[(byte_index_oid.as_str(), "tree")]);
+
+        let mut row_domain = vec![0x83, 0x64];
+        row_domain.extend_from_slice(b"rows");
+        append_fixture_cbor_bytes(&mut row_domain, &relation_id);
+        append_fixture_cbor_bytes(&mut row_domain, &schema_digest);
+        let mut empty_rows = vec![0x84, 0x01, 0x01];
+        empty_rows.extend_from_slice(&row_domain);
+        empty_rows.push(0x80);
+        let row_root_oid = test_native_node(root, &empty_rows, &[]);
+
+        let mut relation_domain = vec![0x82, 0x69];
+        relation_domain.extend_from_slice(b"relations");
+        append_fixture_cbor_bytes(&mut relation_domain, &database_id);
+        let mut relation_map = vec![0x84, 0x01, 0x01];
+        relation_map.extend_from_slice(&relation_domain);
+        relation_map.extend_from_slice(&[0x81, 0x82]);
+        append_fixture_cbor_bytes(&mut relation_map, &relation_id);
+        relation_map.push(0x84);
+        append_fixture_cbor_bytes(&mut relation_map, &fixture_oid_bytes(&schema_oid));
+        append_fixture_cbor_bytes(&mut relation_map, &fixture_oid_bytes(&row_root_oid));
+        relation_map.extend_from_slice(&[0xf6, 0x00]);
+        let relation_map_oid = test_native_node(
+            root,
+            &relation_map,
+            &[
+                (schema_oid.as_str(), "tree"),
+                (row_root_oid.as_str(), "tree"),
+            ],
+        );
+
+        let mut store_root = vec![0x83, 0x01, 0x00];
+        append_fixture_cbor_bytes(&mut store_root, &fixture_oid_bytes(&relation_map_oid));
+        let store_root_oid =
+            test_native_node(root, &store_root, &[(relation_map_oid.as_str(), "tree")]);
+        let database_oid = test_git_object(root, "blob", database.as_bytes());
+        let source_oid = test_git_object(root, "blob", schema_source);
+        let orna_tree = test_git_tree(
+            root,
+            &format!(
+                "100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_root_oid}\tstore\n"
+            ),
+        );
+        let root_tree = test_git_tree(
+            root,
+            &format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"),
+        );
+        let parent = String::from_utf8(test_git_output(root, &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let commit = String::from_utf8(test_git_output(
+            root,
+            &[
+                "commit-tree",
+                &root_tree,
+                "-p",
+                &parent,
+                "-m",
+                "format3 Blob graph fixture",
+            ],
+            None,
+        ))
+        .unwrap()
+        .trim()
+        .to_owned();
+        let head_ref = String::from_utf8(test_git_output(root, &["symbolic-ref", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_owned();
+        test_git(root, &["update-ref", &head_ref, &commit]);
+        let repository = Repository::discover(root).unwrap();
+        (temp, repository, relation_id)
     }
 
     fn rejected() -> SafeDiagnostic {
@@ -4601,6 +4815,238 @@ mod tests {
         assert_eq!(
             snapshot.query_exact(identity.table(), &key).unwrap(),
             Some(stale_fixture.as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_blob_temp_rename_cas_commits_canonical_media_and_pin() {
+        const PIXEL: &[u8] = include_bytes!("../../orna-cli-v1/tests/fixtures/media/pixel.png");
+        let (_temp, repo, relation_id) = format3_blob_repository();
+        let capture = repo.capture_capability(relation_id).unwrap();
+        let runtime_identity = RuntimeIdentity {
+            database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+            repository_id: [0x61; 16],
+        };
+        let state = RuntimeState::open(&repo, runtime_identity, [0x62; 32])
+            .await
+            .unwrap();
+        let cache = state.vfs_repository_cache();
+        let row_fixture = include_bytes!("../tests/fixtures/vfs-row-music-london.orna");
+        let target = cache
+            .managed_file(Arc::new(VfsFileSnapshot::new(
+                SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(row_fixture.as_slice()),
+            )))
+            .await
+            .unwrap();
+        let scratch = target.begin_temporary_replacement(1 << 20).await;
+        scratch.write_at(0, PIXEL).await.unwrap();
+        let owner_id = [0x63; 16];
+        let table = RuntimeTableIdentity::new("media", TableObjectId::new(relation_id)).unwrap();
+        let key = b"image".to_vec();
+        let cwd_generation = repo.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        let pins_before = test_git_output(
+            repo.worktree(),
+            &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+            None,
+        );
+
+        let mut wrong_bytes = PIXEL.to_vec();
+        wrong_bytes[0] ^= 1;
+        let mismatch = cache
+            .commit_durable_blob_rename(
+                &target,
+                &scratch,
+                &state,
+                VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
+                    .with_expected_baseline_row(None),
+                &capture,
+                ContentIdentity::new(PIXEL.len() as u64, Sha256::digest(&wrong_bytes).into())
+                    .unwrap(),
+                "image/png",
+                Some("png"),
+                |_, _, _| async { panic!("identity mismatch must stop before row admission") },
+                &crate::NoFault,
+            )
+            .await;
+        assert!(matches!(
+            mismatch,
+            Err(VfsSaveError::BlobCapture(
+                VfsBlobReplacementError::IdentityMismatch { .. }
+            ))
+        ));
+        assert_eq!(scratch.candidate_bytes().await.as_ref(), PIXEL);
+        assert_eq!(
+            state.committed_table_row("media", &key).await.unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            test_git_output(
+                repo.worktree(),
+                &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+                None,
+            ),
+            pins_before,
+            "identity rejection removes its provisional graph pin"
+        );
+        // A changed candidate sequence makes the corrected bytes retryable after
+        // the identity rejection was recorded for the previous sequence.
+        scratch.write_at(0, PIXEL).await.unwrap();
+
+        let expected_identity =
+            ContentIdentity::new(PIXEL.len() as u64, Sha256::digest(PIXEL).into()).unwrap();
+        let stale_table = table.clone();
+        let stale_table_name = stale_table.table().to_owned();
+        let stale_object_id = stale_table.object_id();
+        let stale_cwd_generation = cwd_generation.clone();
+        let stale = cache
+            .commit_durable_blob_rename(
+                &target,
+                &scratch,
+                &state,
+                VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
+                    .with_expected_baseline_row(Some(b"stale baseline".to_vec())),
+                &capture,
+                expected_identity,
+                "image/png",
+                Some("png"),
+                move |coordinates, _, encoded_blob| async move {
+                    let mut row_value = vec![0x81];
+                    row_value.extend_from_slice(&encoded_blob);
+                    let replacement = VfsTableRowReplacement::new(
+                        [0x64; 16],
+                        stale_table,
+                        coordinates.key().to_vec(),
+                        Some(row_value.clone()),
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    Ok(VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(DurableRenameValidator {
+                            table: stale_table_name,
+                            object_id: stale_object_id,
+                            accepted: row_value,
+                            cwd_generation: stale_cwd_generation,
+                        }),
+                    ))
+                },
+                &crate::NoFault,
+            )
+            .await;
+        let Err(VfsSaveError::Stale { diagnostic, .. }) = stale else {
+            panic!("stale Blob temp rename must retain its retryable candidate")
+        };
+        assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
+        assert_eq!(
+            state.committed_table_row("media", &key).await.unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            test_git_output(
+                repo.worktree(),
+                &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+                None,
+            ),
+            pins_before,
+            "stale rejection removes its provisional graph pin"
+        );
+
+        let encoded_row = Arc::new(TestMutex::new(None));
+        let encoded_row_for_admit = Arc::clone(&encoded_row);
+        let save_table = table.clone();
+        let save_table_name = save_table.table().to_owned();
+        let save_object_id = save_table.object_id();
+        let save_cwd_generation = cwd_generation.clone();
+        let saved = cache
+            .commit_durable_blob_rename(
+                &target,
+                &scratch,
+                &state,
+                VfsDurableSave::new(owner_id, cwd_generation, table, key.clone())
+                    .with_expected_baseline_row(None),
+                &capture,
+                expected_identity,
+                "image/png",
+                Some("png"),
+                move |coordinates, _, encoded_blob| async move {
+                    let mut row_value = vec![0x81];
+                    row_value.extend_from_slice(&encoded_blob);
+                    *encoded_row_for_admit.lock().unwrap() = Some(row_value.clone());
+                    let replacement = VfsTableRowReplacement::new(
+                        [0x65; 16],
+                        save_table,
+                        coordinates.key().to_vec(),
+                        Some(row_value.clone()),
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    Ok(VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(DurableRenameValidator {
+                            table: save_table_name,
+                            object_id: save_object_id,
+                            accepted: row_value,
+                            cwd_generation: save_cwd_generation,
+                        }),
+                    ))
+                },
+                &crate::NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            saved,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(target.open_read().await.read_at(0, PIXEL.len()), PIXEL);
+        let encoded_row = encoded_row.lock().unwrap().clone().unwrap();
+        assert_eq!(encoded_row.first(), Some(&0x81));
+        assert_eq!(&encoded_row[1..4], &[0xd9, 0xea, 0xcf]);
+        assert_eq!(
+            state.committed_table_row("media", &key).await.unwrap(),
+            Some(encoded_row.clone())
+        );
+        let pending = state.pending().await.unwrap();
+        let transfers = TableMutation::decode(pending.last().unwrap())
+            .unwrap()
+            .protected_content_transfers()
+            .to_vec();
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].content_identity(), expected_identity);
+        let protected_refs = test_git_output(
+            repo.worktree(),
+            &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+            None,
+        );
+        let protected_refs_text = String::from_utf8(protected_refs.clone()).unwrap();
+        assert_eq!(protected_refs_text.lines().count(), 1);
+        assert!(protected_refs_text.contains("/pending/"));
+        assert!(!protected_refs_text.contains("/scratch/"));
+
+        drop(target);
+        drop(state);
+        let reopened = RuntimeState::open(&repo, runtime_identity, [0x62; 32])
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.committed_table_row("media", &key).await.unwrap(),
+            Some(encoded_row)
+        );
+        let reopened_pending = reopened.pending().await.unwrap();
+        assert_eq!(
+            TableMutation::decode(reopened_pending.last().unwrap())
+                .unwrap()
+                .protected_content_transfers(),
+            transfers
+        );
+        assert_eq!(
+            test_git_output(
+                repo.worktree(),
+                &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+                None,
+            ),
+            protected_refs
         );
     }
 }
