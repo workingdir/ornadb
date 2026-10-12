@@ -29,7 +29,11 @@ fn repository_with_one_commit() -> TempDir {
     let root = directory.path();
     run_git(root, &["init", "--quiet"]);
     run_git(root, &["config", "commit.gpgsign", "false"]);
-    std::fs::write(root.join("main.orna"), b"pub table Music(id: Str) {}\n").unwrap();
+    std::fs::write(
+        root.join("main.orna"),
+        include_bytes!("fixtures/run/main.orna"),
+    )
+    .unwrap();
     run_git(root, &["add", "--all"]);
     run_git(
         root,
