@@ -65,16 +65,34 @@ fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
     Ok(message.unwrap_or_else(|| DEFAULT_MESSAGE.to_owned()))
 }
 
-/// The one managed path the loose projection gives one frozen mutation.
-///
-/// The table name is the storage root and a canonical text key is the row
-/// component, so the projected path is the same path a reader of the published
-/// snapshot resolves. A non-text key has no representable loose path and is
-/// refused rather than silently aliased.
-fn row_path(mutation: &TableMutation) -> Result<LoosePath, orna_storage_v1::Error> {
-    let key =
-        std::str::from_utf8(mutation.key()).map_err(|_| orna_storage_v1::Error::InvalidKey)?;
-    LoosePath::for_key(mutation.table(), &[key.to_owned()])
+/// Projects one source-owned canonical key using its exact committed schema.
+fn row_path(
+    schema: &orna_project_v1::ResolvedTableSchema,
+    mutation: &TableMutation,
+    table_id: orna_runtime_v1::TableObjectId,
+) -> Result<LoosePath, Diagnostic> {
+    let projection = schema
+        .canonical_key_path_components(mutation.key())
+        .map_err(|error| {
+            publish_error(
+                "source row key could not be projected",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+    if projection.table_root() != mutation.table() || projection.table_object_id() != table_id {
+        return Err(publish_error(
+            "source row key projection conflicts with its schema",
+            "table root or TableObjectId differs from the committed source schema; the pending range was preserved",
+        ));
+    }
+    LoosePath::from_encoded_key(projection.table_root(), projection.key_components()).map_err(
+        |error| {
+            publish_error(
+                "source row could not be admitted for publication",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        },
+    )
 }
 
 /// Rejects mutations that cannot be represented as source-owned rows before
@@ -83,8 +101,9 @@ fn validate_candidate_source_rows(
     repository: &orna_repository_v1::Repository,
     head: &orna_repository_v1::GitCommitRef,
     mutations: &[TableMutation],
-) -> Result<(), Diagnostic> {
+) -> Result<BTreeMap<[u8; 16], LoosePath>, Diagnostic> {
     let loader = orna_project_v1::ProjectLoader::default();
+    let mut row_paths = BTreeMap::new();
     for mutation in mutations {
         let table_id = mutation.table_object_id().ok_or_else(|| {
             publish_error(
@@ -132,16 +151,15 @@ fn validate_candidate_source_rows(
                     )
                 })?;
         }
-        row_path(mutation).map_err(|error| {
-            publish_error(
-                "source row could not be admitted for publication",
-                format!(
-                    "{error:?}; pending runtime mutations and authored files were retained; no candidate was prepared"
-                ),
-            )
-        })?;
+        let path = row_path(&schema, mutation, table_id)?;
+        if row_paths.insert(mutation.id(), path).is_some() {
+            return Err(publish_error(
+                "source rows have duplicate mutation identities",
+                "the frozen range cannot be mapped unambiguously to committed source keys; the pending range was preserved",
+            ));
+        }
     }
-    Ok(())
+    Ok(row_paths)
 }
 
 /// Names an already-committed snapshot as the publication result for a frozen
@@ -479,7 +497,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     "make an initial commit before publishing runtime data",
                 )
             })?;
-        validate_candidate_source_rows(&repository, &head, &frozen)?;
+        let row_paths = validate_candidate_source_rows(&repository, &head, &frozen)?;
         // The frozen range is the only content this call may commit: the
         // candidate is built from the captured base plus exactly these rows.
         let counts = table_row_counts(&frozen);
@@ -492,7 +510,12 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             &head,
             index,
             &freeze,
-            row_path,
+            |mutation| {
+                row_paths
+                    .get(&mutation.id())
+                    .cloned()
+                    .ok_or(orna_storage_v1::Error::InvalidMutationId)
+            },
             &message,
         )
         .await
