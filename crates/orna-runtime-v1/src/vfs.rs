@@ -12,7 +12,9 @@ use std::{
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 
-use orna_repository_v1::NativeObjectId;
+use orna_repository_v1::{
+    ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, RepositoryCaptureCapability,
+};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -2522,6 +2524,48 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
     }
 }
 
+/// Failure while streaming and protecting a replacement Blob.
+#[derive(Debug)]
+pub enum VfsBlobReplacementError {
+    Capture(GraphError),
+    IdentityMismatch {
+        expected: ContentIdentity,
+        actual: ContentIdentity,
+    },
+}
+
+impl std::fmt::Display for VfsBlobReplacementError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Capture(error) => write!(formatter, "Blob capture failed: {error}"),
+            Self::IdentityMismatch { expected, actual } => write!(
+                formatter,
+                "Blob identity mismatch: expected {expected:?}, captured {actual:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for VfsBlobReplacementError {}
+
+fn capture_vfs_blob_replacement(
+    capture: &RepositoryCaptureCapability,
+    bytes: &[u8],
+    expected: ContentIdentity,
+    media_type: &str,
+    suffix: Option<&str>,
+) -> Result<OrpBlobBinding, VfsBlobReplacementError> {
+    let candidate = capture
+        .capture_blob_candidate(bytes, expected.length())
+        .map_err(VfsBlobReplacementError::Capture)?;
+    let actual = candidate.content_identity();
+    if actual != expected {
+        return Err(VfsBlobReplacementError::IdentityMismatch { expected, actual });
+    }
+    capture
+        .accept_captured_blob(candidate, media_type, suffix)
+        .map_err(VfsBlobReplacementError::Capture)
+}
 /// Why a durable save was not admitted. Every variant is decided before the
 /// row store is touched except `Activation`, which the runtime refuses inside
 /// its own transaction.
@@ -2554,11 +2598,94 @@ pub enum VfsSaveError<E> {
     WrongDestination,
     /// The admitted row lookup failed before any candidate commit.
     AdmissionLookup(RuntimeQueryError),
-    /// The runtime refused the activation itself.
+    /// Repository capture failed before the shared row-transaction boundary.
+    BlobCapture(VfsBlobReplacementError),
     Activation(E),
 }
 
+#[derive(Debug)]
+enum VfsSaveAdmissionError {
+    BlobCapture(VfsBlobReplacementError),
+    Activation(TableActivationError),
+}
 impl<S: Send + Sync + 'static> ManagedFile<S> {
+    /// Saves an editor document through the durable shared-row transaction.
+    pub async fn commit_durable_document_save<A, AFut>(
+        self: &Arc<Self>,
+        draft: &EditDraft<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
+    {
+        self.commit_durable_save(
+            draft,
+            runtime,
+            save,
+            move |coordinates, bytes| async move {
+                admit(coordinates, bytes)
+                    .await
+                    .map_err(VfsSaveAdmissionError::Activation)
+            },
+            faults,
+        )
+        .await
+    }
+
+    /// Captures replacement bytes as a protected ORP Blob and admits the row
+    /// through the exact same revision-checked transaction as document saves.
+    /// `admit` must encode the supplied canonical Blob value into the row.
+    pub async fn commit_durable_temporary_blob_rename<A, AFut>(
+        self: &Arc<Self>,
+        scratch: &TemporarySave<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        capture: &RepositoryCaptureCapability,
+        expected_identity: ContentIdentity,
+        media_type: &str,
+        suffix: Option<&str>,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, Arc<[u8]>) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
+    {
+        self.commit_durable_temporary_save(
+            scratch,
+            runtime,
+            save,
+            move |coordinates, bytes| async move {
+                let binding = capture_vfs_blob_replacement(
+                    capture,
+                    &bytes,
+                    expected_identity,
+                    media_type,
+                    suffix,
+                )
+                .map_err(VfsSaveAdmissionError::BlobCapture)?;
+                let encoded_value: Arc<[u8]> = Arc::from(binding.encoded_value());
+                let pin = binding.into_pin();
+                let candidate = admit(coordinates, bytes, encoded_value)
+                    .await
+                    .map_err(VfsSaveAdmissionError::Activation)?;
+                let replacement = candidate
+                    .replacement
+                    .with_protected_content_pin(pin)
+                    .map_err(|error| {
+                        VfsSaveAdmissionError::Activation(TableActivationError::Runtime(error))
+                    })?;
+                Ok(VfsSaveCandidate::new(replacement, candidate.validator))
+            },
+            faults,
+        )
+        .await
+    }
+
     /// Adopts one complete VFS row-document save through the same durable
     /// validation and transaction boundary the CLI uses, then publishes it to
     /// the projection cache (ORNA-VFS-006, VFS-009, VFS-021).
@@ -2571,7 +2698,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
     /// diagnostic through the draft (VFS-009). `faults` is the commit-boundary
     /// seam: crash recovery is exercised through the same runtime transaction a
     /// normal save uses.
-    pub async fn commit_durable_document_save<A, AFut>(
+    async fn commit_durable_save<A, AFut>(
         self: &Arc<Self>,
         draft: &EditDraft<S>,
         runtime: &RuntimeState,
@@ -2581,7 +2708,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
     ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
     where
         A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
-        AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
+        AFut: Future<Output = Result<VfsSaveCandidate, VfsSaveAdmissionError>>,
     {
         let mut destination = self.state.lock().await;
         let mut draft_state = draft.state.lock().await;
@@ -2641,7 +2768,10 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             .map_err(VfsSaveError::Activation)?;
         let candidate = admit(admission.coordinates(), Arc::clone(&candidate_bytes))
             .await
-            .map_err(VfsSaveError::Activation)?;
+            .map_err(|error| match error {
+                VfsSaveAdmissionError::BlobCapture(error) => VfsSaveError::BlobCapture(error),
+                VfsSaveAdmissionError::Activation(error) => VfsSaveError::Activation(error),
+            })?;
         admission
             .validate_replacement(candidate.replacement())
             .map_err(VfsSaveError::Activation)?;
@@ -2724,6 +2854,32 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
+        self.commit_durable_temporary_save(
+            scratch,
+            runtime,
+            save,
+            move |coordinates, bytes| async move {
+                admit(coordinates, bytes)
+                    .await
+                    .map_err(VfsSaveAdmissionError::Activation)
+            },
+            faults,
+        )
+        .await
+    }
+
+    async fn commit_durable_temporary_save<A, AFut>(
+        self: &Arc<Self>,
+        scratch: &TemporarySave<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, VfsSaveAdmissionError>>,
+    {
         if !Arc::ptr_eq(self, &scratch.target) {
             return Err(VfsSaveError::WrongDestination);
         }
@@ -2738,7 +2894,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             });
         }
         let outcome = self
-            .commit_durable_document_save(&scratch_state.draft, runtime, save, admit, faults)
+            .commit_durable_save(&scratch_state.draft, runtime, save, admit, faults)
             .await?;
         if let TemporaryRenameOutcome::Applied { generation, handle } = &outcome {
             scratch_state.applied = Some((*generation, handle.clone()));
