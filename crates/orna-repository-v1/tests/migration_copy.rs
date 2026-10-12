@@ -4,7 +4,7 @@ mod test_support;
 use std::{fs, path::Path, process::Command};
 
 use orna_repository_v1::{
-    MigrationAnnotationDefaults, MigrationContinuityRecord, Repository, migration_copy,
+    migration_copy, MigrationAnnotationDefaults, MigrationContinuityRecord, Repository,
 };
 use tempfile::TempDir;
 
@@ -209,8 +209,8 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
     );
     assert_eq!(
         git_output(copy.destination(), &["show", ":tracked.txt"]),
-        b"committed bytes\n",
-        "the copy's settled index is the source commit, not a dirty worktree"
+        b"staged bytes\n",
+        "the copy preserves the staged source blob separately from the worktree"
     );
     assert_eq!(copy.source_index_generation(), &source_index);
     assert_eq!(
