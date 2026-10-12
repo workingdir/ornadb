@@ -1941,9 +1941,14 @@ mod tests {
         repository.write_publication_journal(&journal).unwrap();
         assert_eq!(
             git(&remote, &["rev-parse", "refs/heads/main"]),
-            git(&local, &["rev-parse", "HEAD"])
+            git(&local, &["rev-parse", "HEAD"]),
+            "the branch update is part of the synchronized push"
         );
-        assert_eq!(git(&remote, &["rev-parse", ALLOCATOR_REF]), first);
+        assert_eq!(
+            git(&remote, &["rev-parse", ALLOCATOR_REF]),
+            git(&remote, &["rev-parse", "refs/heads/main"]),
+            "the allocator advances only to the branch it publishes"
+        );
         assert_eq!(
             Command::new("git")
                 .current_dir(&remote)
