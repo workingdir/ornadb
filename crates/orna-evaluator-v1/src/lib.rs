@@ -1174,8 +1174,17 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         limit: usize,
         budget: &mut StepBudget,
     ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
-        self.handler
-            .scan_context_relation_page_scoped(source, scope, after, limit, budget)
+        let page = self
+            .handler
+            .scan_context_relation_page_scoped(source, scope, after, limit, budget)?;
+        if let Some(row) = page.as_ref().and_then(|page| page.rows.first())
+            && matches!(row.format(), ValueFormat::Rov3 | ValueFormat::Sov3)
+            && let Some(context) = row.context()
+        {
+            self.format = row.format();
+            self.context = Some(context.clone());
+        }
+        Ok(page)
     }
 
     fn value_format(&self) -> ValueFormat {
@@ -15243,7 +15252,9 @@ mod tests {
             ValueFormat::Rov3,
         )
         .unwrap();
-        let page_row = returned.clone();
+        // The indexed row is authoritative for its owner; do not stamp it with
+        // a different context returned by the preceding effect.
+        let page_row = ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap();
         let parsed = orna_syntax_v1::parse_module(include_str!(
             "../tests/fixtures/context-result-owner.orna"
         ));
@@ -15284,9 +15295,9 @@ mod tests {
         .unwrap_or_else(|error| panic!("source consumer failed: {}", error.code()));
 
         assert_eq!(result.format(), ValueFormat::Rov3);
-        assert_eq!(result.context().unwrap().database_uuid(), [0x41; 16]);
+        assert_eq!(result.context().unwrap().database_uuid(), [0x31; 16]);
         assert_eq!(result.raw(), &Raw::Bool(true));
-        assert_eq!(effects.consumed_context, Some([0x41; 16]));
+        assert_eq!(effects.consumed_context, Some([0x31; 16]));
         assert_eq!(effects.page_reads, 1);
     }
 
