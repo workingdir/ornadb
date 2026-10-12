@@ -1153,6 +1153,9 @@ fn verify_blob(directory: &Path, oid: &str, size: u64) -> Result<(), CompleteCop
         .current_dir(directory)
         .args(["cat-file", "blob", oid]);
     scrub_git_routing_environment(&mut command);
+    // A recovery export is deliberately local-only: never lazily fetch missing
+    // objects from a promisor remote recorded by the source repository.
+    command.env("GIT_NO_LAZY_FETCH", "1");
     command.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command
         .spawn()
@@ -1437,6 +1440,9 @@ fn git_output_stdin(
     let mut command = Command::new("git");
     command.current_dir(directory).args(args);
     scrub_git_routing_environment(&mut command);
+    // Read only objects already present in this repository; the archive must
+    // not depend on a configured remote being reachable.
+    command.env("GIT_NO_LAZY_FETCH", "1");
     command.stdin(if stdin.is_some() {
         Stdio::piped()
     } else {
