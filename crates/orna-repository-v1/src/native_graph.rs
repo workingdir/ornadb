@@ -8082,6 +8082,163 @@ mod persisted_orp_tests {
             "reclamation must stay inside the killed owner's pin namespace"
         );
     }
+    #[test]
+    fn bounded_range_reads_the_first_child_above_its_upper_bound_only() {
+        let (_directory, mut graph) = capture_test_context();
+        let seed_scope = graph.open_read_scope().expect("owner seed scope");
+        let seed_value = RowValue::decode_canonical_fields(vec![0x80])
+            .expect("empty canonical fixture row");
+        let mutations: Vec<_> = (0..700)
+            .map(|index| RowIndexMutation::Insert {
+                key: TypedKey::Text(format!("row-{index:04}")),
+                value: seed_value.clone(),
+            })
+            .collect();
+        let seeded = graph
+            .maintain_row_index(&mutations, &seed_scope)
+            .expect("build a multi-page row map");
+        let version = graph.row_snapshot.version();
+        let seeded_store_root = graph
+            .replace_relation_primary_root(
+                version.store_root(),
+                version,
+                seeded.primary_root(),
+                seeded.row_count(),
+                &seed_scope,
+            )
+            .expect("publish seeded row root into relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            seeded_store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            *version.relation_id(),
+        )
+        .expect("load seeded format-3 row map");
+        graph.store_root = seeded_store_root;
+        drop(seed_scope);
+
+        let bounded_scope = graph.open_read_scope().expect("bounded query scope");
+        let bounded_range = crate::row_store::KeyRange::new(
+            Some(TypedKey::Text("row-0150".to_owned())),
+            Some(TypedKey::Text("row-0154".to_owned())),
+            10,
+        )
+        .expect("valid bounded key interval");
+        let bounded_rows = graph
+            .range_rows(&bounded_range, &bounded_scope)
+            .expect("read only the matching range and its upper boundary child");
+        let bounded_keys: Vec<_> = bounded_rows
+            .into_iter()
+            .map(|row| row.key().clone())
+            .collect();
+        assert_eq!(
+            bounded_keys,
+            (150..154)
+                .map(|index| TypedKey::Text(format!("row-{index:04}")))
+                .collect::<Vec<_>>()
+        );
+        let bounded_objects = bounded_scope.objects_read();
+
+        let full_scope = graph.open_read_scope().expect("full query scope");
+        let full_range = crate::row_store::KeyRange::new(None, None, 700)
+            .expect("valid complete key interval");
+        let full_rows = graph
+            .range_rows(&full_range, &full_scope)
+            .expect("read complete row map for traffic comparison");
+        assert_eq!(full_rows.len(), 700);
+        assert!(
+            bounded_objects < full_scope.objects_read(),
+            "bounded traversal read {bounded_objects} Git objects, full traversal read {}",
+            full_scope.objects_read()
+        );
+        assert_eq!(bounded_scope.payload_bytes_read(), 0);
+    }
+
+    #[test]
+    fn row_index_rewrite_reuses_blob_descriptor_without_reading_payload_bytes() {
+        let (_directory, mut graph) = capture_test_context();
+        let seed_scope = graph.open_read_scope().expect("owner seed scope");
+        let payload = b"ORP page rewrite keeps this media payload pinned";
+        let captured = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &seed_scope)
+            .expect("capture payload candidate");
+        let pin = graph
+            .protect_captured_blob(captured, &seed_scope)
+            .expect("protect descriptor and payload closure");
+        let binding = graph
+            .accept_protected_blob_pin(pin)
+            .expect("admit protected Blob for a row");
+        let mut blob_row = vec![0x81];
+        blob_row.extend_from_slice(binding.encoded_value());
+        let blob_value = RowValue::decode_canonical_fields(blob_row)
+            .expect("canonical row with one Blob value");
+        let empty_value = RowValue::decode_canonical_fields(vec![0x80])
+            .expect("empty canonical fixture row");
+        let mutations: Vec<_> = (0..300)
+            .map(|index| RowIndexMutation::Insert {
+                key: TypedKey::Text(format!("row-{index:04}")),
+                value: if index == 150 {
+                    blob_value.clone()
+                } else {
+                    empty_value.clone()
+                },
+            })
+            .collect();
+        let seeded = graph
+            .maintain_row_index(&mutations, &seed_scope)
+            .expect("build row pages containing the protected Blob reference");
+        let version = graph.row_snapshot.version();
+        let seeded_store_root = graph
+            .replace_relation_primary_root(
+                version.store_root(),
+                version,
+                seeded.primary_root(),
+                seeded.row_count(),
+                &seed_scope,
+            )
+            .expect("publish seeded row root into relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            seeded_store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            *version.relation_id(),
+        )
+        .expect("load seeded format-3 row map");
+        graph.store_root = seeded_store_root;
+        drop(seed_scope);
+
+        let query_scope = graph.open_read_scope().expect("row query scope");
+        let blob_range = crate::row_store::KeyRange::new(
+            Some(TypedKey::Text("row-0150".to_owned())),
+            Some(TypedKey::Text("row-0151".to_owned())),
+            1,
+        )
+        .expect("valid Blob row interval");
+        let blob_rows = graph
+            .range_rows(&blob_range, &query_scope)
+            .expect("read Blob reference from its row page");
+        assert_eq!(blob_rows.len(), 1);
+        assert_eq!(blob_rows[0].key(), &TypedKey::Text("row-0150".to_owned()));
+        assert_eq!(query_scope.payload_bytes_read(), 0);
+
+        let rewrite_scope = graph.open_read_scope().expect("rewrite scope");
+        let rewrite = graph
+            .maintain_row_index(
+                &[RowIndexMutation::Insert {
+                    key: TypedKey::Text("row-0300".to_owned()),
+                    value: empty_value,
+                }],
+                &rewrite_scope,
+            )
+            .expect("rewrite the index while preserving the Blob row");
+        assert_eq!(rewrite.payload_objects_reused().len(), 1);
+        assert_eq!(rewrite.row_count(), 301);
+        assert_eq!(rewrite_scope.payload_bytes_read(), 0);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
