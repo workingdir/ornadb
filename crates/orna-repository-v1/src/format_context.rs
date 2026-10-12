@@ -150,6 +150,43 @@ impl fmt::Display for FormatContextError {
 
 impl std::error::Error for FormatContextError {}
 
+/// A schema field's role in the committed table descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommittedTableFieldRole {
+    /// The field contributes to the table key and is not part of the stored tuple.
+    PrimaryKey,
+    /// The field appears in each row's stored-field tuple.
+    Stored,
+}
+
+/// Immutable identity and storage classification for one field in the sealed
+/// committed table descriptor. Entries retain descriptor order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedTableFieldIdentity {
+    field_object_id: [u8; 16],
+    name: String,
+    role: CommittedTableFieldRole,
+    is_blob: bool,
+}
+
+impl CommittedTableFieldIdentity {
+    pub const fn field_object_id(&self) -> &[u8; 16] {
+        &self.field_object_id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub const fn role(&self) -> CommittedTableFieldRole {
+        self.role
+    }
+
+    pub const fn is_blob(&self) -> bool {
+        self.is_blob
+    }
+}
+
 /// Owner-authenticated descriptor binding for one format-3 relation in an
 /// exact repository UUID and snapshot. A qualified source identity is retained
 /// only when its module path and unique table declaration are verified against
@@ -166,6 +203,7 @@ pub struct CommittedTableBinding {
     schema_oid: NativeOid,
     schema_digest: [u8; 32],
     descriptor: SchemaDescriptor,
+    fields: Vec<CommittedTableFieldIdentity>,
 }
 
 impl CommittedTableBinding {
@@ -208,6 +246,18 @@ impl CommittedTableBinding {
 
     pub fn descriptor(&self) -> &SchemaDescriptor {
         &self.descriptor
+    }
+
+    /// All table field identities in the exact sealed descriptor's order.
+    pub fn fields(&self) -> &[CommittedTableFieldIdentity] {
+        &self.fields
+    }
+
+    /// Stored tuple fields in descriptor order, matching decoded row-field order.
+    pub fn stored_fields(&self) -> impl Iterator<Item = &CommittedTableFieldIdentity> {
+        self.fields
+            .iter()
+            .filter(|field| field.role == CommittedTableFieldRole::Stored)
     }
 }
 
@@ -635,6 +685,8 @@ impl RepositoryFormatContext {
         if schema_descriptor_table_id(&descriptor) != Some(relation_id) {
             return Err(FormatContextError::TableBindingMismatch);
         }
+        let fields =
+            schema_descriptor_fields(&descriptor).ok_or(FormatContextError::GraphContextInvalid)?;
         Ok(CommittedTableBinding {
             database_id: self.require_database_id()?,
             snapshot_id: self.snapshot.snapshot_id(),
@@ -645,6 +697,7 @@ impl RepositoryFormatContext {
             schema_oid: version.schema().schema_oid().clone(),
             schema_digest: *version.schema().schema_digest(),
             descriptor,
+            fields,
         })
     }
 
@@ -1305,6 +1358,46 @@ fn schema_descriptor_table_id(descriptor: &SchemaDescriptor) -> Option<[u8; 16]>
     bytes.as_slice().try_into().ok()
 }
 
+fn schema_descriptor_fields(
+    descriptor: &SchemaDescriptor,
+) -> Option<Vec<CommittedTableFieldIdentity>> {
+    let Raw::Array(entries) = schema_descriptor_entry(descriptor, 3)? else {
+        return None;
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            let Raw::Array(parts) = entry else {
+                return None;
+            };
+            let [Raw::Tag(37, id), Raw::Text(name), ty, Raw::Int(role), _] = parts.as_slice()
+            else {
+                return None;
+            };
+            let Raw::Bytes(id) = id.as_ref() else {
+                return None;
+            };
+            let field_object_id = id.as_slice().try_into().ok()?;
+            let role = match role {
+                0 => CommittedTableFieldRole::PrimaryKey,
+                1 => CommittedTableFieldRole::Stored,
+                _ => return None,
+            };
+            let is_blob = matches!(
+                ty,
+                Raw::Array(parts)
+                    if matches!(parts.as_slice(), [Raw::Int(0), Raw::Text(name)] if name == "Blob")
+            );
+            Some(CommittedTableFieldIdentity {
+                field_object_id,
+                name: name.clone(),
+                role,
+                is_blob,
+            })
+        })
+        .collect()
+}
+
 fn schema_descriptor_entry(descriptor: &SchemaDescriptor, field_number: u8) -> Option<&Raw> {
     let Raw::Map(fields) = descriptor.raw() else {
         return None;
@@ -1379,7 +1472,7 @@ mod graph_bridge_tests {
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
-    use super::RepositoryFormatContext;
+    use super::{DatabaseId, RepositoryFormatContext};
     use crate::{
         Repository,
         native_graph::{
@@ -1398,6 +1491,8 @@ mod graph_bridge_tests {
     const DATABASE_TEMPLATE: &str =
         include_str!("../tests/fixtures/format-context/database-template.orna");
     const MAIN_SOURCE: &str = include_str!("../tests/fixtures/git-repository-main.orna");
+    const RESOURCE_SOURCE: &str =
+        include_str!("../../orna-project-v1/tests/fixtures/inventory_resource_table.orna");
     const DATABASE_PLACEHOLDER: &str = "00000000-0000-4000-8000-000000000000";
     const OTHER_DATABASE_ID: &str = "a4a0a7d1-4f5c-4dc4-a5bf-f3f7f6a8d7e1";
 
@@ -1527,6 +1622,24 @@ mod graph_bridge_tests {
         assert_eq!(binding.source_path(), Some("media.orna"));
         assert_eq!(binding.declaration_name(), Some("Audio"));
         assert_eq!(binding.descriptor(), &descriptor);
+        assert_eq!(binding.fields().len(), 2);
+        assert_eq!(binding.fields()[0].field_object_id(), &[0x11; 16]);
+        assert_eq!(binding.fields()[0].name(), "id");
+        assert_eq!(
+            binding.fields()[0].role(),
+            super::CommittedTableFieldRole::PrimaryKey
+        );
+        assert!(!binding.fields()[0].is_blob());
+        assert_eq!(binding.fields()[1].field_object_id(), &[0x22; 16]);
+        assert_eq!(binding.fields()[1].name(), "payload");
+        assert_eq!(
+            binding.fields()[1].role(),
+            super::CommittedTableFieldRole::Stored
+        );
+        assert!(binding.fields()[1].is_blob());
+        let stored_fields: Vec<_> = binding.stored_fields().collect();
+        assert_eq!(stored_fields.len(), 1);
+        assert_eq!(stored_fields[0].field_object_id(), &[0x22; 16]);
 
         assert_eq!(
             context.bind_committed_table(
@@ -1684,6 +1797,143 @@ mod graph_bridge_tests {
         );
     }
 
+    #[test]
+    fn source_bound_decoder_reads_inline_and_overflow_fields_without_payload_bytes() {
+        let relation_id = [0xb1; 16];
+        let (directory, descriptor) = seeded_table_binding(relation_id);
+        let root = directory.path();
+        let writing = context(root);
+        let rows = writing
+            .load_row_map(relation_id)
+            .expect("load source-bound Blob table");
+        let graph = writing
+            .open_native_graph(&rows)
+            .expect("open source-bound Blob graph");
+        let capture_scope = graph.open_read_scope().expect("capture scope");
+        let payload = b"inline media payload";
+        let candidate = graph
+            .capture_blob_candidate(
+                &mut std::io::Cursor::new(payload.as_slice()),
+                payload.len() as u64,
+                &capture_scope,
+            )
+            .expect("capture Blob candidate");
+        let pin = graph
+            .protect_captured_blob(candidate, &capture_scope)
+            .expect("protect Blob candidate");
+        let blob = graph
+            .accept_protected_blob_pin_with_annotation(pin, "image/png", Some("png"))
+            .expect("bind stored Blob annotation");
+        let expected_blob = orna_value_v1::decode_rov3_blob_metadata(blob.encoded_value())
+            .expect("decode expected Blob reference");
+        let mut inline_fields = vec![0x81];
+        inline_fields.extend_from_slice(blob.encoded_value());
+        install_source_row_fields(
+            root,
+            &writing,
+            relation_id,
+            TypedKey::UInt(7),
+            &inline_fields,
+        );
+
+        let pinned = context(root);
+        let rows = pinned
+            .load_row_map(relation_id)
+            .expect("load committed inline row");
+        let graph = pinned
+            .open_native_graph(&rows)
+            .expect("open committed inline graph");
+        let scope = graph.open_read_scope().expect("inline read scope");
+        let binding = pinned
+            .bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                pinned.require_database_id().expect("repository UUID"),
+                &pinned.snapshot_pin().snapshot_id(),
+                &descriptor,
+            )
+            .expect("bind source descriptor to exact commit");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(7), &scope)
+            .expect("read inline row")
+            .expect("row is committed");
+        let decoded = graph
+            .decode_admitted_row_fields(&row, &binding, &scope)
+            .expect("decode source-bound inline fields");
+        assert_eq!(decoded.fields().len(), 1);
+        assert_eq!(decoded.fields()[0].field_id(), &[0x22; 16]);
+        assert_eq!(decoded.fields()[0].blob_metadata(), Some(&expected_blob));
+        assert_eq!(decoded.canonical_fields(), inline_fields);
+        let mut foreign_binding = binding.clone();
+        foreign_binding.database_id = OTHER_DATABASE_ID
+            .parse::<DatabaseId>()
+            .expect("valid foreign database UUID");
+        let foreign_scope = graph.open_read_scope().expect("foreign binding scope");
+        assert!(matches!(
+            graph.decode_admitted_row_fields(&row, &foreign_binding, &foreign_scope),
+            Err(crate::native_graph::GraphError::ContextMismatch)
+        ));
+        assert_eq!(foreign_scope.objects_read(), 0);
+        assert_eq!(foreign_scope.payload_bytes_read(), 0);
+        assert_eq!(scope.payload_bytes_read(), 0);
+
+        let relation_id = [0xb2; 16];
+        let (directory, descriptor) = seeded_resource_table_binding(relation_id);
+        let root = directory.path();
+        let writing = context(root);
+        let large_text = "v".repeat(crate::row_store::ROW_INLINE_LIMIT + 1);
+        let mut overflow_fields = vec![0x81];
+        cbor_head(&mut overflow_fields, 3, large_text.len() as u64);
+        overflow_fields.extend_from_slice(large_text.as_bytes());
+        install_source_row_fields(
+            root,
+            &writing,
+            relation_id,
+            TypedKey::Text("asset".to_owned()),
+            &overflow_fields,
+        );
+
+        let pinned = context(root);
+        let rows = pinned
+            .load_row_map(relation_id)
+            .expect("load committed overflow row");
+        let graph = pinned
+            .open_native_graph(&rows)
+            .expect("open committed overflow graph");
+        let scope = graph.open_read_scope().expect("overflow read scope");
+        let binding = pinned
+            .bind_committed_table(
+                "main",
+                "main.orna",
+                "Resource",
+                relation_id,
+                pinned.require_database_id().expect("repository UUID"),
+                &pinned.snapshot_pin().snapshot_id(),
+                &descriptor,
+            )
+            .expect("bind source descriptor to exact commit");
+        let row = graph
+            .lookup_row(&TypedKey::Text("asset".to_owned()), &scope)
+            .expect("read overflow row")
+            .expect("row is committed");
+        assert!(matches!(row.value(), RowValue::Overflow(_)));
+        let decoded = graph
+            .decode_admitted_row_fields(&row, &binding, &scope)
+            .expect("decode source-bound overflow fields");
+        assert_eq!(decoded.fields().len(), 1);
+        assert_eq!(decoded.fields()[0].field_id(), &[0x22; 16]);
+        assert!(decoded.fields()[0].blob_metadata().is_none());
+        assert_eq!(decoded.canonical_fields(), overflow_fields);
+        assert!(matches!(
+            decode_canonical_cbor(decoded.canonical_fields()).expect("decode canonical fields"),
+            CborValue::Array(values)
+                if values == vec![CborValue::Text(large_text)]
+        ));
+        assert_eq!(scope.payload_bytes_read(), 0);
+    }
+
     fn context(directory: &Path) -> RepositoryFormatContext {
         Repository::discover(directory)
             .expect("discover fixture repository")
@@ -1728,6 +1978,33 @@ mod graph_bridge_tests {
         .expect("valid stored schema descriptor")
     }
 
+    fn descriptor_for_resource_table(relation_id: [u8; 16]) -> SchemaDescriptor {
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
+        let field = |id: [u8; 16], name: &str, role: u8| {
+            Raw::Array(vec![
+                uuid(id),
+                Raw::Text(name.to_owned()),
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid(relation_id)),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
+            (
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    field([0x11; 16], "path", 0),
+                    field([0x22; 16], "value", 1),
+                ]),
+            ),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid Resource schema descriptor")
+    }
+
     fn seeded_table_binding(relation_id: [u8; 16]) -> (TempDir, SchemaDescriptor) {
         let directory = repository();
         let root = directory.path();
@@ -1743,6 +2020,41 @@ mod graph_bridge_tests {
             .algorithm();
         let descriptor = descriptor_for_table(relation_id, "Int");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
+        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            root,
+            algorithm,
+            &schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+        let primary_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: Vec::new(),
+            },
+        );
+        install_rows_store(root, &initial, relation_id, &schema_oid, &primary_root, 0);
+        (directory, descriptor)
+    }
+
+    fn seeded_resource_table_binding(relation_id: [u8; 16]) -> (TempDir, SchemaDescriptor) {
+        let directory = repository();
+        let root = directory.path();
+        fs::write(root.join("main.orna"), RESOURCE_SOURCE).expect("write Resource source fixture");
+        commit(root);
+        let initial = context(root);
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let descriptor = descriptor_for_resource_table(relation_id);
+        let schema_bytes = descriptor
+            .encode()
+            .expect("encode Resource schema descriptor");
         let schema_digest = Sha256::digest(&schema_bytes).into();
         let schema_oid = schema_descriptor_node(
             root,
@@ -2005,6 +2317,75 @@ mod graph_bridge_tests {
         let store_root =
             write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
         commit_store_root(directory, algorithm, &store_root);
+    }
+
+    fn install_source_row_fields(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+        key: TypedKey,
+        canonical_fields: &[u8],
+    ) {
+        let rows = context
+            .load_row_map(relation_id)
+            .expect("load source-bound row map");
+        let version = rows.version();
+        let algorithm = version.store_root().algorithm();
+        let schema_oid = version.schema().schema_oid().clone();
+        let schema_digest = *version.schema().schema_digest();
+        let value = if canonical_fields.len() > crate::row_store::ROW_INLINE_LIMIT {
+            let semantic_digest = Sha256::digest(canonical_fields).into();
+            let chunk = write_git_object(directory, algorithm, "blob", canonical_fields);
+            let byte_root = write_native_node(
+                directory,
+                algorithm,
+                &NodeData::ByteIndex {
+                    height: 0,
+                    total_length: canonical_fields.len() as u64,
+                    entries: vec![ByteIndexEntry {
+                        span_length: canonical_fields.len() as u64,
+                        target: chunk,
+                        chunk_sha256: Some(semantic_digest),
+                    }],
+                },
+            );
+            let overflow_root = write_native_node(
+                directory,
+                algorithm,
+                &NodeData::ValueOverflow {
+                    encoded_length: canonical_fields.len() as u64,
+                    semantic_digest,
+                    byte_root,
+                    dependency_root: None,
+                },
+            );
+            let mut value = Vec::new();
+            cbor_head(&mut value, 6, 60_113);
+            cbor_head(&mut value, 4, 1);
+            cbor_bytes(&mut value, overflow_root.as_bytes());
+            value
+        } else {
+            canonical_fields.to_vec()
+        };
+        let primary_root = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: vec![OrderedLeafEntry {
+                    key: key.canonical_bytes().expect("canonical row key"),
+                    value,
+                }],
+            },
+        );
+        install_rows_store(
+            directory,
+            context,
+            relation_id,
+            &schema_oid,
+            &primary_root,
+            1,
+        );
     }
 
     /// Builds a valid canonical rows leaf from `(key, value)` pairs.
