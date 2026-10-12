@@ -101,8 +101,19 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
-    // A repository that never opened a runtime has no durable tail at all.
+    let journal = repository.read_publication_journal().map_err(|error| {
+        publish_error(
+            "publication recovery journal could not be read",
+            format!("{error:?}; runtime state was not modified"),
+        )
+    })?;
     if !repository.runtime_paths().state_db().exists() {
+        if journal.is_some() {
+            return Err(publish_error(
+                "publication recovery requires local runtime state",
+                "a publication journal is present but its runtime state database is missing; restore the database before retrying. The journal was preserved",
+            ));
+        }
         println!("nothing to publish: no durable runtime changes");
         return Ok(());
     }
@@ -114,11 +125,38 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let state = runtime
         .block_on(RuntimeState::open(&repository, identity, initial_digest))
         .map_err(|error| {
-            publish_error(
-                "local runtime could not be opened",
-                format!("{error:?}; retry `orna publish`"),
-            )
+            let detail = if journal.is_some() {
+                format!("{error:?}; the unresolved publication journal was not changed and no new range was selected. Repair the runtime state, then retry `orna publish`")
+            } else {
+                format!("{error:?}; retry `orna publish`")
+            };
+            publish_error("local runtime could not be opened", detail)
         })?;
+    // A previous invocation may have advanced HEAD but crashed before index
+    // reconciliation or frozen-tail cleanup. Reconcile it before selecting a
+    // new publication range.
+    runtime
+        .block_on(RuntimePublicationCoordinator::recover(&repository, &state))
+        .map_err(|error| {
+            describe_storage_failure("pending publication could not be recovered", &error)
+        })?;
+    // Never select another range if recovery returned with a journal still
+    // present, including when a new publication raced with recovery.
+    if repository
+        .read_publication_journal()
+        .map_err(|error| {
+            publish_error(
+                "publication recovery journal could not be read",
+                format!("{error:?}; no new publication range was selected"),
+            )
+        })?
+        .is_some()
+    {
+        return Err(publish_error(
+            "publication recovery remains pending",
+            "the repository journal is still present; the journal and pending tail were preserved; no new range was selected",
+        ));
+    }
     let pending = runtime.block_on(state.pending_count()).map_err(|error| {
         publish_error(
             "pending runtime changes could not be read",
