@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use orna_value_v1::{BlobMetadata, MimeRegistry};
 
 use crate::native_graph::{
-    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeObjectId,
-    NativeObjectKind, MAX_REFS, NODE_DATA_LIMIT,
+    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeGraphContext,
+    NativeObjectId, NativeObjectKind, RepositoryReadScope, MAX_REFS, NODE_DATA_LIMIT,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
@@ -495,6 +495,42 @@ impl RowMapSnapshot {
             .take(range.limit)
             .map(|entry| AdmittedRow::from_entry(&self.version, entry))
             .collect())
+    }
+
+    /// Reads a bounded range from a persisted snapshot through its matching
+    /// repository graph context. The graph remains the only decoder: it checks
+    /// the admitted schema domain on each traversed page before exposing rows.
+    pub fn range_with_graph_context(
+        &self,
+        context: &NativeGraphContext,
+        scope: &RepositoryReadScope,
+        range: &KeyRange,
+    ) -> Result<Vec<AdmittedRow>, RowStoreError> {
+        let version = &self.version;
+        let row_count = version.row_count.ok_or(RowStoreError::RowCountMismatch)?;
+        let mut authority = Sha256::new();
+        authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
+        authority.update(context.database_id());
+        authority.update(context.snapshot_id());
+        authority.update(version.store_root.as_bytes());
+        authority.update(version.relation_id);
+        authority.update(version.primary_root.as_bytes());
+        authority.update(context.schema_digest());
+        authority.update(row_count.to_be_bytes());
+        let expected_authority: [u8; 32] = authority.finalize().into();
+        if version.database_id() != context.database_id()
+            || version.schema().database_id() != context.database_id()
+            || version.schema().schema_digest() != context.schema_digest()
+            || self.authority != expected_authority
+        {
+            return Err(RowStoreError::BoundaryMismatch);
+        }
+
+        let rows = context.range_rows(range, scope)?;
+        if rows.iter().any(|row| row.version() != version) {
+            return Err(RowStoreError::BoundaryMismatch);
+        }
+        Ok(rows)
     }
 }
 
