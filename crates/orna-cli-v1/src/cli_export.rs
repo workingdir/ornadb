@@ -5,10 +5,11 @@
 //! format:
 //!
 //! - `orna export DEST --at SELECTOR` writes an archive of the selected
-//!   snapshot: its full object closure and every recursively pinned dependency
-//!   (ORNA-GIT-003, ORNA-GIT-007). Exporting never moves the user's branch,
-//!   never creates a pin, and never contacts a remote: the source repository is
-//!   read only (ORNA-GIT-008).
+//!   snapshot and every recursively pinned dependency, reading each nested
+//!   repository at the commit recorded by its parent. `--dependency PATH=DIR`
+//!   supplies a local dependency repository and may also supply its populated
+//!   descendants. Exporting never moves the user's branch or contacts a remote
+//!   (ORNA-GIT-003, ORNA-GIT-007, ORNA-GIT-008).
 //! - `orna export ARCHIVE --check` reads an archive back and reports exactly
 //!   what it records, without a repository.
 //! - `orna export ARCHIVE --restore DEST [--worktree]` reconstructs the archive
@@ -236,6 +237,8 @@ fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
             "A pinned dependency has no recorded origin"
         }
         CompleteCopyError::DependencyUnavailable { .. } => "A pinned dependency is unavailable",
+        CompleteCopyError::InvalidDependencyPath { .. } => "A pinned dependency path is invalid",
+        CompleteCopyError::DependencyCycle { .. } => "Pinned dependencies contain a cycle",
         CompleteCopyError::ClosureTooLarge => "Snapshot closure exceeds the export bound",
         CompleteCopyError::MissingObject { .. } => "A required Git object is unavailable offline",
         CompleteCopyError::IntegrityMismatch { .. } => "A recorded object failed verification",
