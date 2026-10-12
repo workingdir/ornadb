@@ -92,7 +92,7 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
     );
     let accepted = accepted.expect("matching repository context should admit the full tuple");
     assert_eq!(accepted.resolved_schema(), &schema);
-    let (_mutation, bindings, publication_schema) = accepted.into_publication_parts();
+    let (_mutation, bindings, publication_schema) = accepted.into_mutation_and_bindings();
     assert!(bindings.is_empty());
     assert_eq!(&publication_schema, &schema);
 
