@@ -1136,35 +1136,23 @@ impl SourceMutationEffectHandler {
     /// rewriting its canonical mutation or mutation identity.
     pub fn record_admitted_source_row(
         &mut self,
-        schema: ResolvedTableSchema,
         row: AdmittedSourceRow,
     ) -> Result<(), ApplicationError> {
-        let table_name = row.table_name().to_owned();
-        let table_object_id = row.table_object_id();
-        let mutation_id = row.mutation().id();
+        let (mutation, bindings, schema) = row.into_mutation_and_bindings();
+        let table_name = schema.declaration_name().to_owned();
+        let table_object_id = schema.table_object_id();
+        let mutation_id = mutation.id();
         if !self.tables.contains_key(&table_name)
             || self
                 .table_object_ids
                 .get(&table_name)
                 .is_some_and(|expected| *expected != table_object_id)
-            || schema.table_object_id() != table_object_id
-            || row.database_id() != schema.database_id()
-            || row.source_commit() != schema.source_commit()
-            || row.snapshot_id() != schema.snapshot_id()
-            || row.schema() != schema.descriptor()
-            || row.mutation().table() != table_name
-            || row.mutation().table_object_id() != Some(table_object_id)
+            || mutation.table() != table_name
+            || mutation.table_object_id() != Some(table_object_id)
             || self
                 .mutations
                 .iter()
-                .any(|mutation| mutation.id() == mutation_id)
-        {
-            return Err(ApplicationError::InvalidTableMetadata);
-        }
-        let (mutation, bindings) = row.into_mutation_and_bindings();
-        if mutation.id() != mutation_id
-            || mutation.table() != table_name
-            || mutation.table_object_id() != Some(table_object_id)
+                .any(|existing| existing.id() == mutation_id)
         {
             return Err(ApplicationError::InvalidTableMetadata);
         }
@@ -1176,6 +1164,43 @@ impl SourceMutationEffectHandler {
             .validate_stored_row(table_object_id.bytes(), mutation.key(), canonical_fields)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
 
+        let OvbRaw::Map(descriptor_entries) = schema.descriptor().raw() else {
+            return Err(ApplicationError::InvalidTableMetadata);
+        };
+        let field_list_key = OvbRaw::Int(BigInt::from(3));
+        let declared_fields = descriptor_entries
+            .iter()
+            .find_map(|(key, value)| (key == &field_list_key).then_some(value))
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
+        let OvbRaw::Array(declared_fields) = declared_fields else {
+            return Err(ApplicationError::InvalidTableMetadata);
+        };
+        let role_stored = BigInt::from(1);
+        let role_key = BigInt::from(0);
+        let mut stored_field_ids = Vec::new();
+        for declared_field in declared_fields {
+            let OvbRaw::Array(parts) = declared_field else {
+                return Err(ApplicationError::InvalidTableMetadata);
+            };
+            let Some(OvbRaw::Tag(37, uuid)) = parts.first() else {
+                return Err(ApplicationError::InvalidTableMetadata);
+            };
+            let OvbRaw::Bytes(uuid) = uuid.as_ref() else {
+                return Err(ApplicationError::InvalidTableMetadata);
+            };
+            let field_object_id: [u8; 16] = uuid
+                .as_slice()
+                .try_into()
+                .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+            match parts.get(3) {
+                Some(OvbRaw::Int(role)) if role == &role_stored => {
+                    stored_field_ids.push(field_object_id);
+                }
+                Some(OvbRaw::Int(role)) if role == &role_key => {}
+                _ => return Err(ApplicationError::InvalidTableMetadata),
+            }
+        }
+
         let transfers = mutation.protected_content_transfers();
         if transfers.len() != bindings.len() {
             return Err(ApplicationError::InvalidTableMetadata);
@@ -1185,21 +1210,34 @@ impl SourceMutationEffectHandler {
         let OvbRaw::Array(fields) = fields.raw() else {
             return Err(ApplicationError::InvalidTableMetadata);
         };
+        if fields.len() != stored_field_ids.len() {
+            return Err(ApplicationError::InvalidTableMetadata);
+        }
         let mut field_ids = BTreeSet::new();
         let mut pin_ids = BTreeSet::new();
         let mut retained_pins = Vec::with_capacity(bindings.len());
         for binding in bindings {
             let (field_object_id, encoded_value, pin) = binding.into_parts();
+            let field_index = stored_field_ids
+                .iter()
+                .position(|expected| *expected == field_object_id)
+                .ok_or(ApplicationError::InvalidTableMetadata)?;
             let encoded_blob = CanonicalValue::decode(&encoded_value)
                 .map_err(|_| ApplicationError::InvalidTableMetadata)?;
             let transfer = pin.transfer_record();
+            let transfer_evidence = transfers
+                .iter()
+                .find(|candidate| candidate.pin_id() == pin.pin_id())
+                .ok_or(ApplicationError::InvalidTableMetadata)?;
             if !field_ids.insert(field_object_id)
                 || !pin_ids.insert(*pin.pin_id())
                 || transfer.database_id() != schema.database_id()
-                || !transfers
-                    .iter()
-                    .any(|candidate| candidate.pin_id() == pin.pin_id())
-                || !fields.iter().any(|field| field == encoded_blob.raw())
+                || transfer_evidence.repository_id() != transfer.repository_id()
+                || transfer_evidence.database_id() != transfer.database_id()
+                || transfer_evidence.pin_id() != transfer.pin_id()
+                || transfer_evidence.descriptor_oid() != transfer.descriptor_oid()
+                || transfer_evidence.content_identity() != transfer.content_identity()
+                || fields.get(field_index) != Some(encoded_blob.raw())
             {
                 return Err(ApplicationError::InvalidTableMetadata);
             }
