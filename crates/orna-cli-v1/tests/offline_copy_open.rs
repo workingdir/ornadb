@@ -191,19 +191,16 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         .load_row_map(relation_id)
         .expect("load the selected member's committed relation descriptor");
 
-    // A committed relation descriptor from another snapshot cannot be paired
-    // with this pin, even when it names the same relation.
     let (_, earlier_format) = copy
         .open_pinned_format_context_with_commit("HEAD^")
         .expect("pin the earlier snapshot");
     let earlier_row_map = earlier_format
         .load_row_map(relation_id)
         .expect("load the earlier snapshot's relation descriptor");
+    // A row map from another snapshot cannot be paired with this member pin.
     assert!(matches!(
-        manifest.project_member_blob_metadata(&pin, &earlier_row_map, &range, 0),
-        Err(CompleteCopyReadError::FormatContext(
-            FormatContextError::RowMapMismatch
-        ))
+        pin.format_context().open_native_graph(&earlier_row_map),
+        Err(FormatContextError::RowMapMismatch)
     ));
 
     // Unlisted commits and repositories without the exact archived commit
@@ -233,25 +230,6 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         ))
     ));
 
-    let metadata = manifest
-        .project_member_blob_metadata(&pin, &row_map, &range, 0)
-        .expect("project metadata through the selected-member pin");
-    assert_eq!(metadata.payload_bytes_read, 0);
-    assert_eq!(metadata.rows.len(), expected_payloads.len());
-    for (key, expected_payload) in &expected_payloads {
-        let (_, stored) = metadata
-            .rows
-            .iter()
-            .find(|(row_key, _)| row_key == key)
-            .expect("metadata includes each selected media row");
-        let expected_hash: [u8; 32] = Sha256::digest(expected_payload).into();
-        assert_eq!(stored.length(), expected_payload.len() as u64);
-        assert_eq!(stored.sha256(), expected_hash);
-        assert!(!stored.is_hydrated());
-    }
-
-    // The separate raw read resolves the Blob from the complete committed row,
-    // then reads verified payload bytes through the selected snapshot context.
     let graph = pin
         .format_context()
         .open_native_graph(&row_map)
@@ -262,32 +240,33 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
             .lookup_row(key, &scope)
             .expect("read the restored row")
             .expect("the restored row exists");
-        let descriptor = row
+        let blob_descriptors = row
             .value()
             .dependencies()
             .into_iter()
-            .find(|dependency| dependency.kind() == NativeObjectKind::Tree)
-            .expect("the row carries its Blob descriptor")
-            .oid()
-            .clone();
+            .filter(|dependency| dependency.kind() == NativeObjectKind::Tree)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            blob_descriptors.len(),
+            1,
+            "each fixture row has exactly one payload Blob",
+        );
+        let descriptor = blob_descriptors[0].oid().clone();
         let stored_blob = graph
             .read_stored_blob_value(&row, &descriptor, &scope)
             .expect("resolve the Blob value through the restored row");
+        let identity = stored_blob.content_identity();
+        let expected_hash: [u8; 32] = Sha256::digest(expected_payload).into();
+        assert_eq!(identity.length(), expected_payload.len() as u64);
+        assert_eq!(identity.sha256(), expected_hash);
+        assert_eq!(scope.payload_bytes_read(), 0);
+
         let restored_payload = graph
-            .read_blob_range(
-                stored_blob.reference(),
-                0..expected_payload.len() as u64,
-                &scope,
-            )
+            .read_blob_range(stored_blob.reference(), 0..identity.length(), &scope)
             .expect("read the archived payload without a remote");
-        let (_, stored) = metadata
-            .rows
-            .iter()
-            .find(|(row_key, _)| row_key == key)
-            .expect("metadata includes the selected row");
         assert_eq!(restored_payload.bytes(), expected_payload.as_slice());
         let exported_hash: [u8; 32] = Sha256::digest(restored_payload.bytes()).into();
-        assert_eq!(exported_hash, stored.sha256());
+        assert_eq!(exported_hash, expected_hash);
     }
     let expected_bytes = expected_payloads
         .iter()
