@@ -844,11 +844,7 @@ async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
     )
     .unwrap();
     git(root_path, &["add", "unrelated.orna"]);
-    std::fs::write(
-        &unrelated,
-        include_bytes!("fixtures/project-run-zero.orna"),
-    )
-    .unwrap();
+    std::fs::write(&unrelated, include_bytes!("fixtures/project-run-zero.orna")).unwrap();
     let concurrent = root_path.join("concurrent.orna");
     std::fs::write(
         &concurrent,
