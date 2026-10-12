@@ -897,7 +897,7 @@ impl RowEntry {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RowPage {
     entries: Arc<[RowEntry]>,
     range: Range<usize>,
@@ -921,6 +921,17 @@ impl RowPage {
         self.direct_refs
     }
 }
+
+impl PartialEq for RowPage {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries() == other.entries()
+            && self.height == other.height
+            && self.encoded_size == other.encoded_size
+            && self.direct_refs == other.direct_refs
+    }
+}
+
+impl Eq for RowPage {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrderedRowMap {
@@ -1641,6 +1652,31 @@ mod tests {
             .expect("original row remains");
         assert_eq!(row.value().encoded_fields(), Some(&[0x81, 0x01][..]));
     }
+    #[test]
+    fn row_page_equality_uses_only_visible_entries_and_page_metadata() {
+        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
+        let before = RowEntry::new(TypedKey::Text("before".to_owned()), value.clone());
+        let visible = RowEntry::new(TypedKey::Text("visible".to_owned()), value.clone());
+        let after = RowEntry::new(TypedKey::Text("after".to_owned()), value);
+        let left = RowPage {
+            entries: Arc::from(vec![before, visible.clone(), after]),
+            range: 1..2,
+            height: 2,
+            encoded_size: 48,
+            direct_refs: 1,
+        };
+        let right = RowPage {
+            entries: Arc::from(vec![visible]),
+            range: 0..1,
+            height: 2,
+            encoded_size: 48,
+            direct_refs: 1,
+        };
+
+        assert_eq!(left.entries(), right.entries());
+        assert_eq!(left, right);
+    }
+
     #[test]
     fn partition_token_ranges_rejects_heights_above_format_bound() {
         assert_eq!(
