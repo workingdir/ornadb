@@ -1,0 +1,1 @@
+sys.blob.annotate(asset, "image/jpeg", "png")
