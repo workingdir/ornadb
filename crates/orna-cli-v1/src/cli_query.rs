@@ -233,8 +233,16 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             query_error("Format context could not be opened", format!("{error:?}"))
         })?,
     };
+    let table = format
+        .resolve_committed_table_by_relation_id(relation)
+        .map_err(|error| {
+            query_error(
+                "Table descriptor could not be resolved",
+                format!("{error:?}"),
+            )
+        })?;
     let row_map = format
-        .load_row_map(relation)
+        .load_row_map(*table.relation_id())
         .map_err(|error| query_error("Row map could not be loaded", format!("{error:?}")))?;
     let binding = format
         .resolve_committed_table_by_relation_id(relation)
