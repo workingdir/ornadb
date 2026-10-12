@@ -3796,10 +3796,16 @@ mod graph_bridge_tests {
             "the committed OGS-1 store root advanced"
         );
         let later_scope = later_graph.open_read_scope().expect("later read scope");
+        let objects_before = later_scope.objects_read_for_test();
         assert!(matches!(
             later_graph.resolve_row_node(&row, &descriptor_oid, &later_scope),
             Err(crate::native_graph::GraphError::ContextMismatch)
         ));
+        assert_eq!(
+            later_scope.objects_read_for_test(),
+            objects_before,
+            "foreign-root rejection must not read graph objects"
+        );
     }
 
     #[test]

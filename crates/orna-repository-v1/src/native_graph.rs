@@ -20,6 +20,7 @@ use std::{
     },
 };
 
+use fs2::FileExt;
 use orna_value_v1::{BlobMetadata, MediaAnnotation, SchemaDescriptor};
 use sha2::{Digest, Sha256};
 
@@ -1882,12 +1883,14 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
     ) -> Result<(), GraphError> {
         scope.authorize(self)?;
-        let persisted_row = self.lookup_row(row.key(), scope)?;
         if row.version().database_id() != &self.database_id
             || row.version().store_root() != &self.store_root
             || row.version().schema().schema_digest() != &self.schema_digest
-            || persisted_row.as_ref() != Some(row)
         {
+            return Err(GraphError::ContextMismatch);
+        }
+        let persisted_row = self.lookup_row(row.key(), scope)?;
+        if persisted_row.as_ref() != Some(row) {
             return Err(GraphError::ContextMismatch);
         }
         Ok(())
