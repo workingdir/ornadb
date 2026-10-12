@@ -1,21 +1,21 @@
 //! Repository-owned format admission and pinned metadata context.
 //!
-//! This module is deliberately narrower than the repository's storage and
-//! graph implementations. It admits the tracked format coordinate, keeps
-//! legacy readers explicitly read-only, and issues opaque snapshot-bound
-//! handles for later value/schema/store work. It does not write rows, convert
-//! data, or interpret native graph objects.
+//! This module admits tracked format coordinates, pins legacy readers as
+//! read-only, and issues snapshot-bound handles for row and schema work. It
+//! authenticates committed table descriptors; it never derives schema from
+//! row values or uses caller-supplied IDs as schema authority.
 
 use std::{fmt, process::Command, str::FromStr};
 
-use orna_syntax_v1::{Expr, LiteralKind, RecordField, parse_row};
+use orna_syntax_v1::{Declaration, Expr, LiteralKind, RecordField, parse_module, parse_row};
 use sha2::{Digest, Sha256};
 
 use crate::{Repository, RepositoryError};
-use crate::{
-    native_graph::{GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability},
-    row_store::RowMapSnapshot,
+use crate::native_graph::{
+    GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability,
 };
+use crate::row_store::RowMapSnapshot;
+use orna_value_v1::{Raw, SchemaDescriptor};
 
 use super::DatabaseId;
 
@@ -88,6 +88,7 @@ pub enum FormatContextError {
     StoreRootUnavailable,
     StoreRootInvalid,
     RowMapMismatch,
+    TableBindingMismatch,
     GraphContextUnavailable,
     GraphContextInvalid,
 }
@@ -111,6 +112,7 @@ impl FormatContextError {
             Self::RowMapMismatch => "ORNA-REPO-CONTEXT-012",
             Self::GraphContextUnavailable => "ORNA-REPO-CONTEXT-013",
             Self::GraphContextInvalid => "ORNA-REPO-CONTEXT-014",
+            Self::TableBindingMismatch => "ORNA-REPO-CONTEXT-016",
         }
     }
 }
@@ -136,9 +138,45 @@ impl fmt::Display for FormatContextError {
             Self::StoreRootUnavailable => "repository store root is unavailable",
             Self::StoreRootInvalid => "repository store root is invalid",
             Self::RowMapMismatch => "row map does not belong to the pinned format-3 context",
+            Self::TableBindingMismatch => "table declaration and committed schema binding disagree",
             Self::GraphContextUnavailable => "native graph repository data is unavailable",
             Self::GraphContextInvalid => "native graph repository data is invalid",
         })
+    }
+}
+
+/// Repository-authenticated schema binding for one declaration in the
+/// context's committed root module. `descriptor` is decoded from the schema
+/// object sealed by this snapshot; its key order, key types, field roles and
+/// field types (including Blob fields) are the authoritative row contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedTableBinding {
+    declaration_name: String,
+    relation_id: [u8; 16],
+    schema_oid: NativeOid,
+    schema_digest: [u8; 32],
+    descriptor: SchemaDescriptor,
+}
+
+impl CommittedTableBinding {
+    pub fn declaration_name(&self) -> &str {
+        &self.declaration_name
+    }
+
+    pub const fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub fn schema_oid(&self) -> &NativeOid {
+        &self.schema_oid
+    }
+
+    pub const fn schema_digest(&self) -> &[u8; 32] {
+        &self.schema_digest
+    }
+
+    pub fn descriptor(&self) -> &SchemaDescriptor {
+        &self.descriptor
     }
 }
 
@@ -424,6 +462,83 @@ impl RepositoryFormatContext {
             relation_id,
         )
         .map_err(|_| FormatContextError::GraphContextInvalid)
+    }
+
+    /// Binds a committed root-module table declaration to the schema sealed
+    /// by its stable format-3 relation identity in this exact snapshot.
+    ///
+    /// The schema descriptor is loaded through the owner-issued graph context;
+    /// callers must not treat the input ID or row contents as schema authority.
+    pub fn bind_committed_table(
+        &self,
+        declaration_name: &str,
+        table_object_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.require_format3()?;
+        let source = self
+            .snapshot
+            .read_file(&self.repository, MAIN_SOURCE_PATH, 64 * 1024)
+            .map_err(|error| match error {
+                RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
+                _ => FormatContextError::SchemaRootInvalid,
+            })?;
+        let source = std::str::from_utf8(&source)
+            .map_err(|_| FormatContextError::SchemaRootInvalid)?;
+        let parsed = parse_module(source);
+        if !parsed.is_ok() {
+            return Err(FormatContextError::SchemaRootInvalid);
+        }
+        let mut declarations = parsed.value.items.iter().filter_map(|item| {
+            match &item.declaration {
+                Declaration::Table {
+                    name,
+                    keys,
+                    members,
+                } if name == declaration_name => Some((keys, members)),
+                _ => None,
+            }
+        });
+        let Some((keys, members)) = declarations.next() else {
+            return Err(FormatContextError::TableBindingMismatch);
+        };
+        if declarations.next().is_some() {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+
+        let rows = self.load_row_map(table_object_id)?;
+        let version = rows.version();
+        if version.relation_id() != &table_object_id {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        let graph = self.open_native_graph(&rows)?;
+        let scope = graph
+            .open_read_scope()
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        let descriptor = graph
+            .read_schema_descriptor(&scope)
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        if schema_descriptor_table_id(&descriptor) != Some(table_object_id)
+            || !schema_descriptor_matches_source_table(keys, members, &descriptor)
+        {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        if parsed.value.items.iter().any(|item| {
+            matches!(
+                &item.declaration,
+                Declaration::Table { name, keys, members }
+                    if name != declaration_name
+                        && schema_descriptor_matches_source_table(keys, members, &descriptor)
+            )
+        }) {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        Ok(CommittedTableBinding {
+            declaration_name: declaration_name.to_owned(),
+            relation_id: *version.relation_id(),
+            schema_oid: version.schema().schema_oid().clone(),
+            schema_digest: *version.schema().schema_digest(),
+            descriptor,
+        })
     }
 
     /// Issues native Git graph authority only for a sealed row-map snapshot
@@ -1019,6 +1134,262 @@ fn parse_database_id(value: &Expr) -> Result<DatabaseId, FormatContextError> {
     DatabaseId::from_str(text).map_err(|_| FormatContextError::MetadataInvalid)
 }
 
+fn schema_descriptor_table_id(descriptor: &SchemaDescriptor) -> Option<[u8; 16]> {
+    let Raw::Bytes(bytes) = schema_descriptor_entry(descriptor, 1)? else {
+        return None;
+    };
+    bytes.as_slice().try_into().ok()
+}
+
+fn schema_descriptor_entry(descriptor: &SchemaDescriptor, field_number: u8) -> Option<&Raw> {
+    let Raw::Map(fields) = descriptor.raw() else {
+        return None;
+    };
+    let key = Raw::Int(field_number.into());
+    fields
+        .iter()
+        .find_map(|(candidate, value)| (candidate == &key).then_some(value))
+}
+
+fn schema_descriptor_matches_source_table(
+    keys: &[orna_syntax_v1::Parameter],
+    members: &[orna_syntax_v1::TableMember],
+    descriptor: &SchemaDescriptor,
+) -> bool {
+    let Some(Raw::Array(key_ids)) = schema_descriptor_entry(descriptor, 2) else {
+        return false;
+    };
+    let Some(Raw::Array(field_values)) = schema_descriptor_entry(descriptor, 3) else {
+        return false;
+    };
+    let fields = field_values
+        .iter()
+        .map(|field| {
+            let Raw::Array(parts) = field else {
+                return None;
+            };
+            let [Raw::Bytes(id), Raw::Text(name), ty, role, _] = parts.as_slice() else {
+                return None;
+            };
+            Some((<[u8; 16]>::try_from(id.as_slice()).ok()?, name.as_str(), ty, schema_role(role)?))
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(fields) = fields else {
+        return false;
+    };
+    let source_field_count = members
+        .iter()
+        .filter(|member| matches!(member, orna_syntax_v1::TableMember::Field { .. }))
+        .count();
+    if keys.len() != key_ids.len() || fields.len() != keys.len() + source_field_count {
+        return false;
+    }
+    let mut source_names = Vec::with_capacity(keys.len() + members.len());
+    for (key, key_id) in keys.iter().zip(key_ids) {
+        let (orna_syntax_v1::Pattern::Name(name, _), Some(ty), Raw::Bytes(id)) =
+            (&key.pattern, key.annotation.as_ref(), key_id)
+        else {
+            return false;
+        };
+        let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) else {
+            return false;
+        };
+        let Some((_, descriptor_name, descriptor_type, role)) =
+            fields.iter().find(|(field_id, _, _, _)| *field_id == id)
+        else {
+            return false;
+        };
+        if *descriptor_name != name.as_str()
+            || *role != 0
+            || !source_type_matches_schema(ty, descriptor_type)
+        {
+            return false;
+        }
+        source_names.push(name.as_str());
+    }
+
+    for member in members {
+        let orna_syntax_v1::TableMember::Field {
+            name,
+            ty,
+            initializer,
+            ..
+        } = member
+        else {
+            continue;
+        };
+        let Some((_, _, descriptor_type, role)) =
+            fields
+                .iter()
+                .find(|(_, field_name, _, _)| *field_name == name.as_str())
+        else {
+            return false;
+        };
+        let expected_role = match initializer {
+            Some(orna_syntax_v1::FieldInitializer::Computed(_)) => 2,
+            Some(orna_syntax_v1::FieldInitializer::Default(_)) | None => 1,
+        };
+        if *role != expected_role
+            || !source_type_matches_schema(ty, descriptor_type)
+            || source_type_contains_blob(ty) != schema_type_contains_blob(descriptor_type)
+        {
+            return false;
+        }
+        source_names.push(name.as_str());
+    }
+
+    let mut descriptor_names = fields
+        .iter()
+        .map(|(_, name, _, _)| *name)
+        .collect::<Vec<_>>();
+    source_names.sort_unstable();
+    descriptor_names.sort_unstable();
+    source_names == descriptor_names
+}
+
+fn schema_role(raw: &Raw) -> Option<u8> {
+    let Raw::Int(value) = raw else {
+        return None;
+    };
+    if value == &0.into() {
+        Some(0)
+    } else if value == &1.into() {
+        Some(1)
+    } else if value == &2.into() {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+fn source_type_matches_schema(source: &orna_syntax_v1::TypeExpr, schema: &Raw) -> bool {
+    let Some(expected) = source_type_node(source) else {
+        return source_type_contains_blob(source) == schema_type_contains_blob(schema);
+    };
+    expected == *schema
+}
+
+fn source_type_node(source: &orna_syntax_v1::TypeExpr) -> Option<Raw> {
+    use orna_syntax_v1::TypeExpr;
+
+    match source {
+        TypeExpr::Name { path, arguments, .. }
+            if arguments.is_empty() && path.len() == 1 && is_storage_primitive(&path[0]) =>
+        {
+            Some(Raw::Array(vec![Raw::Int(0.into()), Raw::Text(path[0].clone())]))
+        }
+        TypeExpr::Name { .. } => None,
+        TypeExpr::List { inner, .. } => Some(Raw::Array(vec![
+            Raw::Int(1.into()),
+            source_type_node(inner)?,
+        ])),
+        TypeExpr::Optional { inner, .. } => Some(Raw::Array(vec![
+            Raw::Int(2.into()),
+            source_type_node(inner)?,
+        ])),
+        TypeExpr::Tuple { elements, .. } => Some(Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Array(
+                elements
+                    .iter()
+                    .map(source_type_node)
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+        ])),
+        TypeExpr::Record { fields, .. } => {
+            let mut fields = fields
+                .iter()
+                .map(|(name, ty, _)| Some((name.clone(), source_type_node(ty)?)))
+                .collect::<Option<Vec<_>>>()?;
+            fields.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            Some(Raw::Array(vec![
+                Raw::Int(4.into()),
+                Raw::Array(
+                    fields
+                        .into_iter()
+                        .map(|(name, ty)| Raw::Array(vec![Raw::Text(name), ty]))
+                        .collect(),
+                ),
+            ]))
+        }
+        TypeExpr::Name { .. } | TypeExpr::Product { .. } | TypeExpr::Function { .. } => None,
+    }
+}
+
+fn is_storage_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "Bool"
+            | "Int"
+            | "Float"
+            | "Decimal"
+            | "Str"
+            | "Blob"
+            | "Uuid"
+            | "Date"
+            | "Instant"
+            | "LocalDateTime"
+            | "TimeOfDay"
+            | "Duration"
+            | "TimeZone"
+            | "ZonedDateTime"
+            | "Unit"
+    )
+}
+
+fn source_type_contains_blob(source: &orna_syntax_v1::TypeExpr) -> bool {
+    use orna_syntax_v1::TypeExpr;
+
+    match source {
+        TypeExpr::Name { path, arguments, .. } => {
+            path.last().is_some_and(|name| name == "Blob")
+                || arguments.iter().any(source_type_contains_blob)
+        }
+        TypeExpr::List { inner, .. } | TypeExpr::Optional { inner, .. } => {
+            source_type_contains_blob(inner)
+        }
+        TypeExpr::Product { lhs, rhs, .. } => {
+            source_type_contains_blob(lhs) || source_type_contains_blob(rhs)
+        }
+        TypeExpr::Record { fields, .. } => fields
+            .iter()
+            .any(|(_, ty, _)| source_type_contains_blob(ty)),
+        TypeExpr::Tuple { elements, .. } => elements.iter().any(source_type_contains_blob),
+        TypeExpr::Function { parameters, result, .. } => {
+            parameters.iter().any(source_type_contains_blob) || source_type_contains_blob(result)
+        }
+    }
+}
+
+fn schema_type_contains_blob(schema: &Raw) -> bool {
+    let Raw::Array(node) = schema else {
+        return false;
+    };
+    if matches!(
+        node.as_slice(),
+        [Raw::Int(code), Raw::Text(name)] if code == &0.into() && name == "Blob"
+    ) {
+        return true;
+    }
+    match node.first() {
+        Some(Raw::Int(code)) if code == &1.into() || code == &2.into() => {
+            node.get(1).is_some_and(schema_type_contains_blob)
+        }
+        Some(Raw::Int(code)) if code == &3.into() => match node.get(1) {
+            Some(Raw::Array(items)) => items.iter().any(schema_type_contains_blob),
+            _ => false,
+        },
+        Some(Raw::Int(code)) if code == &4.into() => match node.get(1) {
+            Some(Raw::Array(fields)) => fields.iter().any(|field| match field {
+                Raw::Array(parts) => parts.get(1).is_some_and(schema_type_contains_blob),
+                _ => false,
+            }),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// The one shared bounded Orna-record parser used by repository metadata
 /// initialization and this format-context admission path.
 pub(super) fn parse_record(bytes: &[u8]) -> Result<Vec<RecordField>, ()> {
@@ -1082,6 +1453,7 @@ mod graph_bridge_tests {
 
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
+    use orna_value_v1::{Raw, SchemaDescriptor};
 
     use crate::{
         Repository,
@@ -1190,11 +1562,111 @@ mod graph_bridge_tests {
         );
     }
 
+    #[test]
+    fn committed_table_binding_returns_pinned_schema_and_rejects_other_key_type() {
+        let relation_id = [0xa1; 16];
+        let (directory, expected_descriptor, expected_oid, expected_digest) =
+            seeded_table_binding("Int", relation_id);
+        let context = context(directory.path());
+        let binding = context
+            .bind_committed_table("Audio", relation_id)
+            .expect("source declaration and pinned schema agree");
+        assert_eq!(binding.declaration_name(), "Audio");
+        assert_eq!(binding.relation_id(), &relation_id);
+        assert_eq!(binding.schema_oid(), &expected_oid);
+        assert_eq!(binding.schema_digest(), &expected_digest);
+        assert_eq!(binding.descriptor(), &expected_descriptor);
+
+        let (other_directory, _, _, _) = seeded_table_binding("Str", relation_id);
+        let other_context = context(other_directory.path());
+        assert_eq!(
+            other_context.bind_committed_table("Audio", relation_id),
+            Err(super::FormatContextError::TableBindingMismatch)
+        );
+    }
+
     fn context(directory: &Path) -> RepositoryFormatContext {
         Repository::discover(directory)
             .expect("discover fixture repository")
             .open_format_context()
             .expect("admit fixture format context")
+    }
+
+    fn seeded_table_binding(
+        key_type: &str,
+        relation_id: [u8; 16],
+    ) -> (TempDir, SchemaDescriptor, NativeOid, [u8; 32]) {
+        let directory = repository();
+        let root = directory.path();
+        fs::write(
+            root.join("main.orna"),
+            "module main; pub table Audio(id: Int) { payload: Blob, }\n",
+        )
+        .expect("write committed table declaration");
+        commit(root);
+        let context = context(root);
+        let algorithm = context
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let key_field_id = [0x11; 16];
+        let payload_field_id = [0x22; 16];
+        let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
+            Raw::Array(vec![
+                Raw::Bytes(id.to_vec()),
+                Raw::Text(name.to_owned()),
+                ty,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), Raw::Bytes(relation_id.to_vec())),
+            (
+                Raw::Int(2.into()),
+                Raw::Array(vec![Raw::Bytes(key_field_id.to_vec())]),
+            ),
+            (
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    field(
+                        key_field_id,
+                        "id",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text(key_type.into())]),
+                        0,
+                    ),
+                    field(
+                        payload_field_id,
+                        "payload",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".into())]),
+                        1,
+                    ),
+                ]),
+            ),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid stored schema descriptor");
+        let schema_bytes = descriptor.encode().expect("encode schema descriptor");
+        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            root,
+            algorithm,
+            &schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+        let primary_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: Vec::new(),
+            },
+        );
+        install_rows_store(root, &context, relation_id, &schema_oid, &primary_root, 0);
+        (directory, descriptor, schema_oid, schema_digest)
     }
 
     fn write_git_object(
@@ -2370,9 +2842,19 @@ mod graph_bridge_tests {
         .expect("consistent row-map identity");
 
         let mut authority = Sha256::new();
-        authority.update(b"orna.test.graph-bridge.row-authority.v1\0");
-        authority.update(context.snapshot.commit.as_str().as_bytes());
+        authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
         authority.update(database_id.as_bytes());
+        authority.update(context.snapshot.snapshot_id());
+        authority.update(store.oid.as_bytes());
+        authority.update(version.relation_id());
+        authority.update(version.primary_root().as_bytes());
+        authority.update(version.schema().schema_digest());
+        authority.update(
+            version
+                .row_count()
+                .expect("sealed row-map count")
+                .to_be_bytes(),
+        );
         RowMapSnapshot::issue(version, authority.finalize().into(), Vec::new())
             .expect("seal row-map snapshot")
     }
