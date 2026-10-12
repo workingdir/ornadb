@@ -281,8 +281,8 @@ async fn diff_reports_annotation_only_change_between_pinned_publications_without
     let old = &change["before"]["annotations"][0];
     let new = &change["after"]["annotations"][0];
     assert_eq!(old["media_type"], serde_json::json!("audio/wav"));
-    assert_eq!(new["media_type"], serde_json::json!("application/octet-stream"));
-    assert_eq!(new["suffix"], serde_json::json!("wav"));
+    assert_eq!(new["media_type"], serde_json::json!("audio/mpeg"));
+    assert_eq!(new["suffix"], serde_json::json!("mp2"));
     assert_eq!(old["length"], new["length"]);
     assert_eq!(old["sha256"], new["sha256"]);
 }
