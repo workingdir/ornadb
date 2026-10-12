@@ -1182,54 +1182,6 @@ fn build_private_row_publication_candidate(
         .map_err(|_| Error::RepositoryUnavailable)
 }
 
-fn source_schema_has_single_text_key(schema: &orna_semantic_v1::TableSchema) -> bool {
-    schema.admission.as_ref().is_some_and(|admission| {
-        !admission.automatic_key
-            && matches!(
-                admission.keys.as_slice(),
-                [(_, orna_semantic_v1::Type::Text)]
-            )
-    })
-}
-
-fn source_text_key_names(analysis: &orna_semantic_v1::Analysis) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    let mut unqualified_names = BTreeMap::<String, Option<bool>>::new();
-    for (namespace, module) in &analysis.modules {
-        for (name, symbol) in &module.symbols {
-            if symbol.kind != orna_semantic_v1::SymbolKind::Table {
-                continue;
-            }
-            let Some(schema) = symbol.table_schema.as_ref() else {
-                continue;
-            };
-            let is_text_key = source_schema_has_single_text_key(schema);
-            unqualified_names
-                .entry(name.clone())
-                .and_modify(|eligible| *eligible = None)
-                .or_insert(Some(is_text_key));
-            if is_text_key {
-                let owner = if namespace.0.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{}/{}", namespace.0.join("/"), name)
-                };
-                names.insert(owner);
-            }
-        }
-    }
-    names.extend(
-        unqualified_names
-            .into_iter()
-            .filter_map(|(name, eligible)| {
-                eligible
-                    .is_some_and(|is_text_key| is_text_key)
-                    .then_some(name)
-            }),
-    );
-    names
-}
-
 fn decode_source_text_key(encoded: &[u8]) -> Result<orna_repository_v1::TypedKey, Error> {
     let decoded = orna_value_v1::Value::decode(encoded).map_err(|_| Error::InvalidKey)?;
     if decoded.encode().map_err(|_| Error::InvalidKey)?.as_slice() != encoded {
@@ -1241,9 +1193,8 @@ fn decode_source_text_key(encoded: &[u8]) -> Result<orna_repository_v1::TypedKey
     Ok(orna_repository_v1::TypedKey::Text(key.clone()))
 }
 
-/// Lowers protected media rows using the committed source's single-Text-key
-/// admission and the pinned relation maps. Mutation keys must be canonical OVB
-/// Text values before relation-row construction.
+/// Lowers protected media rows using the committed table binding and pinned
+/// relation maps. Mutation keys must be canonical OVB Text values.
 pub fn lower_protected_blob_mutations_for_publication(
     repository: &Repository,
     head: &GitCommitRef,
@@ -1254,42 +1205,52 @@ pub fn lower_protected_blob_mutations_for_publication(
     let format = repository
         .open_pinned_format_context(head.as_str())
         .map_err(|_| Error::RepositoryUnavailable)?;
-    let project = orna_project_v1::ProjectLoader::default()
-        .load_committed_snapshot(repository, head)
-        .map_err(|_| Error::InvalidRow)?;
-    let catalogue = project
-        .standard_catalogue(project.standard_sources().iter().cloned())
-        .map_err(|_| Error::InvalidRow)?;
-    let empty_catalogue = orna_semantic_v1::Catalogue::empty();
-    let analysis = orna_semantic_v1::analyze_with_catalogue(
-        project.modules(),
-        catalogue.as_ref().unwrap_or(&empty_catalogue),
-    );
-    if !analysis.is_ok() {
-        return Err(Error::InvalidRow);
-    }
-    let source_text_keys = source_text_key_names(&analysis);
-
-    let mut by_relation = BTreeMap::<[u8; 16], BTreeMap<TypedKey, &TableMutation>>::new();
+    let mut by_relation = BTreeMap::<
+        [u8; 16],
+        (
+            String,
+            [u8; 16],
+            [u8; 32],
+            BTreeMap<TypedKey, &TableMutation>,
+        ),
+    >::new();
     for mutation in mutations {
-        let relation_id = mutation.table_object_id().ok_or(Error::InvalidRow)?.bytes();
-        if mutation.rekey_to().is_some() || !source_text_keys.contains(mutation.table()) {
+        let table_object_id = mutation.table_object_id().ok_or(Error::InvalidRow)?.bytes();
+        let binding = format
+            .bind_committed_table(mutation.table(), table_object_id)
+            .map_err(|_| Error::InvalidRow)?;
+        let relation_id = *binding.relation_id();
+        let schema_digest = *binding.schema_digest();
+        let key = decode_source_text_key(mutation.key())?;
+        let (declaration_name, bound_table_id, bound_digest, table_mutations) =
+            by_relation.entry(relation_id).or_insert_with(|| {
+                (
+                    mutation.table().to_owned(),
+                    table_object_id,
+                    schema_digest,
+                    BTreeMap::new(),
+                )
+            });
+        if declaration_name != mutation.table()
+            || bound_table_id != &table_object_id
+            || bound_digest != &schema_digest
+            || mutation.rekey_to().is_some()
+        {
             return Err(Error::InvalidRow);
         }
-        let key = decode_source_text_key(mutation.key())?;
-        by_relation
-            .entry(relation_id)
-            .or_default()
-            .insert(key, mutation);
+        table_mutations.insert(key, mutation);
     }
 
     let mut lowered = Vec::with_capacity(by_relation.len());
-    for (relation_id, final_mutations) in by_relation {
+    for (relation_id, (declaration_name, table_object_id, schema_digest, final_mutations)) in
+        by_relation
+    {
         let row_map = format
             .load_row_map(relation_id)
             .map_err(|_| Error::RepositoryUnavailable)?;
-        let schema_digest = *row_map.version().schema().schema_digest();
-        if row_map.version().relation_id() != &relation_id {
+        if row_map.version().relation_id() != &relation_id
+            || row_map.version().schema().schema_digest() != &schema_digest
+        {
             return Err(Error::InvalidRow);
         }
         let graph = format
@@ -1332,7 +1293,8 @@ pub fn lower_protected_blob_mutations_for_publication(
         }
         if !operations.is_empty() {
             lowered.push(RelationRowMutation::new(
-                relation_id,
+                declaration_name,
+                table_object_id,
                 schema_digest,
                 operations,
             ));

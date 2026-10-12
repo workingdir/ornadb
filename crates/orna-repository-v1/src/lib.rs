@@ -229,32 +229,40 @@ impl ManagedFileChange {
     }
 }
 
-/// Ordered row-index operations for one relation in a format-3 publication.
+/// Ordered row-index operations for one authenticated table in a format-3 publication.
 ///
-/// The relation identity and source digest come from admitted compiler output;
-/// the repository matches both against the captured committed row map.
+/// The declaration name and table object identity bind the operations to the
+/// committed schema at the candidate's captured snapshot. The supplied digest
+/// is checked against that authenticated binding before any index maintenance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationRowMutation {
-    relation_id: [u8; 16],
+    declaration_name: String,
+    table_object_id: [u8; 16],
     source_schema_digest: [u8; 32],
     operations: Vec<RowIndexMutation>,
 }
 
 impl RelationRowMutation {
     pub fn new(
-        relation_id: [u8; 16],
+        declaration_name: String,
+        table_object_id: [u8; 16],
         source_schema_digest: [u8; 32],
         operations: Vec<RowIndexMutation>,
     ) -> Self {
         Self {
-            relation_id,
+            declaration_name,
+            table_object_id,
             source_schema_digest,
             operations,
         }
     }
 
-    pub const fn relation_id(&self) -> &[u8; 16] {
-        &self.relation_id
+    pub fn declaration_name(&self) -> &str {
+        &self.declaration_name
+    }
+
+    pub const fn table_object_id(&self) -> &[u8; 16] {
+        &self.table_object_id
     }
 
     pub const fn source_schema_digest(&self) -> &[u8; 32] {
@@ -2648,10 +2656,12 @@ impl Repository {
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
         if mutations.is_empty()
-            || mutations.iter().any(|mutation| mutation.operations.is_empty())
             || mutations
                 .iter()
-                .map(|mutation| mutation.relation_id)
+                .any(|mutation| mutation.operations.is_empty())
+            || mutations
+                .iter()
+                .map(|mutation| mutation.table_object_id)
                 .collect::<BTreeSet<_>>()
                 .len()
                 != mutations.len()
@@ -2667,13 +2677,21 @@ impl Repository {
 
         let mut row_maps = Vec::with_capacity(mutations.len());
         let mut graphs = Vec::with_capacity(mutations.len());
-        let mut maintenances = Vec::with_capacity(mutations.len());
         let mut scopes = Vec::with_capacity(mutations.len());
         for mutation in mutations {
-            let row_map = format
-                .load_row_map(mutation.relation_id)
+            let binding = format
+                .bind_committed_table(mutation.declaration_name(), mutation.table_object_id)
                 .map_err(RepositoryError::FormatContext)?;
-            if row_map.version().schema().schema_digest() != &mutation.source_schema_digest {
+            if binding.schema_digest() != &mutation.source_schema_digest {
+                return Err(RepositoryError::FormatContext(
+                    FormatContextError::RowMapMismatch,
+                ));
+            }
+            let relation_id = *binding.relation_id();
+            let row_map = format
+                .load_row_map(relation_id)
+                .map_err(RepositoryError::FormatContext)?;
+            if row_map.version().schema().schema_digest() != binding.schema_digest() {
                 return Err(RepositoryError::FormatContext(
                     FormatContextError::RowMapMismatch,
                 ));
@@ -2682,15 +2700,57 @@ impl Repository {
                 .open_native_graph(&row_map)
                 .map_err(RepositoryError::FormatContext)?;
             let scope = graph.open_read_scope().map_err(RepositoryError::Graph)?;
-            let maintenance = graph
-                .maintain_row_index(&mutation.operations, &scope)
-                .map_err(RepositoryError::Graph)?;
+            let validate_row = |key: &crate::row_store::TypedKey,
+                                value: &crate::row_store::RowValue|
+             -> Result<(), RepositoryError> {
+                let canonical_key = key.canonical_bytes().map_err(|_| {
+                    RepositoryError::FormatContext(FormatContextError::RowMapMismatch)
+                })?;
+                let canonical_fields = value.encoded_fields().ok_or_else(|| {
+                    RepositoryError::FormatContext(FormatContextError::RowMapMismatch)
+                })?;
+                binding
+                    .descriptor()
+                    .validate_stored_row(relation_id, &canonical_key, canonical_fields)
+                    .map_err(|_| RepositoryError::FormatContext(FormatContextError::RowMapMismatch))
+            };
+            for operation in &mutation.operations {
+                match operation {
+                    RowIndexMutation::Insert { key, value } => validate_row(key, value)?,
+                    RowIndexMutation::Delete { key } => {
+                        let row = graph
+                            .lookup_row(key, &scope)
+                            .map_err(RepositoryError::Graph)?
+                            .ok_or(RepositoryError::FormatContext(
+                                FormatContextError::RowMapMismatch,
+                            ))?;
+                        validate_row(key, row.value())?;
+                    }
+                    RowIndexMutation::Rekey { from, to } => {
+                        let row = graph
+                            .lookup_row(from, &scope)
+                            .map_err(RepositoryError::Graph)?
+                            .ok_or(RepositoryError::FormatContext(
+                                FormatContextError::RowMapMismatch,
+                            ))?;
+                        validate_row(from, row.value())?;
+                        validate_row(to, row.value())?;
+                    }
+                }
+            }
             row_maps.push(row_map);
             graphs.push(graph);
             scopes.push(scope);
-            maintenances.push(maintenance);
         }
 
+        let mut maintenances = Vec::with_capacity(mutations.len());
+        for ((mutation, graph), scope) in mutations.iter().zip(&graphs).zip(&scopes) {
+            maintenances.push(
+                graph
+                    .maintain_row_index(&mutation.operations, scope)
+                    .map_err(RepositoryError::Graph)?,
+            );
+        }
         let relation_candidates = row_maps
             .iter()
             .zip(&maintenances)
