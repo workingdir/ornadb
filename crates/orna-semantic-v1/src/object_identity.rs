@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 use crate::ModuleInput;
 
-pub const OBJECT_IDENTITY_METADATA_PATH: &str = ".orna/objects";
 const MANIFEST_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -237,13 +236,16 @@ fn int_u64(raw: &Raw) -> Option<u64> {
 }
 
 fn validate_records(records: &[ObjectIdentity]) -> Result<(), ObjectIdentityError> {
-    let mut keys = BTreeSet::new();
+    let mut active_keys = BTreeSet::new();
     let mut ids = BTreeSet::new();
     for record in records {
-        if record.qualified_name.is_empty() || record.qualified_name.contains('\0')
-            || !keys.insert((record.kind, record.qualified_name.as_str(), record.retired))
+        if record.qualified_name.is_empty()
+            || record.qualified_name.contains('\0')
+            || (!record.retired && !active_keys.insert((record.kind, record.qualified_name.as_str())))
             || !ids.insert(record.id)
-        { return Err(ObjectIdentityError::IdentityCollision) }
+        {
+            return Err(ObjectIdentityError::IdentityCollision);
+        }
     }
     Ok(())
 }
@@ -299,5 +301,24 @@ mod tests {
                 && record.id() == &table_id
                 && record.is_retired()
         }));
+        let removed_again = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", "")],
+            Some(&restored),
+        )
+        .expect("later removal can retire the new identity generation");
+        let retired_table_count = removed_again
+            .records()
+            .iter()
+            .filter(|record| {
+                record.kind() == ObjectKind::Table
+                    && record.qualified_name() == "Note"
+                    && record.is_retired()
+            })
+            .count();
+        assert_eq!(retired_table_count, 2);
+        assert_eq!(
+            ObjectIdentityManifest::decode(&removed_again.encode().unwrap()).unwrap(),
+            removed_again,
+        );
     }
 }
