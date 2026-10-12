@@ -242,7 +242,7 @@ impl AdmittedSourceRow {
     }
 
     /// Moves the canonical mutation, owned Blob pins, and schema artifact together.
-    pub fn into_publication_parts(
+    pub fn into_mutation_and_bindings(
         self,
     ) -> (
         TableMutation,
