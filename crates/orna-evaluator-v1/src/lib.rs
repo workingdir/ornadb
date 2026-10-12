@@ -14959,7 +14959,7 @@ mod tests {
         let blob = orna_value_v1::Blob::from_reference_with_annotation(
             reference,
             "image/png",
-            Some("png"),
+            None,
         )
         .expect("annotated owner-scoped Blob");
         let blob_value = ContextValue::from_blob(&blob, ValueFormat::Sov3)
