@@ -4820,7 +4820,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_blob_temp_rename_cas_commits_canonical_media_and_pin() {
-        const PIXEL: &[u8] = include_bytes!("../../orna-cli-v1/tests/fixtures/media/pixel.png");
+        const PIXEL: &[u8] = include_bytes!("../tests/fixtures/media/pixel.png");
         let (_temp, repo, relation_id) = format3_blob_repository();
         let capture = repo.capture_capability(relation_id).unwrap();
         let runtime_identity = RuntimeIdentity {
