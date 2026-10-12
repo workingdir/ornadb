@@ -8608,6 +8608,37 @@ mod persisted_orp_tests {
     }
 
     #[test]
+    fn foreign_root_row_is_rejected_before_graph_reads() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let foreign_root =
+            NativeObjectId::new(graph.algorithm, &[0x55; 20]).expect("foreign root OID");
+        let foreign_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            foreign_root.clone(),
+            admitted_version.schema().clone(),
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent foreign-root version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &foreign_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.resolve_row_node(&row, &foreign_root, &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
+    }
+
+    #[test]
     fn prior_root_captured_blob_is_rejected_before_later_graph_reads() {
         let (_directory, graph) = capture_test_context();
         let capture_scope = graph.open_read_scope().expect("capture scope");
