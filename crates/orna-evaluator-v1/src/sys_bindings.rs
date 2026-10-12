@@ -109,23 +109,24 @@ impl SysHostBindingRegistry {
         self
     }
 
-    /// Accepts the exact OVB-2 capture produced by this binding as a
-    /// graph-backed ORP Blob value. This consumes its scratch candidate and
-    /// returns the value and pin evidence that a table mutation must commit
-    /// together.
+    /// Accepts a captured Blob with matching content identity as a graph-backed
+    /// ORP Blob value. Context-bound Format 3 references need not be hydrated:
+    /// identity and annotation are sufficient to select the captured candidate.
+    /// This consumes its scratch candidate and returns the value and pin
+    /// evidence that a table mutation must commit together.
     pub fn accept_captured_blob_for_row(
         &self,
         value: &ContextValue,
     ) -> Result<OrpBlobBinding, EvaluationError> {
-        if value.format() != ValueFormat::Ovb2 {
+        if !matches!(
+            value.format(),
+            ValueFormat::Ovb2 | ValueFormat::Rov3 | ValueFormat::Sov3
+        ) {
             return Err(redacted_error("ORNA-EVAL-VALUE"));
         }
         let blob = value
             .blob()
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
-        if !blob.is_hydrated() {
-            return Err(redacted_error("ORNA-EVAL-VALUE"));
-        }
         let candidate = {
             let mut candidates = self
                 .capture_candidates
@@ -1446,7 +1447,7 @@ mod tests {
             orna_value_v1::AvailabilityState::Available,
             orna_value_v1::OwnerLifetime::new([3; 16]),
             orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
-            std::sync::Arc::new(NoReadResolver),
+            Arc::new(NoReadResolver),
         )
         .unwrap();
         let source_blob =

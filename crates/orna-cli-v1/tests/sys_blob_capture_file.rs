@@ -109,8 +109,8 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     assert_eq!(annotated_blob.media_type(), "audio/mp4");
     assert_eq!(annotated_blob.suffix(), Some("m4b"));
     assert_eq!(annotated_blob.annotation().selected_suffix(), "m4b");
-    // Materialize the captured identity through a real Format3 resolver before
-    // accepting the annotated value for row conversion.
+    // A row-bound Format 3 reference carries identity and annotation without
+    // loading captured bytes; row conversion must not hydrate it.
     let (format3_context, resolver_bytes_read) = resolver_context(payload);
     let reference = format3_context
         .reference(
@@ -118,32 +118,36 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
             NativeOid::from_bytes(&[0x66; 20]).unwrap(),
         )
         .unwrap();
-    let context_backed_blob = Blob::from_reference_with_annotation(
-        reference,
-        annotated_blob.media_type(),
-        annotated_blob.suffix(),
-    )
-    .unwrap();
+    let context_backed_blob =
+        Blob::from_reference_with_annotation(reference, "application/octet-stream", None).unwrap();
     assert!(!context_backed_blob.is_hydrated());
-    let portable = ContextValue::from_blob(&context_backed_blob, ValueFormat::Ovb2).unwrap();
-    assert_eq!(
-        resolver_bytes_read.load(Ordering::Relaxed),
-        payload.len() as u64
-    );
     let contextual_value =
-        ContextValue::new_in_context(&format3_context, ValueFormat::Ovb2, portable.raw().clone())
-            .unwrap();
+        ContextValue::from_blob(&context_backed_blob, ValueFormat::Rov3).unwrap();
     assert!(contextual_value.context().is_some());
     let contextual_blob = contextual_value.blob().unwrap();
     assert_eq!(
         contextual_blob.content_identity(),
         annotated_blob.content_identity()
     );
-    assert_eq!(contextual_blob.media_type(), "audio/mp4");
-    assert_eq!(contextual_blob.suffix(), Some("m4b"));
-    let binding = bindings
-        .accept_captured_blob_for_row(&contextual_value)
+    assert_eq!(contextual_blob.media_type(), "application/octet-stream");
+    assert_eq!(contextual_blob.suffix(), None);
+    assert_eq!(resolver_bytes_read.load(Ordering::Relaxed), 0);
+    let row_value = contextual_value
+        .with_blob_annotation(annotated_blob.media_type(), annotated_blob.suffix())
         .unwrap();
+    assert_eq!(row_value.format(), ValueFormat::Rov3);
+    assert!(row_value.context().is_some());
+    let row_blob = row_value.blob().unwrap();
+    assert_eq!(row_blob.media_type(), "audio/mp4");
+    assert_eq!(row_blob.suffix(), Some("m4b"));
+    assert_eq!(resolver_bytes_read.load(Ordering::Relaxed), 0);
+    let binding = bindings.accept_captured_blob_for_row(&row_value).unwrap();
+    assert_eq!(resolver_bytes_read.load(Ordering::Relaxed), 0);
+    assert_eq!(row_value.blob().unwrap().read_to_end().unwrap(), payload);
+    assert_eq!(
+        resolver_bytes_read.load(Ordering::Relaxed),
+        payload.len() as u64
+    );
     let expected_row_value = binding.encoded_value().to_vec();
     assert!(
         expected_row_value
