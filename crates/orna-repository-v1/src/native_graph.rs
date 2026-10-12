@@ -468,6 +468,10 @@ impl NativeGraphContext {
         }
         Ok(())
     }
+    /// Returns the immutable row-map identity this graph is pinned to.
+    pub(crate) fn row_map_version(&self) -> &crate::row_store::RowMapVersion {
+        self.row_snapshot.version()
+    }
 
     /// Opens the repository owner's fixed-budget read scope. Each range is
     /// limited to 8 MiB; object count and metadata limits are fixed here, not
