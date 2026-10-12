@@ -719,7 +719,8 @@ fn run_diff(
     }
     let from_label = format!("{from:?} ({})", from_commit.as_str());
     let to_label = format!("{to:?} ({})", to_commit.as_str());
-    let before_schema = orna_project_v1::ProjectLoader::default()
+    let loader = orna_project_v1::ProjectLoader::default();
+    let before_schema = loader
         .resolve_committed_source_table_schema(
             repository,
             &from_commit,
@@ -731,7 +732,7 @@ fn run_diff(
                 format!("{from:?}: {error:?}"),
             )
         })?;
-    let after_schema = orna_project_v1::ProjectLoader::default()
+    let after_schema = loader
         .resolve_committed_source_table_schema(repository, &to_commit, TableObjectId::new(relation))
         .map_err(|error| {
             history_error(
@@ -739,12 +740,22 @@ fn run_diff(
                 format!("{to:?}: {error:?}"),
             )
         })?;
-    if before_schema.snapshot_id() != &before_format.snapshot_pin().snapshot_id()
+    if before_schema.source_commit() != &from_commit
+        || after_schema.source_commit() != &to_commit
+        || before_schema.table_object_id() != TableObjectId::new(relation)
+        || after_schema.table_object_id() != TableObjectId::new(relation)
+        || !before_format
+            .database_id()
+            .is_some_and(|id| before_schema.database_id() == id.as_bytes())
+        || !after_format
+            .database_id()
+            .is_some_and(|id| after_schema.database_id() == id.as_bytes())
+        || before_schema.snapshot_id() != &before_format.snapshot_pin().snapshot_id()
         || after_schema.snapshot_id() != &after_format.snapshot_pin().snapshot_id()
     {
         return Err(history_error(
             "Source table schema snapshot mismatch",
-            "source bindings must come from the exact history endpoint",
+            "source table identity and schema must come from the exact history endpoint",
         ));
     }
     let (before, before_read) =
