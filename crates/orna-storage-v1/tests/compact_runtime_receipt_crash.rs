@@ -601,6 +601,23 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
         )
         .await
         .unwrap();
+    let tail = runtime.begin_activation().await.unwrap();
+    runtime
+        .commit_table_activation(
+            lease,
+            &tail,
+            &[TableMutation::new(
+                [108; 16],
+                "Contact",
+                b"tail row".to_vec(),
+                Some(b"tail row".to_vec()),
+            )
+            .unwrap()],
+            [109; 32],
+            &orna_runtime_v1::NoFault,
+        )
+        .await
+        .unwrap();
     repository
         .publish_compact_repository_boundary(plan(&repository, &freeze))
         .unwrap();
@@ -641,7 +658,7 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
     let branch_head = repository.head().unwrap().unwrap();
     assert_ne!(branch_head, *pending.commit());
     let branch_index = repository.index_generation().unwrap();
-    assert!(runtime.pending().await.unwrap().is_empty());
+    assert_eq!(runtime.pending().await.unwrap().len(), 1);
     assert_eq!(
         RuntimePublicationCoordinator::recover_compact_validated(
             &repository,
@@ -656,7 +673,7 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
     assert_eq!(repository.head().unwrap(), Some(branch_head));
     assert_eq!(repository.index_generation().unwrap(), branch_index);
     assert!(repository.read_publication_journal().unwrap().is_none());
-    assert!(runtime.pending().await.unwrap().is_empty());
+    assert_eq!(runtime.pending().await.unwrap().len(), 1);
     assert_eq!(
         runtime
             .persisted_compact_publication_receipt(&pending)
