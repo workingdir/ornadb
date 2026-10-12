@@ -2197,7 +2197,11 @@ async fn source_admitted_query_decodes_inline_and_overflow_rows_without_payload_
             key => panic!("unexpected query-range key: {key:?}"),
         };
         let canonical_fields = fields.canonical_fields();
-        assert!(canonical_fields.windows(marker.len()).any(|window| window == marker));
+        assert!(
+            canonical_fields
+                .windows(marker.len())
+                .any(|window| window == marker)
+        );
         let inline = canonical_fields.len() < 8_192;
         assert_eq!(inline, expected_inline);
         if expected_inline {
@@ -2208,6 +2212,9 @@ async fn source_admitted_query_decodes_inline_and_overflow_rows_without_payload_
         }
     }
     assert!(saw_inline, "the source fixture retains inline media rows");
-    assert!(saw_overflow, "the real source tuple crosses the inline cutoff");
+    assert!(
+        saw_overflow,
+        "the real source tuple crosses the inline cutoff"
+    );
     assert_eq!(scope.payload_bytes_read(), 0);
 }
