@@ -1827,12 +1827,15 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
     ) -> Result<(), GraphError> {
         scope.authorize(self)?;
-        let persisted_row = self.lookup_row(row.key(), scope)?;
-        if row.version().database_id() != &self.database_id
-            || row.version().store_root() != &self.store_root
-            || row.version().schema().schema_digest() != &self.schema_digest
-            || persisted_row.as_ref() != Some(row)
+        let version = row.version();
+        if version.database_id() != &self.database_id
+            || version.relation_id() != self.row_snapshot.version().relation_id()
+            || version.store_root() != &self.store_root
+            || version.schema().schema_digest() != &self.schema_digest
         {
+            return Err(GraphError::ContextMismatch);
+        }
+        if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
             return Err(GraphError::ContextMismatch);
         }
         Ok(())
@@ -7629,6 +7632,39 @@ mod persisted_orp_tests {
         let first = graph
             .maintain_row_index(&first_mutation, &scope)
             .expect("mutate first relation natively");
+
+        let first_only_root = graph
+            .maintain_relations_rows(&[(&first_version, &first)], &scope)
+            .expect("publish first relation without rewriting the second");
+        let untouched_second = load_format3_row_map(
+            &graph.repository,
+            algorithm,
+            first_only_root,
+            *original.database_id(),
+            graph.snapshot_id,
+            second_relation,
+        )
+        .expect("load untouched second relation from successor StoreRoot");
+        assert_eq!(
+            untouched_second.version().schema().schema_oid(),
+            second_version.schema().schema_oid()
+        );
+        assert_eq!(
+            untouched_second.version().schema().schema_digest(),
+            second_version.schema().schema_digest()
+        );
+        assert_eq!(
+            untouched_second.version().primary_root(),
+            second_version.primary_root()
+        );
+        assert_eq!(
+            untouched_second.version().generation(),
+            second_version.generation()
+        );
+        assert_eq!(
+            untouched_second.version().row_count(),
+            second_version.row_count()
+        );
         graph.row_snapshot = second_snapshot;
         let second_mutation = [RowIndexMutation::Insert {
             key: TypedKey::Text("second".to_owned()),
