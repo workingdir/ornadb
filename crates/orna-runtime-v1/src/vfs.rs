@@ -2295,46 +2295,6 @@ fn render_field_name(name: &str) -> Result<String, VfsPathError> {
     Ok(name.to_owned())
 }
 
-/// A complete source-validated row value and its graph-issued content pins.
-/// The canonical tuple is carried intact; this bridge never rebuilds fields
-/// from a VFS document or lets a path select pin ownership.
-pub struct AdmittedSourceRow {
-    canonical_tuple: Vec<u8>,
-    content_pins: Vec<ProtectedContentPin>,
-}
-
-impl AdmittedSourceRow {
-    /// Retains the complete canonical field tuple produced by source admission
-    /// alongside its ordered protected-content pins.
-    pub fn new(canonical_tuple: Vec<u8>, content_pins: Vec<ProtectedContentPin>) -> Self {
-        Self {
-            canonical_tuple,
-            content_pins,
-        }
-    }
-
-    /// Moves a source-admitted tuple and its matching pins into one typed
-    /// mutation. Field ordering and non-Blob fields remain byte-for-byte intact.
-    pub fn into_mutation_and_bindings(
-        self,
-        mutation_id: [u8; 16],
-        table: &RuntimeTableIdentity,
-        key: Vec<u8>,
-    ) -> Result<(TableMutation, Vec<ProtectedContentPin>), RuntimeError> {
-        let mut mutation = TableMutation::new(
-            mutation_id,
-            table.table(),
-            key,
-            Some(self.canonical_tuple),
-        )?
-        .with_table_object_id(table.object_id());
-        for pin in &self.content_pins {
-            mutation = mutation.with_protected_content_pin(pin)?;
-        }
-        Ok((mutation, self.content_pins))
-    }
-}
-
 /// One complete VFS row replacement routed into the runtime's validated table
 /// activation boundary. The table identity is repository-issued admission
 /// metadata; host paths never supply or override it.
@@ -2360,10 +2320,9 @@ impl VfsTableRowReplacement {
         })
     }
 
-    /// Wraps a complete source-admitted row mutation without reconstructing
-    /// its canonical typed fields or discarding its field-bound pin evidence.
-    /// The owned pins must exactly match the transfer records already retained
-    /// by the mutation, in field order.
+    /// Wraps the complete mutation returned by the source producer's
+    /// `AdmittedSourceRow::into_mutation_and_bindings` with its owned field
+    /// pins. The pins must match the mutation's transfer evidence in order.
     pub fn from_admitted_mutation(
         table: RuntimeTableIdentity,
         mutation: TableMutation,
@@ -5172,20 +5131,21 @@ mod tests {
                     );
                     let mut row_value = vec![0x82, 0x64, b'n', b'a', b'm', b'e'];
                     row_value.extend_from_slice(encoded_blob.encoded_value());
-                    let (mutation, bindings) = AdmittedSourceRow::new(
-                        row_value.clone(),
-                        vec![encoded_blob.into_pin()],
-                    )
-                    .into_mutation_and_bindings(
+                    let pin = encoded_blob.into_pin();
+                    let mutation = TableMutation::new(
                         [0x64; 16],
-                        &stale_table,
+                        stale_table.table(),
                         coordinates.key().to_vec(),
+                        Some(row_value.clone()),
                     )
+                    .map_err(TableActivationError::Runtime)?
+                    .with_table_object_id(stale_table.object_id())
+                    .with_protected_content_pin(&pin)
                     .map_err(TableActivationError::Runtime)?;
                     let replacement = VfsTableRowReplacement::from_admitted_mutation(
                         stale_table,
                         mutation,
-                        bindings,
+                        vec![pin],
                     )
                     .map_err(TableActivationError::Runtime)?;
                     Ok(VfsSaveCandidate::new(
@@ -5309,20 +5269,21 @@ mod tests {
                     let mut row_value = vec![0x82, 0x64, b'n', b'a', b'm', b'e'];
                     row_value.extend_from_slice(encoded_blob.encoded_value());
                     *encoded_row_for_admit.lock().unwrap() = Some(row_value.clone());
-                    let (mutation, bindings) = AdmittedSourceRow::new(
-                        row_value.clone(),
-                        vec![encoded_blob.into_pin()],
-                    )
-                    .into_mutation_and_bindings(
+                    let pin = encoded_blob.into_pin();
+                    let mutation = TableMutation::new(
                         [0x65; 16],
-                        &save_table,
+                        save_table.table(),
                         coordinates.key().to_vec(),
+                        Some(row_value.clone()),
                     )
+                    .map_err(TableActivationError::Runtime)?
+                    .with_table_object_id(save_table.object_id())
+                    .with_protected_content_pin(&pin)
                     .map_err(TableActivationError::Runtime)?;
                     let replacement = VfsTableRowReplacement::from_admitted_mutation(
                         save_table,
                         mutation,
-                        bindings,
+                        vec![pin],
                     )
                     .map_err(TableActivationError::Runtime)?;
                     Ok(VfsSaveCandidate::new(
