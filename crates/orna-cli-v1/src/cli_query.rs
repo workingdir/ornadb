@@ -1,5 +1,5 @@
-//! `orna query <relation-hex> [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]`
-//! lists the payload-free Blob metadata of committed format-3 rows, optionally
+//! `orna query <relation-hex> [--key KEY|0xBYTES] [--from text:KEY|bytes:HEX]`
+//! `[--until text:KEY|bytes:HEX] [--field N] [--limit N] [--format human|json]`
 //! narrowed by an annotation predicate (`--kind`, `--not-kind`, `--suffix`,
 //! `--min-length`, `--max-length`).
 //!
@@ -40,6 +40,7 @@ enum QueryFormat {
 struct QueryOptions<'a> {
     relation: &'a str,
     key: Option<&'a str>,
+    range: Option<KeyRange>,
     field: Option<usize>,
     at: Option<&'a str>,
     limit: usize,
@@ -60,6 +61,8 @@ struct PredicateConstraints<'a> {
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
     let mut key = None;
+    let mut lower = None;
+    let mut upper = None;
     let mut field = None;
     let mut at = None;
     let mut limit = DEFAULT_QUERY_LIMIT;
@@ -74,6 +77,30 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                     .next()
                     .ok_or_else(|| query_error("--key needs a value", "usage: --key KEY"))?;
                 key = Some(value);
+            }
+            "--from" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--from needs a value", "usage: --from text:KEY|bytes:HEX")
+                })?;
+                if lower.is_some() {
+                    return Err(query_error(
+                        "Query has one lower range bound",
+                        "use --from once",
+                    ));
+                }
+                lower = Some(parse_range_key(value)?);
+            }
+            "--until" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--until needs a value", "usage: --until text:KEY|bytes:HEX")
+                })?;
+                if upper.is_some() {
+                    return Err(query_error(
+                        "Query has one upper range bound",
+                        "use --until once",
+                    ));
+                }
+                upper = Some(parse_range_key(value)?);
             }
             "--field" => {
                 let value = words
@@ -167,7 +194,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 return Err(query_error(
                     "Unknown query flag",
                     format!(
-                        "got {flag:?}; accepted: --key, --field, --at, --kind, --not-kind, --suffix, \
+                        "got {flag:?}; accepted: --key, --from, --until, --field, --at, --kind, --not-kind, --suffix, \
                          --min-length, --max-length, --limit, --format"
                     ),
                 ));
@@ -178,8 +205,22 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
+            "usage: orna query <relation-hex> [--key KEY] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
         ));
+    };
+    if key.is_some() && (lower.is_some() || upper.is_some()) {
+        return Err(query_error(
+            "Point key and range bounds are mutually exclusive",
+            "use --key for one row, or --from/--until for an ordered range",
+        ));
+    }
+    let range = if key.is_some() {
+        None
+    } else {
+        Some(
+            KeyRange::new(lower, upper, limit)
+                .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?,
+        )
     };
     Ok(QueryOptions {
         relation,
@@ -189,8 +230,44 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
         limit,
         format,
         predicate,
+        range,
         predicate_constraints,
     })
+}
+
+/// Parses one explicit typed key for an inclusive lower or exclusive upper
+/// query boundary. Plain text is never guessed as bytes (or vice versa).
+fn parse_range_key(value: &str) -> Result<TypedKey, Diagnostic> {
+    if let Some(text) = value.strip_prefix("text:") {
+        return validate_range_key(TypedKey::Text(text.to_owned()));
+    }
+    if let Some(hex) = value.strip_prefix("bytes:") {
+        if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(query_error(
+                "Range byte key is malformed",
+                format!("got {value:?}; bytes: requires an even number of hexadecimal digits"),
+            ));
+        }
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex digits are ASCII"), 16)
+                    .expect("hexadecimal digits were checked above")
+            })
+            .collect();
+        return validate_range_key(TypedKey::Bytes(bytes));
+    }
+    Err(query_error(
+        "Range key is not typed",
+        format!("got {value:?}; use text:KEY or bytes:HEX"),
+    ))
+}
+
+fn validate_range_key(key: TypedKey) -> Result<TypedKey, Diagnostic> {
+    key.canonical_bytes()
+        .map_err(|error| query_error("Range key is invalid", format!("{error:?}")))?;
+    Ok(key)
 }
 
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
@@ -281,10 +358,12 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             found.into_iter().collect::<Vec<_>>()
         }
         None => {
-            let range = KeyRange::new(None, None, options.limit)
-                .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
+            let range = options
+                .range
+                .as_ref()
+                .expect("parse_options validates the requested typed range");
             graph
-                .range_rows(&range, &scope)
+                .range_rows(range, &scope)
                 .map_err(|error| query_error("Row range could not be read", format!("{error:?}")))?
         }
     };
@@ -642,6 +721,46 @@ mod tests {
         assert_eq!(parsed.field, Some(0));
     }
 
+    #[test]
+    fn query_options_build_a_bounded_typed_key_range() {
+        let arguments = words(&[
+            "000102030405060708090a0b0c0d0e0f",
+            "--from",
+            "bytes:696d616765",
+            "--until",
+            "bytes:736f6e67",
+            "--limit",
+            "1",
+        ]);
+        let parsed = parse_options(&arguments).unwrap();
+        let range = parsed.range.as_ref().unwrap();
+        assert_eq!(
+            range.lower_inclusive(),
+            Some(&TypedKey::Bytes(b"image".to_vec()))
+        );
+        assert_eq!(
+            range.upper_exclusive(),
+            Some(&TypedKey::Bytes(b"song".to_vec()))
+        );
+        assert_eq!(range.limit(), 1);
+
+        let reversed = words(&[
+            "000102030405060708090a0b0c0d0e0f",
+            "--from",
+            "bytes:736f6e67",
+            "--until",
+            "bytes:696d616765",
+        ]);
+        assert!(parse_options(&reversed).is_err());
+    }
+
+    #[test]
+    fn query_rejects_ambiguous_or_malformed_range_keys() {
+        let relation = "000102030405060708090a0b0c0d0e0f";
+        assert!(parse_options(&words(&[relation, "--from", "song"])).is_err());
+        assert!(parse_options(&words(&[relation, "--from", "bytes:736f6e7"])).is_err());
+        assert!(parse_options(&words(&[relation, "--key", "song", "--from", "text:a"])).is_err());
+    }
 
     #[test]
     fn query_plan_reports_effective_annotation_constraints() {
