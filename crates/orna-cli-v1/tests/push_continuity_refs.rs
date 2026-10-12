@@ -145,6 +145,7 @@ impl Fixture {
 fn push_publishes_the_branch_and_never_exposes_private_pins() {
     let fixture = Fixture::new();
     let head = fixture.head();
+    let checkpoint = fixture.remote_ref(CHECKPOINT_REF);
 
     let output = run(&fixture.worktree, &["push"]);
 
@@ -169,9 +170,9 @@ fn push_publishes_the_branch_and_never_exposes_private_pins() {
         "the allocator continuity ref must be published"
     );
     assert_eq!(
-        fixture.remote_ref(CHECKPOINT_REF).as_deref(),
-        Some(head.as_str()),
-        "the consumer checkpoint continuity ref must be published"
+        fixture.remote_ref(CHECKPOINT_REF),
+        checkpoint,
+        "an ordinary push must not claim an independent consumer checkpoint"
     );
     assert!(
         fixture.remote_ref(PIN_REF).is_none(),
