@@ -31,7 +31,7 @@ pub enum ObjectKind {
 impl ObjectKind {
     fn from_raw(raw: &Raw) -> Option<Self> {
         match raw {
-            Raw::Int(value) => match value.to_u64()? {
+            Raw::Int(_) => match int_u64(raw)? {
                 0 => Some(Self::Module),
                 1 => Some(Self::Table),
                 2 => Some(Self::Column),
@@ -167,44 +167,56 @@ impl ObjectIdentityManifest {
 }
 
 fn source_identity_keys(modules: &[ModuleInput]) -> Result<Vec<(ObjectKind, String)>, ObjectIdentityError> {
-    let mut keys = Vec::new();
+    let mut identity_keys = Vec::new();
     for module in modules {
         let namespace = namespace_from_path(&module.logical_path).ok_or(ObjectIdentityError::InvalidSource)?;
-        keys.push((ObjectKind::Module, namespace.clone()));
+        identity_keys.push((
+            ObjectKind::Module,
+            if namespace.is_empty() { "main".to_owned() } else { namespace.clone() },
+        ));
         let parsed = parse_module_with_file(&module.source, module.logical_path.clone());
         if !parsed.is_ok() { return Err(ObjectIdentityError::InvalidSource) }
         for item in &parsed.value.items {
             match &item.declaration {
-                Declaration::Table { name, members, .. } => {
+                Declaration::Table { name, keys, members, .. } => {
                     let table = qualify(&namespace, name);
-                    keys.push((ObjectKind::Table, table.clone()));
+                    identity_keys.push((ObjectKind::Table, table.clone()));
+                    if keys.is_empty() {
+                        identity_keys.push((ObjectKind::Column, format!("{table}.id")));
+                    } else {
+                        for key in keys {
+                            if let orna_syntax_v1::Pattern::Name(name, _) = &key.pattern {
+                                identity_keys.push((ObjectKind::Column, format!("{table}.{name}")));
+                            }
+                        }
+                    }
                     for member in members {
                         if let orna_syntax_v1::TableMember::Field { name, .. } = member {
-                            keys.push((ObjectKind::Column, format!("{table}.{name}")));
+                            identity_keys.push((ObjectKind::Column, format!("{table}.{name}")));
                         }
                     }
                 }
-                Declaration::Function { signature, .. } => keys.push((ObjectKind::Function, qualify(&namespace, &signature.name))),
-                Declaration::Protocol { name, .. } => keys.push((ObjectKind::Protocol, qualify(&namespace, name))),
+                Declaration::Function { signature, .. } => identity_keys.push((ObjectKind::Function, qualify(&namespace, &signature.name))),
+                Declaration::Protocol { name, .. } => identity_keys.push((ObjectKind::Protocol, qualify(&namespace, name))),
                 Declaration::Enum { name, variants, .. } => {
                     let owner = qualify(&namespace, name);
-                    keys.push((ObjectKind::Nominal, owner.clone()));
+                    identity_keys.push((ObjectKind::Nominal, owner.clone()));
                     for variant in variants {
-                        keys.push((ObjectKind::Variant, format!("{owner}::{}", variant.name)));
+                        identity_keys.push((ObjectKind::Variant, format!("{owner}::{}", variant.name)));
                         for field in &variant.fields {
-                            keys.push((ObjectKind::Column, format!("{owner}::{}.{}", variant.name, field.name)));
+                            identity_keys.push((ObjectKind::Column, format!("{owner}::{}.{}", variant.name, field.name)));
                         }
                     }
                 }
-                Declaration::Dimension { name, .. } => keys.push((ObjectKind::Dimension, qualify(&namespace, name))),
-                Declaration::Unit { name, .. } => keys.push((ObjectKind::Unit, qualify(&namespace, name))),
+                Declaration::Dimension { name, .. } => identity_keys.push((ObjectKind::Dimension, qualify(&namespace, name))),
+                Declaration::Unit { name, .. } => identity_keys.push((ObjectKind::Unit, qualify(&namespace, name))),
                 Declaration::Type { name, representation, .. } => {
                     let owner = qualify(&namespace, name);
                     if let TypeRepresentation::Nominal { members } = representation {
-                        keys.push((ObjectKind::Nominal, owner.clone()));
+                        identity_keys.push((ObjectKind::Nominal, owner.clone()));
                         for member in members {
                             if let TypeMember::Field { name, .. } = member {
-                                keys.push((ObjectKind::Column, format!("{owner}.{name}")));
+                                identity_keys.push((ObjectKind::Column, format!("{owner}.{name}")));
                             }
                         }
                     }
@@ -213,9 +225,9 @@ fn source_identity_keys(modules: &[ModuleInput]) -> Result<Vec<(ObjectKind, Stri
             }
         }
     }
-    keys.sort();
-    if keys.windows(2).any(|pair| pair[0] == pair[1]) { return Err(ObjectIdentityError::IdentityCollision) }
-    Ok(keys)
+    identity_keys.sort();
+    if identity_keys.windows(2).any(|pair| pair[0] == pair[1]) { return Err(ObjectIdentityError::IdentityCollision) }
+    Ok(identity_keys)
 }
 
 fn namespace_from_path(path: &str) -> Option<String> {
@@ -223,8 +235,7 @@ fn namespace_from_path(path: &str) -> Option<String> {
     let file = parts.pop()?;
     if file != "main" { parts.push(file); }
     if parts.iter().any(|part| part.is_empty() || matches!(*part, "." | "..")) { return None }
-    let namespace = parts.join(".");
-    Some(if namespace.is_empty() { "main".to_owned() } else { namespace })
+    Some(parts.join("."))
 }
 
 fn qualify(namespace: &str, name: &str) -> String {
