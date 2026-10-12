@@ -2,13 +2,16 @@
 //! encode raw file bytes and their canonical MIME-1 annotation as an OVB-2 Blob.
 //! This command is repository-independent and never reads or writes a repository.
 
-use std::{fs::File, path::Path};
+use std::{io, path::Path};
 
-use orna_value_v1::{MimeRegistry, encode_ovb2_reader_to_writer};
+use orna_sys_v1::{CaptureFileError, CaptureFileReader, FilesystemProvider};
+use orna_value_v1::{Blob, MimeRegistry};
 
 use super::Diagnostic;
 
 const USAGE: &str = "usage: orna annotate FILE --type MEDIA_TYPE --output FILE [--suffix HINT]";
+
+const MAX_SOURCE_BYTES: u64 = i64::MAX as u64;
 
 #[derive(Debug, Eq, PartialEq)]
 struct AnnotateOptions<'a> {
@@ -85,30 +88,20 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         })?;
 
     let source_path = Path::new(options.source);
-    let mut source = File::open(source_path).map_err(|error| {
+    let captured_source = capture_source(source_path)?;
+    let blob = Blob::from_bytes_with_annotation(
+        captured_source,
+        annotation.media_type(),
+        annotation.suffix(),
+    )
+    .map_err(|error| {
         Diagnostic::target_with_detail(
             "E2001",
-            "annotate source could not be opened",
-            "check that the source file exists and is readable",
-            format!("{}: {error}", source_path.display()),
+            "annotate media annotation is invalid",
+            "choose a valid MIME-1 type and compatible suffix",
+            format!("{error:?}"),
         )
     })?;
-    let metadata = source.metadata().map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2001",
-            "annotate source metadata could not be read",
-            "check that the source file is readable",
-            format!("{}: {error}", source_path.display()),
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(Diagnostic::target(
-            "E2001",
-            "annotate source is not a regular file",
-            "supply a readable regular file",
-        ));
-    }
-    let source_length = metadata.len();
 
     let output_path = Path::new(options.output);
     let output_parent = output_path
@@ -126,13 +119,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
                 format!("{}: {error}", output_parent.display()),
             )
         })?;
-    let encoded = encode_ovb2_reader_to_writer(
-        &mut source,
-        source_length,
-        &annotation,
-        &mut output,
-        u64::MAX,
-    );
+    let encoded = blob.encode_ovb2_to_writer(&mut output, u64::MAX);
     if let Err(error) = encoded {
         if let Err(cleanup) = cleanup_staging_file(output) {
             return Err(Diagnostic::target_with_detail(
@@ -169,18 +156,6 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
             format!("{error:?}"),
         ));
     }
-    if !source
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() == source_length)
-    {
-        let cleanup = cleanup_staging_file(output).err();
-        return Err(Diagnostic::target_with_detail(
-            "E2001",
-            "annotate source length could not be confirmed unchanged",
-            "retry with a stable source file",
-            cleanup.unwrap_or_else(|| "temporary staging file removed".to_owned()),
-        ));
-    }
     if let Err(error) = output.as_file().sync_all() {
         let cleanup = cleanup_staging_file(output).err();
         return Err(Diagnostic::target_with_detail(
@@ -209,6 +184,125 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     Ok(())
 }
 
+fn open_source(path: &Path) -> Result<CaptureFileReader, Diagnostic> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        source_error(
+            path,
+            CaptureFileError::SourceUnavailable,
+            format!("{error}"),
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(source_error(
+            path,
+            CaptureFileError::InvalidPath,
+            "source is not a regular file".to_owned(),
+        ));
+    }
+
+    let root = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let relative_path = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            source_error(
+                path,
+                CaptureFileError::InvalidPath,
+                "source path has no UTF-8 file name".to_owned(),
+            )
+        })?;
+    let root_text = root.to_str().ok_or_else(|| {
+        source_error(
+            path,
+            CaptureFileError::InvalidPath,
+            "source parent path is not UTF-8".to_owned(),
+        )
+    })?;
+    let max_bytes = MAX_SOURCE_BYTES.min(usize::MAX as u64);
+    let mut filesystem =
+        FilesystemProvider::with_limits(max_bytes as usize, 1).map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2001",
+                "annotate source could not be opened",
+                "check that the source file exists and is readable",
+                format!("{}: {error:?}", path.display()),
+            )
+        })?;
+    filesystem.allow_root(root).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2001",
+            "annotate source could not be opened",
+            "check that the source file exists and is readable",
+            format!("{}: {error:?}", path.display()),
+        )
+    })?;
+    filesystem
+        .capture_file(root_text, relative_path, max_bytes)
+        .map_err(|error| source_error(path, error, String::new()))
+}
+
+fn capture_source(path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    let mut source = open_source(path)?;
+    io::copy(&mut source, &mut io::sink()).map_err(|error| {
+        source_error(path, CaptureFileError::SourceUnavailable, error.to_string())
+    })?;
+    if source.exceeded() {
+        return Err(source_error(
+            path,
+            CaptureFileError::LimitExceeded,
+            String::new(),
+        ));
+    }
+    source
+        .verify_unchanged()
+        .map_err(|error| source_error(path, error, String::new()))?;
+    Ok(source.into_captured_bytes())
+}
+
+fn source_error(path: &Path, error: CaptureFileError, detail: String) -> Diagnostic {
+    let code_detail = format!(
+        "{}: {} ({})",
+        path.display(),
+        error.failure_code(),
+        error.code()
+    );
+    let detail = if detail.is_empty() {
+        code_detail
+    } else {
+        format!("{code_detail}: {detail}")
+    };
+    match error {
+        CaptureFileError::LimitExceeded => Diagnostic::usage(
+            "E1002",
+            "annotate source exceeds the OVB-2 format maximum",
+            "choose a source smaller than 2^63 bytes",
+        ),
+        CaptureFileError::InvalidPath => Diagnostic::target_with_detail(
+            "E2001",
+            "annotate source is not a regular file",
+            "supply a regular file without symbolic-link path components",
+            detail,
+        ),
+        CaptureFileError::SourceChanged => Diagnostic::target_with_detail(
+            "E2001",
+            "annotate source changed while being read",
+            "retry with a stable source file",
+            detail,
+        ),
+        CaptureFileError::UnauthorizedRoot | CaptureFileError::SourceUnavailable => {
+            Diagnostic::target_with_detail(
+                "E2001",
+                "annotate source could not be opened",
+                "check that the source file exists and is readable",
+                detail,
+            )
+        }
+    }
+}
+
 fn cleanup_staging_file(output: tempfile::NamedTempFile) -> Result<(), String> {
     let path = output.path().display().to_string();
     output.close().map_err(|error| format!("{path}: {error}"))
@@ -224,6 +318,30 @@ mod tests {
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+    #[test]
+    fn detects_same_length_source_mutation_using_mtime() {
+        use std::time::{Duration, SystemTime};
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("source.bin");
+        std::fs::write(&path, b"before").unwrap();
+
+        let mut source = open_source(&path).unwrap();
+        io::copy(&mut source, &mut io::sink()).unwrap();
+        std::fs::write(&path, b"update").unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(60)),
+            )
+            .unwrap();
+
+        assert_eq!(source.captured_bytes(), b"before");
+        assert_eq!(
+            source.verify_unchanged(),
+            Err(CaptureFileError::SourceChanged)
+        );
     }
 
     #[test]
@@ -244,17 +362,15 @@ mod tests {
             })
         );
         assert!(parse_options(&words(&["song.wav", "--type", "audio/wav"])).is_err());
-        assert!(
-            parse_options(&words(&[
-                "song.wav",
-                "--type",
-                "audio/wav",
-                "--type",
-                "image/png",
-                "--output",
-                "out"
-            ]))
-            .is_err()
-        );
+        assert!(parse_options(&words(&[
+            "song.wav",
+            "--type",
+            "audio/wav",
+            "--type",
+            "image/png",
+            "--output",
+            "out"
+        ]))
+        .is_err());
     }
 }
