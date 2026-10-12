@@ -520,9 +520,14 @@ enum RowChange {
 
 /// The payload-free annotation coordinate of one row: the Blob field
 /// descriptors its own stored tuple carries, separately from the row's value.
-fn annotations_of(row: &AdmittedRow) -> Vec<(usize, serde_json::Value)> {
-    row.blob_fields()
-        .unwrap_or_default()
+fn annotations_of(row: &AdmittedRow) -> Result<Vec<(usize, serde_json::Value)>, Diagnostic> {
+    let fields = row.blob_fields().map_err(|error| {
+        history_error(
+            "Blob annotation metadata could not be read",
+            format!("{error:?}"),
+        )
+    })?;
+    Ok(fields
         .into_iter()
         .map(|(field, metadata)| {
             (
@@ -536,12 +541,7 @@ fn annotations_of(row: &AdmittedRow) -> Vec<(usize, serde_json::Value)> {
                 }),
             )
         })
-        .collect()
-}
-
-/// The stored value the row's own tuple holds, in its canonical encoded form.
-fn encoded_value(row: &AdmittedRow) -> Vec<u8> {
-    row.value().encoded_fields().unwrap_or_default().to_vec()
+        .collect())
 }
 
 /// Reports what changed in one relation between two named snapshots.
@@ -602,12 +602,12 @@ fn run_diff(
     let (after, after_read) = read_relation_rows(&after_format, relation)?;
     let payload_bytes_read = before_read.payload_bytes_read + after_read.payload_bytes_read;
     let native_objects_read = before_read.objects_read + after_read.objects_read;
-    let changes = compare_rows(before, after);
+    let changes = compare_rows(before, after)?;
     let (added, changed, removed) = counts(&changes);
     match format {
         HistoryFormat::Human => {
             for change in &changes {
-                println!("{}", human_change(change));
+                println!("{}", human_change(change)?);
             }
             println!(
                 "{added} added; {changed} changed; {removed} removed; {} rows in {to_label}",
@@ -621,7 +621,8 @@ fn run_diff(
             );
         }
         HistoryFormat::Json => {
-            let entries: Vec<serde_json::Value> = changes.iter().map(change_json).collect();
+            let entries: Vec<serde_json::Value> =
+                changes.iter().map(change_json).collect::<Result<_, _>>()?;
             println!(
                 "{}",
                 serde_json::json!({
@@ -717,18 +718,21 @@ fn read_relation_rows(
 fn compare_rows(
     before: BTreeMap<Vec<u8>, AdmittedRow>,
     after: BTreeMap<Vec<u8>, AdmittedRow>,
-) -> Vec<RowChange> {
+) -> Result<Vec<RowChange>, Diagnostic> {
     let mut changes = Vec::new();
     for (key, old) in &before {
         match after.get(key) {
             None => changes.push(RowChange::Removed(old.clone())),
-            Some(new) if row_identity(old) != row_identity(new) => {
-                changes.push(RowChange::Changed {
-                    before: old.clone(),
-                    after: new.clone(),
-                });
+            Some(new) => {
+                let old_annotations = annotations_of(old)?;
+                let new_annotations = annotations_of(new)?;
+                if old.value() != new.value() || old_annotations != new_annotations {
+                    changes.push(RowChange::Changed {
+                        before: old.clone(),
+                        after: new.clone(),
+                    });
+                }
             }
-            Some(_) => {}
         }
     }
     for (key, new) in &after {
@@ -736,48 +740,50 @@ fn compare_rows(
             changes.push(RowChange::Added(new.clone()));
         }
     }
-    changes
+    Ok(changes)
 }
 
-/// What makes two readings of one committed row the same row: the stored value
-/// beside the Blob annotation coordinate its tuple carries.
-fn row_identity(row: &AdmittedRow) -> (Vec<u8>, Vec<(usize, serde_json::Value)>) {
-    (encoded_value(row), annotations_of(row))
+/// Compares row content without counting a Blob's MIME annotation as data.
+fn content_changed(before: &AdmittedRow, after: &AdmittedRow) -> Result<bool, Diagnostic> {
+    before
+        .same_content(after)
+        .map(|same| !same)
+        .map_err(|error| history_error("Row content could not be compared", format!("{error:?}")))
 }
 
 /// One change as a JSON object. A `changed` entry separates the two
 /// coordinates so a content move and an annotation move are told apart.
-fn change_json(change: &RowChange) -> serde_json::Value {
-    match change {
+fn change_json(change: &RowChange) -> Result<serde_json::Value, Diagnostic> {
+    Ok(match change {
         RowChange::Added(row) => serde_json::json!({
             "change": "added",
             "key": render_key(row.key()),
-            "annotations": annotations_of(row),
+            "annotations": annotations_of(row)?,
         }),
         RowChange::Removed(row) => serde_json::json!({
             "change": "removed",
             "key": render_key(row.key()),
-            "annotations": annotations_of(row),
+            "annotations": annotations_of(row)?,
         }),
         RowChange::Changed { before, after } => serde_json::json!({
             "change": "changed",
             "key": render_key(after.key()),
-            "content_changed": encoded_value(before) != encoded_value(after),
-            "before": { "annotations": annotations_of(before) },
-            "after": { "annotations": annotations_of(after) },
+            "content_changed": content_changed(before, after)?,
+            "before": { "annotations": annotations_of(before)? },
+            "after": { "annotations": annotations_of(after)? },
         }),
-    }
+    })
 }
 
 /// One change as a human line. A changed row names which coordinate moved so a
 /// re-annotation is not read as a data change.
-fn human_change(change: &RowChange) -> String {
-    match change {
+fn human_change(change: &RowChange) -> Result<String, Diagnostic> {
+    Ok(match change {
         RowChange::Added(row) => format!("added   {}", render_key(row.key())),
         RowChange::Removed(row) => format!("removed {}", render_key(row.key())),
         RowChange::Changed { before, after } => {
-            let content = encoded_value(before) != encoded_value(after);
-            let annotation = annotations_of(before) != annotations_of(after);
+            let content = content_changed(before, after)?;
+            let annotation = annotations_of(before)? != annotations_of(after)?;
             format!(
                 "changed {} (content={}, annotation={})",
                 render_key(after.key()),
@@ -785,7 +791,7 @@ fn human_change(change: &RowChange) -> String {
                 annotation,
             )
         }
-    }
+    })
 }
 
 /// Counts the changes as `(added, changed, removed)`.
@@ -848,7 +854,7 @@ fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_HISTORY_LIMIT, HistoryFormat, parse_options, parse_relation_id};
+    use super::{parse_options, parse_relation_id, HistoryFormat, DEFAULT_HISTORY_LIMIT};
     use crate::Exit;
 
     fn words(values: &[&str]) -> Vec<String> {
