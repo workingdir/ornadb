@@ -619,6 +619,14 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
         .await
         .unwrap();
     assert_eq!(receipt.commit(), pending.commit());
+    assert_eq!(
+        runtime
+            .persisted_compact_publication_receipt(&pending)
+            .await
+            .unwrap(),
+        Some(receipt.clone())
+    );
+    runtime.validate_recovery().await.unwrap();
 
     fs::write(
         temp.path().join("ordinary.txt"),
@@ -632,6 +640,7 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
     );
     let branch_head = repository.head().unwrap().unwrap();
     assert_ne!(branch_head, *pending.commit());
+    let branch_index = repository.index_generation().unwrap();
     assert!(runtime.pending().await.unwrap().is_empty());
     assert_eq!(
         RuntimePublicationCoordinator::recover_compact_validated(
@@ -640,10 +649,20 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
             &CompactOvbProfile::new(profile()).unwrap(),
             &publication_identity(),
         )
-        .await,
-        Err(orna_storage_v1::Error::RefConflict)
+        .await
+        .unwrap(),
+        Some(branch_index.clone())
     );
     assert_eq!(repository.head().unwrap(), Some(branch_head));
-    assert!(repository.read_publication_journal().unwrap().is_some());
+    assert_eq!(repository.index_generation().unwrap(), branch_index);
+    assert!(repository.read_publication_journal().unwrap().is_none());
     assert!(runtime.pending().await.unwrap().is_empty());
+    assert_eq!(
+        runtime
+            .persisted_compact_publication_receipt(&pending)
+            .await
+            .unwrap(),
+        Some(receipt)
+    );
+    runtime.validate_recovery().await.unwrap();
 }
