@@ -269,13 +269,11 @@ impl Repository {
     /// Publishes the continuity refs [`Repository::ordinary_push_refs`] selects
     /// together with one ordinary branch ref.
     ///
-    /// The selected continuity refs are transferred by pushing `refs/orna/*`
-    /// directly, so the remote and the local repository agree on each ref by
-    /// name. Every selected continuity ref must already match on the remote:
-    /// a ref that the remote is missing or names with a different object ID is
-    /// refused as a conflict instead of being republished under a different
-    /// reachability, which is the rule a later fetch revalidates
-    /// (`ORNA-GIT-008`).
+    /// The allocator advances to the published branch only when that branch
+    /// contains its current watermark. Consumer checkpoints retain their own
+    /// independently synchronized positions; ordinary push must not claim
+    /// consumption that did not occur. Missing or divergent continuity refs
+    /// are refused (`ORNA-GIT-008`).
     pub fn push_ordinary_with_local_continuity(
         &self,
         remote: impl Into<String>,
@@ -293,28 +291,59 @@ impl Repository {
         self.require_no_pending_publication_recovery_locked()?;
         #[cfg(test)]
         tests::pause_push_after_journal_validation();
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_head =
+            local_ref_oid(self, &branch_ref)?.ok_or(FetchError::RequestedRefMissing)?;
         let selected = self.ordinary_push_refs()?;
         let mut continuity = Vec::with_capacity(selected.len());
-        for (reference, object_id) in selected {
-            if object_id.len() != self.native_object_id_length()? {
+        let mut ref_plans = Vec::with_capacity(selected.len());
+        for (reference, local_id) in selected {
+            if local_id.len() != self.native_object_id_length()? {
                 return Err(FetchError::InvalidContinuity);
             }
+            let reference_name = reference.as_str().to_owned();
             let advertised = advertise(
                 self,
                 &remote,
-                std::slice::from_ref(&reference.as_str().to_owned()),
-                object_id.len(),
+                std::slice::from_ref(&reference_name),
+                local_id.len(),
             )?;
-            match advertised.get(reference.as_str()) {
-                Some(remote_id) if remote_id.eq_ignore_ascii_case(&object_id) => {}
-                _ => return Err(FetchError::RefConflict),
+            let remote_id = advertised
+                .get(&reference_name)
+                .ok_or(FetchError::RefConflict)?;
+            let remote_ahead = is_fast_forward(self, &local_id, remote_id)?;
+            let local_ahead = is_fast_forward(self, remote_id, &local_id)?;
+            if !remote_ahead && !local_ahead {
+                return Err(FetchError::RefConflict);
             }
+            let mut target_id = if remote_ahead {
+                remote_id.clone()
+            } else {
+                local_id.clone()
+            };
+            if reference_name == ALLOCATOR_REF {
+                if is_fast_forward(self, &target_id, &branch_head)? {
+                    target_id.clone_from(&branch_head);
+                } else if !is_fast_forward(self, &branch_head, &target_id)? {
+                    return Err(FetchError::RefConflict);
+                }
+            }
+            ref_plans.push(RefPlan {
+                source: reference_name.clone(),
+                destination: reference_name,
+                object_id: target_id.clone(),
+                old: Some(local_id.clone()),
+                kind: RefKind::Internal,
+                updated: target_id != local_id,
+            });
             continuity.push(reference);
         }
+        self.preflight_atomic(&remote, &branch_ref, &branch_head)?;
+        install_refs(self, &ref_plans)?;
+        sync_fetched_ref_directories(self, &ref_plans)?;
         let request = PushRequest::new(remote, branch, continuity)?;
-        self.push_locked(&request)
+        self.push_locked_at(&request, &branch_head)
     }
-}
 
 /// A push request whose Orna continuity refs are sent before the ordinary
 /// branch ref. The allocator ref, when present, is sent first so a later
@@ -805,6 +834,13 @@ impl Repository {
 
     /// Pushes with the repository coordination lock already held.
     fn push_locked(&self, request: &PushRequest) -> Result<(), FetchError> {
+        let branch_ref = format!("refs/heads/{}", request.branch());
+        let branch_head =
+            local_ref_oid(self, &branch_ref)?.ok_or(FetchError::RequestedRefMissing)?;
+        self.push_locked_at(request, &branch_head)
+    }
+
+    fn push_locked_at(&self, request: &PushRequest, branch_head: &str) -> Result<(), FetchError> {
         if !self
             .remote_names()?
             .iter()
@@ -815,15 +851,19 @@ impl Repository {
         let branch_ref = format!("refs/heads/{}", request.branch());
         let mut internal = request.internal.clone();
         internal.sort_by_key(|reference| if reference == ALLOCATOR_REF { 0 } else { 1 });
-        let mut ordered = internal
-            .into_iter()
-            .map(|reference| format!("{reference}:{reference}"))
-            .collect::<Vec<_>>();
-        ordered.push(format!("{branch_ref}:{branch_ref}"));
-        self.preflight_atomic(request.remote(), &branch_ref)?;
-        let allocator = ordered
-            .iter()
-            .position(|refspec| refspec == &format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}"));
+        let mut ordered = Vec::with_capacity(internal.len().saturating_add(1));
+        for reference in internal {
+            let object_id =
+                local_ref_oid(self, &reference)?.ok_or(FetchError::InvalidContinuity)?;
+            ordered.push(format!("{object_id}:{reference}"));
+        }
+        ordered.push(format!("{branch_head}:{branch_ref}"));
+        self.preflight_atomic(request.remote(), &branch_ref, branch_head)?;
+        let allocator = ordered.iter().position(|refspec| {
+            refspec
+                .split_once(':')
+                .is_some_and(|(_, reference)| reference == ALLOCATOR_REF)
+        });
         if let Some(index) = allocator {
             let allocator_ref = ordered.remove(index);
             self.push_refspecs(
@@ -835,8 +875,13 @@ impl Repository {
         self.push_refspecs(request.remote(), &ordered, true)
     }
 
-    fn preflight_atomic(&self, remote: &str, branch_ref: &str) -> Result<(), FetchError> {
-        let branch_refspec = format!("{branch_ref}:{branch_ref}");
+    fn preflight_atomic(
+        &self,
+        remote: &str,
+        branch_ref: &str,
+        branch_head: &str,
+    ) -> Result<(), FetchError> {
+        let branch_refspec = format!("{branch_head}:{branch_ref}");
         let mut command = self.observer_command();
         command.args([
             "push",
@@ -847,9 +892,7 @@ impl Repository {
             remote,
             &branch_refspec,
         ]);
-        command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.stdout(Stdio::null()).stderr(Stdio::null());
         command
             .status()
             .map_err(|_| FetchError::RemoteUnavailable)?
