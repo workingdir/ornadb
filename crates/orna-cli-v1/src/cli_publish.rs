@@ -67,25 +67,19 @@ fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
 
 /// Projects one source-owned canonical key using its exact committed schema.
 fn row_path(
-    schema: &orna_project_v1::ResolvedTableSchema,
+    projection: &orna_project_v1::CommittedLooseRowProjection,
     mutation: &TableMutation,
     table_id: orna_runtime_v1::TableObjectId,
 ) -> Result<LoosePath, Diagnostic> {
-    let projection = schema
-        .canonical_key_path_components(mutation.key())
-        .map_err(|error| {
-            publish_error(
-                "source row key could not be projected",
-                format!("{error:?}; the pending range was preserved"),
-            )
-        })?;
-    if projection.table_root() != mutation.table() || projection.table_object_id() != table_id {
+    if projection.table_root() != mutation.table()
+        || projection.schema().table_object_id() != table_id
+    {
         return Err(publish_error(
             "source row key projection conflicts with its schema",
             "table root or TableObjectId differs from the committed source schema; the pending range was preserved",
         ));
     }
-    LoosePath::from_encoded_key(projection.table_root(), projection.key_components()).map_err(
+    LoosePath::from_encoded_key(projection.table_root(), projection.key_path_components()).map_err(
         |error| {
             publish_error(
                 "source row could not be admitted for publication",
@@ -111,14 +105,15 @@ fn validate_candidate_source_rows(
                 "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
             )
         })?;
-        let schema = loader
-            .resolve_committed_source_table_schema(repository, head, table_id)
+        let projection = loader
+            .resolve_committed_loose_row_projection(repository, head, mutation)
             .map_err(|error| {
                 publish_error(
-                    "source table schema could not be resolved",
+                    "source row path could not be resolved",
                     format!("{error:?}; the pending range was preserved"),
                 )
             })?;
+        let schema = projection.schema();
         if schema.declaration_name() != mutation.table() || schema.table_object_id() != table_id {
             return Err(publish_error(
                 "source row table identity does not match its committed schema",
@@ -151,7 +146,7 @@ fn validate_candidate_source_rows(
                     )
                 })?;
         }
-        let path = row_path(&schema, mutation, table_id)?;
+        let path = row_path(&projection, mutation, table_id)?;
         if row_paths.insert(mutation.id(), path).is_some() {
             return Err(publish_error(
                 "source rows have duplicate mutation identities",
@@ -161,7 +156,6 @@ fn validate_candidate_source_rows(
     }
     Ok(row_paths)
 }
-
 
 /// Names an already-committed snapshot as the publication result for a frozen
 /// range with no visible change. The commit is the current `HEAD`, so the
