@@ -1828,10 +1828,7 @@ impl NativeGraphContext {
         max_commits: usize,
         scope: &RepositoryReadScope,
     ) -> Result<Vec<RowRevision>, GraphError> {
-        scope.authorize(self)?;
-        if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
-            return Err(GraphError::ContextMismatch);
-        }
+        self.require_committed_row(row, scope)?;
         let descriptors: Vec<NativeObjectId> = row
             .value()
             .dependencies()
@@ -8831,6 +8828,46 @@ mod persisted_orp_tests {
         let reads_before = scope.objects_read_for_test();
         assert!(matches!(
             graph.resolve_row_node(&row, admitted_version.primary_root(), &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
+    }
+
+    #[test]
+    fn schema_generation_mismatch_is_rejected_before_row_history_lookup() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let stale_schema = crate::row_store::SchemaGeneration::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.schema().schema_oid().clone(),
+            *admitted_version.schema().schema_digest(),
+            admitted_version
+                .schema()
+                .generation()
+                .checked_add(1)
+                .expect("fixture schema generation has room"),
+        );
+        let stale_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.store_root().clone(),
+            stale_schema,
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent stale schema version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &stale_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.list_row_revisions(&row, "HEAD", 1, &scope),
             Err(GraphError::ContextMismatch)
         ));
         assert_eq!(scope.objects_read_for_test(), reads_before);
