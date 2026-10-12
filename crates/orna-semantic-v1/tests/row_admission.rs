@@ -129,7 +129,7 @@ fn three_source_rows_lower_to_distinct_canonical_keys_and_full_fields() {
 fn canonical_object_blob_row_keeps_source_size_for_owner_binding() {
     let modules = [ModuleInput::new(
         "main.orna",
-        include_str!("../../orna-conformance-v1/tests/fixtures/reference/examples/valid/blob-vs-information.orna"),
+        include_str!("fixtures/source-row-object-schema.orna"),
     )];
     let analysis = analyze(&modules);
     assert!(analysis.is_ok());
