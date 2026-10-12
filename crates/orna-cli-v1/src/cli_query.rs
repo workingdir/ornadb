@@ -68,15 +68,15 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 key = Some(value);
             }
             "--from" => {
-                let value = words
-                    .next()
-                    .ok_or_else(|| query_error("--from needs a value", "usage: --from text:KEY|bytes:HEX"))?;
+                let value = words.next().ok_or_else(|| {
+                    query_error("--from needs a value", "usage: --from text:KEY|bytes:HEX")
+                })?;
                 from = Some(parse_bound_key(value)?);
             }
             "--until" => {
-                let value = words
-                    .next()
-                    .ok_or_else(|| query_error("--until needs a value", "usage: --until text:KEY|bytes:HEX"))?;
+                let value = words.next().ok_or_else(|| {
+                    query_error("--until needs a value", "usage: --until text:KEY|bytes:HEX")
+                })?;
                 until = Some(parse_bound_key(value)?);
             }
             "--field" => {
@@ -182,6 +182,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
         return Err(query_error(
             "Query expects a relation",
             "usage: orna query <relation-hex> [--key TEXT] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
+        ));
     };
     Ok(QueryOptions {
         relation,
@@ -561,8 +562,8 @@ fn query_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_bound_key, parse_options, parse_relation_id, render_key, QueryFormat,
-        DEFAULT_QUERY_LIMIT,
+        DEFAULT_QUERY_LIMIT, QueryFormat, parse_bound_key, parse_options, parse_relation_id,
+        render_key,
     };
     use crate::Exit;
     use orna_repository_v1::TypedKey;
@@ -638,7 +639,6 @@ mod tests {
         assert!(parse_bound_key("bytes:xyz").is_err());
         assert!(parse_bound_key("image").is_err());
     }
-
 
     #[test]
     fn rendered_keys_follow_the_spelling_the_row_carries() {

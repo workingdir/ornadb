@@ -2057,7 +2057,9 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     assert_eq!(human.status.code(), Some(0));
     let text = String::from_utf8(human.stdout).unwrap();
     assert_eq!(
-        text.lines().filter(|line| line.starts_with("plan:")).count(),
+        text.lines()
+            .filter(|line| line.starts_with("plan:"))
+            .count(),
         1,
         "the measured plan is emitted on one line: {text}"
     );
