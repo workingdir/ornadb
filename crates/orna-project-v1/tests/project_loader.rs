@@ -100,6 +100,23 @@ fn commit_directory(directory: &Path, message: &str) {
 }
 
 #[test]
+fn committed_project_carries_verified_source_snapshot_identity() {
+    let (directory, repository) = repository(&[("main.orna", "pub let answer: Int = 42\n")]);
+    commit_all(&directory);
+    let commit = repository.head().unwrap().unwrap();
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &commit)
+        .unwrap();
+
+    assert_eq!(project.source_commit(), Some(&commit));
+    assert_eq!(project.source_snapshot_id(), Some(commit.snapshot_id()));
+
+    let worktree_project = ProjectLoader::default().load(&repository).unwrap();
+    assert_eq!(worktree_project.source_commit(), None);
+    assert_eq!(worktree_project.source_snapshot_id(), None);
+}
+
+#[test]
 fn loads_only_reachable_modules_in_deterministic_logical_order() {
     let (_directory, repository) = repository(&[
         (

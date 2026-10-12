@@ -257,6 +257,7 @@ fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, S
                 "name": name,
                 "version": {"major": 1, "minor": 0},
                 "signature": function.metadata["signature"],
+                "contract": function.metadata["contract"],
                 "effect": function.metadata["effect"],
                 "preconditions": preconditions,
                 "failures": failures,

@@ -60,7 +60,7 @@ use std::{
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
-use crate::{CommittedTreeEntryKind, GitCommitRef, Repository, scrub_git_routing_environment};
+use crate::{GitCommitRef, Repository, scrub_git_routing_environment};
 
 const MANIFEST_FILE: &str = "manifest.tsv";
 const SUPERPROJECT_BUNDLE: &str = "superproject.bundle";
@@ -827,38 +827,22 @@ fn resolve_dependencies_of(
     let mut recorded = BTreeSet::new();
 
     for exported in members {
-        let entries = repository
-            .list_committed_tree(&exported.snapshot, MAX_EXPORT_OBJECTS)
-            .map_err(|_| CompleteCopyError::GitUnavailable)?;
-        if !entries
-            .iter()
-            .any(|entry| entry.kind() == CommittedTreeEntryKind::Submodule)
-        {
+        // Repository's committed-tree convenience methods spawn their own Git
+        // processes after scrubbing routing variables, which also discards
+        // GIT_NO_REPLACE_OBJECTS. Read the pinned commit directly through this
+        // module's replacement-safe Git wrapper instead.
+        let snapshot = exported.snapshot.as_str();
+        let gitlinks = committed_gitlinks(repository.worktree(), snapshot)?;
+        if gitlinks.is_empty() {
             continue;
         }
-        let origins = read_gitmodules(repository, &exported.snapshot)?;
+        let origins = read_gitmodules_from(repository.worktree(), snapshot)?;
         let mut work = Vec::new();
-        for entry in entries
-            .iter()
-            .filter(|entry| entry.kind() == CommittedTreeEntryKind::Submodule)
-        {
-            let path = entry
-                .path()
-                .as_path()
-                .to_str()
-                .ok_or(CompleteCopyError::InvalidArchive(
-                    "dependency path is not UTF-8",
-                ))?
-                .to_owned();
+        for (path, commit) in gitlinks {
             if !valid_dependency_path(&path) {
                 return Err(CompleteCopyError::InvalidDependencyPath { path });
             }
             let origin = dependency_origin(&origins, &path)?;
-            let commit = repository
-                .committed_submodule_commit(&exported.snapshot, &path)
-                .map_err(|_| CompleteCopyError::DependencyUnavailable { path: path.clone() })?
-                .as_str()
-                .to_owned();
             work.push(DependencyWork::Enter(DependencyCandidate {
                 path,
                 commit,
@@ -1010,10 +994,15 @@ fn committed_gitlinks(
 ) -> Result<Vec<(String, String)>, CompleteCopyError> {
     let output = git_output(directory, &["ls-tree", "-r", "-z", "--full-tree", commit])?;
     let mut gitlinks = Vec::new();
+    let mut entries = 0;
     for record in output
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
     {
+        entries += 1;
+        if entries > MAX_EXPORT_OBJECTS {
+            return Err(CompleteCopyError::ClosureTooLarge);
+        }
         let separator = record
             .iter()
             .position(|byte| *byte == b'\t')
@@ -1072,66 +1061,63 @@ fn valid_dependency_path(path: &str) -> bool {
             .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
-/// Reads the committed `.gitmodules` file as `path`/`url` pairs. A snapshot
-/// without `.gitmodules` records no origins.
-fn read_gitmodules(
-    repository: &Repository,
-    snapshot: &GitCommitRef,
-) -> Result<Vec<(String, String)>, CompleteCopyError> {
-    let bytes = match repository.read_committed_file(snapshot, ".gitmodules", MAX_GITMODULES_BYTES)
-    {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"))?;
-    parse_gitmodules(text)
-}
-
-/// Parses `[submodule ...]` sections, one `path`/`url` pair each. A value is a
-/// single token; a value containing a control character is refused rather than
-/// truncated into the manifest.
+/// Parses committed `.gitmodules` with Git's config parser so quoted paths and
+/// URLs are decoded before they are matched to gitlinks.
 fn parse_gitmodules(text: &str) -> Result<Vec<(String, String)>, CompleteCopyError> {
-    let mut pairs = Vec::new();
-    let mut in_section = false;
-    let mut path: Option<String> = None;
-    let mut url: Option<String> = None;
-    let flush = |path: &mut Option<String>, url: &mut Option<String>, pairs: &mut Vec<_>| {
-        if let (Some(path), Some(url)) = (path.take(), url.take()) {
-            pairs.push((path, url));
-        }
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            if in_section {
-                flush(&mut path, &mut url, &mut pairs);
-            }
-            in_section = line.starts_with("[submodule ");
-            path = None;
-            url = None;
-            continue;
-        }
-        if !in_section || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
+    let output = git_output_stdin(
+        Path::new("."),
+        &["config", "--no-includes", "--null", "--list", "--file", "-"],
+        Some(text.as_bytes()),
+    )?;
+    let mut sections: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let separator = record
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or(CompleteCopyError::GitUnavailable)?;
+        let key = std::str::from_utf8(&record[..separator])
+            .map_err(|_| CompleteCopyError::GitUnavailable)?;
+        let value = std::str::from_utf8(&record[separator + 1..])
+            .map_err(|_| CompleteCopyError::InvalidArchive("`.gitmodules` is not UTF-8"))?;
+        let Some(key) = key.get("submodule.".len()..).filter(|_| {
+            key.get(.."submodule.".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("submodule."))
+        }) else {
             continue;
         };
-        let value = value.trim();
-        if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control()) {
+        let (name, is_path) = if key.len() >= ".path".len()
+            && key
+                .get(key.len() - ".path".len()..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".path"))
+        {
+            (&key[..key.len() - ".path".len()], true)
+        } else if key.len() >= ".url".len()
+            && key
+                .get(key.len() - ".url".len()..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".url"))
+        {
+            (&key[..key.len() - ".url".len()], false)
+        } else {
+            continue;
+        };
+        if name.is_empty() || value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control())
+        {
             return Err(CompleteCopyError::InvalidArchive("`.gitmodules` value"));
         }
-        match key.trim() {
-            "path" => path = Some(value.to_owned()),
-            "url" => url = Some(value.to_owned()),
-            _ => {}
+        let pair = sections.entry(name.to_owned()).or_default();
+        if is_path {
+            pair.0 = Some(value.to_owned());
+        } else {
+            pair.1 = Some(value.to_owned());
         }
     }
-    if in_section {
-        flush(&mut path, &mut url, &mut pairs);
-    }
-    Ok(pairs)
+    Ok(sections
+        .into_values()
+        .filter_map(|(path, url)| path.zip(url))
+        .collect())
 }
 
 /// Lists every object reachable from `commit`, ordered by object ID.
@@ -1371,6 +1357,9 @@ fn verify_blob(directory: &Path, oid: &str, size: u64) -> Result<(), CompleteCop
     // A recovery export is deliberately local-only: never lazily fetch missing
     // objects from a promisor remote recorded by the source repository.
     command.env("GIT_NO_LAZY_FETCH", "1");
+    // Replacement refs can redirect a snapshot walk away from its committed
+    // native graph, silently dropping secondary row-map roots from the copy.
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
     command.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command
         .spawn()
@@ -1658,6 +1647,8 @@ fn git_output_stdin(
     // Read only objects already present in this repository; the archive must
     // not depend on a configured remote being reachable.
     command.env("GIT_NO_LAZY_FETCH", "1");
+    // Resolve the immutable object graph, not a local refs/replace overlay.
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
     command.stdin(if stdin.is_some() {
         Stdio::piped()
     } else {
@@ -1706,6 +1697,18 @@ mod tests {
                 ),
                 ("tools".to_owned(), "../tools.git".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn gitmodules_quoted_values_are_decoded() {
+        let text = "[submodule \"reference\"]\n\tpath = \"deps/reference project\"\n\turl = \"file:///tmp/reference project\"\n";
+        assert_eq!(
+            parse_gitmodules(text).unwrap(),
+            vec![(
+                "deps/reference project".to_owned(),
+                "file:///tmp/reference project".to_owned()
+            )]
         );
     }
 
