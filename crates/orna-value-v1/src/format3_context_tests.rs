@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    io::Cursor,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use super::*;
@@ -166,6 +169,57 @@ fn ovb2_blob_encoder_preflights_sink_and_streams_public_encoding() {
 }
 
 #[test]
+fn reader_ovb2_encoder_preflights_and_requires_exact_source_length() {
+    let annotation = MimeRegistry::mime1()
+        .annotation("text/plain;charset=utf-8", None)
+        .unwrap();
+    let expected =
+        hex_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6");
+    let mut reader = Cursor::new(&b"abc"[..]);
+    let mut output = Vec::new();
+
+    assert_eq!(
+        encode_ovb2_reader_to_writer(
+            &mut reader,
+            3,
+            &annotation,
+            &mut output,
+            (expected.len() - 1) as u64,
+        ),
+        Err(Error::QuotaExceeded)
+    );
+    assert_eq!(reader.position(), 0);
+    assert!(output.is_empty());
+
+    let encoded_length = encode_ovb2_reader_to_writer(
+        &mut reader,
+        3,
+        &annotation,
+        &mut output,
+        expected.len() as u64,
+    )
+    .unwrap();
+    assert_eq!(encoded_length, expected.len() as u64);
+    assert_eq!(output, expected);
+    let decoded = decode_ovb2(&output).unwrap();
+    assert_eq!(decoded.read_to_end().unwrap(), b"abc");
+
+    let mut short = Cursor::new(&b"ab"[..]);
+    let mut discarded = Vec::new();
+    assert_eq!(
+        encode_ovb2_reader_to_writer(&mut short, 3, &annotation, &mut discarded, u64::MAX,),
+        Err(Error::ContentUnavailable)
+    );
+
+    let mut long = Cursor::new(&b"abcd"[..]);
+    let mut discarded = Vec::new();
+    assert_eq!(
+        encode_ovb2_reader_to_writer(&mut long, 3, &annotation, &mut discarded, u64::MAX,),
+        Err(Error::InvalidRange)
+    );
+}
+
+#[test]
 fn mime1_annotations_reject_noncanonical_and_unsafe_inputs() {
     assert_eq!(
         decode_typed::<Vec<u8>>(&hex_bytes("436a7067")).unwrap(),
@@ -259,8 +313,14 @@ fn mime1_annotations_reject_noncanonical_and_unsafe_inputs() {
     assert_eq!(blob.content_identity(), annotated.content_identity());
     assert!(blob.same_content(&annotated).unwrap());
     assert!(!blob.value_eq(&annotated).unwrap());
-    assert_ne!(encode_rov3(&blob).unwrap(), encode_rov3(&annotated).unwrap());
-    assert_ne!(encode_sov3(&blob).unwrap(), encode_sov3(&annotated).unwrap());
+    assert_ne!(
+        encode_rov3(&blob).unwrap(),
+        encode_rov3(&annotated).unwrap()
+    );
+    assert_ne!(
+        encode_sov3(&blob).unwrap(),
+        encode_sov3(&annotated).unwrap()
+    );
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
     assert_eq!(
         Blob::from_semantic_commitment_in_context(identity, &context, "image/jpeg", Some("png")),
@@ -384,7 +444,11 @@ fn annotate_canonicalizes_mime_and_suffix_without_hydrating_content() {
         .annotate("Application/JavaScript;CHARSET=\"UTF-8\"", Some("JS"))
         .unwrap();
     assert_eq!(javascript.media_type(), "text/javascript;charset=utf-8");
-    assert_eq!(javascript.suffix(), None, "preferred suffix is stored as no hint");
+    assert_eq!(
+        javascript.suffix(),
+        None,
+        "preferred suffix is stored as no hint"
+    );
     assert_eq!(javascript.content_identity(), identity);
 
     let gzip = blob.annotate("application/gzip", Some("TAR.GZ")).unwrap();
@@ -687,6 +751,28 @@ fn content_identity_is_separate_from_annotated_value_equality() {
     let second = Blob::from_semantic_commitment(identity, "text/plain", None).unwrap();
     assert_eq!(first.same_content(&second), Err(Error::ContentUnavailable));
     assert_eq!(first.value_eq(&second), Err(Error::ContentUnavailable));
+}
+
+#[test]
+fn identical_reference_bindings_short_circuit_only_within_one_context() {
+    let bytes = b"payload";
+    let identity = ContentIdentity::from_bytes(bytes);
+    let resolver = counting_resolver(bytes);
+    let context = test_context(resolver.clone());
+    let descriptor_oid = NativeOid::from_bytes(&[0x42; 20]).unwrap();
+    let left_reference = context.reference(identity, descriptor_oid.clone()).unwrap();
+    let same_context_reference = context.reference(identity, descriptor_oid.clone()).unwrap();
+    assert_eq!(left_reference, same_context_reference);
+
+    let left = Blob::from_reference(left_reference).unwrap();
+    let same_context = Blob::from_reference(same_context_reference).unwrap();
+    assert!(left.same_content(&same_context).unwrap());
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
+    let foreign_context = test_context(resolver.clone());
+    let foreign =
+        Blob::from_reference(foreign_context.reference(identity, descriptor_oid).unwrap()).unwrap();
+    assert!(left.same_content(&foreign).unwrap());
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 2);
 }
 
 struct CountingResolver {
