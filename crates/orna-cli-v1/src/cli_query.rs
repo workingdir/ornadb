@@ -241,6 +241,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let scope = graph
         .open_read_scope()
         .map_err(|error| query_error("Read scope could not be opened", format!("{error:?}")))?;
+    let filter_active = options.predicate != BlobMetadataFilter::new();
     // `--key` names one canonical OVB Text key. In particular, a `0x` prefix
     // is ordinary Text here, not a fallback to raw key bytes.
     let rows = match options.key {
@@ -250,7 +251,12 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             .into_iter()
             .collect::<Vec<_>>(),
         None => {
-            let range = KeyRange::new(None, None, options.limit)
+            let range_limit = if filter_active {
+                MAX_QUERY_LIMIT
+            } else {
+                options.limit
+            };
+            let range = KeyRange::new(None, None, range_limit)
                 .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
             graph
                 .range_rows(&range, &scope)
@@ -300,6 +306,11 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     );
     listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
     let matched = listings.len();
+    // Count matches before applying the presentation window, so `--limit`
+    // cannot hide matching rows that occur later in the scanned relation.
+    if filter_active {
+        listings.truncate(options.limit);
+    }
     let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
     match options.format {
         QueryFormat::Human => {

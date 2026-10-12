@@ -724,7 +724,7 @@ async fn import_media(
     // The runtime only stages durable mutations. Publication is the explicit
     // boundary that freezes that prefix into the store, so the imported row
     // becomes reachable from a published snapshot.
-    publish_media_row(repository, state, key_text, ordinal).await;
+    publish_media_row(repository, state, key, ordinal).await;
 }
 
 #[tokio::test]
@@ -1940,6 +1940,19 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     assert_eq!(plan["candidates"].as_u64(), Some(3), "all rows: {plan}");
     assert_eq!(plan["matched"].as_u64(), Some(2), "two WAVs: {plan}");
     assert_eq!(plan["payload_fetch"], "none");
+
+    // The filter scans the relation's bounded candidate window before the
+    // output limit: it reports all matches in the scanned candidate window and
+    // returns the first match instead of testing only the first unfiltered row.
+    let limited_wavs = query_json(
+        directory.path(),
+        &[&relation, "--kind", "audio/wav", "--limit", "1"],
+    );
+    assert_eq!(limited_wavs["plan"]["candidates"].as_u64(), Some(3));
+    assert_eq!(limited_wavs["plan"]["matched"].as_u64(), Some(2));
+    assert_eq!(limited_wavs["blobs"].as_u64(), Some(1));
+    assert_eq!(limited_wavs["listings"][0]["key"], "note");
+    assert_eq!(limited_wavs["media_payload_bytes_read"], 0);
 
     // `--suffix` discriminates the two WAVs by their authored annotation, and
     // an unauthored hint selects nothing rather than falling back to kind.
