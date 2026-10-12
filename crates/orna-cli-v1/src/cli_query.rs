@@ -1,4 +1,4 @@
-//! `orna query <relation-hex> [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]`
+//! `orna query <relation-hex> [--key KEY|0xBYTES] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--limit N] [--format human|json]`
 //! lists the payload-free Blob metadata of committed format-3 rows, optionally
 //! narrowed by an annotation predicate (`--kind`, `--not-kind`, `--suffix`,
 //! `--min-length`, `--max-length`).
@@ -40,6 +40,8 @@ enum QueryFormat {
 struct QueryOptions<'a> {
     relation: &'a str,
     key: Option<&'a str>,
+    from: Option<TypedKey>,
+    until: Option<TypedKey>,
     field: Option<usize>,
     at: Option<&'a str>,
     limit: usize,
@@ -50,6 +52,8 @@ struct QueryOptions<'a> {
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
     let mut key = None;
+    let mut from = None;
+    let mut until = None;
     let mut field = None;
     let mut at = None;
     let mut limit = DEFAULT_QUERY_LIMIT;
@@ -63,6 +67,30 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                     .next()
                     .ok_or_else(|| query_error("--key needs a value", "usage: --key KEY"))?;
                 key = Some(value);
+            }
+            "--from" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--from needs a value", "usage: --from text:KEY|bytes:HEX")
+                })?;
+                if from.is_some() {
+                    return Err(query_error(
+                        "Query names one lower bound",
+                        "usage: --from text:KEY|bytes:HEX",
+                    ));
+                }
+                from = Some(parse_bound_key(value)?);
+            }
+            "--until" => {
+                let value = words.next().ok_or_else(|| {
+                    query_error("--until needs a value", "usage: --until text:KEY|bytes:HEX")
+                })?;
+                if until.is_some() {
+                    return Err(query_error(
+                        "Query names one upper bound",
+                        "usage: --until text:KEY|bytes:HEX",
+                    ));
+                }
+                until = Some(parse_bound_key(value)?);
             }
             "--field" => {
                 let value = words
@@ -149,7 +177,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 return Err(query_error(
                     "Unknown query flag",
                     format!(
-                        "got {flag:?}; accepted: --key, --field, --at, --kind, --not-kind, --suffix, \
+                        "got {flag:?}; accepted: --key, --from, --until, --field, --at, --kind, --not-kind, --suffix, \
                          --min-length, --max-length, --limit, --format"
                     ),
                 ));
@@ -157,21 +185,57 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
             _ => positional.push(word),
         }
     }
+    if key.is_some() && (from.is_some() || until.is_some()) {
+        return Err(query_error(
+            "Point key conflicts with typed bounds",
+            "use either --key KEY or --from/--until for an indexed range",
+        ));
+    }
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
+            "usage: orna query <relation-hex> [--key KEY] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
         ));
     };
     Ok(QueryOptions {
         relation,
         key,
+        from,
+        until,
         field,
         at,
         limit,
         format,
         predicate,
     })
+}
+
+/// Parses a typed index bound without applying the point-key spelling fallback.
+fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
+    if let Some(text) = value.strip_prefix("text:") {
+        return Ok(TypedKey::Text(text.to_owned()));
+    }
+    if let Some(hex) = value.strip_prefix("bytes:") {
+        if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(query_error(
+                "Range byte key is not hexadecimal",
+                format!("got {value:?}; usage: bytes:HEX with an even number of digits"),
+            ));
+        }
+        let bytes = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("hex digits are ASCII"), 16)
+                    .expect("hexadecimal digits were checked above")
+            })
+            .collect();
+        return Ok(TypedKey::Bytes(bytes));
+    }
+    Err(query_error(
+        "Range key is not typed",
+        format!("got {value:?}; use text:KEY or bytes:HEX"),
+    ))
 }
 
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
@@ -242,7 +306,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         .resolve_committed_source_table_schema(
             &repository,
             &commit,
-            orna_application_v1::TableObjectId::new(relation),
+            orna_runtime_v1::TableObjectId::new(relation),
         )
         .map_err(|error| {
             query_error(
@@ -287,7 +351,11 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             } else {
                 options.limit
             };
-            let range = KeyRange::new(options.from.clone(), options.until.clone(), candidate_limit)
+            let range = KeyRange::new(
+                options.from.clone(),
+                options.until.clone(),
+                candidate_limit,
+            )
                 .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
             graph
                 .range_rows(&range, &scope)
