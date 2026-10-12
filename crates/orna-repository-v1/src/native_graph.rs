@@ -588,6 +588,73 @@ impl NativeGraphContext {
             })
             .collect()
     }
+    /// Reads one bounded ordinal page from this context's pinned primary ORP root.
+    /// The half-open range must be within the snapshot row count and contain at
+    /// most `MAX_ROW_RANGE_LIMIT` ordinals. Pages remain pinned to this graph
+    /// context; callers can identify that snapshot with `snapshot_id()`.
+    pub fn range_rows_by_ordinal(
+        &self,
+        range: Range<u64>,
+        scope: &RepositoryReadScope,
+    ) -> Result<Vec<crate::row_store::AdmittedRow>, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+        let length = range.end.checked_sub(range.start).ok_or(GraphError::InvalidRange)?;
+        if range.end > expected_count || length > crate::row_store::MAX_ROW_RANGE_LIMIT as u64 {
+            return Err(GraphError::InvalidRange);
+        }
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+
+        let root = version.primary_root().clone();
+        let domain = rows_domain_for_version(version);
+        let entries = {
+            let mut objects = ObjectBudget::new(
+                scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+                scope.max_objects,
+                Arc::clone(&scope.objects_used),
+                scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+                Arc::clone(&scope.metadata_used),
+            );
+            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+            let root_node = read_node(&root)?;
+            validate_ordered_root_node(&root_node, &domain, expected_count)?;
+            let capacity = usize::try_from(length).map_err(|_| GraphError::InvalidRange)?;
+            let mut entries = Vec::with_capacity(capacity);
+            collect_ordered_ordinal_range_with(
+                &mut read_node,
+                root_node,
+                &domain,
+                None,
+                0,
+                &range,
+                &mut entries,
+            )?;
+            if entries.len() as u64 != length {
+                return Err(GraphError::InvalidCount(entries.len()));
+            }
+            entries
+        };
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        entries
+            .into_iter()
+            .map(|entry| {
+                let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                let value = self.decode_persisted_row_value(entry.value, scope, &mut objects)?;
+                Ok(crate::row_store::AdmittedRow::issue(version, key, value))
+            })
+            .collect()
+    }
+
 
     /// Applies ordered mutations to the pinned primary ORP-1 root and returns
     /// the new root together with the object accounting of the pass.
@@ -1827,12 +1894,15 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
     ) -> Result<(), GraphError> {
         scope.authorize(self)?;
-        let persisted_row = self.lookup_row(row.key(), scope)?;
-        if row.version().database_id() != &self.database_id
-            || row.version().store_root() != &self.store_root
-            || row.version().schema().schema_digest() != &self.schema_digest
-            || persisted_row.as_ref() != Some(row)
+        let version = row.version();
+        if version.database_id() != &self.database_id
+            || version.relation_id() != self.row_snapshot.version().relation_id()
+            || version.store_root() != &self.store_root
+            || version.schema().schema_digest() != &self.schema_digest
         {
+            return Err(GraphError::ContextMismatch);
+        }
+        if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
             return Err(GraphError::ContextMismatch);
         }
         Ok(())
@@ -1984,10 +2054,10 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
     ) -> Result<VerifiedBlobRange, GraphError> {
         scope.authorize(self)?;
-        if !reference.matches_context(self)
-            || range.start > range.end
-            || range.end > reference.identity.length()
-        {
+        if !reference.matches_context(self) {
+            return Err(GraphError::ContextMismatch);
+        }
+        if range.start > range.end || range.end > reference.identity.length() {
             return Err(GraphError::InvalidRange);
         }
         let requested_len = range.end - range.start;
@@ -6525,6 +6595,122 @@ fn collect_ordered_range_with(
     }
 }
 
+fn collect_ordered_ordinal_range_with(
+    read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
+    node: NodeData,
+    expected_domain: &[u8],
+    expected_height: Option<u8>,
+    subtree_start: u64,
+    requested: &Range<u64>,
+    output: &mut Vec<OrderedLeafEntry>,
+) -> Result<(), GraphError> {
+    match node {
+        NodeData::OrderedLeaf { domain, entries } => {
+            if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
+                return Err(GraphError::InvalidDomain);
+            }
+            let subtree_end = subtree_start
+                .checked_add(entries.len() as u64)
+                .filter(|end| *end <= MAX_SIGNED_LENGTH)
+                .ok_or(GraphError::InvalidCount(entries.len()))?;
+            let mut previous: Option<crate::row_store::TypedKey> = None;
+            for entry in &entries {
+                let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                if previous.as_ref().is_some_and(|last| last >= &key) {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                previous = Some(key);
+            }
+            let selected_start = requested.start.max(subtree_start);
+            let selected_end = requested.end.min(subtree_end);
+            if selected_start < selected_end {
+                let from = usize::try_from(selected_start - subtree_start)
+                    .map_err(|_| GraphError::InvalidRange)?;
+                let to = usize::try_from(selected_end - subtree_start)
+                    .map_err(|_| GraphError::InvalidRange)?;
+                output.extend(entries.get(from..to).ok_or(GraphError::InvalidRange)?.iter().cloned());
+            }
+            Ok(())
+        }
+        NodeData::OrderedBranch {
+            domain,
+            height,
+            entries,
+        } => {
+            if domain != expected_domain
+                || height == 0
+                || expected_height.is_some_and(|expected| expected != height)
+                || entries.len() < 2
+            {
+                return Err(GraphError::InvalidDomain);
+            }
+            let mut preceding_count = 0_u64;
+            let mut previous_fence: Option<crate::row_store::TypedKey> = None;
+            for entry in entries {
+                if entry.row_count == 0 {
+                    return Err(GraphError::InvalidCount(0));
+                }
+                let child_start = subtree_start
+                    .checked_add(preceding_count)
+                    .filter(|start| *start <= MAX_SIGNED_LENGTH)
+                    .ok_or(GraphError::InvalidCount(usize::MAX))?;
+                preceding_count = preceding_count
+                    .checked_add(entry.row_count)
+                    .filter(|count| *count <= MAX_SIGNED_LENGTH)
+                    .ok_or(GraphError::InvalidCount(usize::MAX))?;
+                let child_end = subtree_start
+                    .checked_add(preceding_count)
+                    .filter(|end| *end <= MAX_SIGNED_LENGTH)
+                    .ok_or(GraphError::InvalidCount(usize::MAX))?;
+                let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                if previous_fence.as_ref().is_some_and(|previous| previous >= &fence) {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                if child_start < requested.end && requested.start < child_end {
+                    let child = read_node(&entry.child)?;
+                    let child_bounds = ordered_node_bounds_with(
+                        read_node,
+                        child.clone(),
+                        expected_domain,
+                        Some(height - 1),
+                    )?;
+                    if child_bounds.0 != entry.row_count
+                        || child_bounds.2 != fence
+                        || previous_fence
+                            .as_ref()
+                            .is_some_and(|previous| child_bounds.1 <= *previous)
+                    {
+                        return Err(GraphError::InvalidCount(
+                            usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
+                        ));
+                    }
+                    collect_ordered_ordinal_range_with(
+                        read_node,
+                        child,
+                        expected_domain,
+                        Some(height - 1),
+                        child_start,
+                        requested,
+                        output,
+                    )?;
+                }
+                previous_fence = Some(fence);
+            }
+            subtree_start
+                .checked_add(preceding_count)
+                .filter(|end| *end <= MAX_SIGNED_LENGTH)
+                .ok_or(GraphError::InvalidCount(usize::MAX))?;
+            Ok(())
+        }
+        other => Err(GraphError::WrongNodeKind {
+            expected: NodeKind::OrderedLeaf,
+            actual: other.kind(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod persisted_orp_tests {
     use super::*;
@@ -7629,6 +7815,39 @@ mod persisted_orp_tests {
         let first = graph
             .maintain_row_index(&first_mutation, &scope)
             .expect("mutate first relation natively");
+
+        let first_only_root = graph
+            .maintain_relations_rows(&[(&first_version, &first)], &scope)
+            .expect("publish first relation without rewriting the second");
+        let untouched_second = load_format3_row_map(
+            &graph.repository,
+            algorithm,
+            first_only_root,
+            *original.database_id(),
+            graph.snapshot_id,
+            second_relation,
+        )
+        .expect("load untouched second relation from successor StoreRoot");
+        assert_eq!(
+            untouched_second.version().schema().schema_oid(),
+            second_version.schema().schema_oid()
+        );
+        assert_eq!(
+            untouched_second.version().schema().schema_digest(),
+            second_version.schema().schema_digest()
+        );
+        assert_eq!(
+            untouched_second.version().primary_root(),
+            second_version.primary_root()
+        );
+        assert_eq!(
+            untouched_second.version().generation(),
+            second_version.generation()
+        );
+        assert_eq!(
+            untouched_second.version().row_count(),
+            second_version.row_count()
+        );
         graph.row_snapshot = second_snapshot;
         let second_mutation = [RowIndexMutation::Insert {
             key: TypedKey::Text("second".to_owned()),
@@ -8321,6 +8540,110 @@ mod persisted_orp_tests {
     }
 
     #[test]
+    fn prior_root_captured_blob_is_rejected_before_later_graph_reads() {
+        let (_directory, graph) = capture_test_context();
+        let capture_scope = graph.open_read_scope().expect("capture scope");
+        let payload = b"captured OGB-2 payload on the earlier StoreRoot";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &capture_scope)
+            .expect("capture native Blob");
+        let pin = graph
+            .protect_captured_blob(candidate, &capture_scope)
+            .expect("protect captured Blob");
+        let binding = graph
+            .accept_protected_blob_pin(pin)
+            .expect("admit captured descriptor");
+        let descriptor_oid = binding.descriptor_oid().clone();
+        let mut encoded_fields = vec![0x81];
+        encoded_fields.extend_from_slice(binding.encoded_value());
+        let blob_value = RowValue::decode_canonical_fields(encoded_fields)
+            .expect("decode canonical captured Blob value");
+
+        let source_version = graph.row_snapshot.version().clone();
+        let source_snapshot_id = [0x39; 32];
+        let row_key = TypedKey::Text("captured".to_owned());
+        let source_store_root = graph
+            .maintain_relation_rows(
+                &source_version,
+                &[RowIndexMutation::Insert {
+                    key: row_key.clone(),
+                    value: blob_value,
+                }],
+                &capture_scope,
+            )
+            .expect("write captured row under the source root");
+        let source_rows = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            source_store_root.clone(),
+            graph.database_id,
+            source_snapshot_id,
+            *source_version.relation_id(),
+        )
+        .expect("load source-root row map");
+        let source_graph = NativeGraphContext::issue(
+            graph.repository.clone(),
+            graph.repository_id,
+            [0x41; 32],
+            graph.database_id,
+            graph.owner_id,
+            source_snapshot_id,
+            graph.algorithm,
+            source_store_root,
+            graph.schema_digest,
+            source_rows,
+        )
+        .expect("issue source-root graph");
+        let source_scope = source_graph.open_read_scope().expect("source read scope");
+        let old_row = source_graph
+            .lookup_row(&row_key, &source_scope)
+            .expect("read captured source row")
+            .expect("captured source row exists");
+
+        let later_snapshot_id = [0x40; 32];
+        let later_store_root = source_graph
+            .maintain_relation_rows(
+                source_graph.row_snapshot.version(),
+                &[RowIndexMutation::Insert {
+                    key: TypedKey::Text("later".to_owned()),
+                    value: RowValue::decode_canonical_fields(vec![0x80])
+                        .expect("canonical empty later row"),
+                }],
+                &source_scope,
+            )
+            .expect("write a valid later StoreRoot");
+        let later_rows = load_format3_row_map(
+            &source_graph.repository,
+            source_graph.algorithm,
+            later_store_root.clone(),
+            source_graph.database_id,
+            later_snapshot_id,
+            *source_graph.row_snapshot.version().relation_id(),
+        )
+        .expect("load later-root row map");
+        let later_graph = NativeGraphContext::issue(
+            source_graph.repository.clone(),
+            source_graph.repository_id,
+            [0x42; 32],
+            source_graph.database_id,
+            source_graph.owner_id,
+            later_snapshot_id,
+            source_graph.algorithm,
+            later_store_root,
+            source_graph.schema_digest,
+            later_rows,
+        )
+        .expect("issue valid later-root graph");
+        let later_scope = later_graph.open_read_scope().expect("later read scope");
+
+        assert!(matches!(
+            later_graph.resolve_row_node(&old_row, &descriptor_oid, &later_scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(later_scope.objects_read(), 0);
+        assert_eq!(later_scope.payload_bytes_read(), 0);
+    }
+    #[test]
     fn requested_range_verifies_only_intersecting_real_media_chunks() {
         let (_directory, graph) = capture_test_context();
         let scope = graph.open_read_scope().expect("capture scope");
@@ -8358,6 +8681,17 @@ mod persisted_orp_tests {
             .expect("read pinned media descriptor");
         let reference = graph.admit_blob(descriptor).expect("bind media descriptor");
         let selected = spans[0].length()..spans[0].length() + 32;
+        let stale_reference = AdmittedBlobReference {
+            snapshot_id: [0xff; 32],
+            ..reference.clone()
+        };
+        let stale_scope = graph.open_read_scope().expect("stale range scope");
+        assert!(matches!(
+            graph.read_blob_range(&stale_reference, selected.clone(), &stale_scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(stale_scope.objects_read(), 0);
+        assert_eq!(stale_scope.payload_bytes_read(), 0);
         let range_scope = graph.open_read_scope().expect("range scope");
         let before_objects = range_scope.objects_read();
         let result = graph
