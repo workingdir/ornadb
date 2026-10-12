@@ -147,10 +147,13 @@ impl fmt::Display for FormatContextError {
 
 /// Repository-authenticated schema binding for one declaration in the
 /// context's committed root module. `descriptor` is decoded from the schema
-/// object sealed by this snapshot; its key order, key types, field roles and
+/// object sealed by `snapshot_id`; its key order, key types, field roles and
 /// field types (including Blob fields) are the authoritative row contract.
+/// This proves committed descriptor provenance, not that caller-side project
+/// analysis agrees with it; use `bind_committed_table` for that check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommittedTableBinding {
+    snapshot_id: [u8; 32],
     declaration_name: String,
     relation_id: [u8; 16],
     schema_oid: NativeOid,
@@ -159,8 +162,16 @@ pub struct CommittedTableBinding {
 }
 
 impl CommittedTableBinding {
+    pub const fn snapshot_id(&self) -> &[u8; 32] {
+        &self.snapshot_id
+    }
+
     pub fn declaration_name(&self) -> &str {
         &self.declaration_name
+    }
+
+    pub const fn table_object_id(&self) -> &[u8; 16] {
+        &self.relation_id
     }
 
     pub const fn relation_id(&self) -> &[u8; 16] {
@@ -457,26 +468,16 @@ impl RepositoryFormatContext {
         .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
-    /// Binds a committed root-module table declaration to the schema sealed
-    /// by its stable format-3 relation identity in this exact snapshot.
-    ///
-    /// `expected_snapshot_id` and `expected_schema` must come from the caller's
-    /// resolved project analysis for this snapshot. The schema descriptor is
-    /// then authenticated through the owner-issued graph context; row contents
-    /// and source syntax are never used to infer schema identity.
-    pub fn bind_committed_table(
+    /// Resolves the canonical descriptor for a committed declaration and
+    /// TableObjectId through this exact format-3 snapshot's native graph.
+    /// Callers must compare it with resolved project analysis; this repository
+    /// proof alone does not establish source-analysis provenance.
+    pub fn resolve_committed_table_descriptor(
         &self,
         declaration_name: &str,
         table_object_id: [u8; 16],
-        expected_snapshot_id: &[u8; 32],
-        expected_schema: &SchemaDescriptor,
     ) -> Result<CommittedTableBinding, FormatContextError> {
         self.require_format3()?;
-        if *expected_snapshot_id != self.snapshot.snapshot_id()
-            || schema_descriptor_table_id(expected_schema) != Some(table_object_id)
-        {
-            return Err(FormatContextError::TableBindingMismatch);
-        }
         let source = self
             .snapshot
             .read_file(&self.repository, MAIN_SOURCE_PATH, 64 * 1024)
@@ -490,15 +491,14 @@ impl RepositoryFormatContext {
         if !parsed.is_ok() {
             return Err(FormatContextError::SchemaRootInvalid);
         }
-        let mut declarations =
-            parsed
-                .value
-                .items
-                .iter()
-                .filter_map(|item| match &item.declaration {
-                    Declaration::Table { name, .. } if name == declaration_name => Some(()),
-                    _ => None,
-                });
+        let mut declarations = parsed
+            .value
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Table { name, .. } if name == declaration_name => Some(()),
+                _ => None,
+            });
         if declarations.next().is_none() || declarations.next().is_some() {
             return Err(FormatContextError::TableBindingMismatch);
         }
@@ -515,18 +515,40 @@ impl RepositoryFormatContext {
         let descriptor = graph
             .read_schema_descriptor(&scope)
             .map_err(|_| FormatContextError::GraphContextInvalid)?;
-        if schema_descriptor_table_id(&descriptor) != Some(table_object_id)
-            || &descriptor != expected_schema
-        {
+        if schema_descriptor_table_id(&descriptor) != Some(table_object_id) {
             return Err(FormatContextError::TableBindingMismatch);
         }
         Ok(CommittedTableBinding {
+            snapshot_id: self.snapshot.snapshot_id(),
             declaration_name: declaration_name.to_owned(),
             relation_id: *version.relation_id(),
             schema_oid: version.schema().schema_oid().clone(),
             schema_digest: *version.schema().schema_digest(),
             descriptor,
         })
+    }
+
+    /// Binds caller-side resolved schema identity to the descriptor sealed by
+    /// this exact snapshot. The expected schema must come from an owner-issued
+    /// resolved-analysis artifact; row bytes and source syntax never infer it.
+    pub fn bind_committed_table(
+        &self,
+        declaration_name: &str,
+        table_object_id: [u8; 16],
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.require_format3()?;
+        if *expected_snapshot_id != self.snapshot.snapshot_id()
+            || schema_descriptor_table_id(expected_schema) != Some(table_object_id)
+        {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        let binding = self.resolve_committed_table_descriptor(declaration_name, table_object_id)?;
+        if binding.descriptor() != expected_schema {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        Ok(binding)
     }
 
     /// Issues native Git graph authority only for a sealed row-map snapshot
@@ -716,8 +738,18 @@ impl HistoricalFormatContext {
         self.context.load_row_map(relation_id)
     }
 
-    /// Binds a committed declaration through this exact historical snapshot,
-    /// requiring its resolved-schema expectation to be tied to the same pin.
+    /// Resolves the canonical descriptor through this exact historical pin
+    /// before caller-side resolved project analysis is compared.
+    pub fn resolve_committed_table_descriptor(
+        &self,
+        declaration_name: &str,
+        table_object_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context
+            .resolve_committed_table_descriptor(declaration_name, table_object_id)
+    }
+
+    /// Binds caller-side resolved schema identity through this exact historical snapshot.
     pub fn bind_committed_table(
         &self,
         declaration_name: &str,
@@ -1338,6 +1370,14 @@ mod graph_bridge_tests {
             seeded_table_binding("Int", relation_id);
         let first_context = context(directory.path());
         let snapshot_id = first_context.snapshot_pin().snapshot_id();
+        let resolved = first_context
+            .resolve_committed_table_descriptor("Audio", relation_id)
+            .expect("resolve canonical descriptor from the pinned graph");
+        assert_eq!(resolved.snapshot_id(), &snapshot_id);
+        assert_eq!(resolved.declaration_name(), "Audio");
+        assert_eq!(resolved.table_object_id(), &relation_id);
+        assert_eq!(resolved.descriptor(), &expected_descriptor);
+
         let binding = first_context
             .bind_committed_table("Audio", relation_id, &snapshot_id, &expected_descriptor)
             .expect("source declaration and pinned schema agree");
@@ -1405,6 +1445,14 @@ mod graph_bridge_tests {
             Err(super::FormatContextError::TableBindingMismatch),
             "pinned HEAD rejects a resolved schema inconsistent with committed metadata"
         );
+
+        let resolved = historical
+            .resolve_committed_table_descriptor("Audio", relation_id)
+            .expect("resolve descriptor from the historical graph pin");
+        assert_eq!(resolved.snapshot_id(), &historical_snapshot_id);
+        assert_eq!(resolved.declaration_name(), "Audio");
+        assert_eq!(resolved.table_object_id(), &relation_id);
+        assert_eq!(resolved.descriptor(), &expected_descriptor);
 
         let binding = historical
             .bind_committed_table(
