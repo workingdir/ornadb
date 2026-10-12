@@ -481,17 +481,16 @@ impl RowMapSnapshot {
             .entries
             .as_ref()
             .ok_or(RowStoreError::PersistedLookupRequiresGraphContext)?;
-        Ok(entries
+        let start = range.lower_inclusive.as_ref().map_or(0, |lower| {
+            entries.partition_point(|entry| entry.key < *lower)
+        });
+        Ok(entries[start..]
             .iter()
-            .filter(|entry| {
+            .take_while(|entry| {
                 range
-                    .lower_inclusive
+                    .upper_exclusive
                     .as_ref()
-                    .map_or(true, |lower| entry.key >= *lower)
-                    && range
-                        .upper_exclusive
-                        .as_ref()
-                        .map_or(true, |upper| entry.key < *upper)
+                    .map_or(true, |upper| entry.key < *upper)
             })
             .take(range.limit)
             .map(|entry| AdmittedRow::from_entry(&self.version, entry))
@@ -1582,6 +1581,87 @@ mod tests {
         .expect("coherent row-map version");
         let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty field tuple");
         AdmittedRow::issue(&version, TypedKey::Text("london".to_owned()), value)
+    }
+
+    #[test]
+    fn materialized_range_seeks_across_page_boundary_and_keeps_snapshot_pin() {
+        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
+        let version = RowMapVersion::issue(
+            [0x11; 16],
+            [0x22; 16],
+            oid(0x55),
+            schema,
+            oid(0x66),
+            8,
+            Some(600),
+        )
+        .expect("coherent row-map version");
+        let boundary = RowMapBoundary::new([0x11; 16], oid(0x55), [0x44; 32], [0x22; 16]);
+        let mut builder = RowMapBuilder::new(boundary);
+        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
+        for key in 0..600 {
+            builder
+                .insert(TypedKey::Int(key), value.clone())
+                .expect("insert ordered row");
+        }
+        let map = builder.build().expect("build paged row map");
+        assert!(map.pages().len() > 1, "fixture must span row pages");
+        let first_page_last_key = map.pages()[0]
+            .entries()
+            .last()
+            .expect("nonempty first page")
+            .key()
+            .clone();
+        let start = match first_page_last_key {
+            TypedKey::Int(value) => value,
+            _ => unreachable!("test keys are integers"),
+        };
+        let entries = map.entries().to_vec();
+        let snapshot = RowMapSnapshot::issue(version.clone(), [0x77; 32], entries)
+            .expect("seal materialized snapshot");
+        let range = KeyRange::new(
+            Some(TypedKey::Int(start)),
+            Some(TypedKey::Int(start + 4)),
+            3,
+        )
+        .expect("valid page-crossing range");
+
+        let rows = snapshot.range(&range).expect("read bounded range");
+        assert_eq!(
+            rows.iter()
+                .map(AdmittedRow::key)
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                TypedKey::Int(start),
+                TypedKey::Int(start + 1),
+                TypedKey::Int(start + 2),
+            ]
+        );
+        assert!(rows.iter().all(|row| row.version() == &version));
+    }
+
+    #[test]
+    fn lazy_snapshot_range_requires_graph_context_instead_of_empty_result() {
+        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
+        let version = RowMapVersion::issue(
+            [0x11; 16],
+            [0x22; 16],
+            oid(0x55),
+            schema,
+            oid(0x66),
+            8,
+            Some(1),
+        )
+        .expect("coherent row-map version");
+        let snapshot = RowMapSnapshot::issue_lazy(version, [0x77; 32])
+            .expect("seal persisted snapshot without materializing rows");
+        let range = KeyRange::new(None, None, 1).expect("valid bounded range");
+
+        assert!(matches!(
+            snapshot.range(&range),
+            Err(RowStoreError::PersistedLookupRequiresGraphContext)
+        ));
     }
 
     #[test]
