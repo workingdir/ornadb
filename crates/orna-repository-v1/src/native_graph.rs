@@ -1876,6 +1876,8 @@ impl NativeGraphContext {
     }
 
     /// Checks that `row` is still the committed row for this context.
+    /// Database, relation, root, and schema mismatches fail before `lookup_row`,
+    /// so a foreign row cannot trigger reads in this graph.
     fn require_committed_row(
         &self,
         row: &crate::row_store::AdmittedRow,
