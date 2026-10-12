@@ -1188,11 +1188,41 @@ impl Blob {
                     .to_vec())
             }
             BlobContent::Reference(reference) => {
-                let bytes = reference.context.read_range(reference, offset, expected)?;
-                if bytes.len() as u64 != expected {
+                // A range is not independently authenticated by the stored
+                // full-content digest. Verify the complete pinned content
+                // before exposing any requested bytes; keep only the range
+                // while streaming the remaining chunks for the digest.
+                let result_capacity = usize::try_from(expected).map_err(|_| Error::Limit)?;
+                let mut result = Vec::new();
+                result
+                    .try_reserve_exact(result_capacity)
+                    .map_err(|_| Error::Limit)?;
+                let requested_end = offset.checked_add(expected).ok_or(Error::Limit)?;
+                let chunk_limit = self.read_chunk_limit();
+                let mut digest = Sha256::new();
+                let mut cursor = 0_u64;
+                while cursor < self.length() {
+                    let size = (self.length() - cursor).min(chunk_limit);
+                    let bytes = read_reference_range(reference, cursor, size)?;
+                    digest.update(&bytes);
+                    let chunk_end = cursor.checked_add(size).ok_or(Error::Limit)?;
+                    let overlap_start = cursor.max(offset);
+                    let overlap_end = chunk_end.min(requested_end);
+                    if overlap_start < overlap_end {
+                        let start =
+                            usize::try_from(overlap_start - cursor).map_err(|_| Error::Limit)?;
+                        let end = usize::try_from(overlap_end - cursor).map_err(|_| Error::Limit)?;
+                        result.extend_from_slice(&bytes[start..end]);
+                    }
+                    cursor = chunk_end;
+                }
+                if digest.finalize()[..] != self.identity.sha256 {
+                    return Err(Error::ContentDigestMismatch);
+                }
+                if result.len() as u64 != expected {
                     return Err(Error::ContentUnavailable);
                 }
-                Ok(bytes)
+                Ok(result)
             }
             BlobContent::Descriptor(_) => Err(Error::ContentUnavailable),
             BlobContent::Commitment => Err(Error::ContentUnavailable),
@@ -1205,12 +1235,31 @@ impl Blob {
         result.try_reserve_exact(capacity).map_err(|_| Error::Limit)?;
         let mut offset = 0_u64;
         let chunk_limit = self.read_chunk_limit();
+        let mut digest = Sha256::new();
         while offset < self.length() {
             let size = (self.length() - offset).min(chunk_limit);
-            result.extend(self.read(offset, size)?);
+            let bytes = match &self.content {
+                BlobContent::Inline(content) => {
+                    let start = usize::try_from(offset).map_err(|_| Error::Limit)?;
+                    let length = usize::try_from(size).map_err(|_| Error::Limit)?;
+                    let end = start.checked_add(length).ok_or(Error::Limit)?;
+                    content
+                        .get(start..end)
+                        .ok_or(Error::ContentDigestMismatch)?
+                        .to_vec()
+                }
+                BlobContent::Reference(reference) => read_reference_range(reference, offset, size)?,
+                BlobContent::Descriptor(_) | BlobContent::Commitment => {
+                    return Err(Error::ContentUnavailable);
+                }
+            };
+            digest.update(&bytes);
+            result.extend_from_slice(&bytes);
             offset = offset.checked_add(size).ok_or(Error::Limit)?;
         }
-        verify_content_identity(self.identity, &result)?;
+        if digest.finalize()[..] != self.identity.sha256 {
+            return Err(Error::ContentDigestMismatch);
+        }
         Ok(result)
     }
 
@@ -1236,8 +1285,8 @@ impl Blob {
         let chunk_limit = self.read_chunk_limit().min(other.read_chunk_limit());
         while offset < self.length() {
             let size = (self.length() - offset).min(chunk_limit);
-            let left = self.read(offset, size)?;
-            let right = other.read(offset, size)?;
+            let left = read_content_range(self, offset, size)?;
+            let right = read_content_range(other, offset, size)?;
             if left != right {
                 return Err(Error::ContentDigestMismatch);
             }
@@ -1356,10 +1405,10 @@ impl Blob {
                     digest.update(bytes);
                 }
                 BlobContent::Reference(_) => {
-                    let bytes = self.read(offset, size)?;
-                    if bytes.len() as u64 != size {
+                    let BlobContent::Reference(reference) = &self.content else {
                         return Err(Error::ContentUnavailable);
-                    }
+                    };
+                    let bytes = read_reference_range(reference, offset, size)?;
                     writer.write_all(&bytes).map_err(|_| Error::SinkFailed)?;
                     digest.update(&bytes);
                 }
@@ -1399,13 +1448,34 @@ fn same_content_source(left: &BlobContent, right: &BlobContent) -> bool {
     }
 }
 
-fn verify_content_identity(identity: ContentIdentity, bytes: &[u8]) -> Result<()> {
-    if ContentIdentity::from_bytes(bytes) == identity {
-        Ok(())
-    } else {
-        Err(Error::ContentDigestMismatch)
+fn read_reference_range(reference: &ContentReference, offset: u64, length: u64) -> Result<Vec<u8>> {
+    let bytes = reference.context.read_range(reference, offset, length)?;
+    if bytes.len() as u64 != length {
+        return Err(Error::ContentUnavailable);
+    }
+    Ok(bytes)
+}
+
+fn read_content_range(blob: &Blob, offset: u64, length: u64) -> Result<Vec<u8>> {
+    let end = offset.checked_add(length).ok_or(Error::Limit)?;
+    if end > blob.length() {
+        return Err(Error::InvalidRange);
+    }
+    match &blob.content {
+        BlobContent::Inline(bytes) => {
+            let start = usize::try_from(offset).map_err(|_| Error::Limit)?;
+            let length = usize::try_from(length).map_err(|_| Error::Limit)?;
+            let end = start.checked_add(length).ok_or(Error::Limit)?;
+            Ok(bytes
+                .get(start..end)
+                .ok_or(Error::ContentDigestMismatch)?
+                .to_vec())
+        }
+        BlobContent::Reference(reference) => read_reference_range(reference, offset, length),
+        BlobContent::Descriptor(_) | BlobContent::Commitment => Err(Error::ContentUnavailable),
     }
 }
+
 
 /// Canonical MIME-1 annotation stored with each Blob value.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -7423,5 +7493,83 @@ mod logical_primary_key_order_tests {
             ])),
         ));
         assert!(compare_primary_keys(&malformed_enum, &payload_enum).is_err());
+    }
+}
+
+#[cfg(test)]
+mod resolver_integrity_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct PinnedMediaResolver {
+        descriptor: NativeOid,
+        bytes: Vec<u8>,
+        reads: AtomicUsize,
+    }
+
+    impl BlobResolver for PinnedMediaResolver {
+        fn read_range(
+            &self,
+            reference: &ContentReference,
+            offset: u64,
+            length: u64,
+        ) -> Result<Vec<u8>> {
+            self.reads.fetch_add(1, AtomicOrdering::SeqCst);
+            if reference.descriptor_oid() != &self.descriptor {
+                return Err(Error::MissingDescriptor);
+            }
+            let start = usize::try_from(offset).map_err(|_| Error::InvalidRange)?;
+            let length = usize::try_from(length).map_err(|_| Error::InvalidRange)?;
+            let end = start.checked_add(length).ok_or(Error::InvalidRange)?;
+            Ok(self.bytes[start..end].to_vec())
+        }
+    }
+
+    fn context(resolver: Arc<dyn BlobResolver>) -> Format3Context {
+        let database = [1; 16];
+        Format3Context::from_persisted(
+            database,
+            Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            GitHash::Sha1,
+            NativeOid::from_bytes(&[9; 20]).unwrap(),
+            NativeOid::from_bytes(&[8; 20]).unwrap(),
+            AvailabilityState::Available,
+            OwnerLifetime::new([3; 16]),
+            Format3Quota::new(2, 1024).unwrap(),
+            resolver,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn range_reads_reject_replaced_descriptors_and_raw_digest_mismatch() {
+        let descriptor = NativeOid::from_bytes(&[7; 20]).unwrap();
+        let resolver = Arc::new(PinnedMediaResolver {
+            descriptor: descriptor.clone(),
+            bytes: b"axc".to_vec(),
+            reads: AtomicUsize::new(0),
+        });
+        let context = context(resolver.clone());
+        let identity = ContentIdentity::from_bytes(b"abc");
+        let blob = Blob::from_reference_with_annotation(
+            context
+                .reference(identity, descriptor)
+                .expect("issue pinned descriptor reference"),
+            "text/plain;charset=utf-8",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(blob.read(0, 1), Err(Error::ContentDigestMismatch));
+        assert_eq!(resolver.reads.load(AtomicOrdering::SeqCst), 2);
+
+        let replaced = Blob::from_reference(
+            context
+                .reference(identity, NativeOid::from_bytes(&[6; 20]).unwrap())
+                .expect("issue replacement descriptor reference"),
+        )
+        .unwrap();
+        assert_eq!(replaced.read(0, 1), Err(Error::MissingDescriptor));
+        assert_eq!(resolver.reads.load(AtomicOrdering::SeqCst), 3);
     }
 }
