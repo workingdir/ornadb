@@ -403,3 +403,45 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
         );
     }
 }
+
+#[test]
+fn restore_rejects_export_only_dependency_options() {
+    let (source_directory, _repository, _relation_id) = empty_format3_repository();
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(
+        source_directory.path(),
+        &["export", archive_path, "--at", "HEAD"],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "archive export failed: {}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+
+    let destination = outside.path().join("restored");
+    let destination_path = destination.to_str().unwrap();
+    let restored = run(
+        outside.path(),
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            destination_path,
+            "--dependency",
+            "deps/std=/srv/std",
+        ],
+    );
+    assert_eq!(restored.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&restored.stderr).contains("E2000"),
+        "restore rejects an export-only option before reconstruction: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert!(
+        !destination.exists(),
+        "invalid restore options do not create the destination"
+    );
+}
