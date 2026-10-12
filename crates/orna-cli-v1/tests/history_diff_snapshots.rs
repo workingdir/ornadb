@@ -380,5 +380,33 @@ fn diff_refuses_an_endpoint_carried_by_more_than_one_ref() {
         String::from_utf8_lossy(&full.stderr)
     );
 
+    // A full commit id is not a ref lookup, even when refs use the same
+    // spelling. The diff must reach the pinned legacy snapshot, not reject the
+    // commit id as an ambiguous short ref.
+    let commit_id = revision(root, "HEAD");
+    git_output(root, &["branch", &commit_id], None);
+    git_output(root, &["tag", &commit_id], None);
+    let full_id = run_history(
+        root,
+        &[
+            relation,
+            "--diff",
+            &commit_id,
+            "refs/heads/twin",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(full_id.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&full_id.stderr);
+    assert!(
+        stderr.contains("Snapshot is a legacy format-1/2 input"),
+        "the full commit id reaches its pinned endpoint: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Snapshot name is ambiguous"),
+        "a full commit id names an object despite colliding ref spellings: {stderr}"
+    );
+
     drop(directory);
 }
