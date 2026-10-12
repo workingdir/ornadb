@@ -723,6 +723,7 @@ async fn publish_recovers_compact_journal_without_receipt_before_tail_selection(
         CanonicalValue::int(1.into()).encode().unwrap(),
         Some(
             CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Int(1.into())]))
+                .unwrap()
                 .encode()
                 .unwrap(),
         ),
@@ -797,6 +798,7 @@ async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
         CanonicalValue::int(1.into()).encode().unwrap(),
         Some(
             CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Int(1.into())]))
+                .unwrap()
                 .encode()
                 .unwrap(),
         ),
