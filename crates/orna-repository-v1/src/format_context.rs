@@ -1608,7 +1608,11 @@ mod graph_bridge_tests {
         );
         fs::write(root.join("media.orna"), large_source)
             .expect("write valid imported source above the old bound");
-        commit(root);
+        // `commit_store_root` advances HEAD without refreshing the worktree/index.
+        // Reset the index to that committed graph before staging only the source change.
+        git(root, &["read-tree", "HEAD"]);
+        git(root, &["add", "--", "media.orna"]);
+        git(root, &["commit", "--quiet", "-m", "advance imported source fixture"]);
         let large_context = Repository::discover(root)
             .expect("discover large imported module")
             .open_format_context()
