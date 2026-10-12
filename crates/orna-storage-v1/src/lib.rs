@@ -1182,6 +1182,65 @@ fn build_private_row_publication_candidate(
         .map_err(|_| Error::RepositoryUnavailable)
 }
 
+fn source_schema_has_single_text_key(schema: &orna_semantic_v1::TableSchema) -> bool {
+    schema.admission.as_ref().is_some_and(|admission| {
+        !admission.automatic_key
+            && matches!(
+                admission.keys.as_slice(),
+                [(_, orna_semantic_v1::Type::Text)]
+            )
+    })
+}
+
+fn source_text_key_names(analysis: &orna_semantic_v1::Analysis) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut unqualified_names = BTreeMap::<String, Option<bool>>::new();
+    for (namespace, module) in &analysis.modules {
+        for (name, symbol) in &module.symbols {
+            if symbol.kind != orna_semantic_v1::SymbolKind::Table {
+                continue;
+            }
+            let Some(schema) = symbol.table_schema.as_ref() else {
+                continue;
+            };
+            let is_text_key = source_schema_has_single_text_key(schema);
+            unqualified_names
+                .entry(name.clone())
+                .and_modify(|eligible| *eligible = None)
+                .or_insert(Some(is_text_key));
+            if is_text_key {
+                let owner = if namespace.0.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", namespace.0.join("/"), name)
+                };
+                names.insert(owner);
+            }
+        }
+    }
+    names.extend(
+        unqualified_names
+            .into_iter()
+            .filter_map(|(name, eligible)| {
+                eligible
+                    .is_some_and(|is_text_key| is_text_key)
+                    .then_some(name)
+            }),
+    );
+    names
+}
+
+fn decode_source_text_key(encoded: &[u8]) -> Result<orna_repository_v1::TypedKey, Error> {
+    let decoded = orna_value_v1::Value::decode(encoded).map_err(|_| Error::InvalidKey)?;
+    if decoded.encode().map_err(|_| Error::InvalidKey)?.as_slice() != encoded {
+        return Err(Error::InvalidKey);
+    }
+    let orna_foundation_v1::OvbRaw::Text(key) = decoded.raw() else {
+        return Err(Error::InvalidKey);
+    };
+    Ok(orna_repository_v1::TypedKey::Text(key.clone()))
+}
+
 /// Lowers protected media rows using the source-bound primary-key descriptor
 /// from the committed project and the pinned relation maps. Raw mutation key
 /// bytes are decoded as canonical OVB before the declared text type is used.
@@ -1209,48 +1268,19 @@ pub fn lower_protected_blob_mutations_for_publication(
     if !analysis.is_ok() {
         return Err(Error::InvalidRow);
     }
-    let mut source_text_keys = BTreeSet::new();
-    for (namespace, module) in &analysis.modules {
-        for (name, symbol) in &module.symbols {
-            let Some(schema) = symbol.table_schema.as_ref() else {
-                continue;
-            };
-            let Some(admission) = schema.admission.as_ref() else {
-                continue;
-            };
-            if !admission.automatic_key
-                && matches!(admission.keys.as_slice(), [(_, orna_semantic_v1::Type::Text)])
-            {
-                let owner = if namespace.0.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{}/{}", namespace.0.join("/"), name)
-                };
-                source_text_keys.insert(owner);
-            }
-        }
-    }
+    let source_text_keys = source_text_key_names(&analysis);
 
     let mut by_relation = BTreeMap::<[u8; 16], BTreeMap<TypedKey, &TableMutation>>::new();
     for mutation in mutations {
-        let relation_id = mutation
-            .table_object_id()
-            .ok_or(Error::InvalidRow)?
-            .bytes();
+        let relation_id = mutation.table_object_id().ok_or(Error::InvalidRow)?.bytes();
         if mutation.rekey_to().is_some() || !source_text_keys.contains(mutation.table()) {
             return Err(Error::InvalidRow);
         }
-        let decoded = orna_value_v1::Value::decode(mutation.key()).map_err(|_| Error::InvalidKey)?;
-        if decoded.encode().map_err(|_| Error::InvalidKey)?.as_slice() != mutation.key() {
-            return Err(Error::InvalidKey);
-        }
-        let orna_foundation_v1::OvbRaw::Text(key) = decoded.raw() else {
-            return Err(Error::InvalidKey);
-        };
+        let key = decode_source_text_key(mutation.key())?;
         by_relation
             .entry(relation_id)
             .or_default()
-            .insert(TypedKey::Text(key.clone()), mutation);
+            .insert(key, mutation);
     }
 
     let mut lowered = Vec::with_capacity(by_relation.len());
@@ -1265,7 +1295,9 @@ pub fn lower_protected_blob_mutations_for_publication(
         let graph = format
             .open_native_graph(&row_map)
             .map_err(|_| Error::RepositoryUnavailable)?;
-        let scope = graph.open_read_scope().map_err(|_| Error::RepositoryUnavailable)?;
+        let scope = graph
+            .open_read_scope()
+            .map_err(|_| Error::RepositoryUnavailable)?;
         let mut operations = Vec::new();
         for (key, mutation) in final_mutations {
             let existing = graph
@@ -1278,8 +1310,8 @@ pub fn lower_protected_blob_mutations_for_publication(
                     let mut fields = Vec::with_capacity(encoded_blob.len() + 1);
                     fields.push(0x81);
                     fields.extend_from_slice(encoded_blob);
-                    let value = RowValue::decode_canonical_fields(fields)
-                        .map_err(|_| Error::InvalidRow)?;
+                    let value =
+                        RowValue::decode_canonical_fields(fields).map_err(|_| Error::InvalidRow)?;
                     if existing
                         .as_ref()
                         .is_some_and(|row| row.value().encoded_fields() == value.encoded_fields())
@@ -3775,6 +3807,122 @@ mod tests {
             ),
             Err(Error::IncompleteStaging)
         );
+    }
+
+    #[test]
+    fn source_text_key_admission_rejects_raw_utf8_and_nontext_values() {
+        let source_text = orna_value_v1::Value::new(OvbRaw::Text("song".to_owned()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert_eq!(
+            decode_source_text_key(&source_text),
+            Ok(orna_repository_v1::TypedKey::Text("song".to_owned()))
+        );
+        assert_eq!(decode_source_text_key(b"song"), Err(Error::InvalidKey));
+
+        let source_int = orna_value_v1::Value::new(OvbRaw::Int(7.into()))
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert_eq!(decode_source_text_key(&source_int), Err(Error::InvalidKey));
+    }
+
+    #[test]
+    fn publication_requires_an_explicit_single_text_key_schema() {
+        use orna_semantic_v1::{TableAdmission, TableSchema, Type};
+
+        let schema = |key_type| TableSchema {
+            fields: BTreeMap::new(),
+            admission: Some(TableAdmission {
+                required: BTreeSet::new(),
+                private_required: false,
+                computed: BTreeSet::new(),
+                keys: vec![("id".to_owned(), key_type)],
+                automatic_key: false,
+            }),
+            conversions: Vec::new(),
+        };
+        assert!(source_schema_has_single_text_key(&schema(Type::Text)));
+        assert!(!source_schema_has_single_text_key(&schema(Type::Int)));
+        let mut automatic = schema(Type::Text);
+        automatic.admission.as_mut().unwrap().automatic_key = true;
+        assert!(!source_schema_has_single_text_key(&automatic));
+    }
+
+    #[test]
+    fn source_table_lookup_keeps_unique_unqualified_names_and_rejects_ambiguous_ones() {
+        use orna_semantic_v1::{
+            Analysis, EffectSummary, ModuleHeader, Namespace, Symbol, SymbolKind, TableAdmission,
+            TableSchema, Type,
+        };
+
+        let module = |namespace: Namespace, key_type| {
+            let schema = TableSchema {
+                fields: BTreeMap::new(),
+                admission: Some(TableAdmission {
+                    required: BTreeSet::new(),
+                    private_required: false,
+                    computed: BTreeSet::new(),
+                    keys: vec![("id".to_owned(), key_type)],
+                    automatic_key: false,
+                }),
+                conversions: Vec::new(),
+            };
+            ModuleHeader {
+                namespace,
+                exports: BTreeMap::new(),
+                symbols: BTreeMap::from([(
+                    "Contact".to_owned(),
+                    Symbol {
+                        kind: SymbolKind::Table,
+                        ty: Type::Record(BTreeMap::new()),
+                        public: true,
+                        effects: EffectSummary::default(),
+                        generic_parameters: Vec::new(),
+                        enum_variants: BTreeSet::new(),
+                        table_schema: Some(schema),
+                    },
+                )]),
+                generic_functions: BTreeMap::new(),
+                protocols: BTreeMap::new(),
+                prelude_exports: BTreeSet::new(),
+                implicit: false,
+            }
+        };
+        let music = Namespace(vec!["music".to_owned()]);
+        let unique = Analysis {
+            modules: BTreeMap::from([(music.clone(), module(music, Type::Text))]),
+            ..Analysis::default()
+        };
+        let names = source_text_key_names(&unique);
+        assert!(names.contains("music/Contact"));
+        assert!(names.contains("Contact"));
+
+        let music = Namespace(vec!["music".to_owned()]);
+        let video = Namespace(vec!["video".to_owned()]);
+        let compatible = Analysis {
+            modules: BTreeMap::from([
+                (music.clone(), module(music.clone(), Type::Text)),
+                (video.clone(), module(video.clone(), Type::Text)),
+            ]),
+            ..Analysis::default()
+        };
+        assert!(!source_text_key_names(&compatible).contains("Contact"));
+        assert!(source_text_key_names(&compatible).contains("music/Contact"));
+
+        let music = Namespace(vec!["music".to_owned()]);
+        let video = Namespace(vec!["video".to_owned()]);
+        let ambiguous = Analysis {
+            modules: BTreeMap::from([
+                (music.clone(), module(music, Type::Text)),
+                (video.clone(), module(video, Type::Int)),
+            ]),
+            ..Analysis::default()
+        };
+        let names = source_text_key_names(&ambiguous);
+        assert!(names.contains("music/Contact"));
+        assert!(!names.contains("Contact"));
     }
 
     #[test]
