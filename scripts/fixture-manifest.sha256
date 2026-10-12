@@ -126,6 +126,8 @@ f409c8bda3f248a37dc03aedacf3ba913ebdbea9472ec571aa6714fe0a9ad8f6  crates/orna-cl
 01fb282836bbca8383c60cc52849c8f79714ec27fe6f51fba9b9ba77579e5768  crates/orna-cli-v1/tests/fixtures/catalogue-slash-ogs1.orna
 ec11d4e3265472dbd51abfa94fc85249c9d28b39149b95ca5f162f54388e66c1  crates/orna-cli-v1/tests/fixtures/catalogue-stale-ogt1.orna
 0fec0363fbbd62f9c5e998c280086bb1d1ccaa3f1957faee3d1bba2403c19c80  crates/orna-cli-v1/tests/fixtures/catalogue-unsupported-media-ogx1.orna
+96b8acf285b129f8039828b2d0b659a0df9ca6eaabb9ca30c431c9c79f223b0e  crates/orna-cli-v1/tests/fixtures/format-context/database-sidecar.orna
+cc8bb4733b30c0273d0edba6337c2997ae51c70c9f497e6042d19368a57d791e  crates/orna-cli-v1/tests/fixtures/format-context/format-1.orna
 fa370caf837c9f5f602f4edbc6e4d7f2401239f2524827e0e43ea396ed18126e  crates/orna-cli-v1/tests/fixtures/function-expression-staged.orna
 fd1db994cb47cf7e21a59c01ae97eedc6e00e1df9ba8ed2e9ad8b0d789226b3b  crates/orna-cli-v1/tests/fixtures/function-expression-unstaged.orna
 b42f8ed673740c142be33126aa268fbc57999745475d31c06ec9578a64dc1052  crates/orna-cli-v1/tests/fixtures/function-expression.orna
@@ -4832,6 +4834,7 @@ c66fedbccb944893873e54f5de6cb60d02b5f42912962d4fc9c7f88c95f793c5  crates/orna-se
 969a9fec7280d8a76948706e806da716013e89f42eaa39062c9463b875a57a60  crates/orna-semantic-v1/tests/fixtures/local-nominal-generic-bounds.orna
 1c9702137ed7233e4d3184a9e09151c6c5bbf520a7f35f32f7f6f6cf345d6151  crates/orna-semantic-v1/tests/fixtures/mixed-generic-protocol-accepted.orna
 d47154d33af57f51813fda56cb6ea547132967f9a48a471bac5060855d0f60d8  crates/orna-semantic-v1/tests/fixtures/mixed-generic-protocol-missing.orna
+5ef611b83e5dfe7a50d6d6ebf68e261f4e5e4d07565657b3662d590be31795c3  crates/orna-semantic-v1/tests/fixtures/nested_optional_query_coalesce.orna
 e66f268b57706bccd5119c3bab4e92c94feb4b37c35c3e24fa17594e702348cc  crates/orna-semantic-v1/tests/fixtures/non-relation-field.orna
 1384cd8c1a0f2190a36a796c829f8dd8234c36a506b7d1069fb86bf019659329  crates/orna-semantic-v1/tests/fixtures/numeric-methods-relation-count.orna
 233dde0a2d3223d43ec09592350b006e9a21663ca666ff3b10b15ac6c82b90c0  crates/orna-semantic-v1/tests/fixtures/omitted-numeric-inference.orna
