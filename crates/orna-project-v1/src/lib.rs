@@ -14,17 +14,20 @@ use std::{
 };
 
 use orna_repository_v1::{
-    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, PrivateCommit, Repository,
-    RepositoryError,
+    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, OrpBlobBinding, PrivateCommit,
+    ProtectedContentPin, Repository, RepositoryError,
 };
-use orna_runtime_v1::TableObjectId;
+use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
-    Analysis, Catalogue, ModuleInput, Namespace, SourceTableSchemaArtifact,
+    Analysis, Catalogue, ModuleInput, Namespace, RowUnitInput, SourceTableSchemaArtifact,
     StandardCatalogueError, StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
-    source_table_schema_with_ids,
+    lower_row_unit, source_table_schema_with_ids,
 };
 use orna_syntax_v1::{Declaration, parse_module};
-use orna_value_v1::{Raw, SchemaDescriptor};
+use orna_value_v1::{
+    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat,
+    ROV3_BLOB_TAG,
+};
 use unicode_normalization::UnicodeNormalization;
 
 mod attachments;
@@ -148,6 +151,56 @@ impl ResolvedTableSchema {
     }
 }
 
+/// One exact accepted ORP Blob value paired with its field identity and pin.
+#[derive(Debug)]
+pub struct SourceBlobFieldBinding {
+    field_object_id: [u8; 16],
+    encoded_value: Vec<u8>,
+    pin: ProtectedContentPin,
+}
+
+impl SourceBlobFieldBinding {
+    pub const fn field_object_id(&self) -> &[u8; 16] {
+        &self.field_object_id
+    }
+
+    pub fn encoded_value(&self) -> &[u8] {
+        &self.encoded_value
+    }
+
+    pub fn pin(&self) -> &ProtectedContentPin {
+        &self.pin
+    }
+}
+
+/// A source row admitted against one committed schema and format-3 context.
+/// The mutation contains the canonical runtime key/field tuple; `blob_bindings`
+/// retains the exact per-field encoded values and pin owners through commit.
+#[derive(Debug)]
+pub struct AdmittedSourceRow {
+    table_name: String,
+    table_object_id: TableObjectId,
+    source_commit: GitCommitRef,
+    snapshot_id: [u8; 32],
+    schema: SchemaDescriptor,
+    canonical_key: Vec<u8>,
+    canonical_fields: Vec<u8>,
+    blob_bindings: Vec<SourceBlobFieldBinding>,
+    mutation: TableMutation,
+}
+
+impl AdmittedSourceRow {
+    pub fn table_name(&self) -> &str { &self.table_name }
+    pub const fn table_object_id(&self) -> TableObjectId { self.table_object_id }
+    pub fn source_commit(&self) -> &GitCommitRef { &self.source_commit }
+    pub const fn snapshot_id(&self) -> &[u8; 32] { &self.snapshot_id }
+    pub fn schema(&self) -> &SchemaDescriptor { &self.schema }
+    pub fn canonical_key(&self) -> &[u8] { &self.canonical_key }
+    pub fn canonical_fields(&self) -> &[u8] { &self.canonical_fields }
+    pub fn blob_bindings(&self) -> &[SourceBlobFieldBinding] { &self.blob_bindings }
+    pub fn mutation(&self) -> &TableMutation { &self.mutation }
+}
+
 /// The deterministic source inputs suitable for `analyze_with_catalogue`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadedProject {
@@ -185,6 +238,7 @@ impl LoadedProject {
     pub fn loose_rows(&self) -> &[LooseRowCandidate] {
         &self.loose_rows
     }
+
 
     pub fn into_loose_rows(self) -> Vec<LooseRowCandidate> {
         self.loose_rows
@@ -237,6 +291,214 @@ impl LoadedProject {
             .map(|profile| Catalogue::from_standard_sources(profile, sources))
             .transpose()
     }
+}
+/// Admit a source row expression and its accepted captured Blob bindings as
+/// one canonical mutation. Bindings are named by authored field, not inferred
+/// storage identities; this boundary resolves committed IDs and field order
+/// and retains each pin through durable publication.
+pub fn admit_source_row(
+    project: &LoadedProject,
+    logical_path: &str,
+    source: &str,
+    schema: &ResolvedTableSchema,
+    context: &Format3Context,
+    blob_bindings: Vec<(String, OrpBlobBinding)>,
+    mutation_id: [u8; 16],
+) -> Result<AdmittedSourceRow, ProjectLoadError> {
+    if project.source_commit() != Some(schema.source_commit())
+        || project.source_snapshot_id().as_ref() != Some(schema.snapshot_id())
+        || !format_context_matches_commit(context, schema.source_commit())
+    {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let catalogue = project
+        .standard_catalogue(project.standard_sources().iter().cloned())
+        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    let analysis = match catalogue.as_ref() {
+        Some(catalogue) => analyze_with_catalogue(project.modules(), catalogue),
+        None => analyze(project.modules()),
+    };
+    if !analysis.is_ok() {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let module_name = source_table_module_name(project, &analysis, schema.declaration_name())?;
+    let table_path = if module_name.is_empty() {
+        schema.declaration_name().to_owned()
+    } else {
+        format!("{}/{}", module_name.replace('.', "/"), schema.declaration_name())
+    };
+    let row_prefix = format!("{table_path}/");
+    let key_path = logical_path
+        .strip_prefix(&row_prefix)
+        .map(|key| key.split('/').map(str::to_owned).collect::<Vec<_>>())
+        .filter(|key| !key.is_empty())
+        .ok_or(ProjectLoadError::InvalidSourceRow)?;
+    let input = RowUnitInput {
+        logical_path,
+        table_path: &table_path,
+        key_path: &key_path,
+        source,
+        source_bytes: source.as_bytes(),
+        parse_as: "row_unit",
+    };
+    let lowered = lower_row_unit(&analysis, &input).map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    if lowered.owner != table_path {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+
+    let (descriptor_table_id, fields) = source_schema_fields(schema.descriptor())?;
+    if &descriptor_table_id != schema.table.table_id() {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let mut pending_bindings = BTreeMap::new();
+    for (field_name, binding) in blob_bindings {
+        let field = fields
+            .iter()
+            .find(|field| field.name == field_name && field.role == 1 && field.is_blob)
+            .ok_or(ProjectLoadError::InvalidSourceRow)?;
+        if pending_bindings.insert(field.id, binding).is_some() {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        }
+    }
+    let mut stored_fields = Vec::new();
+    let mut retained_bindings = Vec::new();
+    for field in fields.iter().filter(|field| field.role == 1) {
+        if field.is_blob {
+            if lowered.fields.contains_key(&field.name) {
+                return Err(ProjectLoadError::InvalidSourceRow);
+            }
+            let binding = pending_bindings
+                .remove(&field.id)
+                .ok_or(ProjectLoadError::InvalidSourceRow)?;
+            let encoded_value = binding.encoded_value().to_vec();
+            let decoded = ContextValue::decode_in_context(&encoded_value, ValueFormat::Rov3, context)
+                .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+            if !matches!(decoded.raw(), Raw::Tag(ROV3_BLOB_TAG, _)) {
+                return Err(ProjectLoadError::InvalidSourceRow);
+            }
+            stored_fields.push(decoded.into_raw());
+            retained_bindings.push(SourceBlobFieldBinding {
+                field_object_id: field.id,
+                encoded_value,
+                pin: binding.into_pin(),
+            });
+        } else {
+            if pending_bindings.contains_key(&field.id) {
+                return Err(ProjectLoadError::InvalidSourceRow);
+            }
+            stored_fields.push(
+                lowered
+                    .fields
+                    .get(&field.name)
+                    .cloned()
+                    .ok_or(ProjectLoadError::InvalidSourceRow)?,
+            );
+        }
+    }
+    if !pending_bindings.is_empty()
+        || lowered.fields.len() + retained_bindings.len()
+            != fields.iter().filter(|field| field.role == 1).count()
+    {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let canonical_fields = Value::new(Raw::Array(stored_fields))
+        .and_then(|value| value.encode())
+        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    schema
+        .descriptor()
+        .validate_stored_row(
+            *schema.table.table_id(),
+            &lowered.canonical_key,
+            &canonical_fields,
+        )
+        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+
+    let table_name = schema.declaration_name().to_owned();
+    let mut mutation = TableMutation::new(
+        mutation_id,
+        table_name.clone(),
+        lowered.canonical_key.clone(),
+        Some(canonical_fields.clone()),
+    )
+    .map_err(|_| ProjectLoadError::InvalidSourceRow)?
+    .with_table_object_id(schema.table_object_id());
+    for binding in &retained_bindings {
+        mutation = mutation
+            .with_protected_content_pin(&binding.pin)
+            .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    }
+    Ok(AdmittedSourceRow {
+        table_name,
+        table_object_id: schema.table_object_id(),
+        source_commit: schema.source_commit.clone(),
+        snapshot_id: *schema.snapshot_id(),
+        schema: schema.descriptor().clone(),
+        canonical_key: lowered.canonical_key,
+        canonical_fields,
+        blob_bindings: retained_bindings,
+        mutation,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct SourceSchemaField {
+    id: [u8; 16],
+    name: String,
+    role: u64,
+    is_blob: bool,
+}
+
+fn source_schema_fields(
+    descriptor: &SchemaDescriptor,
+) -> Result<([u8; 16], Vec<SourceSchemaField>), ProjectLoadError> {
+    let table_id = raw_map_value(descriptor.raw(), "1")
+        .and_then(committed_uuid)
+        .ok_or(ProjectLoadError::InvalidSourceRow)?;
+    let Raw::Array(entries) = raw_map_value(descriptor.raw(), "3")
+        .ok_or(ProjectLoadError::InvalidSourceRow)?
+    else {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    };
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    let mut fields = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Raw::Array(parts) = entry else { return Err(ProjectLoadError::InvalidSourceRow); };
+        let [id, Raw::Text(name), ty, Raw::Int(role), _] = parts.as_slice() else {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        };
+        let id = committed_uuid(id).ok_or(ProjectLoadError::InvalidSourceRow)?;
+        if !ids.insert(id) || !names.insert(name.clone()) {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        }
+        let is_blob = matches!(ty, Raw::Array(parts) if matches!(parts.as_slice(), [Raw::Int(kind), Raw::Text(name)] if kind.to_string() == "0" && name == "Blob"));
+        let role = role.to_string().parse::<u64>().map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+        if role > 1 { return Err(ProjectLoadError::InvalidSourceRow); }
+        fields.push(SourceSchemaField { id, name: name.clone(), role, is_blob });
+    }
+    Ok((table_id, fields))
+}
+
+fn format_context_matches_commit(context: &Format3Context, commit: &GitCommitRef) -> bool {
+    let (algorithm, oid) = match commit.as_str().len() {
+        40 => (orna_value_v1::GitHash::Sha1, decode_source_oid(commit.as_str())),
+        64 => (orna_value_v1::GitHash::Sha256, decode_source_oid(commit.as_str())),
+        _ => return false,
+    };
+    let Some(oid) = oid else { return false; };
+    matches!(context.pin(), Snapshot::Commit { database, algorithm: actual_algorithm, oid: actual_oid }
+        if *database == context.database_uuid()
+            && *actual_algorithm == algorithm
+            && actual_oid == &oid)
+}
+
+fn decode_source_oid(value: &str) -> Option<Vec<u8>> {
+    if !value.is_ascii() || value.len() % 2 != 0 { return None; }
+    value.as_bytes().chunks_exact(2).map(|pair| {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        Some(((high << 4) | low) as u8)
+    }).collect()
 }
 
 /// Loads the root module and its reachable ordinary source imports.
@@ -401,6 +663,7 @@ impl ProjectLoader {
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
         if table.declaration_name() != declaration_name
             || table.table_id() != &table_object_id.bytes()
+            || table.descriptor() != binding.descriptor()
         {
             return Err(ProjectLoadError::InvalidTableSchema);
         }
@@ -829,7 +1092,7 @@ pub enum ProjectLoadError {
     DuplicateModuleNamespace,
     ReservedNamespace,
     StandardSnapshotMismatch,
-    InvalidTableSchema,
+    InvalidSourceRow,
 }
 
 impl fmt::Display for ProjectLoadError {
@@ -860,6 +1123,7 @@ impl fmt::Display for ProjectLoadError {
             Self::InvalidTableSchema => {
                 "committed table schema could not be resolved from source and identity metadata"
             }
+            Self::InvalidSourceRow => "source row could not be admitted against its committed schema",
         })
     }
 }
