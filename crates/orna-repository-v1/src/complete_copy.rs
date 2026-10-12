@@ -181,6 +181,7 @@ impl CompleteCopyMemberPin {
         &self.format
     }
 }
+
 /// One payload-free metadata projection from a restored complete-copy member.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompleteCopyBlobMetadataPage {

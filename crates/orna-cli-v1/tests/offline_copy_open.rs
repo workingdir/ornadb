@@ -178,6 +178,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+
     let range = KeyRange::new(None, None, 16).unwrap();
     // Obtain an owner-issued pin for the archive member. It carries both the
     // exact commit identity and the repository-bound format context.
