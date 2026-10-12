@@ -1,0 +1,7 @@
+pub table Object(id: Str) {
+    payload: Blob,
+}
+
+pub fn import_song(id: Str, payload: Blob) {
+    Object.insert({ id: id, payload: payload });
+}
