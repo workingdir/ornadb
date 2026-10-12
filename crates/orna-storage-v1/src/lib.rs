@@ -726,7 +726,7 @@ use orna_foundation_v1::{
 use orna_repository_v1::{
     CompactManifest, CompactPublicationPlan, CompactPublicationRecovery, GitCommitRef,
     IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit, PublicationJournal,
-    PublicationJournalEntry, Repository, RepositoryError, Uuid,
+    PublicationJournalEntry, RelationRowMutation, Repository, RepositoryError, Uuid,
 };
 use orna_runtime_v1::{
     PublicationCommitId, PublicationFreeze, PublicationTableIdentity, RuntimeError, RuntimeState,
@@ -1147,6 +1147,126 @@ pub fn build_private_publication_candidate(
         .map_err(|_| Error::RepositoryUnavailable)
 }
 
+/// Builds a private candidate containing typed ORP row changes and the
+/// managed-file projection for the exact frozen batch.
+fn build_private_row_publication_candidate(
+    repository: &Repository,
+    expected_head: &GitCommitRef,
+    batch: &FrozenBatch,
+    row_mutations: &[RelationRowMutation],
+    message: &str,
+) -> Result<PrivateCommit, Error> {
+    validate_portable_paths(
+        batch
+            .mutations
+            .iter()
+            .filter_map(|mutation| mutation.next.as_ref().map(|_| &mutation.path)),
+    )?;
+    let changes = batch
+        .mutations
+        .iter()
+        .map(|mutation| {
+            ManagedFileChange::new(
+                mutation.path.as_managed_path().clone(),
+                mutation.next.as_ref().map(|row| row.bytes().to_vec()),
+            )
+        })
+        .collect::<Vec<_>>();
+    repository
+        .build_private_row_publication_candidate_with_changes(
+            expected_head,
+            row_mutations,
+            &changes,
+            message,
+        )
+        .map_err(|_| Error::RepositoryUnavailable)
+}
+
+/// Lowers protected media rows using the pinned committed relation maps.
+/// Only text keys and canonical ROV3 Blob values are admitted here; row bytes
+/// and annotation metadata remain unchanged through durable publication.
+pub fn lower_protected_blob_mutations_for_publication(
+    repository: &Repository,
+    head: &GitCommitRef,
+    mutations: &[TableMutation],
+) -> Result<Vec<RelationRowMutation>, Error> {
+    use orna_repository_v1::{RowIndexMutation, RowValue, TypedKey};
+
+    let format = repository
+        .open_pinned_format_context(head.as_str())
+        .map_err(|_| Error::RepositoryUnavailable)?;
+    let mut by_relation = BTreeMap::<[u8; 16], BTreeMap<TypedKey, &TableMutation>>::new();
+    for mutation in mutations {
+        let relation_id = mutation
+            .table_object_id()
+            .ok_or(Error::InvalidRow)?
+            .bytes();
+        if mutation.rekey_to().is_some() {
+            return Err(Error::InvalidRow);
+        }
+        let key = std::str::from_utf8(mutation.key()).map_err(|_| Error::InvalidKey)?;
+        by_relation
+            .entry(relation_id)
+            .or_default()
+            .insert(TypedKey::Text(key.to_owned()), mutation);
+    }
+
+    let mut lowered = Vec::with_capacity(by_relation.len());
+    for (relation_id, final_mutations) in by_relation {
+        let row_map = format
+            .load_row_map(relation_id)
+            .map_err(|_| Error::RepositoryUnavailable)?;
+        let schema_digest = *row_map.version().schema().schema_digest();
+        if row_map.version().relation_id() != &relation_id {
+            return Err(Error::InvalidRow);
+        }
+        let graph = format
+            .open_native_graph(&row_map)
+            .map_err(|_| Error::RepositoryUnavailable)?;
+        let scope = graph.open_read_scope().map_err(|_| Error::RepositoryUnavailable)?;
+        let mut operations = Vec::new();
+        for (key, mutation) in final_mutations {
+            let existing = graph
+                .lookup_row(&key, &scope)
+                .map_err(|_| Error::RepositoryUnavailable)?;
+            match mutation.value() {
+                Some(encoded_blob) => {
+                    orna_value_v1::decode_rov3_blob_metadata(encoded_blob)
+                        .map_err(|_| Error::InvalidRow)?;
+                    let mut fields = Vec::with_capacity(encoded_blob.len() + 1);
+                    fields.push(0x81);
+                    fields.extend_from_slice(encoded_blob);
+                    let value = RowValue::decode_canonical_fields(fields)
+                        .map_err(|_| Error::InvalidRow)?;
+                    if existing
+                        .as_ref()
+                        .is_some_and(|row| row.value().encoded_fields() == value.encoded_fields())
+                    {
+                        continue;
+                    }
+                    if existing.is_some() {
+                        operations.push(RowIndexMutation::Delete { key: key.clone() });
+                    }
+                    operations.push(RowIndexMutation::Insert { key, value });
+                }
+                None => {
+                    if existing.is_some() {
+                        operations.push(RowIndexMutation::Delete { key });
+                    }
+                }
+            }
+        }
+        if !operations.is_empty() {
+            lowered.push(RelationRowMutation::new(
+                relation_id,
+                schema_digest,
+                operations,
+            ));
+        }
+    }
+    Ok(lowered)
+}
+
 /// Converts the runtime's validated typed table prefix into the loose-row
 /// representation. Key decoding remains schema-owned: this function refuses
 /// to invent path components for an opaque runtime key.
@@ -1173,6 +1293,28 @@ pub fn lower_runtime_table_mutations_allow_empty(
     mutations: &[TableMutation],
     path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
     expected_bytes_for: impl Fn(&LoosePath) -> Result<Option<Vec<u8>>, Error>,
+) -> Result<Option<FrozenBatch>, Error> {
+    lower_runtime_table_mutations_inner(freeze, mutations, path_for, expected_bytes_for, true)
+}
+
+/// Lowers the frozen runtime prefix for an indexed-row publication. Unlike the
+/// loose-only lowerer, equal projection bytes do not suppress a row-map write.
+pub fn lower_runtime_table_mutations_for_row_publication(
+    freeze: &PublicationFreeze,
+    mutations: &[TableMutation],
+    path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
+    expected_bytes_for: impl Fn(&LoosePath) -> Result<Option<Vec<u8>>, Error>,
+) -> Result<FrozenBatch, Error> {
+    lower_runtime_table_mutations_inner(freeze, mutations, path_for, expected_bytes_for, false)?
+        .ok_or(Error::IncompleteStaging)
+}
+
+fn lower_runtime_table_mutations_inner(
+    freeze: &PublicationFreeze,
+    mutations: &[TableMutation],
+    path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
+    expected_bytes_for: impl Fn(&LoosePath) -> Result<Option<Vec<u8>>, Error>,
+    omit_noop: bool,
 ) -> Result<Option<FrozenBatch>, Error> {
     if mutations.is_empty() {
         return Err(Error::IncompleteStaging);
@@ -1214,16 +1356,14 @@ pub fn lower_runtime_table_mutations_allow_empty(
             );
         }
     }
-    let visible = lowered
-        .into_values()
-        .filter(|mutation| mutation.next.as_ref().map(LooseRow::hash) != mutation.expected)
-        .collect::<Vec<_>>();
-    if visible.is_empty() {
-        // Every row in the prefix already matches its committed bytes, so the
-        // frozen intent has no visible change to publish.
+    let all = lowered.into_values().collect::<Vec<_>>();
+    let visible = all
+        .iter()
+        .any(|mutation| mutation.next.as_ref().map(LooseRow::hash) != mutation.expected);
+    if !visible && omit_noop {
         return Ok(None);
     }
-    FrozenBatch::new(batch_id, visible, freeze.checkpoint.mutation_sequence).map(Some)
+    FrozenBatch::new(batch_id, all, freeze.checkpoint.mutation_sequence).map(Some)
 }
 
 /// A prepared, runtime-bound publication. Preparation creates only private
@@ -1504,6 +1644,7 @@ impl RuntimePublicationCoordinator {
     /// change, so there is no publication to prepare. The caller completes the
     /// frozen intent without a commit; a save that changed nothing stays
     /// successful instead of failing on the empty batch.
+
     pub async fn prepare_from_runtime_allow_noop(
         repository: &Repository,
         runtime: &RuntimeState,
@@ -1536,6 +1677,49 @@ impl RuntimePublicationCoordinator {
         )
         .map(Some)
     }
+    /// Prepares an indexed format-3 row candidate from a trusted schema-bound
+    /// lowering of the exact frozen runtime prefix. Projection bytes are kept
+    /// in the same private commit and journaled through the existing PUB-1
+    /// reconciliation boundary.
+    pub async fn prepare_from_runtime_rows_allow_noop(
+        repository: &Repository,
+        runtime: &RuntimeState,
+        expected_head: &GitCommitRef,
+        expected_index: IndexGeneration,
+        freeze: &PublicationFreeze,
+        path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
+        row_mutations_for: impl Fn(&[TableMutation]) -> Result<Vec<RelationRowMutation>, Error>,
+        message: &str,
+    ) -> Result<Option<Self>, Error> {
+        let mutations = runtime
+            .pending_table_mutations_through(freeze)
+            .await
+            .map_err(|_| Error::RuntimeUnavailable)?;
+        let row_mutations = row_mutations_for(&mutations)?;
+        if row_mutations.is_empty() {
+            return Ok(None);
+        }
+        let batch = lower_runtime_table_mutations_for_row_publication(
+            freeze,
+            &mutations,
+            path_for,
+            |path| {
+                repository
+                    .managed_file_bytes(path.as_managed_path())
+                    .map_err(|_| Error::RepositoryUnavailable)
+            },
+        )?;
+        Self::prepare_with_row_mutations(
+            repository,
+            expected_head,
+            expected_index,
+            freeze,
+            batch,
+            &row_mutations,
+            message,
+        )
+        .map(Some)
+    }
 
     /// Prepares a candidate from a validated runtime freeze and already
     /// lowered loose mutations. The journal captures the runtime intent and
@@ -1548,13 +1732,54 @@ impl RuntimePublicationCoordinator {
         batch: FrozenBatch,
         message: &str,
     ) -> Result<Self, Error> {
+        Self::prepare_with_candidate_builder(
+            repository,
+            expected_head,
+            expected_index,
+            freeze,
+            batch,
+            |batch| build_private_publication_candidate(repository, expected_head, batch, message),
+        )
+    }
+
+    fn prepare_with_row_mutations(
+        repository: &Repository,
+        expected_head: &GitCommitRef,
+        expected_index: IndexGeneration,
+        freeze: &PublicationFreeze,
+        batch: FrozenBatch,
+        row_mutations: &[RelationRowMutation],
+        message: &str,
+    ) -> Result<Self, Error> {
+        Self::prepare_with_candidate_builder(
+            repository,
+            expected_head,
+            expected_index,
+            freeze,
+            batch,
+            |batch| {
+                build_private_row_publication_candidate(
+                    repository,
+                    expected_head,
+                    batch,
+                    row_mutations,
+                    message,
+                )
+            },
+        )
+    }
+
+    fn prepare_with_candidate_builder(
+        repository: &Repository,
+        expected_head: &GitCommitRef,
+        expected_index: IndexGeneration,
+        freeze: &PublicationFreeze,
+        batch: FrozenBatch,
+        build_candidate: impl FnOnce(&FrozenBatch) -> Result<PrivateCommit, Error>,
+    ) -> Result<Self, Error> {
         if batch.watermark != freeze.checkpoint.mutation_sequence
             || batch.id != MutationId::new(hex_id(freeze.intent_id))?
         {
-            // The frozen prefix is the only runtime range completion may
-            // consume.  Requiring the lowering batch identity to equal the
-            // durable freeze intent prevents a caller from publishing bytes
-            // under one journal intent and then deleting another prefix.
             return Err(Error::IncompleteStaging);
         }
         let paths = batch
@@ -1565,8 +1790,7 @@ impl RuntimePublicationCoordinator {
         let captured = repository
             .capture_managed_publication_state(expected_head, &expected_index, &paths)
             .map_err(map_publication_repository_error)?;
-        let candidate =
-            build_private_publication_candidate(repository, expected_head, &batch, message)?;
+        let candidate = build_candidate(&batch)?;
         let entries = batch
             .mutations
             .iter()
@@ -3508,6 +3732,39 @@ mod tests {
                 |_path| Ok(Some(b"unchanged".to_vec())),
             ),
             Err(Error::IncompleteStaging)
+        );
+    }
+
+    #[test]
+    fn row_publication_keeps_mutations_when_loose_projection_is_unchanged() {
+        let freeze = PublicationFreeze {
+            intent_id: [31; 16],
+            checkpoint: orna_runtime_v1::Checkpoint {
+                generation: 1,
+                digest: [32; 32],
+                mutation_sequence: 1,
+            },
+            candidate_digest: [32; 32],
+            mutations: Vec::new(),
+        };
+        let mutation = TableMutation::new(
+            [33; 16],
+            "Contact",
+            b"Alice".to_vec(),
+            Some(b"already materialized".to_vec()),
+        )
+        .unwrap();
+        let batch = lower_runtime_table_mutations_for_row_publication(
+            &freeze,
+            std::slice::from_ref(&mutation),
+            |_mutation| LoosePath::for_key("Contact", &["Alice".into()]),
+            |_path| Ok(Some(b"already materialized".to_vec())),
+        )
+        .expect("indexed row operation must survive equal loose bytes");
+        assert_eq!(batch.mutations.len(), 1);
+        assert_eq!(
+            batch.mutations[0].next.as_ref().unwrap().bytes(),
+            b"already materialized"
         );
     }
 
