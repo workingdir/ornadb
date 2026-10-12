@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -253,6 +253,9 @@ impl ObjectIdentityManifest {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ObjectIdentityError> {
+        if bytes.len() > MAX_OBJECT_IDENTITY_MANIFEST_BYTES {
+            return Err(ObjectIdentityError::InvalidEncoding);
+        }
         let value = Value::decode(bytes).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
         let Raw::Array(root) = value.raw() else {
             return Err(ObjectIdentityError::InvalidEncoding);
@@ -367,11 +370,36 @@ impl ObjectIdentityManifest {
         let root = repository.worktree();
         let path = root.join(OBJECT_IDENTITY_MANIFEST_PATH);
         crate::ensure_no_symlink_ancestors(root, &path).map_err(|_| ObjectIdentityError::Io)?;
-        match fs::read(path) {
-            Ok(bytes) => Self::decode(&bytes).map(Some),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(ObjectIdentityError::Io),
+        let Some(bytes) = Self::read_bounded_manifest(&path)? else {
+            return Ok(None);
+        };
+        Self::decode(&bytes).map(Some)
+    }
+
+    fn read_bounded_manifest(path: &Path) -> Result<Option<Vec<u8>>, ObjectIdentityError> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ObjectIdentityError::Io),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ObjectIdentityError::Io);
         }
+        let length =
+            usize::try_from(metadata.len()).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
+        if length > MAX_OBJECT_IDENTITY_MANIFEST_BYTES {
+            return Err(ObjectIdentityError::InvalidEncoding);
+        }
+        let mut bytes = Vec::with_capacity(length);
+        fs::File::open(path)
+            .map_err(|_| ObjectIdentityError::Io)?
+            .take((MAX_OBJECT_IDENTITY_MANIFEST_BYTES as u64) + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ObjectIdentityError::Io)?;
+        if bytes.len() > MAX_OBJECT_IDENTITY_MANIFEST_BYTES {
+            return Err(ObjectIdentityError::InvalidEncoding);
+        }
+        Ok(Some(bytes))
     }
 
     /// Reconciles an explicit source snapshot with the current worktree
@@ -695,6 +723,20 @@ mod tests {
         assert_eq!(
             ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(),
             removed
+        );
+    }
+
+    #[test]
+    fn oversized_worktree_manifest_is_rejected_before_reading() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("object-identities.cbor");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len((MAX_OBJECT_IDENTITY_MANIFEST_BYTES as u64) + 1)
+            .unwrap();
+
+        assert_eq!(
+            ObjectIdentityManifest::read_bounded_manifest(&path),
+            Err(ObjectIdentityError::InvalidEncoding)
         );
     }
 }
