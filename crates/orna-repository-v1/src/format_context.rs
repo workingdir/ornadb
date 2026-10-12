@@ -3373,11 +3373,17 @@ mod graph_bridge_tests {
             7..7,
         ] {
             let range_scope = admitted_graph.open_read_scope().unwrap();
-            let expected_payload_reads = chunk_spans
-                .iter()
-                .filter(|span| span.offset() < range.end && span.offset() + span.length() > range.start)
-                .map(crate::blob_store::ChunkSpan::length)
-                .sum::<u64>();
+            let expected_payload_reads = if range.is_empty() {
+                0
+            } else {
+                chunk_spans
+                    .iter()
+                    .filter(|span| {
+                        span.offset() < range.end && span.offset() + span.length() > range.start
+                    })
+                    .map(crate::blob_store::ChunkSpan::length)
+                    .sum::<u64>()
+            };
             let read = admitted_graph
                 .read_blob_range(&reference, range.clone(), &range_scope)
                 .unwrap_or_else(|error| panic!("range {range:?} failed: {error:?}"));
