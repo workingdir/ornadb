@@ -1064,7 +1064,11 @@ impl ContextValueEffectHandlerAdapter<'_> {
         }
     }
     fn profile(&self) -> (ValueFormat, Option<&Format3Context>) {
-        if matches!(self.source_format, ValueFormat::Rov3 | ValueFormat::Sov3) {
+        if matches!(self.format, ValueFormat::Rov3 | ValueFormat::Sov3)
+            && self.context.is_some()
+        {
+            (self.format, self.context.as_ref())
+        } else if matches!(self.source_format, ValueFormat::Rov3 | ValueFormat::Sov3) {
             (self.source_format, self.source_context.as_ref())
         } else {
             (self.format, self.context.as_ref())
@@ -15009,6 +15013,120 @@ mod tests {
 
         assert_eq!(result.format(), ValueFormat::Ovb2);
         assert!(matches!(result.raw(), Raw::Tag(OVB2_BLOB_TAG, _)));
+    }
+
+    #[test]
+    fn context_named_invocation_adopts_effect_result_owner_context() {
+        struct EmptyResolver;
+
+        impl orna_value_v1::BlobResolver for EmptyResolver {
+            fn read_range(
+                &self,
+                _reference: &orna_value_v1::ContentReference,
+                _offset: u64,
+                _length: u64,
+            ) -> orna_value_v1::Result<Vec<u8>> {
+                Err(orna_value_v1::Error::ContentUnavailable)
+            }
+        }
+
+        struct ReplaceBlob(ContextValue);
+
+        impl EffectHandler for ReplaceBlob {
+            fn handle(
+                &mut self,
+                _callee: &Expr,
+                _arguments: &[CanonicalValue],
+            ) -> Result<Option<CanonicalValue>, EvaluationError> {
+                Err(error("ORNA-EVAL-UNSUPPORTED"))
+            }
+        }
+
+        impl ContextValueEffectHandler for ReplaceBlob {
+            fn handle_context(
+                &mut self,
+                _callee: &Expr,
+                arguments: &[ContextValue],
+            ) -> Result<Option<ContextValue>, EvaluationError> {
+                assert_eq!(arguments.len(), 1);
+                assert_eq!(arguments[0].format(), ValueFormat::Rov3);
+                Ok(Some(self.0.clone()))
+            }
+        }
+
+        let context = |database: [u8; 16], base: u8| {
+            Format3Context::from_persisted(
+                database,
+                orna_value_v1::Snapshot::cwd(database, [base; 16], 0.into())
+                    .expect("format-3 snapshot"),
+                orna_value_v1::GitHash::Sha1,
+                orna_value_v1::NativeOid::from_bytes(&[base + 1; 20]).unwrap(),
+                orna_value_v1::NativeOid::from_bytes(&[base + 2; 20]).unwrap(),
+                orna_value_v1::AvailabilityState::Available,
+                orna_value_v1::OwnerLifetime::new([base + 3; 16]),
+                orna_value_v1::Format3Quota::new(1024, 1 << 20).unwrap(),
+                Arc::new(EmptyResolver),
+            )
+            .expect("format-3 owner context")
+        };
+        let source_context = context([0x31; 16], 0x32);
+        let result_context = context([0x41; 16], 0x42);
+        let source_blob = orna_value_v1::Blob::from_reference(
+            source_context
+                .reference(
+                    orna_value_v1::ContentIdentity::from_bytes(b"source"),
+                    orna_value_v1::NativeOid::from_bytes(&[0x37; 20]).unwrap(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let returned = ContextValue::from_blob(
+            &orna_value_v1::Blob::from_reference(
+                result_context
+                    .reference(
+                        orna_value_v1::ContentIdentity::from_bytes(b"replacement"),
+                        orna_value_v1::NativeOid::from_bytes(&[0x47; 20]).unwrap(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap(),
+            ValueFormat::Rov3,
+        )
+        .unwrap();
+        let parsed = orna_syntax_v1::parse_module(include_str!(
+            "../tests/fixtures/context-result-owner.orna"
+        ));
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let orna_syntax_v1::Declaration::Function { signature, body } =
+            &parsed.value.items[0].declaration
+        else {
+            panic!("function expected")
+        };
+        let functions = Functions::from([(
+            String::from("entry"),
+            PureFunction {
+                parameters: signature.parameters.clone(),
+                body: body.clone(),
+                environment: Environment::new(),
+            },
+        )]);
+        let arguments = BTreeMap::from([(
+            String::from("blob"),
+            ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap(),
+        )]);
+
+        let result = invoke_named_with_context_effects(
+            "entry",
+            &functions,
+            &arguments,
+            Limits::default(),
+            &mut ReplaceBlob(returned.clone()),
+        )
+        .expect("source call returns the effect's owner-bound Blob");
+
+        assert_eq!(result.format(), ValueFormat::Rov3);
+        assert_eq!(result.context().unwrap().database_uuid(), [0x41; 16]);
+        assert_eq!(result.raw(), returned.raw());
     }
 
     #[test]
