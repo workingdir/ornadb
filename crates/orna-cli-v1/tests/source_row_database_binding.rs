@@ -90,8 +90,5 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
         Vec::new(),
         [0x77; 16],
     );
-    assert!(matches!(
-        result,
-        Err(ProjectLoadError::InvalidSourceRow)
-    ));
+    assert!(matches!(result, Err(ProjectLoadError::InvalidSourceRow)));
 }
