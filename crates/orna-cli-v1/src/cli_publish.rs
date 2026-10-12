@@ -77,6 +77,7 @@ fn row_path(mutation: &TableMutation) -> Result<LoosePath, orna_storage_v1::Erro
     LoosePath::for_key(mutation.table(), &[key.to_owned()])
 }
 
+
 /// Names an already-committed snapshot as the publication result for a frozen
 /// range with no visible change. The commit is the current `HEAD`, so the
 /// completion receipt never claims an object the range did not produce.
@@ -179,13 +180,20 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         let index = repository.index_generation().map_err(|error| {
             publish_error("ordinary index could not be read", format!("{error:?}"))
         })?;
-        let prepared = RuntimePublicationCoordinator::prepare_from_runtime_allow_noop(
+        let prepared = RuntimePublicationCoordinator::prepare_from_runtime_rows_allow_noop(
             &repository,
             &state,
             &head,
             index,
             &freeze,
             row_path,
+            |mutations| {
+                orna_storage_v1::lower_protected_blob_mutations_for_publication(
+                    &repository,
+                    &head,
+                    mutations,
+                )
+            },
             &message,
         )
         .await

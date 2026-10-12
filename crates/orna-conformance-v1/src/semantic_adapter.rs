@@ -3781,9 +3781,9 @@ impl DurableTransactionalEvaluator {
     }
 
 
-    /// Publishes the caller-selected frozen runtime prefix through the loose
-    /// Git projection. Publication is explicit: source execution only stages
-    /// durable runtime mutations and never advances the repository by itself.
+    /// Publishes the caller-selected frozen runtime prefix. Format-3
+    /// publications lower admitted protected-media rows into the native row
+    /// map; legacy repositories retain their managed-file projection.
     pub async fn publish_pending(
         &self,
         repository: &Repository,
@@ -3801,10 +3801,33 @@ impl DurableTransactionalEvaluator {
         let index = repository
             .index_generation()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let prepared = RuntimePublicationCoordinator::prepare_from_runtime_allow_noop(
-            repository, runtime, &head, index, &freeze, path_for, message,
-        )
-        .await
+        let format = repository
+            .open_pinned_format_context(head.as_str())
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let prepared = if format.is_read_only() {
+            RuntimePublicationCoordinator::prepare_from_runtime_allow_noop(
+                repository, runtime, &head, index, &freeze, path_for, message,
+            )
+            .await
+        } else {
+            RuntimePublicationCoordinator::prepare_from_runtime_rows_allow_noop(
+                repository,
+                runtime,
+                &head,
+                index,
+                &freeze,
+                path_for,
+                |mutations| {
+                    orna_storage_v1::lower_protected_blob_mutations_for_publication(
+                        repository,
+                        &head,
+                        mutations,
+                    )
+                },
+                message,
+            )
+            .await
+        }
         .map_err(|_| RuntimeError::StorageUnavailable)?;
         let Some(mut coordinator) = prepared else {
             // The frozen prefix folds to the bytes already committed, so the
