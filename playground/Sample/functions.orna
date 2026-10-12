@@ -1,1 +1,0 @@
-{ id: "functions", name: "Function composition", source: "pub fn double(value: Int): Int = value + value;\npub fn addOne(value: Int): Int = value + 1;\ndouble(addOne(20))" }
