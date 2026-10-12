@@ -15,8 +15,8 @@
 //! `orna history`, `orna export` and `orna copy` all see it through the same
 //! object store as any other commit.
 
-use orna_runtime_v1::{RuntimeState, TableMutation};
-use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
+use orna_runtime_v1::{PublicationTableIdentity, RuntimeState, TableMutation};
+use orna_storage_v1::{CompactOvbProfile, LoosePath, RuntimePublicationCoordinator};
 
 use super::*;
 
@@ -107,6 +107,209 @@ fn publication_commit_id(
     })
 }
 
+async fn recover_pending_publication(
+    repository: &orna_repository_v1::Repository,
+    state: &RuntimeState,
+    journal: Option<&orna_repository_v1::PublicationJournal>,
+) -> Result<(), Diagnostic> {
+    if !journal.is_some_and(|journal| journal.compact_manifest().is_some()) {
+        RuntimePublicationCoordinator::recover(repository, state)
+            .await
+            .map_err(|error| {
+                describe_storage_failure("pending publication could not be recovered", &error)
+            })?;
+        return Ok(());
+    }
+
+    let pending = repository
+        .recover_compact_repository_boundary()
+        .map_err(|error| {
+            publish_error(
+                "compact publication recovery boundary could not be established",
+                format!("{error:?}; journal and pending tail were preserved"),
+            )
+        })?;
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+
+    if let Some(receipt) = state
+        .persisted_compact_publication_receipt(&pending)
+        .await
+        .map_err(|error| {
+            publish_error(
+                "persisted compact publication receipt could not be verified",
+                format!("{error:?}; journal and pending tail were preserved"),
+            )
+        })?
+    {
+        repository
+            .finish_compact_with_receipt(&receipt)
+            .map_err(|error| {
+                publish_error(
+                    "compact publication could not be finalized",
+                    format!("{error:?}; the validated receipt and journal were retained"),
+                )
+            })?;
+        return Ok(());
+    }
+
+    let journal = repository.read_publication_journal().map_err(|error| {
+        publish_error(
+            "compact publication journal could not be refreshed",
+            format!("{error:?}; journal and pending tail were preserved"),
+        )
+    })?;
+    let Some(journal) = journal else {
+        return Err(publish_error(
+            "compact publication journal disappeared during recovery",
+            "no new publication range was selected",
+        ));
+    };
+    let witness = journal.compact_manifest().ok_or_else(|| {
+        publish_error(
+            "compact publication source could not be verified",
+            "the compact journal witness is missing; the journal and pending tail were preserved",
+        )
+    })?;
+    let freeze = state
+        .publication_freeze(pending.runtime_intent_id())
+        .await
+        .map_err(|error| {
+            publish_error(
+                "compact publication freeze could not be recovered",
+                format!("{error:?}; journal and pending tail were preserved"),
+            )
+        })?;
+    if freeze.checkpoint.digest != pending.cleanup_watermark() {
+        return Err(publish_error(
+            "compact publication freeze does not match its journal",
+            "the journal and pending tail were preserved",
+        ));
+    }
+    let mutations = state
+        .pending_table_mutations_through(&freeze)
+        .await
+        .map_err(|error| {
+            publish_error(
+                "compact publication table identity could not be recovered",
+                format!("{error:?}; journal and pending tail were preserved"),
+            )
+        })?;
+    let table_id = *witness.table().as_bytes();
+    let mut table_name: Option<String> = None;
+    for mutation in &mutations {
+        if !mutation
+            .table_object_id()
+            .is_some_and(|object_id| object_id.bytes() == &table_id)
+        {
+            return Err(publish_error(
+                "compact publication table identity does not match its journal",
+                "persisted typed mutation identity is missing or conflicts with the source-bound manifest; the journal and pending tail were preserved",
+            ));
+        }
+        match table_name.as_deref() {
+            Some(existing) if existing != mutation.table() => {
+                return Err(publish_error(
+                    "compact publication spans multiple tables",
+                    "the source-bound identity is ambiguous; the journal and pending tail were preserved",
+                ));
+            }
+            Some(_) => {}
+            None => table_name = Some(mutation.table().to_owned()),
+        }
+    }
+    let Some(table_name) = table_name else {
+        return Err(publish_error(
+            "compact publication has no frozen table mutations",
+            "no source-bound table identity can be established; the journal and pending tail were preserved",
+        ));
+    };
+    let manifest = repository
+        .read_compact_manifest(pending.commit(), witness.table())
+        .map_err(|error| {
+            publish_error(
+                "compact publication manifest could not be verified",
+                format!("{error:?}; journal and pending tail were preserved"),
+            )
+        })?
+        .ok_or_else(|| {
+            publish_error(
+                "compact publication manifest is missing",
+                "the journal and pending tail were preserved",
+            )
+        })?;
+    let schema_fingerprint = manifest.schema();
+    let descriptor = orna_storage_v1::trusted_compact_schema_descriptor(
+        repository,
+        journal.old_head(),
+        witness.table(),
+        schema_fingerprint,
+        &journal,
+        pending.commit(),
+    )
+    .map_err(|error| {
+        publish_error(
+            "compact publication source schema is not trusted",
+            format!("{error:?}; journal and pending tail were preserved"),
+        )
+    })?;
+    let profile = CompactOvbProfile::new(descriptor.clone()).map_err(|error| {
+        publish_error(
+            "compact publication source schema is invalid",
+            format!("{error:?}; journal and pending tail were preserved"),
+        )
+    })?;
+    if profile.table_id() != table_id || profile.schema_fingerprint() != schema_fingerprint {
+        return Err(publish_error(
+            "compact publication source schema does not match its journal",
+            "the journal and pending tail were preserved",
+        ));
+    }
+    for mutation in &mutations {
+        if let Some(fields) = mutation.value() {
+            descriptor
+                .validate_stored_row(table_id, mutation.key(), fields)
+                .map_err(|error| {
+                    publish_error(
+                        "compact publication row is invalid for its committed schema",
+                        format!("{error:?}; journal and pending tail were preserved"),
+                    )
+                })?;
+            if let Some(new_key) = mutation.rekey_to() {
+                descriptor
+                    .validate_stored_row(table_id, new_key, fields)
+                    .map_err(|error| {
+                        publish_error(
+                            "compact publication rekey is invalid for its committed schema",
+                            format!("{error:?}; journal and pending tail were preserved"),
+                        )
+                    })?;
+            }
+        }
+    }
+    let table_identity = PublicationTableIdentity {
+        table: table_name,
+        table_id,
+        schema_fingerprint,
+        candidate_generation: witness.generation(),
+    };
+    RuntimePublicationCoordinator::recover_compact_validated(
+        repository,
+        state,
+        &profile,
+        &table_identity,
+    )
+    .await
+    .map_err(|error| {
+        publish_error(
+            "source-bound compact publication recovery failed",
+            format!("{error:?}; retry `orna publish` before selecting another range"),
+        )
+    })?;
+    Ok(())
+}
+
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let message = parse_options(arguments)?;
     let path = local_project_path(endpoint)?;
@@ -148,14 +351,12 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             };
             publish_error("local runtime could not be opened", detail)
         })?;
-    // A previous invocation may have advanced HEAD but crashed before index
-    // reconciliation or frozen-tail cleanup. Reconcile it before selecting a
-    // new publication range.
-    runtime
-        .block_on(RuntimePublicationCoordinator::recover(&repository, &state))
-        .map_err(|error| {
-            describe_storage_failure("pending publication could not be recovered", &error)
-        })?;
+    // Reconcile an interrupted publication before reading or freezing the tail.
+    runtime.block_on(recover_pending_publication(
+        &repository,
+        &state,
+        journal.as_ref(),
+    ))?;
     // Never select another range if recovery returned with a journal still
     // present, including when a new publication raced with recovery.
     if repository
