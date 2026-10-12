@@ -1231,7 +1231,10 @@ pub fn lower_publication_freeze(
         if mutation.candidate_generation != expected_generation {
             return Err(CompactLoweringError::GenerationMismatch);
         }
-        if mutation.sequence == 0 || mutation.sequence <= previous_sequence {
+        if mutation.sequence == 0
+            || mutation.sequence <= previous_sequence
+            || mutation.sequence > freeze.checkpoint.mutation_sequence
+        {
             return Err(CompactLoweringError::SequenceOutOfOrder);
         }
         previous_sequence = mutation.sequence;
@@ -2614,6 +2617,26 @@ mod tests {
         );
         assert!(expected.has_same_logical_rows(&expected.clone()));
         assert_eq!(folded.candidate_digest, freeze.candidate_digest);
+    }
+
+    #[test]
+    fn freeze_rejects_mutations_after_checkpoint_watermark() {
+        let profile = fixture_profile();
+        let mut freeze = fixture_freeze(
+            &profile,
+            vec![publication_mutation(
+                &profile,
+                1,
+                "changing",
+                PublicationMutationState::Deletion,
+            )],
+        );
+        freeze.checkpoint.mutation_sequence = 0;
+
+        assert!(matches!(
+            lower_publication_freeze(&profile, &freeze),
+            Err(CompactLoweringError::SequenceOutOfOrder)
+        ));
     }
 
     #[test]
