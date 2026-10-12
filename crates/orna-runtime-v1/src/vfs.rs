@@ -4890,8 +4890,9 @@ mod tests {
             pins_before,
             "identity rejection removes its provisional graph pin"
         );
-        // A changed candidate sequence makes the corrected bytes retryable after
+        // A changed candidate sequence makes corrected bytes retryable after
         // the identity rejection was recorded for the previous sequence.
+        scratch.write_at(0, &wrong_bytes).await.unwrap();
         scratch.write_at(0, PIXEL).await.unwrap();
 
         let expected_identity =
