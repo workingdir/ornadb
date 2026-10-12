@@ -536,3 +536,88 @@ fn export_discovers_the_repository_from_a_subdirectory() {
     );
     assert!(archive.join("manifest.tsv").is_file());
 }
+
+/// A promised object that exists only at `origin` must not be fetched to make
+/// an otherwise incomplete local snapshot exportable.
+#[test]
+fn export_fails_locally_for_a_missing_promisor_object() {
+    let (root, _repository, _) = empty_format3_repository();
+    let source = root.path();
+    std::fs::write(source.join("remote-only.txt"), b"promisor-only payload").unwrap();
+    git(source, &["add", "remote-only.txt"]);
+    git(source, &["commit", "--quiet", "-m", "promisor source"]);
+    let oid = String::from_utf8(git_output(
+        source,
+        &["rev-parse", "HEAD:remote-only.txt"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let source_object = source.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+    assert!(source_object.is_file(), "origin has the promised object");
+
+    let outside = TempDir::new().unwrap();
+    let partial = outside.path().join("partial");
+    git_output(
+        outside.path(),
+        &[
+            "clone",
+            "--local",
+            source.to_str().unwrap(),
+            partial.to_str().unwrap(),
+        ],
+        None,
+    );
+    git(&partial, &["config", "extensions.partialClone", "origin"]);
+    git(&partial, &["config", "remote.origin.promisor", "true"]);
+    git(
+        &partial,
+        &["config", "remote.origin.partialclonefilter", "blob:none"],
+    );
+    let partial_object = partial.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+    assert!(
+        partial_object.is_file(),
+        "the clone initially has the object"
+    );
+    std::fs::remove_file(&partial_object).unwrap();
+
+    let has_local_object = || {
+        Command::new("git")
+            .current_dir(&partial)
+            .args(["cat-file", "-e", &oid])
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .status()
+            .expect("check the local object database")
+            .success()
+    };
+    assert!(
+        !has_local_object(),
+        "the object is missing locally before export"
+    );
+    assert!(
+        source_object.is_file(),
+        "the origin can still serve the object"
+    );
+
+    let archive = outside.path().join("incomplete-copy");
+    let exported = run(
+        &partial,
+        &["export", archive.to_str().unwrap(), "--at", "HEAD"],
+    );
+    assert_ne!(
+        exported.status.code(),
+        Some(0),
+        "export refuses a locally incomplete snapshot: {} {}",
+        stdout(&exported),
+        stderr(&exported)
+    );
+    assert!(
+        !archive.join("manifest.tsv").exists(),
+        "a failed export writes no completeness manifest"
+    );
+    assert!(
+        !has_local_object(),
+        "export does not fetch the promised object from origin"
+    );
+}
