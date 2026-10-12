@@ -1,7 +1,5 @@
 use std::{
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -9,10 +7,10 @@ use std::{
 };
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::Repository;
+use orna_project_v1::ProjectLoader;
 use orna_runtime_v1::{
     FaultInjector, FaultPoint, RequestIdentity, RequestState, RuntimeError, RuntimeIdentity,
-    RuntimeState, TableMutation, TerminalOutcome,
+    RuntimeState, TableMutation, TableObjectId, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{
@@ -20,15 +18,26 @@ use orna_value_v1::{
     Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
     ValueFormat,
 };
-use sha2::{Digest, Sha256};
-use tempfile::TempDir;
 
 #[tokio::test]
 async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let (directory, repository, relation_id) = empty_format3_repository();
+    let commit = repository.head().unwrap().unwrap();
+    let source_table = ProjectLoader::default()
+        .resolve_committed_source_table_schema(
+            &repository,
+            &commit,
+            TableObjectId::new(relation_id),
+        )
+        .unwrap();
+    assert_eq!(source_table.binding().module_name(), Some(""));
+    assert_eq!(source_table.binding().source_path(), Some("main.orna"));
+    assert_eq!(source_table.binding().declaration_name(), Some("media"));
+    let media_table_id = *source_table.binding().table_object_id();
+    assert_eq!(media_table_id, relation_id);
     let root = directory.path();
-    let payload = b"{\"source\":\"cli\"}";
-    std::fs::write(root.join("note.wav"), payload).unwrap();
+    let payload = include_bytes!("fixtures/media/tone.wav");
+    std::fs::write(root.join("tone.wav"), payload).unwrap();
     let head_before_capture = git_output(root, &["rev-parse", "HEAD"], None);
 
     let runtime_identity = RuntimeIdentity {
@@ -59,7 +68,9 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap();
     let context = state.begin_activation().await.unwrap();
 
-    let capability = repository.capture_capability(relation_id).unwrap();
+    let capability = repository
+        .capture_capability(media_table_id)
+        .unwrap();
 
     let mut filesystem = FilesystemProvider::with_limits(65_536, 16).unwrap();
     filesystem.allow_root(root).unwrap();
@@ -68,9 +79,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .with_repository_capture_capability(capability);
     let media_root = format!("{:?}", root.to_string_lossy().as_ref());
     let source = include_str!("fixtures/media/import-song-annotation.orna")
-        .replace("__MEDIA_ROOT__", &media_root)
-        .replace("\"audio/wav\"", "\"audio/mp4\"")
-        .replace("\"note\"", "\"m4b\"");
+        .replace("__MEDIA_ROOT__", &media_root);
     let value = evaluate_expression_ovb2_with_effects(
         &source,
         &Default::default(),
@@ -102,7 +111,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     // inserted a runtime row or created a public commit.
     assert_eq!(
         state
-            .committed_table_row("captures", b"capture.json")
+            .committed_table_row("media", b"song")
             .await
             .unwrap(),
         None
@@ -192,7 +201,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     );
     assert_eq!(
         state
-            .committed_table_row("captures", b"capture.json")
+            .committed_table_row("media", b"song")
             .await
             .unwrap(),
         None
@@ -200,15 +209,15 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     assert_eq!(git_output(root, &["rev-parse", "HEAD"], None), head_before_capture);
 
     let mutation = TableMutation::insert(
-        [0x58; 16],
-        "captures",
-        b"capture.json".to_vec(),
+        media_table_id,
+        "media",
+        b"song".to_vec(),
         Vec::new(),
     )
     .unwrap()
     .with_orp_blob_binding(binding)
     .unwrap();
-    std::fs::remove_file(root.join("note.wav")).unwrap();
+    std::fs::remove_file(root.join("tone.wav")).unwrap();
     let competing_context = state.begin_activation().await.unwrap();
     state
         .commit_table_activation(
@@ -237,7 +246,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     ));
     assert_eq!(
         state
-            .committed_table_row("captures", b"capture.json")
+            .committed_table_row("media", b"song")
             .await
             .unwrap(),
         None
@@ -267,7 +276,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
     let committed_value = state
-        .committed_table_row("captures", b"capture.json")
+        .committed_table_row("media", b"song")
         .await
         .unwrap()
         .unwrap();
@@ -330,9 +339,9 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap();
     let failed_context = state.begin_activation().await.unwrap();
     let failed_mutation = TableMutation::insert(
-        [0x64; 16],
-        "captures",
-        b"flush.json".to_vec(),
+        media_table_id,
+        "media",
+        b"flush".to_vec(),
         Vec::new(),
     )
     .unwrap()
@@ -355,7 +364,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     );
     assert_eq!(
         state
-            .committed_table_row("captures", b"flush.json")
+            .committed_table_row("media", b"flush")
             .await
             .unwrap(),
         None
@@ -387,14 +396,14 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap();
     assert_eq!(
         state
-            .committed_table_row("captures", b"capture.json")
+            .committed_table_row("media", b"song")
             .await
             .unwrap(),
         Some(expected_row_value)
     );
     assert_eq!(
         state
-            .committed_table_row("captures", b"flush.json")
+            .committed_table_row("media", b"flush")
             .await
             .unwrap(),
         None
