@@ -3428,17 +3428,32 @@ mod graph_bridge_tests {
             );
         }
 
-        // Cross-root boundary: a row committed under this store root must not
-        // resolve through a graph admitted at a later store root.
-        fs::write(root.join(".orna/store/data"), b"store root two")
-            .expect("write later store root");
-        commit(root);
+        // Advance to a different, valid OGS-1 store root while keeping a
+        // committed row at the same key. A loose worktree marker under
+        // `.orna/store` would instead turn the root into a non-OGS tree.
+        let later_text = vec![b'y'; crate::row_store::ROW_INLINE_LIMIT + 1];
+        let mut later_value = vec![0x81];
+        cbor_head(&mut later_value, 3, later_text.len() as u64);
+        later_value.extend_from_slice(&later_text);
+        install_overflow_row_store_with_bytes(
+            root,
+            &admitted_context,
+            relation_id,
+            &later_value,
+            None,
+        );
         let later_context = context(root);
-        let (later_schema, later_digest) = schema_node(root, &later_context);
-        let later_rows = sealed_rows(&later_context, &later_schema, later_digest);
+        let later_rows = later_context
+            .load_row_map(relation_id)
+            .expect("load the later committed row-map identity");
         let later_graph = later_context
             .open_native_graph(&later_rows)
-            .expect("admit the later fixture root");
+            .expect("admit the later committed graph");
+        assert_ne!(
+            admitted_context.validate_store_root().unwrap().oid,
+            later_context.validate_store_root().unwrap().oid,
+            "the committed OGS-1 store root advanced"
+        );
         let later_scope = later_graph.open_read_scope().expect("later read scope");
         assert!(matches!(
             later_graph.resolve_row_node(&row, &descriptor_oid, &later_scope),
