@@ -361,6 +361,7 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
 
 #[test]
 fn cli_migration_copy_rejects_mixed_worktree_metadata() {
+    let oversized = vec![b'x'; 64 * 1024 + 1];
     for (label, metadata_file, marker) in [
         ("mixed", ".orna/format.orna", &b"format 3\n"[..]),
         ("unknown", ".orna/format.orna", &b"format 99\n"[..]),
@@ -368,6 +369,16 @@ fn cli_migration_copy_rejects_mixed_worktree_metadata() {
             "changed database identity",
             ".orna/database.orna",
             &b"{database_id: \"00000000-0000-4000-8000-000000000000\"}\n"[..],
+        ),
+        (
+            "oversized format",
+            ".orna/format.orna",
+            oversized.as_slice(),
+        ),
+        (
+            "oversized database",
+            ".orna/database.orna",
+            oversized.as_slice(),
         ),
     ] {
         let parent = TempDir::new().unwrap();
