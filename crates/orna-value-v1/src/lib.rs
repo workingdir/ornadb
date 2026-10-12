@@ -6440,7 +6440,7 @@ mod tests {
         .unwrap();
         let option_fields = encode_canonical_storage_value(&Raw::Array(vec![Raw::Tag(
             60013,
-                stored_blob_reference("image/png", Raw::Null),
+            Box::new(stored_blob_reference("image/png", Raw::Null)),
         )]))
         .unwrap();
         assert!(option_schema
