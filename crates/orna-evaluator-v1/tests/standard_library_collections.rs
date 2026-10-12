@@ -24,6 +24,15 @@ fn assert_reference_collection_true(session: &mut AdmittedReplSession, expressio
 }
 
 #[test]
+fn pinned_collection_count_source_handles_empty_lists() {
+    let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
+    assert_reference_collection_true(
+        &mut session,
+        include_str!("fixtures/stdlib-collection-count-consumer.orna"),
+    );
+}
+
+#[test]
 fn pinned_core_collection_source_executes_the_documented_list_operations() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     for expression in [

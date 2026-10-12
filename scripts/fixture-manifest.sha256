@@ -2281,6 +2281,7 @@ e12a72b75e4b9bb73994892298cbf0917e66407c85be9c8cee054c2892bc602a  crates/orna-ev
 f0a057722cbdfc60d18e7ca958e5e72c362cc7732ad5436578089fe0cf4c1eeb  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-captured-predicate-callbacks-yfifu.orna
 0872440514823f60e8c4e43247d277b16bd7fdb1dd1a3fca32c8dd468a55bfce  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-captured-transform-callbacks-yfifu.orna
 d21b82c31240202fc4ae439d09bdb7297edb71b72b2b6496ea36c3cea2c8863a  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-chunk-2213.orna
+d128a4bd15132ce95b2011489db75c40e55cd0ed88010d12da790cb87ca68f1a  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-count-consumer.orna
 3e167f258e32f113bb7d89fdefd7a86676fe9386c9ffb3a28ccc6cdf7f5da0db  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-empty-chunk-p0b5d.orna
 1770582604a0212f5de0b919c7b242a7cd305abb6ab973089d8f267110bee7cb  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-flatten-2213.orna
 7e1cf76031918f97faca285ee741e6ae99226586a35c5770ae9f652d7bed0dd9  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-group-by-2213.orna
