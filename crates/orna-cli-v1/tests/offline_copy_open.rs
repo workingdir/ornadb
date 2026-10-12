@@ -244,8 +244,8 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         assert!(!stored.is_hydrated());
     }
 
-    // The separate raw read traverses the same restored snapshot. Each payload
-    // is compared with its source bytes and the hash returned by metadata.
+    // The separate raw read resolves the Blob from the complete committed row,
+    // then reads verified payload bytes through the selected snapshot context.
     let graph = pin
         .format_context()
         .open_native_graph(&row_map)
@@ -264,11 +264,15 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
             .expect("the row carries its Blob descriptor")
             .oid()
             .clone();
-        let reference = graph
-            .admit_blob_reference(&row, &descriptor, &scope)
-            .expect("admit the descriptor through the restored row");
+        let stored_blob = graph
+            .read_stored_blob_value(&row, &descriptor, &scope)
+            .expect("resolve the Blob value through the restored row");
         let restored_payload = graph
-            .read_blob_range(&reference, 0..expected_payload.len() as u64, &scope)
+            .read_blob_range(
+                stored_blob.reference(),
+                0..expected_payload.len() as u64,
+                &scope,
+            )
             .expect("read the archived payload without a remote");
         let (_, stored) = metadata
             .rows
