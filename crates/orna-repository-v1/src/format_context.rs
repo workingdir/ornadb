@@ -420,8 +420,8 @@ impl RepositoryFormatContext {
     }
 
     /// Issues native Git graph authority only for a sealed row-map snapshot
-    /// whose database, schema identity and store root match this pinned
-    /// format-3 repository snapshot.
+    /// whose repository, database, schema, store root, and exact snapshot
+    /// authority match this pinned format-3 context.
     pub fn open_native_graph(
         &self,
         rows: &RowMapSnapshot,
@@ -438,6 +438,23 @@ impl RepositoryFormatContext {
             return Err(FormatContextError::RowMapMismatch);
         }
         let schema_digest = *version.schema().schema_digest();
+        let snapshot_id = self.snapshot.snapshot_id();
+        let row_count = version
+            .row_count()
+            .ok_or(FormatContextError::RowMapMismatch)?;
+        let mut row_authority = Sha256::new();
+        row_authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
+        row_authority.update(database_id.as_bytes());
+        row_authority.update(snapshot_id);
+        row_authority.update(store.oid.as_bytes());
+        row_authority.update(version.relation_id());
+        row_authority.update(version.primary_root().as_bytes());
+        row_authority.update(schema_digest);
+        row_authority.update(row_count.to_be_bytes());
+        let expected_authority: [u8; 32] = row_authority.finalize().into();
+        if rows.authority() != &expected_authority {
+            return Err(FormatContextError::RowMapMismatch);
+        }
         let algorithm = store.oid.algorithm();
         if version.schema().schema_oid().algorithm() != algorithm {
             return Err(FormatContextError::GraphContextInvalid);
@@ -453,7 +470,6 @@ impl RepositoryFormatContext {
         repository_hash.update(database_id.as_bytes());
         let repository_id: [u8; 32] = repository_hash.finalize().into();
 
-        let snapshot_id: [u8; 32] = self.snapshot.snapshot_id();
 
         let authority = rows.authority();
         let mut owner_hash = Sha256::new();
