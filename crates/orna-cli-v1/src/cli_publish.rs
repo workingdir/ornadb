@@ -417,20 +417,13 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         let index = repository.index_generation().map_err(|error| {
             publish_error("ordinary index could not be read", format!("{error:?}"))
         })?;
-        let prepared = RuntimePublicationCoordinator::prepare_from_runtime_rows_allow_noop(
+        let prepared = RuntimePublicationCoordinator::prepare_from_runtime_allow_noop(
             &repository,
             &state,
             &head,
             index,
             &freeze,
             row_path,
-            |mutations| {
-                orna_storage_v1::lower_protected_blob_mutations_for_publication(
-                    &repository,
-                    &head,
-                    mutations,
-                )
-            },
             &message,
         )
         .await
