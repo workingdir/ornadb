@@ -74,10 +74,10 @@ fn context_backed_resolver_rejects_foreign_store_root_bindings() {
         Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
     );
     let reference = context.reference(identity, descriptor_oid.clone()).unwrap();
-    let blob = Blob::from_reference_with_annotation(reference, "audio/mpeg", Some("mp3")).unwrap();
+    let blob = Blob::from_reference_with_annotation(reference, "audio/mpeg", Some("mp2")).unwrap();
     assert_eq!(blob.read_to_end().unwrap(), bytes);
     assert_eq!(blob.media_type(), "audio/mpeg");
-    assert_eq!(blob.suffix(), Some("mp3"));
+    assert_eq!(blob.suffix(), Some("mp2"));
     let decoded = decode_rov3_in_context(&encode_rov3(&blob).unwrap(), &context).unwrap();
     assert_eq!(decoded.content_identity(), identity);
     assert_eq!(decoded.descriptor_oid(), Some(&descriptor_oid));
