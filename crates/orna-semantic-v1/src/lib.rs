@@ -22783,26 +22783,34 @@ fn infer_historical_member(
 }
 
 fn descriptor_member_type(ty: &system_api::SystemType) -> Type {
-    let value = descriptor_type(ty);
-    let Type::Named(name) = &value else {
-        return value;
-    };
-    let api = system_api::embedded_system_api();
-    if api
-        .type_parameters(name)
-        .is_none_or(|parameters| !parameters.is_empty())
-    {
-        return value;
+    match ty {
+        system_api::SystemType::Named(name) => {
+            let api = system_api::embedded_system_api();
+            let fields = api
+                .type_parameters(name)
+                .filter(|parameters| parameters.is_empty())
+                .and_then(|_| api.value_type_fields(name))
+                .filter(|fields| !fields.is_empty());
+            fields.map_or_else(
+                || descriptor_type(ty),
+                |fields| {
+                    Type::Record(
+                        fields
+                            .iter()
+                            .map(|(name, field)| (name.clone(), descriptor_member_type(field)))
+                            .collect(),
+                    )
+                },
+            )
+        }
+        system_api::SystemType::List(element) => {
+            Type::List(Box::new(descriptor_member_type(element)))
+        }
+        system_api::SystemType::Optional(element) => {
+            Type::Optional(Box::new(descriptor_member_type(element)))
+        }
+        system_api::SystemType::Applied { .. } => descriptor_type(ty),
     }
-    let Some(fields) = api.value_type_fields(name).filter(|fields| !fields.is_empty()) else {
-        return value;
-    };
-    Type::Record(
-        fields
-            .iter()
-            .map(|(name, field)| (name.clone(), descriptor_type(field)))
-            .collect(),
-    )
 }
 
 fn descriptor_relation_record_type(relation: &system_api::RelationDescriptor) -> Type {
@@ -26015,18 +26023,14 @@ mod tests {
     }
 
     #[test]
-    fn system_storage_publication_policy_exposes_record_fields() {
+    fn publication_relation_fields_expose_nested_descriptor_records() {
         let analysis = checked(&[ModuleInput::new(
-            "storage-publication-policy.orna",
-            r#"
-                fn visible(storage: sys.Storage): Bool = !storage.publication_policy.redacted && storage.publication_policy.canonical_digest != null;
-                fn visible_in_query(): Bool = sys.Storage | map(storage => !storage.publication_policy.redacted && storage.publication_policy.canonical_digest != null) | first() ?? false;
-            "#,
+            "publication_metadata.orna",
+            include_str!("../../orna-cli-v1/tests/fixtures/publication_metadata.orna"),
         )]);
 
         assert!(analysis.is_ok(), "diagnostics: {:?}", analysis.diagnostics);
     }
-
     #[test]
     fn infers_primitive_record_list_and_function_without_any() {
         let a = checked(&[ModuleInput::new(
