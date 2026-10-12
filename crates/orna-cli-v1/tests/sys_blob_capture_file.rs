@@ -121,7 +121,8 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let context_backed_blob =
         Blob::from_reference_with_annotation(reference, "application/octet-stream", None).unwrap();
     assert!(!context_backed_blob.is_hydrated());
-    let contextual_value = ContextValue::from_blob(&context_backed_blob, ValueFormat::Rov3).unwrap();
+    let contextual_value =
+        ContextValue::from_blob(&context_backed_blob, ValueFormat::Rov3).unwrap();
     assert!(contextual_value.context().is_some());
     let contextual_blob = contextual_value.blob().unwrap();
     assert_eq!(
