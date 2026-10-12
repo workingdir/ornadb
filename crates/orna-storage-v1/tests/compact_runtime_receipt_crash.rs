@@ -336,10 +336,15 @@ async fn recovery_uses_persisted_receipt_after_runtime_consumes_prefix() {
     assert!(repository.read_publication_journal().unwrap().is_some());
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
     assert!(
-        RuntimePublicationCoordinator::recover(&repository, &runtime)
-            .await
-            .unwrap()
-            .is_some()
+        RuntimePublicationCoordinator::recover_compact_validated(
+            &repository,
+            &runtime,
+            &CompactOvbProfile::new(profile()).unwrap(),
+            &publication_identity(),
+        )
+        .await
+        .unwrap()
+        .is_some()
     );
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
     assert!(repository.read_publication_journal().unwrap().is_none());
