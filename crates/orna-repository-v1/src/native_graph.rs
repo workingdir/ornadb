@@ -1887,11 +1887,7 @@ impl NativeGraphContext {
     ) -> Result<(), GraphError> {
         scope.authorize(self)?;
         let version = row.version();
-        if version.database_id() != &self.database_id
-            || version.relation_id() != self.row_snapshot.version().relation_id()
-            || version.store_root() != &self.store_root
-            || version.schema().schema_digest() != &self.schema_digest
-        {
+        if version != self.row_snapshot.version() {
             return Err(GraphError::ContextMismatch);
         }
         if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
