@@ -242,52 +242,6 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                         "no source-bound table identity can be established; the journal and pending tail were preserved",
                     ));
                 };
-                // The declaration is only a name selector; the source-bound
-                // context authenticates its table identity and schema at the
-                // journal's exact old head, never the already-advanced HEAD.
-                let source_context = repository
-                    .open_format_context_at_selector(pending_journal.old_head().as_str())
-                    .map_err(|error| {
-                        publish_error(
-                            "compact publication source schema is not trusted",
-                            format!("{error:?}; journal and pending tail were preserved"),
-                        )
-                    })?;
-                let source_schema = orna_project_v1::ProjectLoader::default()
-                    .resolve_committed_table_schema(
-                        &repository,
-                        pending_journal.old_head(),
-                        &table_name,
-                        orna_runtime_v1::TableObjectId::new(table_id),
-                    )
-                    .map_err(|error| {
-                        publish_error(
-                            "compact publication source schema is not trusted",
-                            format!("{error:?}; journal and pending tail were preserved"),
-                        )
-                    })?;
-                if source_schema.declaration_name() != table_name
-                    || source_schema.table_object_id()
-                        != orna_runtime_v1::TableObjectId::new(table_id)
-                {
-                    return Err(publish_error(
-                        "compact publication table binding is not trusted",
-                        "the value owner resolved a different table identity; journal and pending tail were preserved",
-                    ));
-                }
-                let binding = source_context
-                    .bind_committed_table(
-                        &table_name,
-                        table_id,
-                        source_schema.snapshot_id(),
-                        source_schema.descriptor(),
-                    )
-                    .map_err(|error| {
-                        publish_error(
-                            "compact publication table binding is not trusted",
-                            format!("{error:?}; journal and pending tail were preserved"),
-                        )
-                    })?;
                 let manifest = repository
                     .read_compact_manifest(pending.commit(), witness.table())
                     .map_err(|error| {
@@ -303,15 +257,27 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                         )
                     })?;
                 let schema_fingerprint = manifest.schema();
-                let profile =
-                    CompactOvbProfile::new(binding.descriptor().clone()).map_err(|error| {
-                        publish_error(
-                            "compact publication source schema is invalid",
-                            format!("{error:?}; journal and pending tail were preserved"),
-                        )
-                    })?;
-                if binding.relation_id() != &table_id
-                    || profile.table_id() != table_id
+                let descriptor = orna_storage_v1::trusted_compact_schema_descriptor(
+                    &repository,
+                    pending_journal.old_head(),
+                    witness.table(),
+                    schema_fingerprint,
+                    &pending_journal,
+                    pending.commit(),
+                )
+                .map_err(|error| {
+                    publish_error(
+                        "compact publication source schema is not trusted",
+                        format!("{error:?}; journal and pending tail were preserved"),
+                    )
+                })?;
+                let profile = CompactOvbProfile::new(descriptor.clone()).map_err(|error| {
+                    publish_error(
+                        "compact publication source schema is invalid",
+                        format!("{error:?}; journal and pending tail were preserved"),
+                    )
+                })?;
+                if profile.table_id() != table_id
                     || profile.schema_fingerprint() != schema_fingerprint
                 {
                     return Err(publish_error(
@@ -321,9 +287,8 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 }
                 for mutation in &mutations {
                     if let Some(fields) = mutation.value() {
-                        binding
-                            .descriptor()
-                            .validate_stored_row(*binding.relation_id(), mutation.key(), fields)
+                        descriptor
+                            .validate_stored_row(table_id, mutation.key(), fields)
                             .map_err(|error| {
                                 publish_error(
                                     "compact publication row is invalid for its committed schema",
@@ -331,13 +296,8 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                                 )
                             })?;
                         if let Some(new_key) = mutation.rekey_to() {
-                            binding
-                                .descriptor()
-                                .validate_stored_row(
-                                    *binding.relation_id(),
-                                    new_key,
-                                    fields,
-                                )
+                            descriptor
+                                .validate_stored_row(table_id, new_key, fields)
                                 .map_err(|error| {
                                     publish_error(
                                         "compact publication rekey is invalid for its committed schema",

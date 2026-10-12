@@ -703,7 +703,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
 }
 
 #[tokio::test]
-async fn publish_preserves_compact_journal_and_tail_on_source_binding_mismatch() {
+async fn publish_recovers_compact_journal_without_receipt_before_tail_selection() {
     let (directory, repository, _) = empty_format3_repository();
     let root_path = directory.path();
     let old_head = repository.head().unwrap().unwrap();
@@ -720,8 +720,12 @@ async fn publish_preserves_compact_journal_and_tail_on_source_binding_mismatch()
     let mutation = TableMutation::new(
         [0xf1; 16],
         "media",
-        b"image".to_vec(),
-        Some(b"compact row".to_vec()),
+        CanonicalValue::int(1.into()).encode().unwrap(),
+        Some(
+            CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Int(1.into())]))
+                .encode()
+                .unwrap(),
+        ),
     )
     .unwrap()
     .with_table_object_id(TableObjectId::new(*table.as_bytes()));
@@ -757,23 +761,17 @@ async fn publish_preserves_compact_journal_and_tail_on_source_binding_mismatch()
     assert!(state.pending_count().await.unwrap() > 0);
     drop(state);
 
-    // The new CLI process must resolve this compact table through the old
-    // source snapshot; the fixture has no committed `media` declaration.
+    // A fresh CLI process has no receipt. It must validate the candidate-bound
+    // schema, recover from the persisted freeze, then clear the journal before
+    // selecting a new publication tail.
     let output = run(root_path, &["publish"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("compact publication source schema is not trusted"),
-        "unexpected compact recovery diagnostic: {stderr}"
-    );
+    assert!(output.status.success(), "{stderr}");
     assert_eq!(head(root_path), published_head);
-    assert_eq!(
-        repository.read_publication_journal().unwrap(),
-        Some(journal)
-    );
+    assert!(repository.read_publication_journal().unwrap().is_none());
 
-    let preserved = RuntimeState::open(&repository, runtime_identity, initial_digest)
+    let recovered = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
-    assert!(preserved.pending_count().await.unwrap() > 0);
+    assert_eq!(recovered.pending_count().await.unwrap(), 0);
 }
