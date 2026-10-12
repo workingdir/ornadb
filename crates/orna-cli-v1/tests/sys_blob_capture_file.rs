@@ -2,6 +2,10 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
@@ -11,7 +15,11 @@ use orna_runtime_v1::{
     RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use orna_value_v1::{ContextValue, ValueFormat};
+use orna_value_v1::{
+    AvailabilityState, Blob, BlobResolver, ContentIdentity, ContentReference, ContextValue,
+    Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
+    ValueFormat,
+};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -101,7 +109,41 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     assert_eq!(annotated_blob.media_type(), "audio/mp4");
     assert_eq!(annotated_blob.suffix(), Some("m4b"));
     assert_eq!(annotated_blob.annotation().selected_suffix(), "m4b");
-    let binding = bindings.accept_captured_blob_for_row(&annotated).unwrap();
+    // Materialize the captured identity through a real Format3 resolver before
+    // accepting the annotated value for row conversion.
+    let (format3_context, resolver_bytes_read) = resolver_context(payload);
+    let reference = format3_context
+        .reference(
+            annotated_blob.content_identity(),
+            NativeOid::from_bytes(&[0x66; 20]).unwrap(),
+        )
+        .unwrap();
+    let context_backed_blob = Blob::from_reference_with_annotation(
+        reference,
+        annotated_blob.media_type(),
+        annotated_blob.suffix(),
+    )
+    .unwrap();
+    assert!(!context_backed_blob.is_hydrated());
+    let portable = ContextValue::from_blob(&context_backed_blob, ValueFormat::Ovb2).unwrap();
+    assert_eq!(
+        resolver_bytes_read.load(Ordering::Relaxed),
+        payload.len() as u64
+    );
+    let contextual_value =
+        ContextValue::new_in_context(&format3_context, ValueFormat::Ovb2, portable.raw().clone())
+            .unwrap();
+    assert!(contextual_value.context().is_some());
+    let contextual_blob = contextual_value.blob().unwrap();
+    assert_eq!(
+        contextual_blob.content_identity(),
+        annotated_blob.content_identity()
+    );
+    assert_eq!(contextual_blob.media_type(), "audio/mp4");
+    assert_eq!(contextual_blob.suffix(), Some("m4b"));
+    let binding = bindings
+        .accept_captured_blob_for_row(&contextual_value)
+        .unwrap();
     let expected_row_value = binding.encoded_value().to_vec();
     assert!(
         expected_row_value
@@ -368,6 +410,56 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         capture_failure(&mut bindings, root.to_str().unwrap(), "capture.json", 4),
         "ORNA-INGEST-004"
     );
+}
+
+struct FixtureResolver {
+    identity: ContentIdentity,
+    payload: Arc<[u8]>,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl BlobResolver for FixtureResolver {
+    fn read_range(
+        &self,
+        reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> orna_value_v1::Result<Vec<u8>> {
+        if reference.identity() != self.identity {
+            return Err(BlobError::ContentUnavailable);
+        }
+        let start = usize::try_from(offset).map_err(|_| BlobError::InvalidRange)?;
+        let length = usize::try_from(length).map_err(|_| BlobError::InvalidRange)?;
+        let end = start.checked_add(length).ok_or(BlobError::InvalidRange)?;
+        let bytes = self
+            .payload
+            .get(start..end)
+            .ok_or(BlobError::InvalidRange)?;
+        self.bytes_read.fetch_add(length as u64, Ordering::Relaxed);
+        Ok(bytes.to_vec())
+    }
+}
+
+fn resolver_context(payload: &[u8]) -> (Format3Context, Arc<AtomicU64>) {
+    let database = [0x67; 16];
+    let bytes_read = Arc::new(AtomicU64::new(0));
+    let context = Format3Context::from_persisted(
+        database,
+        Snapshot::cwd(database, [0x68; 16], 0.into()).unwrap(),
+        GitHash::Sha1,
+        NativeOid::from_bytes(&[0x69; 20]).unwrap(),
+        NativeOid::from_bytes(&[0x6a; 20]).unwrap(),
+        AvailabilityState::Available,
+        OwnerLifetime::new([0x6b; 16]),
+        Format3Quota::new(65_536, 1_u64 << 32).unwrap(),
+        Arc::new(FixtureResolver {
+            identity: ContentIdentity::from_bytes(payload),
+            payload: Arc::from(payload),
+            bytes_read: Arc::clone(&bytes_read),
+        }),
+    )
+    .unwrap();
+    (context, bytes_read)
 }
 
 struct FailAt(FaultPoint);
