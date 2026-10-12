@@ -1205,35 +1205,85 @@ pub fn lower_protected_blob_mutations_for_publication(
     let format = repository
         .open_pinned_format_context(head.as_str())
         .map_err(|_| Error::RepositoryUnavailable)?;
+    let mut resolved_schemas = BTreeMap::<
+        [u8; 16],
+        (String, [u8; 32], orna_value_v1::SchemaDescriptor),
+    >::new();
     let mut by_relation = BTreeMap::<
         [u8; 16],
         (
             String,
             [u8; 16],
             [u8; 32],
+            [u8; 32],
+            orna_value_v1::SchemaDescriptor,
             BTreeMap<TypedKey, &TableMutation>,
         ),
     >::new();
     for mutation in mutations {
-        let table_object_id = mutation.table_object_id().ok_or(Error::InvalidRow)?.bytes();
+        let table_identity = mutation.table_object_id().ok_or(Error::InvalidRow)?;
+        let table_object_id = table_identity.bytes();
+        if !resolved_schemas.contains_key(&table_object_id) {
+            let resolved = orna_project_v1::ProjectLoader::default()
+                .resolve_committed_table_schema(repository, head, mutation.table(), table_identity)
+                .map_err(|_| Error::InvalidRow)?;
+            if resolved.declaration_name() != mutation.table()
+                || resolved.table_object_id() != table_identity
+            {
+                return Err(Error::InvalidRow);
+            }
+            let snapshot_id = *resolved.snapshot_id();
+            if snapshot_id != format.snapshot_pin().snapshot_id() {
+                return Err(Error::InvalidRow);
+            }
+            resolved_schemas.insert(
+                table_object_id,
+                (
+                    resolved.declaration_name().to_owned(),
+                    snapshot_id,
+                    resolved.descriptor().clone(),
+                ),
+            );
+        }
+        let (resolved_name, expected_snapshot_id, expected_schema) = resolved_schemas
+            .get(&table_object_id)
+            .ok_or(Error::InvalidRow)?;
+        if resolved_name != mutation.table() {
+            return Err(Error::InvalidRow);
+        }
         let binding = format
-            .bind_committed_table(mutation.table(), table_object_id)
+            .bind_committed_table(
+                mutation.table(),
+                table_object_id,
+                expected_snapshot_id,
+                expected_schema,
+            )
             .map_err(|_| Error::InvalidRow)?;
         let relation_id = *binding.relation_id();
         let schema_digest = *binding.schema_digest();
         let key = decode_source_text_key(mutation.key())?;
-        let (declaration_name, bound_table_id, bound_digest, table_mutations) =
-            by_relation.entry(relation_id).or_insert_with(|| {
-                (
-                    mutation.table().to_owned(),
-                    table_object_id,
-                    schema_digest,
-                    BTreeMap::new(),
-                )
-            });
+        let (
+            declaration_name,
+            bound_table_id,
+            bound_digest,
+            bound_snapshot_id,
+            bound_schema,
+            table_mutations,
+        ) = by_relation.entry(relation_id).or_insert_with(|| {
+            (
+                mutation.table().to_owned(),
+                table_object_id,
+                schema_digest,
+                *expected_snapshot_id,
+                expected_schema.clone(),
+                BTreeMap::new(),
+            )
+        });
         if declaration_name != mutation.table()
             || bound_table_id != &table_object_id
             || bound_digest != &schema_digest
+            || bound_snapshot_id != expected_snapshot_id
+            || bound_schema != expected_schema
             || mutation.rekey_to().is_some()
         {
             return Err(Error::InvalidRow);
@@ -1242,8 +1292,17 @@ pub fn lower_protected_blob_mutations_for_publication(
     }
 
     let mut lowered = Vec::with_capacity(by_relation.len());
-    for (relation_id, (declaration_name, table_object_id, schema_digest, final_mutations)) in
-        by_relation
+    for (
+        relation_id,
+        (
+            declaration_name,
+            table_object_id,
+            schema_digest,
+            expected_snapshot_id,
+            expected_schema,
+            final_mutations,
+        ),
+    ) in by_relation
     {
         let row_map = format
             .load_row_map(relation_id)
@@ -1292,6 +1351,8 @@ pub fn lower_protected_blob_mutations_for_publication(
             lowered.push(RelationRowMutation::new(
                 declaration_name,
                 table_object_id,
+                expected_snapshot_id,
+                expected_schema,
                 schema_digest,
                 operations,
             ));
