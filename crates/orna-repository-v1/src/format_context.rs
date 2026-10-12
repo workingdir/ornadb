@@ -145,16 +145,17 @@ impl fmt::Display for FormatContextError {
     }
 }
 
-/// Repository-authenticated schema binding for one declaration in the
-/// context's committed root module. `descriptor` is decoded from the schema
-/// object sealed by `snapshot_id`; its key order, key types, field roles and
-/// field types (including Blob fields) are the authoritative row contract.
-/// This proves committed descriptor provenance, not that caller-side project
-/// analysis agrees with it; use `bind_committed_table` for that check.
+/// Owner-authenticated descriptor binding for one format-3 relation in an
+/// exact repository snapshot. A source declaration name is retained only
+/// when supplied and verified on the name-based resolution path. The
+/// descriptor is decoded from the schema object sealed by `snapshot_id`; its
+/// key order, key types, field roles, and field types are authoritative. This
+/// proves committed descriptor provenance; full source-analysis binding uses
+/// `bind_committed_table` or `bind_committed_table_by_relation_id`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommittedTableBinding {
     snapshot_id: [u8; 32],
-    declaration_name: String,
+    declaration_name: Option<String>,
     relation_id: [u8; 16],
     schema_oid: NativeOid,
     schema_digest: [u8; 32],
@@ -166,8 +167,8 @@ impl CommittedTableBinding {
         &self.snapshot_id
     }
 
-    pub fn declaration_name(&self) -> &str {
-        &self.declaration_name
+    pub fn declaration_name(&self) -> Option<&str> {
+        self.declaration_name.as_deref()
     }
 
     pub const fn table_object_id(&self) -> &[u8; 16] {
@@ -477,35 +478,61 @@ impl RepositoryFormatContext {
         declaration_name: &str,
         table_object_id: [u8; 16],
     ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.resolve_committed_relation_descriptor(table_object_id, Some(declaration_name))
+    }
+
+    /// Resolves an authenticated committed descriptor directly by relation
+    /// ID, without requiring a source declaration name. Row-map admission may
+    /// inspect the primary-root page, but this path does not decode row values
+    /// or resolve Blob payloads. The result proves descriptor provenance in
+    /// this exact format-3 snapshot; it does not bind caller-side source analysis.
+    pub fn resolve_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.resolve_committed_relation_descriptor(relation_id, None)
+    }
+
+    /// Resolves a pinned relation descriptor, optionally checking that a
+    /// caller-supplied declaration name occurs exactly once in the same
+    /// committed root source.
+    fn resolve_committed_relation_descriptor(
+        &self,
+        relation_id: [u8; 16],
+        declaration_name: Option<&str>,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
         self.require_format3()?;
-        let source = self
-            .snapshot
-            .read_file(&self.repository, MAIN_SOURCE_PATH, 64 * 1024)
-            .map_err(|error| match error {
-                RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
-                _ => FormatContextError::SchemaRootInvalid,
-            })?;
-        let source =
-            std::str::from_utf8(&source).map_err(|_| FormatContextError::SchemaRootInvalid)?;
-        let parsed = parse_module(source);
-        if !parsed.is_ok() {
-            return Err(FormatContextError::SchemaRootInvalid);
-        }
-        let mut declarations = parsed
-            .value
-            .items
-            .iter()
-            .filter_map(|item| match &item.declaration {
-                Declaration::Table { name, .. } if name == declaration_name => Some(()),
-                _ => None,
-            });
-        if declarations.next().is_none() || declarations.next().is_some() {
-            return Err(FormatContextError::TableBindingMismatch);
+        if let Some(declaration_name) = declaration_name {
+            let source = self
+                .snapshot
+                .read_file(&self.repository, MAIN_SOURCE_PATH, 64 * 1024)
+                .map_err(|error| match error {
+                    RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
+                    _ => FormatContextError::SchemaRootInvalid,
+                })?;
+            let source =
+                std::str::from_utf8(&source).map_err(|_| FormatContextError::SchemaRootInvalid)?;
+            let parsed = parse_module(source);
+            if !parsed.is_ok() {
+                return Err(FormatContextError::SchemaRootInvalid);
+            }
+            let mut declarations =
+                parsed
+                    .value
+                    .items
+                    .iter()
+                    .filter_map(|item| match &item.declaration {
+                        Declaration::Table { name, .. } if name == declaration_name => Some(()),
+                        _ => None,
+                    });
+            if declarations.next().is_none() || declarations.next().is_some() {
+                return Err(FormatContextError::TableBindingMismatch);
+            }
         }
 
-        let rows = self.load_row_map(table_object_id)?;
+        let rows = self.load_row_map(relation_id)?;
         let version = rows.version();
-        if version.relation_id() != &table_object_id {
+        if version.relation_id() != &relation_id {
             return Err(FormatContextError::TableBindingMismatch);
         }
         let graph = self.open_native_graph(&rows)?;
@@ -515,12 +542,12 @@ impl RepositoryFormatContext {
         let descriptor = graph
             .read_schema_descriptor(&scope)
             .map_err(|_| FormatContextError::GraphContextInvalid)?;
-        if schema_descriptor_table_id(&descriptor) != Some(table_object_id) {
+        if schema_descriptor_table_id(&descriptor) != Some(relation_id) {
             return Err(FormatContextError::TableBindingMismatch);
         }
         Ok(CommittedTableBinding {
             snapshot_id: self.snapshot.snapshot_id(),
-            declaration_name: declaration_name.to_owned(),
+            declaration_name: declaration_name.map(str::to_owned),
             relation_id: *version.relation_id(),
             schema_oid: version.schema().schema_oid().clone(),
             schema_digest: *version.schema().schema_digest(),
@@ -545,6 +572,28 @@ impl RepositoryFormatContext {
             return Err(FormatContextError::TableBindingMismatch);
         }
         let binding = self.resolve_committed_table_descriptor(declaration_name, table_object_id)?;
+        if binding.descriptor() != expected_schema {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        Ok(binding)
+    }
+
+    /// Binds caller-side resolved schema identity to the committed descriptor
+    /// selected directly by relation ID. Both snapshot identity and the full
+    /// descriptor must agree; neither is inferred from stored row bytes.
+    pub fn bind_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.require_format3()?;
+        if *expected_snapshot_id != self.snapshot.snapshot_id()
+            || schema_descriptor_table_id(expected_schema) != Some(relation_id)
+        {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        let binding = self.resolve_committed_table_by_relation_id(relation_id)?;
         if binding.descriptor() != expected_schema {
             return Err(FormatContextError::TableBindingMismatch);
         }
@@ -749,6 +798,16 @@ impl HistoricalFormatContext {
             .resolve_committed_table_descriptor(declaration_name, table_object_id)
     }
 
+    /// Resolves a committed descriptor by relation ID through this exact
+    /// historical pin; it does not infer declaration identity from row bytes.
+    pub fn resolve_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context
+            .resolve_committed_table_by_relation_id(relation_id)
+    }
+
     /// Binds caller-side resolved schema identity through this exact historical snapshot.
     pub fn bind_committed_table(
         &self,
@@ -760,6 +819,21 @@ impl HistoricalFormatContext {
         self.context.bind_committed_table(
             declaration_name,
             table_object_id,
+            expected_snapshot_id,
+            expected_schema,
+        )
+    }
+
+    /// Binds caller-side schema to the descriptor selected by relation ID,
+    /// rejecting a different source snapshot or any descriptor mismatch.
+    pub fn bind_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context.bind_committed_table_by_relation_id(
+            relation_id,
             expected_snapshot_id,
             expected_schema,
         )
@@ -1374,20 +1448,60 @@ mod graph_bridge_tests {
             .resolve_committed_table_descriptor("Audio", relation_id)
             .expect("resolve canonical descriptor from the pinned graph");
         assert_eq!(resolved.snapshot_id(), &snapshot_id);
-        assert_eq!(resolved.declaration_name(), "Audio");
+        assert_eq!(resolved.declaration_name(), Some("Audio"));
         assert_eq!(resolved.table_object_id(), &relation_id);
         assert_eq!(resolved.descriptor(), &expected_descriptor);
 
         let binding = first_context
             .bind_committed_table("Audio", relation_id, &snapshot_id, &expected_descriptor)
             .expect("source declaration and pinned schema agree");
-        assert_eq!(binding.declaration_name(), "Audio");
+        assert_eq!(binding.declaration_name(), Some("Audio"));
         assert_eq!(binding.relation_id(), &relation_id);
         assert_eq!(binding.schema_oid(), &expected_oid);
         assert_eq!(binding.schema_digest(), &expected_digest);
         assert_eq!(binding.descriptor(), &expected_descriptor);
 
-        let (_other_directory, other_descriptor, _, _) = seeded_table_binding("Str", relation_id);
+        let relation_binding = first_context
+            .resolve_committed_table_by_relation_id(relation_id)
+            .expect("resolve the committed descriptor by relation ID");
+        assert_eq!(relation_binding.snapshot_id(), &snapshot_id);
+        assert_eq!(relation_binding.declaration_name(), None);
+        assert_eq!(relation_binding.relation_id(), &relation_id);
+        assert_eq!(relation_binding.descriptor(), &expected_descriptor);
+        let relation_bound = first_context
+            .bind_committed_table_by_relation_id(relation_id, &snapshot_id, &expected_descriptor)
+            .expect("bind relation ID to the exact pinned descriptor");
+        assert_eq!(relation_bound.descriptor(), &expected_descriptor);
+
+        let (other_directory, other_descriptor, _, _) = seeded_table_binding("Str", relation_id);
+
+        assert_eq!(
+            first_context.bind_committed_table_by_relation_id(
+                relation_id,
+                &snapshot_id,
+                &other_descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "relation-ID binding rejects a full descriptor mismatch"
+        );
+        let foreign_context = context(other_directory.path());
+        let foreign_snapshot_id = foreign_context.snapshot_pin().snapshot_id();
+        assert_ne!(foreign_snapshot_id, snapshot_id);
+        let foreign_binding = foreign_context
+            .resolve_committed_table_by_relation_id(relation_id)
+            .expect("resolve the foreign repository's own committed descriptor");
+        assert_eq!(foreign_binding.snapshot_id(), &foreign_snapshot_id);
+        assert_eq!(foreign_binding.descriptor(), &other_descriptor);
+        assert_eq!(
+            foreign_context.bind_committed_table_by_relation_id(
+                relation_id,
+                &snapshot_id,
+                &expected_descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "a foreign repository cannot bind this source's snapshot and schema"
+        );
+
         assert_eq!(
             first_context.bind_committed_table(
                 "Audio",
@@ -1397,6 +1511,35 @@ mod graph_bridge_tests {
             ),
             Err(super::FormatContextError::TableBindingMismatch)
         );
+    }
+
+    #[test]
+    fn relation_id_descriptor_resolution_does_not_decode_row_values() {
+        let relation_id = [0xa3; 16];
+        let (directory, expected_descriptor, schema_oid, schema_digest) = seeded_table_binding("Int", relation_id);
+        let root = directory.path();
+        let initial = context(root);
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned format-3 store")
+            .oid
+            .algorithm();
+        let primary_root = rows_leaf(
+            root,
+            algorithm,
+            &row_domain(relation_id, schema_digest),
+            &[(7, vec![0xff])],
+        );
+        install_rows_store(root, &initial, relation_id, &schema_oid, &primary_root, 1);
+
+        let pinned = context(root);
+        let snapshot_id = pinned.snapshot_pin().snapshot_id();
+        let binding = pinned
+            .resolve_committed_table_by_relation_id(relation_id)
+            .expect("resolve schema metadata without decoding the malformed stored row");
+        assert_eq!(binding.snapshot_id(), &snapshot_id);
+        assert_eq!(binding.relation_id(), &relation_id);
+        assert_eq!(binding.descriptor(), &expected_descriptor);
     }
 
     #[test]
@@ -1413,7 +1556,7 @@ mod graph_bridge_tests {
 
         fs::write(
             root.join("main.orna"),
-            "module main;\npub table Audio(id: Str) { payload: Blob, }\n",
+            include_str!("../tests/fixtures/committed-table-binding-str.orna"),
         )
         .expect("write candidate source with a different key type");
         commit(root);
@@ -1445,14 +1588,39 @@ mod graph_bridge_tests {
             Err(super::FormatContextError::TableBindingMismatch),
             "pinned HEAD rejects a resolved schema inconsistent with committed metadata"
         );
+        assert_eq!(
+            current.bind_committed_table_by_relation_id(
+                relation_id,
+                &historical_snapshot_id,
+                &expected_descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "relation-ID binding rejects the wrong source snapshot"
+        );
 
         let resolved = historical
             .resolve_committed_table_descriptor("Audio", relation_id)
             .expect("resolve descriptor from the historical graph pin");
         assert_eq!(resolved.snapshot_id(), &historical_snapshot_id);
-        assert_eq!(resolved.declaration_name(), "Audio");
+        assert_eq!(resolved.declaration_name(), Some("Audio"));
         assert_eq!(resolved.table_object_id(), &relation_id);
         assert_eq!(resolved.descriptor(), &expected_descriptor);
+
+        let relation_binding = historical
+            .resolve_committed_table_by_relation_id(relation_id)
+            .expect("resolve the relation through the selected historical snapshot");
+        assert_eq!(relation_binding.snapshot_id(), &historical_snapshot_id);
+        assert_eq!(relation_binding.declaration_name(), None);
+        assert_eq!(relation_binding.descriptor(), &expected_descriptor);
+        let relation_bound = historical
+            .bind_committed_table_by_relation_id(
+                relation_id,
+                &historical_snapshot_id,
+                &expected_descriptor,
+            )
+            .expect("historical relation binding retains exact source identity");
+        assert_eq!(relation_bound.snapshot_id(), &historical_snapshot_id);
+        assert_eq!(relation_bound.descriptor(), &expected_descriptor);
 
         let binding = historical
             .bind_committed_table(
@@ -1462,7 +1630,7 @@ mod graph_bridge_tests {
                 &expected_descriptor,
             )
             .expect("historical binding reads only its selected source and schema");
-        assert_eq!(binding.declaration_name(), "Audio");
+        assert_eq!(binding.declaration_name(), Some("Audio"));
         assert_eq!(binding.relation_id(), &relation_id);
         assert_eq!(binding.schema_oid(), &expected_oid);
         assert_eq!(binding.schema_digest(), &expected_digest);
