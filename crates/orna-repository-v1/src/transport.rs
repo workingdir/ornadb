@@ -1966,6 +1966,55 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_push_refuses_divergent_allocator_without_advancing_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        let remote = root.path().join("remote.git");
+        fs::create_dir(&local).unwrap();
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(&local, &["init", "-b", "main"]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("state.txt"), "initial\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "initial"]);
+        let initial = git(&local, &["rev-parse", "HEAD"]);
+        git(&local, &["update-ref", ALLOCATOR_REF, &initial]);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&local, &["push", "origin", "main"]);
+        let allocator_refspec = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
+        git(&local, &["push", "origin", &allocator_refspec]);
+
+        git(&local, &["checkout", "-b", "divergent"]);
+        fs::write(local.join("state.txt"), "remote divergence\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "divergent allocator"]);
+        let divergent = git(&local, &["rev-parse", "HEAD"]);
+        let divergent_refspec = format!("{divergent}:{ALLOCATOR_REF}");
+        git(&local, &["push", "origin", &divergent_refspec]);
+
+        git(&local, &["checkout", "main"]);
+        fs::write(local.join("state.txt"), "local branch advance\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "local branch advance"]);
+        let local_head = git(&local, &["rev-parse", "HEAD"]);
+
+        let repository = Repository::discover(&local).unwrap();
+        assert!(matches!(
+            repository.push_ordinary_with_local_continuity("origin", "main"),
+            Err(FetchError::RefConflict)
+        ));
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), initial);
+        assert_eq!(git(&remote, &["rev-parse", ALLOCATOR_REF]), divergent);
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]), local_head);
+        assert_eq!(git(&local, &["rev-parse", ALLOCATOR_REF]), initial);
+    }
+
+    #[test]
     fn push_request_validates_internal_refs_and_branch() {
         let allocator = OrnaInternalRef::new("refs/orna/allocator").unwrap();
         let checkpoint = OrnaInternalRef::new("refs/orna/checkpoint").unwrap();
