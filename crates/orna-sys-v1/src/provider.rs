@@ -218,6 +218,8 @@ pub struct OperationContract {
     pub id: OperationId,
     pub version: AbiVersion,
     pub signature: FunctionSignature,
+    /// Semantic contract tag projected from the generated system API metadata.
+    pub contract: Option<String>,
     pub effects: EffectSet,
     pub preconditions: Vec<Precondition>,
     pub failures: BTreeSet<FailureCode>,
@@ -482,6 +484,7 @@ impl SystemProviderAbi {
                 id: id.clone(),
                 version: raw_operation.version,
                 signature,
+                contract: raw_operation.contract,
                 effects: EffectSet::one(effect),
                 preconditions: raw_operation
                     .preconditions
@@ -994,6 +997,8 @@ struct RawOperation {
     name: String,
     version: AbiVersion,
     signature: String,
+    #[serde(default)]
+    contract: Option<String>,
     effect: String,
     preconditions: Vec<String>,
     failures: Vec<String>,

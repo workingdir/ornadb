@@ -2499,10 +2499,22 @@ fn generated_blob_annotate_declaration_matches_api_and_typed_dispatch() {
     const SIGNATURE: &str =
         "fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob";
 
-    let operation = system_provider_abi()
+    let provider_abi = system_provider_abi();
+    let operation = provider_abi
         .operation(OPERATION)
         .expect("Blob annotation operation is in the generated dispatch registry");
     assert_eq!(operation.signature.source, SIGNATURE);
+    assert_eq!(
+        operation.contract.as_deref(),
+        Some("annotated-blob-format-3")
+    );
+    let capture_operation = provider_abi
+        .operation("sys.blob.capture_file")
+        .expect("Blob capture operation is in the generated dispatch registry");
+    assert_eq!(
+        capture_operation.contract.as_deref(),
+        Some("blob-value-and-storage")
+    );
     assert_eq!(operation.effects.iter().next(), Some(SystemEffect::Read));
     assert_eq!(
         operation.signature.parameters[2].default.as_deref(),
