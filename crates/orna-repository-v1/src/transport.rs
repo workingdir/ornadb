@@ -287,6 +287,12 @@ impl Repository {
             return Err(FetchError::InvalidRemote);
         }
         let _lock = self.acquire_coordination_lock()?;
+        // Publication recovery owns the exact ref/index/worktree generation
+        // recorded in its journal. Validate under this lock through ref transfer,
+        // preventing a journal from appearing between validation and push.
+        self.require_no_pending_publication_recovery_locked()?;
+        #[cfg(test)]
+        tests::pause_push_after_journal_validation();
         let selected = self.ordinary_push_refs()?;
         let mut continuity = Vec::with_capacity(selected.len());
         for (reference, object_id) in selected {
@@ -1435,7 +1441,26 @@ fn valid_fetch_full_ref(reference: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::Path, process::Command};
+    use std::{
+        fs,
+        path::Path,
+        process::Command,
+        sync::{Arc, Barrier, Mutex},
+        thread,
+    };
+
+    static PUSH_LOCK_GATE: Mutex<Option<Arc<(Barrier, Barrier)>>> = Mutex::new(None);
+
+    pub(super) fn pause_push_after_journal_validation() {
+        let gate = PUSH_LOCK_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            gate.0.wait();
+            gate.1.wait();
+        }
+    }
 
     fn git(directory: &Path, arguments: &[&str]) -> String {
         let output = Command::new("git")
@@ -1772,6 +1797,115 @@ mod tests {
             "continuity refs are selected and no private pin ref is exposed"
         );
         assert_eq!(selected[0].1, head, "each ref keeps its own object ID");
+    }
+
+    #[test]
+    fn ordinary_push_fences_journal_and_serializes_continuity_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        let remote = root.path().join("remote.git");
+        fs::create_dir(&local).unwrap();
+        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(&local, &["init", "-b", "main"]);
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("state.txt"), "initial\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "initial"]);
+        let first = git(&local, &["rev-parse", "HEAD"]);
+        git(&local, &["update-ref", ALLOCATOR_REF, &first]);
+        git(
+            &local,
+            &[
+                "update-ref",
+                "refs/orna/pins/0123456789abcdef/scratch/row-1",
+                &first,
+            ],
+        );
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&local, &["push", "origin", "main"]);
+        git(
+            &local,
+            &[
+                "push",
+                "origin",
+                &format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}"),
+            ],
+        );
+        fs::write(local.join("state.txt"), "next\n").unwrap();
+        git(&local, &["add", "state.txt"]);
+        git(&local, &["commit", "-m", "next"]);
+
+        let repository = Repository::discover(&local).unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let journal = crate::PublicationJournal::new_with_index_tree(
+            head.clone(),
+            head,
+            index.tree().unwrap().clone(),
+            vec![crate::PublicationJournalEntry::new(
+                crate::ManagedPath::new("state.txt").unwrap(),
+                Some(b"next\n".to_vec()),
+                Some(b"published candidate\n".to_vec()),
+            )],
+        )
+        .unwrap();
+
+        repository.write_publication_journal(&journal).unwrap();
+        assert!(matches!(
+            repository.push_ordinary_with_local_continuity("origin", "main"),
+            Err(FetchError::Repository(RepositoryError::PublicationPending))
+        ));
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), first);
+        repository.clear_publication_journal().unwrap();
+
+        let gate = Arc::new((Barrier::new(2), Barrier::new(2)));
+        *PUSH_LOCK_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate.clone());
+        let local_for_push = local.clone();
+        let push = thread::spawn(move || {
+            Repository::discover(local_for_push)
+                .unwrap()
+                .push_ordinary_with_local_continuity("origin", "main")
+        });
+        gate.0.wait();
+        let journal_write_during_push = repository.write_publication_journal(&journal);
+        gate.1.wait();
+        let push_result = push.join().unwrap();
+        *PUSH_LOCK_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
+        assert!(matches!(
+            journal_write_during_push,
+            Err(RepositoryError::RepositoryBusy)
+        ));
+        push_result.unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/main"]),
+            git(&local, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(git(&remote, &["rev-parse", ALLOCATOR_REF]), first);
+        assert_eq!(
+            Command::new("git")
+                .current_dir(&remote)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/orna/pins/0123456789abcdef/scratch/row-1",
+                ])
+                .status()
+                .unwrap()
+                .code(),
+            Some(1)
+        );
     }
 
     #[test]
