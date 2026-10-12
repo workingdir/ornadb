@@ -1344,12 +1344,29 @@ impl Blob {
         let chunk_limit = self.read_chunk_limit();
         while offset < self.length() {
             let size = (self.length() - offset).min(chunk_limit);
-            let bytes = self.read(offset, size)?;
-            if bytes.len() as u64 != size {
-                return Err(Error::ContentUnavailable);
+            match &self.content {
+                BlobContent::Inline(content) => {
+                    let start = usize::try_from(offset).map_err(|_| Error::Limit)?;
+                    let length = usize::try_from(size).map_err(|_| Error::Limit)?;
+                    let end = start.checked_add(length).ok_or(Error::Limit)?;
+                    let bytes = content
+                        .get(start..end)
+                        .ok_or(Error::ContentDigestMismatch)?;
+                    writer.write_all(bytes).map_err(|_| Error::SinkFailed)?;
+                    digest.update(bytes);
+                }
+                BlobContent::Reference(_) => {
+                    let bytes = self.read(offset, size)?;
+                    if bytes.len() as u64 != size {
+                        return Err(Error::ContentUnavailable);
+                    }
+                    writer.write_all(&bytes).map_err(|_| Error::SinkFailed)?;
+                    digest.update(&bytes);
+                }
+                BlobContent::Descriptor(_) | BlobContent::Commitment => {
+                    return Err(Error::ContentUnavailable);
+                }
             }
-            writer.write_all(&bytes).map_err(|_| Error::SinkFailed)?;
-            digest.update(&bytes);
             offset = offset.checked_add(size).ok_or(Error::Limit)?;
         }
         if digest.finalize()[..] != self.identity.sha256 {
