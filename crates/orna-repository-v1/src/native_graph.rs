@@ -21,7 +21,7 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_value_v1::{BlobMetadata, MediaAnnotation};
+use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor};
 use sha2::{Digest, Sha256};
 
 pub const REPOSITORY_FORMAT: u8 = 3;
@@ -483,6 +483,61 @@ impl NativeGraphContext {
             MAX_FULL_VERIFY_OBJECTS,
             MAX_FULL_METADATA_BYTES,
         )
+    }
+
+    /// Decodes the schema descriptor retained by this graph's sealed row map.
+    /// The caller cannot substitute an OID or bytes from another snapshot.
+    pub(crate) fn read_schema_descriptor(
+        &self,
+        scope: &RepositoryReadScope,
+    ) -> Result<SchemaDescriptor, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let schema_oid = version.schema().schema_oid();
+        let mut objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let node = self.read_native_node(schema_oid, scope, &mut objects)?;
+        let NodeData::Schema {
+            encoded_length,
+            schema_digest,
+            byte_root,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::Schema,
+                actual: node.kind(),
+            });
+        };
+        if schema_digest != self.schema_digest
+            || schema_digest != *version.schema().schema_digest()
+            || encoded_length > MAX_FULL_METADATA_BYTES
+        {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        objects.record_metadata(encoded_length)?;
+        let capacity = usize::try_from(encoded_length)
+            .map_err(|_| GraphError::InvalidLength(encoded_length))?;
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(capacity)
+            .map_err(|_| GraphError::ReadQuotaExceeded)?;
+        self.read_full_index_bytes(
+            &byte_root,
+            encoded_length,
+            None,
+            scope,
+            &mut objects,
+            &mut encoded,
+        )?;
+        if encoded.len() as u64 != encoded_length {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        SchemaDescriptor::decode(&encoded).map_err(|_| GraphError::NonCanonicalData)
     }
 
     /// Cancels every read scope opened from this repository graph context.
@@ -5401,15 +5456,9 @@ pub(crate) fn load_format3_row_map(
     let relation = reader
         .find_ordered_entry(&relation_map, &relations_domain, &relation_key)?
         .ok_or(GraphError::ContextMismatch)?;
-    let (schema_oid, primary_root, secondary_root, row_count) =
+    let (schema_oid, primary_root, _secondary_root, row_count) =
         decode_relation_value(&relation.value, algorithm)?;
-
-    // The current profile does not define a complete secondary-domain tuple
-    // beyond requiring ORP-1 pages. Do not silently admit an unrecognized
-    // index domain against this row root.
-    if secondary_root.is_some() {
-        return Err(GraphError::InvalidDomain);
-    }
+    // The secondary OID is parsed but never dereferenced by primary admission.
 
     let schema_node = reader.read_native_node(&schema_oid)?;
     let NodeData::Schema {
@@ -5423,7 +5472,13 @@ pub(crate) fn load_format3_row_map(
             actual: schema_node.kind(),
         });
     };
-    reader.verify_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+    let schema_bytes = reader.read_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+    let descriptor =
+        SchemaDescriptor::decode(&schema_bytes).map_err(|_| GraphError::NonCanonicalData)?;
+    if schema_relation_id(&descriptor)? != relation_id {
+        return Err(GraphError::ContextMismatch);
+    }
+
 
     let rows_domain = canonical_domain(vec![
         CborValue::Text("rows".to_owned()),
@@ -5461,6 +5516,31 @@ pub(crate) fn load_format3_row_map(
     authority.update(row_count.to_be_bytes());
     crate::row_store::RowMapSnapshot::issue_lazy(version, authority.finalize().into())
         .map_err(|_| GraphError::ContextMismatch)
+}
+
+
+
+
+fn schema_relation_id(schema: &SchemaDescriptor) -> Result<[u8; 16], GraphError> {
+    let relation_key = Raw::Int(1.into());
+    let Raw::Map(fields) = schema.raw() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let relation = fields
+        .iter()
+        .find(|(key, _)| key == &relation_key)
+        .map(|(_, value)| value)
+        .ok_or(GraphError::NonCanonicalData)?;
+    let Raw::Tag(37, relation) = relation else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let Raw::Bytes(bytes) = relation.as_ref() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| GraphError::NonCanonicalData)
 }
 
 fn canonical_domain(fields: Vec<CborValue>) -> Vec<u8> {
@@ -5515,6 +5595,7 @@ impl PinnedNativeGraphReader {
             metadata_bytes: 0,
         }
     }
+
 
     fn validate_map_root(
         &mut self,
@@ -5680,6 +5761,37 @@ impl PinnedNativeGraphReader {
         Ok(output)
     }
 
+
+    fn read_full_byte_index(
+        &mut self,
+        root: &NativeObjectId,
+        expected_length: u64,
+        expected_digest: [u8; 32],
+    ) -> Result<Vec<u8>, GraphError> {
+        if expected_length > MAX_RANGE_METADATA_BYTES {
+            return Err(GraphError::MetadataQuotaExceeded);
+        }
+        let capacity =
+            usize::try_from(expected_length).map_err(|_| GraphError::MetadataQuotaExceeded)?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(capacity)
+            .map_err(|_| GraphError::MetadataQuotaExceeded)?;
+        let mut hasher = Sha256::new();
+        let (length, _) = self.walk_byte_index(
+            root,
+            None,
+            &mut hasher,
+            Some(&mut output),
+            Some(expected_length),
+        )?;
+        let digest: [u8; 32] = hasher.finalize().into();
+        if length != expected_length || digest != expected_digest {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        Ok(output)
+    }
+
     fn verify_full_byte_index(
         &mut self,
         root: &NativeObjectId,
@@ -5687,7 +5799,7 @@ impl PinnedNativeGraphReader {
         expected_digest: [u8; 32],
     ) -> Result<(), GraphError> {
         let mut hasher = Sha256::new();
-        let (length, _) = self.walk_byte_index(root, None, &mut hasher)?;
+        let (length, _) = self.walk_byte_index(root, None, &mut hasher, None, None)?;
         let digest: [u8; 32] = hasher.finalize().into();
         if length != expected_length || digest != expected_digest {
             return Err(GraphError::ContentIdentityMismatch);
@@ -5700,6 +5812,8 @@ impl PinnedNativeGraphReader {
         oid: &NativeObjectId,
         expected_height: Option<u8>,
         hasher: &mut Sha256,
+        mut output: Option<&mut Vec<u8>>,
+        output_limit: Option<u64>,
     ) -> Result<(u64, u8), GraphError> {
         let node = self.read_native_node(oid)?;
         let NodeData::ByteIndex {
@@ -5734,9 +5848,24 @@ impl PinnedNativeGraphReader {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
                 hasher.update(&chunk);
+                if let Some(output) = output.as_deref_mut() {
+                    let next_len = output
+                        .len()
+                        .checked_add(chunk.len())
+                        .ok_or(GraphError::MetadataQuotaExceeded)?;
+                    if output_limit.is_none_or(|limit| next_len as u64 > limit) {
+                        return Err(GraphError::MetadataQuotaExceeded);
+                    }
+                    output.extend_from_slice(&chunk);
+                }
             } else {
-                let (child_length, child_height) =
-                    self.walk_byte_index(&entry.target, Some(height - 1), hasher)?;
+                let (child_length, child_height) = self.walk_byte_index(
+                    &entry.target,
+                    Some(height - 1),
+                    hasher,
+                    output.as_deref_mut(),
+                    output_limit,
+                )?;
                 if child_length != entry.span_length || child_height + 1 != height {
                     return Err(GraphError::InvalidByteIndex);
                 }
@@ -6753,6 +6882,124 @@ mod persisted_orp_tests {
         )
         .expect("issue graph context after verifying fixture schema");
         graph
+    }
+
+    #[test]
+    fn load_format3_row_map_keeps_secondary_root_opaque() {
+        let (directory, graph) = capture_test_context();
+        let version = graph.row_snapshot.version();
+        let relation_id = *version.relation_id();
+        let database_id = *version.database_id();
+        let algorithm = graph.algorithm;
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (
+                Raw::Int(1.into()),
+                Raw::Tag(37, Box::new(Raw::Bytes(relation_id.to_vec()))),
+            ),
+            (Raw::Int(2.into()), Raw::Array(Vec::new())),
+            (Raw::Int(3.into()), Raw::Array(Vec::new())),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid relation schema descriptor");
+        let schema_bytes = descriptor.encode().expect("canonical schema bytes");
+        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_chunk = fixture_git_object(directory.path(), "blob", &schema_bytes);
+        let schema_byte_root = fixture_git_node(
+            directory.path(),
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: schema_bytes.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: schema_bytes.len() as u64,
+                    target: schema_chunk,
+                    chunk_sha256: Some(schema_digest),
+                }],
+            },
+        );
+        let schema_root = fixture_git_node(
+            directory.path(),
+            &NodeData::Schema {
+                encoded_length: schema_bytes.len() as u64,
+                schema_digest,
+                byte_root: schema_byte_root.clone(),
+            },
+        );
+        let primary_root = fixture_git_node(
+            directory.path(),
+            &NodeData::OrderedLeaf {
+                domain: rows_domain(relation_id, schema_digest),
+                entries: Vec::new(),
+            },
+        );
+        // This schema node is distinct from the selected schema and is not a
+        // secondary map. The primary-only loader must leave its OID opaque.
+        let secondary_root = fixture_git_node(
+            directory.path(),
+            &NodeData::Schema {
+                encoded_length: 0,
+                schema_digest,
+                byte_root: schema_byte_root,
+            },
+        );
+
+        let relations_domain = canonical_domain(vec![
+            CborValue::Text("relations".to_owned()),
+            CborValue::Bytes(database_id.to_vec()),
+        ]);
+        let relation_map = fixture_git_node(
+            directory.path(),
+            &NodeData::OrderedLeaf {
+                domain: relations_domain,
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .expect("canonical relation key"),
+                    value: canonical_value_bytes(&CborValue::Array(vec![
+                        CborValue::Bytes(schema_root.as_bytes().to_vec()),
+                        CborValue::Bytes(primary_root.as_bytes().to_vec()),
+                        CborValue::Bytes(secondary_root.as_bytes().to_vec()),
+                        CborValue::Unsigned(0),
+                    ])),
+                }],
+            },
+        );
+        let store_root = fixture_git_node(
+            directory.path(),
+            &NodeData::StoreRoot { relation_map },
+        );
+
+        let loaded = load_format3_row_map(
+            &graph.repository,
+            algorithm,
+            store_root,
+            database_id,
+            graph.snapshot_id,
+            relation_id,
+        )
+        .expect("load the primary map without traversing the secondary root");
+        assert_eq!(loaded.version().primary_root(), &primary_root);
+    }
+
+    #[test]
+    fn schema_relation_identity_is_read_from_descriptor() {
+        let relation_id = [0x42; 16];
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (
+                Raw::Int(1.into()),
+                Raw::Tag(37, Box::new(Raw::Bytes(relation_id.to_vec()))),
+            ),
+            (Raw::Int(2.into()), Raw::Array(Vec::new())),
+            (Raw::Int(3.into()), Raw::Array(Vec::new())),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid relation schema descriptor");
+
+        assert_eq!(
+            schema_relation_id(&descriptor).expect("extract relation identity"),
+            relation_id
+        );
     }
 
     fn fixture_ref_exists(directory: &Path, reference: &str) -> bool {

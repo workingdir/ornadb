@@ -1418,7 +1418,6 @@ dependencies = [
  "orna-syntax-v1",
  "serde",
  "serde_json",
- "wasm-bindgen",
 ]
 
 [[package]]

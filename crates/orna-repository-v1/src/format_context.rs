@@ -8,14 +8,15 @@
 
 use std::{fmt, process::Command, str::FromStr};
 
-use orna_syntax_v1::{Expr, LiteralKind, RecordField, parse_row};
+use orna_syntax_v1::{parse_module, parse_row, Declaration, Expr, LiteralKind, RecordField};
 use sha2::{Digest, Sha256};
 
-use crate::{Repository, RepositoryError};
-use crate::{
-    native_graph::{GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability},
-    row_store::RowMapSnapshot,
+use crate::native_graph::{
+    GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability,
 };
+use crate::row_store::RowMapSnapshot;
+use crate::{Repository, RepositoryError};
+use orna_value_v1::{Raw, SchemaDescriptor};
 
 use super::DatabaseId;
 
@@ -90,6 +91,7 @@ pub enum FormatContextError {
     RowMapMismatch,
     GraphContextUnavailable,
     GraphContextInvalid,
+    TableBindingMismatch,
 }
 
 impl FormatContextError {
@@ -111,6 +113,7 @@ impl FormatContextError {
             Self::RowMapMismatch => "ORNA-REPO-CONTEXT-012",
             Self::GraphContextUnavailable => "ORNA-REPO-CONTEXT-013",
             Self::GraphContextInvalid => "ORNA-REPO-CONTEXT-014",
+            Self::TableBindingMismatch => "ORNA-REPO-CONTEXT-016",
         }
     }
 }
@@ -138,11 +141,95 @@ impl fmt::Display for FormatContextError {
             Self::RowMapMismatch => "row map does not belong to the pinned format-3 context",
             Self::GraphContextUnavailable => "native graph repository data is unavailable",
             Self::GraphContextInvalid => "native graph repository data is invalid",
+            Self::TableBindingMismatch => "table declaration and committed schema binding disagree",
         })
     }
 }
 
 impl std::error::Error for FormatContextError {}
+
+/// Owner-authenticated descriptor binding for one format-3 relation in an
+/// exact repository snapshot. A qualified source identity is retained only
+/// when its module path and unique table declaration are verified against
+/// that pinned snapshot. The descriptor is decoded from the schema object
+/// sealed by `snapshot_id`; its key order, key types, field roles, and field
+/// types must equal the complete expected source descriptor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedTableBinding {
+    snapshot_id: [u8; 32],
+    module_name: Option<String>,
+    source_path: Option<String>,
+    declaration_name: Option<String>,
+    relation_id: [u8; 16],
+    schema_oid: NativeOid,
+    schema_digest: [u8; 32],
+    descriptor: SchemaDescriptor,
+}
+
+impl CommittedTableBinding {
+    pub const fn snapshot_id(&self) -> &[u8; 32] {
+        &self.snapshot_id
+    }
+
+    pub fn declaration_name(&self) -> Option<&str> {
+        self.declaration_name.as_deref()
+    }
+
+    pub fn module_name(&self) -> Option<&str> {
+        self.module_name.as_deref()
+    }
+
+    pub fn source_path(&self) -> Option<&str> {
+        self.source_path.as_deref()
+    }
+
+    pub const fn table_object_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub const fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub fn schema_oid(&self) -> &NativeOid {
+        &self.schema_oid
+    }
+
+    pub const fn schema_digest(&self) -> &[u8; 32] {
+        &self.schema_digest
+    }
+
+    pub fn descriptor(&self) -> &SchemaDescriptor {
+        &self.descriptor
+    }
+}
+
+fn source_module_name(source_path: &str) -> Option<String> {
+    if source_path.starts_with('/') || source_path.contains('\\') || source_path.contains('\0') {
+        return None;
+    }
+    let mut components = source_path.split('/').collect::<Vec<_>>();
+    let file = components.pop()?;
+    let stem = file.strip_suffix(".orna")?;
+    if components.iter().any(|component| {
+        component.is_empty()
+            || *component == "."
+            || *component == ".."
+            || component.contains('.')
+            || component.contains('\0')
+    }) || stem.is_empty()
+        || stem == "."
+        || stem == ".."
+        || stem.contains('.')
+        || stem.contains('\0')
+    {
+        return None;
+    }
+    if stem != "main" {
+        components.push(stem);
+    }
+    Some(components.join("."))
+}
 
 /// An immutable Git snapshot selected through the owning [`Repository`].
 ///
@@ -511,6 +598,134 @@ impl RepositoryFormatContext {
         .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
+    /// Resolves the committed descriptor selected by its authenticated table ID.
+    /// This descriptor is not source-bound until `bind_committed_table`
+    /// verifies the pinned module, declaration and expected source schema.
+    pub fn resolve_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.resolve_committed_relation_descriptor(relation_id)
+    }
+
+    fn resolve_committed_relation_descriptor(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.require_format3()?;
+        let rows = self.load_row_map(relation_id)?;
+        let version = rows.version();
+        if version.relation_id() != &relation_id {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        let graph = self.open_native_graph(&rows)?;
+        let scope = graph
+            .open_read_scope()
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        let descriptor = graph
+            .read_schema_descriptor(&scope)
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        if schema_descriptor_table_id(&descriptor) != Some(relation_id) {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        Ok(CommittedTableBinding {
+            snapshot_id: self.snapshot.snapshot_id(),
+            module_name: None,
+            source_path: None,
+            declaration_name: None,
+            relation_id: *version.relation_id(),
+            schema_oid: version.schema().schema_oid().clone(),
+            schema_digest: *version.schema().schema_digest(),
+            descriptor,
+        })
+    }
+
+    fn validate_committed_source_table(
+        &self,
+        module_name: &str,
+        source_path: &str,
+        declaration_name: &str,
+    ) -> Result<(), FormatContextError> {
+        if source_module_name(source_path).as_deref() != Some(module_name) {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        let source = self
+            .snapshot
+            .read_file(&self.repository, source_path, 64 * 1024)
+            .map_err(|error| match error {
+                RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
+                _ => FormatContextError::SchemaRootInvalid,
+            })?;
+        let source =
+            std::str::from_utf8(&source).map_err(|_| FormatContextError::SchemaRootInvalid)?;
+        let parsed = parse_module(source);
+        let mut declarations =
+            parsed
+                .value
+                .items
+                .iter()
+                .filter_map(|item| match &item.declaration {
+                    Declaration::Table { name, .. } if name == declaration_name => Some(()),
+                    _ => None,
+                });
+        if declarations.next().is_none() || declarations.next().is_some() {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        Ok(())
+    }
+
+    /// Binds a qualified source table and its expected schema to this exact
+    /// committed snapshot. The caller supplies the module namespace and
+    /// repository-relative source path from project analysis; this method
+    /// checks their agreement, declaration uniqueness, table ID, snapshot and
+    /// complete expected descriptor before issuing source-bound authority.
+    pub fn bind_committed_table(
+        &self,
+        module_name: &str,
+        source_path: &str,
+        declaration_name: &str,
+        table_object_id: [u8; 16],
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.require_format3()?;
+        if *expected_snapshot_id != self.snapshot.snapshot_id()
+            || schema_descriptor_table_id(expected_schema) != Some(table_object_id)
+        {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        self.validate_committed_source_table(module_name, source_path, declaration_name)?;
+        let mut binding = self.resolve_committed_table_by_relation_id(table_object_id)?;
+        if binding.descriptor() != expected_schema {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        binding.module_name = Some(module_name.to_owned());
+        binding.source_path = Some(source_path.to_owned());
+        binding.declaration_name = Some(declaration_name.to_owned());
+        Ok(binding)
+    }
+
+    /// Binds resolved schema to the committed descriptor selected by relation
+    /// ID, rejecting any snapshot or descriptor mismatch.
+    pub fn bind_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.require_format3()?;
+        if *expected_snapshot_id != self.snapshot.snapshot_id()
+            || schema_descriptor_table_id(expected_schema) != Some(relation_id)
+        {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        let binding = self.resolve_committed_table_by_relation_id(relation_id)?;
+        if binding.descriptor() != expected_schema {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        Ok(binding)
+    }
+
     /// Reads one committed path's bytes from this context's own pinned
     /// snapshot.
     ///
@@ -611,6 +826,48 @@ impl HistoricalFormatContext {
         relation_id: [u8; 16],
     ) -> Result<RowMapSnapshot, FormatContextError> {
         self.context.load_row_map(relation_id)
+    }
+
+    /// Resolves the committed descriptor selected by relation ID without
+    /// claiming a source binding.
+    pub fn resolve_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context
+            .resolve_committed_table_by_relation_id(relation_id)
+    }
+
+    pub fn bind_committed_table(
+        &self,
+        module_name: &str,
+        source_path: &str,
+        declaration_name: &str,
+        table_object_id: [u8; 16],
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context.bind_committed_table(
+            module_name,
+            source_path,
+            declaration_name,
+            table_object_id,
+            expected_snapshot_id,
+            expected_schema,
+        )
+    }
+
+    pub fn bind_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context.bind_committed_table_by_relation_id(
+            relation_id,
+            expected_snapshot_id,
+            expected_schema,
+        )
     }
 
     /// Issues graph authority bound to this pinned snapshot. Rows, schema and
@@ -1019,6 +1276,26 @@ fn parse_database_id(value: &Expr) -> Result<DatabaseId, FormatContextError> {
     DatabaseId::from_str(text).map_err(|_| FormatContextError::MetadataInvalid)
 }
 
+fn schema_descriptor_table_id(descriptor: &SchemaDescriptor) -> Option<[u8; 16]> {
+    let Raw::Tag(37, value) = schema_descriptor_entry(descriptor, 1)? else {
+        return None;
+    };
+    let Raw::Bytes(bytes) = value.as_ref() else {
+        return None;
+    };
+    bytes.as_slice().try_into().ok()
+}
+
+fn schema_descriptor_entry(descriptor: &SchemaDescriptor, field_number: u8) -> Option<&Raw> {
+    let Raw::Map(fields) = descriptor.raw() else {
+        return None;
+    };
+    let key = Raw::Int(field_number.into());
+    fields
+        .iter()
+        .find_map(|(candidate, value)| (candidate == &key).then_some(value))
+}
+
 /// The one shared bounded Orna-record parser used by repository metadata
 /// initialization and this format-context admission path.
 pub(super) fn parse_record(bytes: &[u8]) -> Result<Vec<RecordField>, ()> {
@@ -1083,19 +1360,20 @@ mod graph_bridge_tests {
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
+    use super::RepositoryFormatContext;
     use crate::{
         Repository,
         native_graph::{
-            ByteIndexEntry, CborValue, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid, NodeData,
-            OrderedBranchEntry, OrderedLeafEntry, RowIndexMutation, decode_canonical_cbor,
+            ByteIndexEntry, CborValue, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid,
+            NodeData, OrderedBranchEntry, OrderedLeafEntry, RowIndexMutation,
+            decode_canonical_cbor,
         },
         row_store::{
             KeyRange, MAX_ROW_RANGE_LIMIT, RowEntry, RowMapSnapshot, RowMapVersion, RowValue,
             SchemaGeneration, TypedKey,
         },
     };
-
-    use super::RepositoryFormatContext;
+    use orna_value_v1::{Raw, SchemaDescriptor};
 
     const DATABASE: &str = include_str!("../tests/fixtures/format-context/database-final.orna");
     const DATABASE_TEMPLATE: &str =
@@ -1190,11 +1468,185 @@ mod graph_bridge_tests {
         );
     }
 
+    #[test]
+    fn committed_table_bindings_pin_imported_source_and_reject_descriptor_mismatch() {
+        let relation_id = [0xa1; 16];
+        let (directory, descriptor) = seeded_table_binding(relation_id);
+        let repository = Repository::discover(directory.path()).expect("discover fixture");
+        let context = repository.open_format_context().expect("admit fixture");
+        let snapshot_id = context.snapshot_pin().snapshot_id();
+
+        let resolved = context
+            .resolve_committed_table_by_relation_id(relation_id)
+            .expect("resolve descriptor by committed relation ID");
+        assert_eq!(resolved.snapshot_id(), &snapshot_id);
+        assert_eq!(resolved.module_name(), None);
+        assert_eq!(resolved.source_path(), None);
+        assert_eq!(resolved.declaration_name(), None);
+        assert_eq!(resolved.table_object_id(), &relation_id);
+        assert_eq!(resolved.descriptor(), &descriptor);
+
+        let binding = context
+            .bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                &snapshot_id,
+                &descriptor,
+            )
+            .expect("bind source analysis to imported committed descriptor");
+        assert_eq!(binding.snapshot_id(), &snapshot_id);
+        assert_eq!(binding.module_name(), Some("media"));
+        assert_eq!(binding.source_path(), Some("media.orna"));
+        assert_eq!(binding.declaration_name(), Some("Audio"));
+        assert_eq!(binding.descriptor(), &descriptor);
+
+        assert_eq!(
+            context.bind_committed_table(
+                "other",
+                "media.orna",
+                "Audio",
+                relation_id,
+                &snapshot_id,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a namespace/path disagreement"
+        );
+        let mut wrong_snapshot = snapshot_id;
+        wrong_snapshot[0] ^= 1;
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                &wrong_snapshot,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a foreign source snapshot"
+        );
+
+        let wrong_descriptor = descriptor_for_table(relation_id, "Str");
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                &snapshot_id,
+                &wrong_descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a differing field type under the same table ID"
+        );
+        let other_id = [0xa2; 16];
+        let wrong_table_descriptor = descriptor_for_table(other_id, "Int");
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                &snapshot_id,
+                &wrong_table_descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects an expected descriptor for another table"
+        );
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Missing",
+                relation_id,
+                &snapshot_id,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a source declaration absent from the imported module"
+        );
+    }
+
     fn context(directory: &Path) -> RepositoryFormatContext {
         Repository::discover(directory)
             .expect("discover fixture repository")
             .open_format_context()
             .expect("admit fixture format context")
+    }
+
+    fn descriptor_for_table(relation_id: [u8; 16], key_type: &str) -> SchemaDescriptor {
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
+        let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
+            Raw::Array(vec![
+                uuid(id),
+                Raw::Text(name.to_owned()),
+                ty,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid(relation_id)),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
+            (
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    field(
+                        [0x11; 16],
+                        "id",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text(key_type.into())]),
+                        0,
+                    ),
+                    field(
+                        [0x22; 16],
+                        "payload",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".into())]),
+                        1,
+                    ),
+                ]),
+            ),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid stored schema descriptor")
+    }
+
+    fn seeded_table_binding(relation_id: [u8; 16]) -> (TempDir, SchemaDescriptor) {
+        let directory = repository();
+        let root = directory.path();
+        let source = include_str!("../tests/fixtures/committed-table-binding.orna");
+        fs::write(root.join("main.orna"), "use media;\n").expect("write importing root module");
+        fs::write(root.join("media.orna"), source).expect("write imported table module");
+        commit(root);
+        let initial = context(root);
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let descriptor = descriptor_for_table(relation_id, "Int");
+        let schema_bytes = descriptor.encode().expect("encode schema descriptor");
+        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            root,
+            algorithm,
+            &schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+        let primary_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: Vec::new(),
+            },
+        );
+        install_rows_store(root, &initial, relation_id, &schema_oid, &primary_root, 0);
+        (directory, descriptor)
     }
 
     fn write_git_object(
@@ -1969,7 +2421,6 @@ mod graph_bridge_tests {
 
     fn commit_store_root(directory: &Path, algorithm: GitHashAlgorithm, store_root: &NativeOid) {
         let database_oid = write_git_object(directory, algorithm, "blob", DATABASE.as_bytes());
-        let main_oid = write_git_object(directory, algorithm, "blob", MAIN_SOURCE.as_bytes());
         let orna_tree_spec = format!(
             "100644 blob {}\tdatabase.orna\n040000 tree {}\tstore\n",
             database_oid.to_hex(),
@@ -1983,11 +2434,13 @@ mod graph_bridge_tests {
                 .trim(),
         )
         .expect("valid .orna tree OID");
-        let root_tree_spec = format!(
-            "040000 tree {}\t.orna\n100644 blob {}\tmain.orna\n",
-            orna_tree_oid.to_hex(),
-            main_oid.to_hex()
-        );
+        let parent_entries = git_output(directory, &["ls-tree", "HEAD"], None);
+        let parent_entries = std::str::from_utf8(&parent_entries).expect("root tree entries UTF-8");
+        let mut root_tree_spec = format!("040000 tree {}\t.orna\n", orna_tree_oid.to_hex());
+        for entry in parent_entries.lines().filter(|entry| !entry.ends_with("\t.orna")) {
+            root_tree_spec.push_str(entry);
+            root_tree_spec.push('\n');
+        }
         let root_tree = git_output(directory, &["mktree"], Some(root_tree_spec.as_bytes()));
         let root_tree_oid = NativeOid::from_hex(
             algorithm,
