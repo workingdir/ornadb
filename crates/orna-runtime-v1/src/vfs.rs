@@ -19,9 +19,9 @@ use uuid::Uuid;
 
 use super::{
     CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, RuntimeActivationContext,
-    RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
-    SafeDiagnostic, TableActivationCandidateValidator, TableActivationError, TableMutation,
-    ValidatedTableActivationCommit, WriterLease,
+    RuntimeError, RuntimeQueryError, RuntimeState, RuntimeTableActivationSnapshot,
+    RuntimeTableIdentity, SafeDiagnostic, TableActivationCandidateValidator, TableActivationError,
+    TableMutation, ValidatedTableActivationCommit, WriterLease,
 };
 use orna_repository_v1::{CwdGeneration, ProtectedContentPin};
 
@@ -518,6 +518,7 @@ struct DraftState<S> {
     candidate: Option<Vec<u8>>,
     revision: u64,
     last_rejection: Option<(u64, SafeDiagnostic)>,
+    last_accepted: Option<(u64, Arc<VfsFileSnapshot<S>>)>,
     retained_invalid: Option<RetainedRejection<S>>,
 }
 
@@ -530,15 +531,25 @@ struct RetainedRejection<S> {
 }
 
 impl<S> DraftState<S> {
-    /// Records one rejection of `revision`, issuing a fresh identity unless the
-    /// same revision was already retained by an earlier rejection.
+    /// Records one terminal rejection of `revision`, issuing a fresh identity
+    /// unless the same revision was already retained.
     fn retain_rejection(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
+        self.last_rejection = Some((revision, diagnostic));
+        self.retain_draft(revision, diagnostic);
+    }
+
+    /// Retains a stale compare-and-swap candidate without caching the outcome.
+    /// A caller may retry these same bytes against a newly captured baseline.
+    fn retain_retryable_conflict(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
+        self.retain_draft(revision, diagnostic);
+    }
+
+    fn retain_draft(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
         let replacement: Arc<[u8]> = Arc::from(
             self.candidate
                 .as_deref()
                 .unwrap_or(self.baseline.bytes.as_ref()),
         );
-        self.last_rejection = Some((revision, diagnostic));
         let id = match self.retained_invalid.as_ref() {
             Some(retained) if retained.draft.revision == revision => retained.id,
             _ => *Uuid::new_v4().as_bytes(),
@@ -1162,6 +1173,7 @@ impl<S> EditDraft<S> {
                 candidate: None,
                 revision: 0,
                 last_rejection: None,
+                last_accepted: None,
                 retained_invalid: None,
             }),
             max_file_bytes,
@@ -1270,6 +1282,13 @@ impl<S> EditDraft<S> {
     {
         let mut state = self.state.lock().await;
         let Some(bytes) = state.candidate.as_ref() else {
+            if let Some((revision, image)) = &state.last_accepted
+                && *revision == state.revision
+            {
+                return Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(
+                    Arc::clone(image),
+                )));
+            }
             return Ok(FsyncOutcome::Unchanged(SnapshotReadHandle::open(
                 Arc::clone(&state.baseline),
             )));
@@ -1294,6 +1313,7 @@ impl<S> EditDraft<S> {
                 let image = Arc::new(VfsFileSnapshot::new(pin, bytes));
                 state.baseline = Arc::clone(&image);
                 state.last_rejection = None;
+                state.last_accepted = Some((revision, Arc::clone(&image)));
                 Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(image)))
             }
             ActivationDecision::Rejected(diagnostic) => {
@@ -2286,6 +2306,7 @@ pub struct VfsDurableSave {
     cwd_generation: CwdGeneration,
     table: RuntimeTableIdentity,
     key: Vec<u8>,
+    expected_baseline_row: Option<Option<Vec<u8>>>,
 }
 
 impl VfsDurableSave {
@@ -2300,7 +2321,15 @@ impl VfsDurableSave {
             cwd_generation,
             table,
             key,
+            expected_baseline_row: None,
         }
+    }
+
+    /// Binds a save to the exact encoded row observed when its edit began.
+    /// `None` means the row was absent; an unconfigured baseline is distinct.
+    pub fn with_expected_baseline_row(mut self, row: Option<Vec<u8>>) -> Self {
+        self.expected_baseline_row = Some(row);
+        self
     }
 
     /// The admitted committed identity of the saved row's relation.
@@ -2346,6 +2375,7 @@ pub struct VfsSaveAdmission<'a, S> {
     context: RuntimeActivationContext,
     save: VfsDurableSave,
     writer: WriterLease,
+    expected_baseline_row: Option<Option<Vec<u8>>>,
     digest: [u8; 32],
     faults: &'a dyn FaultInjector,
     _baseline: std::marker::PhantomData<fn() -> S>,
@@ -2398,11 +2428,13 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
             .map_err(TableActivationError::Runtime)?;
         let context = snapshot.context().clone();
         let digest = context.capture().generation_digest();
+        let expected_baseline_row = save.expected_baseline_row.clone();
         Ok(Self {
             runtime,
             snapshot,
             context,
             save,
+            expected_baseline_row,
             writer,
             digest,
             faults,
@@ -2433,11 +2465,14 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
     /// the candidate before committing, so replaying such a save reports the
     /// accepted outcome instead of committing the same mutation a second time
     /// (VFS-008, VFS-021).
-    pub fn admitted_row(&self) -> Option<&[u8]> {
+    pub fn admitted_row(&self) -> Result<Option<&[u8]>, RuntimeQueryError> {
         self.snapshot
             .query_exact(self.save.table.table(), &self.save.key)
-            .ok()
-            .flatten()
+    }
+    fn expected_baseline_matches(&self, current: Option<&[u8]>) -> Option<bool> {
+        self.expected_baseline_row
+            .as_ref()
+            .map(|expected| current == expected.as_deref())
     }
     fn validate_replacement(
         &self,
@@ -2513,6 +2548,12 @@ pub enum VfsSaveError<E> {
     },
     /// The file holds no candidate bytes to admit (VFS-001).
     NoCandidate,
+    /// The temporary rename route requires an admitted durable baseline.
+    MissingBaseline,
+    /// The temporary file belongs to a different managed destination.
+    WrongDestination,
+    /// The admitted row lookup failed before any candidate commit.
+    AdmissionLookup(RuntimeQueryError),
     /// The runtime refused the activation itself.
     Activation(E),
 }
@@ -2567,6 +2608,15 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 diagnostic,
             });
         }
+        if let Some((accepted_revision, image)) = &draft_state.last_accepted
+            && *accepted_revision == revision
+        {
+            let generation = *self.cache_epoch.generation.lock().await;
+            return Ok(TemporaryRenameOutcome::Applied {
+                generation,
+                handle: SnapshotReadHandle::open(Arc::clone(image)),
+            });
+        }
         let Some(candidate) = draft_state.candidate.clone() else {
             return Err(VfsSaveError::NoCandidate);
         };
@@ -2601,10 +2651,21 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         // that state is idempotent: the accepted image is published again
         // without appending a second mutation or advancing the durable
         // generation twice (VFS-008, VFS-021).
-        let already_durable = candidate
-            .replacement()
-            .value()
-            .is_some_and(|value| admission.admitted_row() == Some(value));
+        let admitted_row = admission
+            .admitted_row()
+            .map_err(VfsSaveError::AdmissionLookup)?;
+        let already_durable = admitted_row == candidate.replacement().value();
+        if admission
+            .expected_baseline_matches(admitted_row)
+            .is_some_and(|matches| !matches && !already_durable)
+        {
+            let diagnostic = stale_baseline_diagnostic();
+            draft_state.retain_retryable_conflict(revision, diagnostic);
+            return Err(VfsSaveError::Stale {
+                generation: *cache_generation,
+                diagnostic,
+            });
+        }
         if !already_durable {
             match admission.commit(candidate).await {
                 Err(TableActivationError::ValidationFailed(diagnostic)) => {
@@ -2635,7 +2696,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             ));
             draft_state.candidate = None;
             draft_state.last_rejection = None;
+            draft_state.retained_invalid = None;
             draft_state.baseline = Arc::clone(&image);
+            draft_state.last_accepted = Some((revision, Arc::clone(&image)));
             destination.image = Arc::clone(&image);
             *cache_generation = next_generation;
             Ok(TemporaryRenameOutcome::Applied {
@@ -2644,15 +2707,59 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             })
         }
     }
+
+    /// Commits a temporary editor replacement through the same durable row
+    /// transaction as a document save. Unlike the cache-only rename route, this
+    /// route requires the exact row value observed when the temporary was made;
+    /// a changed durable row is rejected before activation (VFS-011).
+    pub async fn commit_durable_temporary_rename<A, AFut>(
+        self: &Arc<Self>,
+        scratch: &TemporarySave<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
+    {
+        if !Arc::ptr_eq(self, &scratch.target) {
+            return Err(VfsSaveError::WrongDestination);
+        }
+        if save.expected_baseline_row.is_none() {
+            return Err(VfsSaveError::MissingBaseline);
+        }
+        let mut scratch_state = scratch.state.lock().await;
+        if let Some((generation, handle)) = &scratch_state.applied {
+            return Ok(TemporaryRenameOutcome::Applied {
+                generation: *generation,
+                handle: handle.clone(),
+            });
+        }
+        let outcome = self
+            .commit_durable_document_save(&scratch_state.draft, runtime, save, admit, faults)
+            .await?;
+        if let TemporaryRenameOutcome::Applied { generation, handle } = &outcome {
+            scratch_state.applied = Some((*generation, handle.clone()));
+        }
+        Ok(outcome)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        RuntimeIdentity, RuntimeState, RuntimeTableRows, TableActivationCandidateValidator,
+        TableObjectId,
+    };
+    use orna_repository_v1::{Repository, RuntimeGeneration};
     use std::sync::{
         Mutex as TestMutex,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::{collections::BTreeMap, process::Command};
 
     fn fixture_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/publication-repository-main.orna");
@@ -3279,6 +3386,24 @@ mod tests {
         assert_eq!(*new_handle.pin().snapshot(), 8);
         assert_eq!(*old_handle.pin().snapshot(), 7);
         assert_ne!(old_handle.read_at(0, 1), new_handle.read_at(0, 1));
+        let repeated_calls = AtomicUsize::new(0);
+        let repeated = draft
+            .fsync_with(|_| {
+                repeated_calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                        Arc::new(9),
+                    )))
+                }
+            })
+            .await
+            .unwrap();
+        let FsyncOutcome::Accepted(repeated_handle) = repeated else {
+            panic!("repeated sync must return its accepted outcome");
+        };
+        assert_eq!(repeated_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(*repeated_handle.pin().snapshot(), 8);
+        assert_eq!(repeated_handle.read_at(0, 1), [0x58]);
 
         let calls = AtomicUsize::new(0);
         let draft = EditDraft::open(fixture_image(), 1 << 20);
@@ -3512,10 +3637,7 @@ mod tests {
         let TemporaryRenameOutcome::Stale { diagnostic } = stale_outcome else {
             panic!("a draft over a replaced image must be stale");
         };
-        let stale_diagnostic = SafeDiagnostic {
-            code: DiagnosticCode::ExecutionRejected,
-            class: DiagnosticClass::Transient,
-        };
+        let stale_diagnostic = stale_baseline_diagnostic();
         assert_eq!(diagnostic, stale_diagnostic);
         assert_eq!(row_store.transaction_count(), before_stale_commits);
         assert_eq!(row_store.accepted(), row_text);
@@ -3977,6 +4099,270 @@ mod tests {
         assert_eq!(
             target.open_read().await.read_at(0, draft_bytes.len()),
             draft_bytes.as_bytes()
+        );
+    }
+
+    struct DurableRenameValidator {
+        table: String,
+        object_id: TableObjectId,
+        accepted: Vec<u8>,
+        cwd_generation: CwdGeneration,
+    }
+
+    impl TableActivationCandidateValidator for DurableRenameValidator {
+        fn tables(&self) -> &[String] {
+            std::slice::from_ref(&self.table)
+        }
+
+        fn table_object_ids(&self) -> BTreeMap<String, TableObjectId> {
+            BTreeMap::from([(self.table.clone(), self.object_id)])
+        }
+
+        fn cwd_generation(&self) -> &CwdGeneration {
+            &self.cwd_generation
+        }
+
+        fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+            let accepted = rows
+                .get(&self.table)
+                .and_then(|rows| rows.first())
+                .map(|(_, value)| value.as_slice());
+            if accepted == Some(self.accepted.as_slice()) {
+                Ok(())
+            } else {
+                Err(rejected())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_temporary_rename_commits_and_refuses_changed_row_baseline() {
+        let temp = tempfile::TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init"])
+                .current_dir(temp.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repo = Repository::discover(temp.path()).unwrap();
+        let cwd_generation = repo.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        let state = RuntimeState::open(
+            &repo,
+            RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            [3; 32],
+        )
+        .await
+        .unwrap();
+        let identity = RuntimeTableIdentity::new("books", TableObjectId::new([11; 16])).unwrap();
+        let key = vec![1];
+        let target = VfsRepositoryCache::new()
+            .managed_file(Arc::new(VfsFileSnapshot::new(
+                SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(b"original".as_slice()),
+            )))
+            .await
+            .unwrap();
+        let accepted_for_admit =
+            include_bytes!("../tests/fixtures/vfs-row-music-london.orna").to_vec();
+        let stale_fixture =
+            include_bytes!("../tests/fixtures/publication-repository-main.orna").to_vec();
+        let cwd_for_admit = cwd_generation.clone();
+        let accepted_baseline = accepted_for_admit.clone();
+        let stale_for_validation = stale_fixture.clone();
+        let scratch = target.begin_temporary_replacement(1 << 20).await;
+        scratch.write_at(0, &accepted_for_admit).await.unwrap();
+        let save = VfsDurableSave::new(
+            [4; 16],
+            cwd_generation.clone(),
+            identity.clone(),
+            key.clone(),
+        )
+        .with_expected_baseline_row(None);
+        let identity_for_admit = identity.clone();
+        let applied = target
+            .commit_durable_temporary_rename(
+                &scratch,
+                &state,
+                save,
+                move |coordinates, bytes| async move {
+                    let replacement = VfsTableRowReplacement::new(
+                        [7; 16],
+                        identity_for_admit.clone(),
+                        coordinates.key().to_vec(),
+                        Some(bytes.to_vec()),
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    Ok(VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(DurableRenameValidator {
+                            table: identity_for_admit.table().to_owned(),
+                            object_id: identity_for_admit.object_id(),
+                            accepted: accepted_for_admit.clone(),
+                            cwd_generation: cwd_for_admit.clone(),
+                        }),
+                    ))
+                },
+                &crate::NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(state.pending().await.unwrap().len(), 1);
+        let replay = target
+            .commit_durable_temporary_rename(
+                &scratch,
+                &state,
+                VfsDurableSave::new(
+                    [4; 16],
+                    cwd_generation.clone(),
+                    identity.clone(),
+                    key.clone(),
+                )
+                .with_expected_baseline_row(None),
+                |_, _| async { panic!("an accepted temp rename must replay its outcome") },
+                &crate::NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            replay,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(state.pending().await.unwrap().len(), 1);
+
+        let stale_scratch = target.begin_temporary_replacement(1 << 20).await;
+        stale_scratch.write_at(0, &stale_fixture).await.unwrap();
+        let stale_identity = identity.clone();
+        let cwd_for_stale = cwd_generation.clone();
+        let stale = target
+            .commit_durable_temporary_rename(
+                &stale_scratch,
+                &state,
+                VfsDurableSave::new(
+                    [4; 16],
+                    cwd_generation.clone(),
+                    identity.clone(),
+                    key.clone(),
+                )
+                .with_expected_baseline_row(Some(b"not-current".to_vec())),
+                move |coordinates, bytes| async move {
+                    let replacement = VfsTableRowReplacement::new(
+                        [8; 16],
+                        stale_identity.clone(),
+                        coordinates.key().to_vec(),
+                        Some(bytes.to_vec()),
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    Ok(VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(DurableRenameValidator {
+                            table: stale_identity.table().to_owned(),
+                            object_id: stale_identity.object_id(),
+                            accepted: stale_for_validation,
+                            cwd_generation: cwd_for_stale.clone(),
+                        }),
+                    ))
+                },
+                &crate::NoFault,
+            )
+            .await;
+        let Err(VfsSaveError::Stale { diagnostic, .. }) = stale else {
+            panic!("a temp rename over a changed durable row must be stale");
+        };
+        assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
+        assert_eq!(
+            stale_scratch.candidate_bytes().await.as_ref(),
+            stale_fixture
+        );
+        assert_eq!(state.pending().await.unwrap().len(), 1);
+        let retry_identity = identity.clone();
+        let retry_fixture = stale_fixture.clone();
+        let cwd_for_retry = cwd_generation.clone();
+        let retried = target
+            .commit_durable_temporary_rename(
+                &stale_scratch,
+                &state,
+                VfsDurableSave::new(
+                    [4; 16],
+                    cwd_generation.clone(),
+                    identity.clone(),
+                    key.clone(),
+                )
+                .with_expected_baseline_row(Some(accepted_baseline.clone())),
+                move |coordinates, bytes| async move {
+                    let replacement = VfsTableRowReplacement::new(
+                        [9; 16],
+                        retry_identity.clone(),
+                        coordinates.key().to_vec(),
+                        Some(bytes.to_vec()),
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    Ok(VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(DurableRenameValidator {
+                            table: retry_identity.table().to_owned(),
+                            object_id: retry_identity.object_id(),
+                            accepted: retry_fixture,
+                            cwd_generation: cwd_for_retry.clone(),
+                        }),
+                    ))
+                },
+                &crate::NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            retried,
+            TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(state.pending().await.unwrap().len(), 2);
+
+        let mut failed_lookup = VfsSaveAdmission::<u64>::begin(
+            &state,
+            VfsDurableSave::new(
+                [4; 16],
+                cwd_generation.clone(),
+                identity.clone(),
+                key.clone(),
+            ),
+            &crate::NoFault,
+        )
+        .await
+        .unwrap();
+        failed_lookup.snapshot.table_rows.clear();
+        assert_eq!(
+            failed_lookup.admitted_row(),
+            Err(RuntimeQueryError::TableNotAdmitted),
+            "an unverifiable admitted row must remain a lookup error, not an absent row"
+        );
+        drop(failed_lookup);
+
+        drop(state);
+        let reopened = RuntimeState::open(
+            &repo,
+            RuntimeIdentity {
+                database_id: [1; 16],
+                repository_id: [2; 16],
+            },
+            [3; 32],
+        )
+        .await
+        .unwrap();
+        let snapshot = reopened
+            .begin_admitted_table_activation(std::slice::from_ref(&identity))
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.query_exact(identity.table(), &key).unwrap(),
+            Some(stale_fixture.as_slice())
         );
     }
 }
