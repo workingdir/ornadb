@@ -552,6 +552,21 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
         "the newest listed revision is HEAD {head}"
     );
 
+    // Make ordinary Git walks substitute the pre-publication commit. The
+    // exporter must still archive the pinned publication's actual row/blob graph.
+    let replacement_ref = format!("refs/replace/{publication}");
+    git(project, &["update-ref", &replacement_ref, &parent]);
+    let publication_store = format!("{publication}:.orna/store");
+    let parent_store = format!("{parent}:.orna/store");
+    assert_eq!(
+        String::from_utf8(git_output(project, &["rev-parse", &publication_store], None))
+            .unwrap()
+            .trim(),
+        String::from_utf8(git_output(project, &["rev-parse", &parent_store], None))
+            .unwrap()
+            .trim(),
+        "the fixture's replace ref redirects ordinary Git walks to the empty parent"
+    );
     // Step 3: freeze that publication and reconstruct it somewhere else.
     let outside = TempDir::new().unwrap();
     let archive = outside.path().join("publication-archive");
