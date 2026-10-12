@@ -201,7 +201,7 @@ async fn recover_pending_publication(
     for mutation in &mutations {
         if !mutation
             .table_object_id()
-            .is_some_and(|object_id| object_id.bytes() == &table_id)
+            .is_some_and(|object_id| object_id.bytes() == table_id)
         {
             return Err(publish_error(
                 "compact publication table identity does not match its journal",
