@@ -344,6 +344,7 @@ impl Repository {
         let request = PushRequest::new(remote, branch, continuity)?;
         self.push_locked_at(&request, &branch_head)
     }
+}
 
 /// A push request whose Orna continuity refs are sent before the ordinary
 /// branch ref. The allocator ref, when present, is sent first so a later
