@@ -96,6 +96,28 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
         "prepared or recovered format-3 migration copy: source_format=1 source_commit="
     ));
 
+    let candidate = String::from_utf8(git_output(
+        &destination,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/orna/migration-candidates/",
+        ],
+    ))
+    .unwrap();
+    let candidate = candidate.trim();
+    assert!(
+        !candidate.is_empty(),
+        "the copy pins its prepared candidate"
+    );
+    assert_eq!(
+        git_output(
+            &destination,
+            &["show", "-s", "--format=%an <%ae>", candidate],
+        ),
+        b"Orna migration <migration@orna.invalid>\n",
+        "the migration commit identity is deterministic, not inherited from the host"
+    );
     let retry = run_copy(&source, &destination, "0", &git_trace);
     assert!(
         retry.status.success(),
