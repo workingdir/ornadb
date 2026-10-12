@@ -91,6 +91,12 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
     git_output(source.path(), &["add", "tracked.txt"]);
     fs::write(source.path().join("tracked.txt"), b"unstaged bytes\n").unwrap();
     fs::write(source.path().join("new-source.txt"), b"untracked source\n").unwrap();
+    fs::write(
+        source.path().join("intent-to-add.txt"),
+        b"intent-to-add bytes\n",
+    )
+    .unwrap();
+    git_output(source.path(), &["add", "-N", "intent-to-add.txt"]);
     fs::write(source.path().join("new-executable.sh"), b"#!/bin/sh\n").unwrap();
     #[cfg(unix)]
     {
@@ -131,6 +137,25 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
         source.path(),
         &["show", &format!("{source_head}:tracked.txt")],
     );
+    let intent_to_add_index = git_output(
+        source.path(),
+        &["ls-files", "--stage", "--", "intent-to-add.txt"],
+    );
+    let intent_to_add_fields = String::from_utf8(intent_to_add_index.clone()).unwrap();
+    let intent_to_add_fields = intent_to_add_fields
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>();
+    assert_eq!(intent_to_add_fields.len(), 4);
+    assert_eq!(intent_to_add_fields[0], "100644");
+    let source_status_text = String::from_utf8(source_status.clone()).unwrap();
+    assert!(
+        source_status_text
+            .lines()
+            .any(|line| line.starts_with("1 .A ") && line.ends_with(" intent-to-add.txt")),
+        "git add -N must remain an intent-to-add worktree change: {source_status_text:?}"
+    );
+    assert_eq!(intent_to_add_fields[2], "0");
+    assert_eq!(intent_to_add_fields[3], "intent-to-add.txt");
     let destination_parent = TempDir::new().unwrap();
     let destination = destination_parent.path().join("migrated");
     let defaults = MigrationAnnotationDefaults::new(1).unwrap();
@@ -168,6 +193,18 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
         ),
         source_status,
         "migration preparation leaves every staged, unstaged and untracked source change intact"
+    );
+    assert_eq!(
+        git_output(
+            source.path(),
+            &["ls-files", "--stage", "--", "intent-to-add.txt"],
+        ),
+        intent_to_add_index,
+        "preparing the copy leaves the source intent-to-add entry unchanged"
+    );
+    assert_eq!(
+        fs::read(source.path().join("intent-to-add.txt")).unwrap(),
+        b"intent-to-add bytes\n"
     );
     assert_eq!(
         git_output(source.path(), &["show", ":tracked.txt"]),
@@ -209,8 +246,21 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
     );
     assert_eq!(
         git_output(copy.destination(), &["show", ":tracked.txt"]),
-        b"committed bytes\n",
-        "the copy's settled index is the source commit, not a dirty worktree"
+        b"staged bytes\n",
+        "the copy preserves the staged source blob separately from the worktree"
+    );
+    assert_eq!(
+        git_output(
+            copy.destination(),
+            &["ls-files", "--stage", "--", "intent-to-add.txt"],
+        ),
+        intent_to_add_index,
+        "the copy retains the intent-to-add index entry"
+    );
+    assert_eq!(
+        fs::read(copy.destination().join("intent-to-add.txt")).unwrap(),
+        b"intent-to-add bytes\n",
+        "the intent-to-add worktree bytes are copied separately"
     );
     assert_eq!(copy.source_index_generation(), &source_index);
     assert_eq!(
