@@ -15,16 +15,16 @@ use std::{
 use orna_repository_v1::{
     ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, RepositoryCaptureCapability,
 };
-use orna_value_v1::MimeRegistry;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{
-    CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, RuntimeActivationContext,
-    RuntimeError, RuntimeQueryError, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, SafeDiagnostic, TableActivationCandidateValidator, TableActivationError,
-    TableMutation, ValidatedTableActivationCommit, WriterLease,
+    CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, ProtectedContentTransferEvidence,
+    RuntimeActivationContext, RuntimeError, RuntimeQueryError, RuntimeState,
+    RuntimeTableActivationSnapshot, RuntimeTableIdentity, SafeDiagnostic,
+    TableActivationCandidateValidator, TableActivationError, TableMutation,
+    ValidatedTableActivationCommit, WriterLease,
 };
 use orna_repository_v1::{CwdGeneration, ProtectedContentPin};
 
@@ -207,7 +207,7 @@ impl VfsRepositoryCache {
     ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
     where
         S: Send + Sync + 'static,
-        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, Arc<[u8]>) -> AFut,
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, OrpBlobBinding) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
         if !Arc::ptr_eq(&target.cache_epoch.generation, &self.epoch.generation) {
@@ -2270,10 +2270,8 @@ fn render_field_name(name: &str) -> Result<String, VfsPathError> {
 /// activation boundary. The table identity is repository-issued admission
 /// metadata; host paths never supply or override it.
 pub struct VfsTableRowReplacement {
-    mutation_id: [u8; 16],
+    mutation: TableMutation,
     table: RuntimeTableIdentity,
-    key: Vec<u8>,
-    value: Option<Vec<u8>>,
     content_pins: Vec<ProtectedContentPin>,
 }
 
@@ -2284,14 +2282,43 @@ impl VfsTableRowReplacement {
         key: Vec<u8>,
         value: Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
-        let mutation = TableMutation::new(mutation_id, table.table(), key.clone(), value.clone())?
+        let mutation = TableMutation::new(mutation_id, table.table(), key, value)?
             .with_table_object_id(table.object_id());
         Ok(Self {
-            mutation_id: mutation.id(),
+            mutation,
             table,
-            key: mutation.key().to_vec(),
-            value,
             content_pins: Vec::new(),
+        })
+    }
+
+    /// Wraps a complete source-admitted row mutation without reconstructing
+    /// its canonical typed fields or discarding its field-bound pin evidence.
+    /// The owned pins must exactly match the transfer records already retained
+    /// by the mutation, in field order.
+    pub fn from_admitted_mutation(
+        table: RuntimeTableIdentity,
+        mutation: TableMutation,
+        content_pins: Vec<ProtectedContentPin>,
+    ) -> Result<Self, RuntimeError> {
+        if mutation.table() != table.table()
+            || mutation.table_object_id() != Some(table.object_id())
+            || mutation.value().is_none()
+            || mutation.is_insert()
+            || mutation.rekey_to().is_some()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let transfers = content_pins
+            .iter()
+            .map(|pin| ProtectedContentTransferEvidence::from_transfer(&pin.transfer_record()))
+            .collect::<Vec<_>>();
+        if transfers.as_slice() != mutation.protected_content_transfers() {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        Ok(Self {
+            mutation,
+            table,
+            content_pins,
         })
     }
 
@@ -2310,11 +2337,11 @@ impl VfsTableRowReplacement {
     }
 
     pub fn key(&self) -> &[u8] {
-        &self.key
+        self.mutation.key()
     }
 
     pub fn value(&self) -> Option<&[u8]> {
-        self.value.as_deref()
+        self.mutation.value()
     }
 
     /// Carries graph-issued native content pins with the saved row so the
@@ -2324,24 +2351,13 @@ impl VfsTableRowReplacement {
         mut self,
         pin: ProtectedContentPin,
     ) -> Result<Self, RuntimeError> {
+        self.mutation = self.mutation.with_protected_content_pin(&pin)?;
         self.content_pins.push(pin);
-        self.mutation()?;
         Ok(self)
     }
 
     pub fn mutation(&self) -> Result<TableMutation, RuntimeError> {
-        let mutation = TableMutation::new(
-            self.mutation_id,
-            self.table.table(),
-            self.key.clone(),
-            self.value.clone(),
-        )
-        .map(|mutation| mutation.with_table_object_id(self.table.object_id()))?;
-        self.content_pins
-            .iter()
-            .try_fold(mutation, |mutation, pin| {
-                mutation.with_protected_content_pin(pin)
-            })
+        Ok(self.mutation.clone())
     }
 }
 
@@ -2561,10 +2577,12 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
             mut validator,
         } = candidate;
         self.validate_replacement(&replacement)?;
-        let mutation = replacement
-            .mutation()
-            .map_err(TableActivationError::Runtime)?;
-        let mut content_pins = replacement.content_pins;
+        let VfsTableRowReplacement {
+            mutation,
+            content_pins,
+            ..
+        } = replacement;
+        let mut content_pins = content_pins;
         commit_vfs_table_activation(
             self.runtime,
             ValidatedTableActivationCommit {
@@ -2620,11 +2638,8 @@ fn capture_vfs_blob_replacement(
     if actual != expected {
         return Err(VfsBlobReplacementError::IdentityMismatch { expected, actual });
     }
-    let annotation = MimeRegistry::mime1()
-        .canonical_annotation(media_type, suffix)
-        .map_err(|_| VfsBlobReplacementError::Capture(GraphError::InvalidBlobAnnotation))?;
     capture
-        .accept_captured_blob(candidate, annotation.media_type(), annotation.suffix())
+        .accept_captured_blob(candidate, media_type, suffix)
         .map_err(VfsBlobReplacementError::Capture)
 }
 /// Why a durable save was not admitted. Every variant is decided before the
@@ -2706,9 +2721,12 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         .await
     }
 
-    /// Captures replacement bytes as a protected ORP Blob and admits the row
-    /// through the exact same revision-checked transaction as document saves.
-    /// `admit` must encode the supplied canonical Blob value into the row.
+    /// Captures replacement bytes as a protected ORP Blob and admits the full
+    /// typed row through the same revision-checked transaction as document
+    /// saves. The caller receives the graph-issued binding so source admission
+    /// can bind its canonical Blob field and pin into one row mutation.
+    /// `media_type` and `suffix` must already be canonical MIME-1 annotation
+    /// values, as issued by the source schema.
     pub async fn commit_durable_temporary_blob_rename<A, AFut>(
         self: &Arc<Self>,
         scratch: &TemporarySave<S>,
@@ -2722,7 +2740,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         faults: &dyn FaultInjector,
     ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
     where
-        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, Arc<[u8]>) -> AFut,
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, OrpBlobBinding) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
         let result = self
@@ -2739,18 +2757,10 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                         suffix,
                     )
                     .map_err(VfsSaveAdmissionError::BlobCapture)?;
-                    let encoded_value: Arc<[u8]> = Arc::from(binding.encoded_value());
-                    let pin = binding.into_pin();
-                    let candidate = admit(coordinates, bytes, encoded_value)
+                    let candidate = admit(coordinates, bytes, binding)
                         .await
                         .map_err(VfsSaveAdmissionError::Activation)?;
-                    let replacement = candidate
-                        .replacement
-                        .with_protected_content_pin(pin)
-                        .map_err(|error| {
-                            VfsSaveAdmissionError::Activation(TableActivationError::Runtime(error))
-                        })?;
-                    Ok(VfsSaveCandidate::new(replacement, candidate.validator))
+                    Ok(candidate)
                 },
                 faults,
             )
@@ -3005,7 +3015,7 @@ mod tests {
         RuntimeIdentity, RuntimeState, RuntimeTableRows, TableActivationCandidateValidator,
         TableObjectId,
     };
-    use orna_repository_v1::{Repository, RuntimeGeneration};
+    use orna_repository_v1::{ProtectedContentTransfer, Repository, RuntimeGeneration};
     use std::sync::{
         Mutex as TestMutex,
         atomic::{AtomicUsize, Ordering},
@@ -4572,6 +4582,7 @@ mod tests {
         table: String,
         object_id: TableObjectId,
         accepted: Vec<u8>,
+        expected_content_transfer: Option<ProtectedContentTransferEvidence>,
         cwd_generation: CwdGeneration,
     }
 
@@ -4597,6 +4608,21 @@ mod tests {
                 Ok(())
             } else {
                 Err(rejected())
+            }
+        }
+
+        fn validate_content_pins(
+            &mut self,
+            _: &RuntimeTableRows,
+            transfers: &[ProtectedContentTransfer],
+        ) -> bool {
+            match &self.expected_content_transfer {
+                Some(expected) => {
+                    transfers.len() == 1
+                        && ProtectedContentTransferEvidence::from_transfer(&transfers[0])
+                            == *expected
+                }
+                None => transfers.is_empty(),
             }
         }
     }
@@ -4670,6 +4696,7 @@ mod tests {
                             table: identity_for_admit.table().to_owned(),
                             object_id: identity_for_admit.object_id(),
                             accepted: accepted_for_validation.clone(),
+                            expected_content_transfer: None,
                             cwd_generation: cwd_for_admit.clone(),
                         }),
                     ))
@@ -4741,6 +4768,7 @@ mod tests {
                             table: identical_identity.table().to_owned(),
                             object_id: identical_identity.object_id(),
                             accepted: identical_bytes,
+                            expected_content_transfer: None,
                             cwd_generation: cwd_for_identical,
                         }),
                     ))
@@ -4787,6 +4815,7 @@ mod tests {
                             table: stale_identity.table().to_owned(),
                             object_id: stale_identity.object_id(),
                             accepted: stale_for_validation,
+                            expected_content_transfer: None,
                             cwd_generation: cwd_for_stale.clone(),
                         }),
                     ))
@@ -4831,6 +4860,7 @@ mod tests {
                             table: retry_identity.table().to_owned(),
                             object_id: retry_identity.object_id(),
                             accepted: retry_fixture,
+                            expected_content_transfer: None,
                             cwd_generation: cwd_for_retry.clone(),
                         }),
                     ))
@@ -4956,6 +4986,7 @@ mod tests {
         .unwrap();
         let owner_id = [0x63; 16];
         let table = RuntimeTableIdentity::new("media", TableObjectId::new(relation_id)).unwrap();
+        let table_for_checks = table.clone();
         let key = b"image".to_vec();
         let cwd_generation = repo.cwd_generation(RuntimeGeneration::new(0)).unwrap();
         let pins_before = test_git_output(
@@ -4968,10 +4999,15 @@ mod tests {
             old_bytes,
             "scratch flush leaves new opens on the accepted image"
         );
+        let initial_rows = state
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
         assert_eq!(
-            state.committed_table_row("media", &key).await.unwrap(),
-            None,
-            "scratch flush does not admit a row mutation"
+            initial_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
+            None
         );
         assert!(state.pending().await.unwrap().is_empty());
 
@@ -5006,8 +5042,14 @@ mod tests {
             scratch.candidate_bytes().await.as_ref(),
             replacement_bytes.as_slice()
         );
+        let rejected_rows = state
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
         assert_eq!(
-            state.committed_table_row("media", &key).await.unwrap(),
+            rejected_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
             None
         );
         assert!(state.pending().await.unwrap().is_empty());
@@ -5052,16 +5094,21 @@ mod tests {
                 &capture,
                 expected_identity,
                 "image/png",
-                Some("png"),
+                None,
                 move |coordinates, _, encoded_blob| async move {
+                    let expected_content_transfer = ProtectedContentTransferEvidence::from_transfer(
+                        &encoded_blob.transfer_record(),
+                    );
                     let mut row_value = vec![0x81];
-                    row_value.extend_from_slice(&encoded_blob);
+                    row_value.extend_from_slice(encoded_blob.encoded_value());
                     let replacement = VfsTableRowReplacement::new(
                         [0x64; 16],
                         stale_table,
                         coordinates.key().to_vec(),
                         Some(row_value.clone()),
                     )
+                    .map_err(TableActivationError::Runtime)?
+                    .with_protected_content_pin(encoded_blob.into_pin())
                     .map_err(TableActivationError::Runtime)?;
                     Ok(VfsSaveCandidate::new(
                         replacement,
@@ -5069,6 +5116,7 @@ mod tests {
                             table: stale_table_name,
                             object_id: stale_object_id,
                             accepted: row_value,
+                            expected_content_transfer: Some(expected_content_transfer),
                             cwd_generation: stale_cwd_generation,
                         }),
                     ))
@@ -5082,8 +5130,14 @@ mod tests {
             Ok(_) => panic!("stale Blob temp rename must retain its retryable candidate"),
         };
         assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
+        let stale_rows = state
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
         assert_eq!(
-            state.committed_table_row("media", &key).await.unwrap(),
+            stale_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
             None
         );
         assert!(state.pending().await.unwrap().is_empty());
@@ -5124,7 +5178,7 @@ mod tests {
                 &capture,
                 expected_identity,
                 "image/png",
-                Some("png"),
+                None,
                 move |coordinates, _, encoded_blob| async move {
                     assert_eq!(cache_for_admit.generation().await, 0);
                     assert_eq!(
@@ -5171,8 +5225,11 @@ mod tests {
                             RuntimeError::AdminBusy
                         )))
                     ));
+                    let expected_content_transfer = ProtectedContentTransferEvidence::from_transfer(
+                        &encoded_blob.transfer_record(),
+                    );
                     let mut row_value = vec![0x81];
-                    row_value.extend_from_slice(&encoded_blob);
+                    row_value.extend_from_slice(encoded_blob.encoded_value());
                     *encoded_row_for_admit.lock().unwrap() = Some(row_value.clone());
                     let replacement = VfsTableRowReplacement::new(
                         [0x65; 16],
@@ -5180,6 +5237,8 @@ mod tests {
                         coordinates.key().to_vec(),
                         Some(row_value.clone()),
                     )
+                    .map_err(TableActivationError::Runtime)?
+                    .with_protected_content_pin(encoded_blob.into_pin())
                     .map_err(TableActivationError::Runtime)?;
                     Ok(VfsSaveCandidate::new(
                         replacement,
@@ -5187,6 +5246,7 @@ mod tests {
                             table: save_table_name,
                             object_id: save_object_id,
                             accepted: row_value,
+                            expected_content_transfer: Some(expected_content_transfer),
                             cwd_generation: save_cwd_generation,
                         }),
                     ))
@@ -5211,9 +5271,15 @@ mod tests {
         let encoded_row = encoded_row.lock().unwrap().clone().unwrap();
         assert_eq!(encoded_row.first(), Some(&0x81));
         assert_eq!(&encoded_row[1..4], &[0xd9, 0xea, 0xcf]);
+        let committed_rows = state
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
         assert_eq!(
-            state.committed_table_row("media", &key).await.unwrap(),
-            Some(encoded_row.clone())
+            committed_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
+            Some(encoded_row.as_slice())
         );
         let pending = state.pending().await.unwrap();
         let transfers = TableMutation::decode(pending.last().unwrap())
@@ -5237,9 +5303,15 @@ mod tests {
         let reopened = RuntimeState::open(&repo, runtime_identity, [0x62; 32])
             .await
             .unwrap();
+        let reopened_rows = reopened
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
         assert_eq!(
-            reopened.committed_table_row("media", &key).await.unwrap(),
-            Some(encoded_row)
+            reopened_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
+            Some(encoded_row.as_slice())
         );
         let reopened_pending = reopened.pending().await.unwrap();
         assert_eq!(
