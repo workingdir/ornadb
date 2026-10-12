@@ -24,8 +24,8 @@ use orna_syntax_v1::{
 };
 use orna_value_v1::{
     CANONICAL_NAN_BITS, ContextValue, Error as ValueError, ErrorValue as CanonicalErrorValue,
-    OVB2_BLOB_TAG, Raw, ValueFormat, domain_digest, float_max, float_min, float_ordinary_eq,
-    float_total_cmp,
+    Format3Context, OVB2_BLOB_TAG, ROV3_BLOB_TAG, SOV3_BLOB_TAG, Raw, ValueFormat,
+    domain_digest, float_max, float_min, float_ordinary_eq, float_total_cmp,
 };
 use serde::{
     Deserialize,
@@ -955,6 +955,22 @@ pub trait Ovb2EffectHandler {
         self.handle_with_budget(callee, arguments, budget)
     }
 
+    /// Selects the ContextValue profile used by context-aware named invocation.
+    /// Existing OVB-2 handlers keep their original default profile.
+    fn value_format(&self) -> ValueFormat {
+        ValueFormat::Ovb2
+    }
+
+    /// Supplies the capability context for ROV-3/SOV-3 values.
+    fn value_context(&self) -> Option<&Format3Context> {
+        None
+    }
+
+    /// Whether this binding accepts formats beyond OVB-2.
+    fn accepts_context_values(&self) -> bool {
+        false
+    }
+
     /// Handle a registered operation while retaining the live cancellation
     /// request for host operations that can stop promptly.
     fn handle_registered_with_cancellation_and_budget(
@@ -988,6 +1004,112 @@ impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
 
     fn ovb2_binding(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
         Some(self.handler)
+    }
+}
+
+/// Effect boundary for named source invocation with preserved ContextValues.
+/// Values passed to a handler retain their source profile and capability
+/// context, including nested format-3 Blob pins.
+pub trait ContextValueEffectHandler {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+    ) -> Result<Option<ContextValue>, EvaluationError>;
+
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        _budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle(callee, arguments)
+    }
+
+    fn handle_registered_with_budget(
+        &mut self,
+        _operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle_with_budget(callee, arguments, budget)
+    }
+
+    fn handle_registered_with_cancellation_and_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle_registered_with_budget(operation, callee, arguments, budget)
+    }
+}
+
+struct ContextValueEffectHandlerAdapter<'a> {
+    handler: &'a mut dyn ContextValueEffectHandler,
+    format: ValueFormat,
+    context: Option<Format3Context>,
+}
+
+impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handler.handle(callee, arguments)
+    }
+
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handler.handle_with_budget(callee, arguments, budget)
+    }
+
+    fn handle_registered_with_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handler
+            .handle_registered_with_budget(operation, callee, arguments, budget)
+    }
+
+    fn handle_registered_with_cancellation_and_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handler.handle_registered_with_cancellation_and_budget(
+            operation,
+            callee,
+            arguments,
+            budget,
+            cancellation,
+        )
+    }
+
+    fn value_format(&self) -> ValueFormat {
+        self.format
+    }
+
+    fn value_context(&self) -> Option<&Format3Context> {
+        self.context.as_ref()
+    }
+
+    fn accepts_context_values(&self) -> bool {
+        true
     }
 }
 
@@ -1483,6 +1605,67 @@ pub fn invoke_named_with_effects(
     invoke_named_with_effects_and_budget(name, functions, arguments, limits, effects, &mut budget)
 }
 
+/// Invokes an admitted function without crossing the legacy canonical-value
+/// boundary. ContextValue inputs, source calls, host effects, and the result
+/// retain the same declared profile and format-3 capability context.
+pub fn invoke_named_with_context_effects(
+    name: &str,
+    functions: &Functions,
+    arguments: &BTreeMap<String, ContextValue>,
+    limits: Limits,
+    effects: &mut dyn ContextValueEffectHandler,
+) -> Result<ContextValue, EvaluationError> {
+    validate_limits(limits)?;
+    let format = arguments
+        .values()
+        .find(|value| matches!(value.format(), ValueFormat::Rov3 | ValueFormat::Sov3))
+        .or_else(|| arguments.values().find(|value| value.format() == ValueFormat::Ovb2))
+        .or_else(|| arguments.values().next())
+        .map_or(ValueFormat::Ovb1, ContextValue::format);
+    let value_context = arguments
+        .values()
+        .find_map(ContextValue::context)
+        .cloned();
+    if matches!(format, ValueFormat::Rov3 | ValueFormat::Sov3) && value_context.is_none() {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    let mut profiled_effects = ContextValueEffectHandlerAdapter {
+        handler: effects,
+        format,
+        context: value_context.clone(),
+    };
+    let mut effects_adapter = Ovb2EffectHandlerAdapter {
+        handler: &mut profiled_effects,
+    };
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: Some(&mut effects_adapter),
+        namespace: function_namespace(name),
+        transfer: None,
+        cancellation: None,
+    };
+    context.items(functions.len())?;
+    let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+    let supplied = supplied_context_arguments(arguments, &mut context)?;
+    let captured = Scope::from_environment(&function.environment, &mut context)?;
+    let result = invoke_pure(
+        &mut context,
+        &function.parameters,
+        &function.body,
+        captured,
+        supplied,
+        0,
+    )?;
+    Context::contextual_value(result, format, value_context.as_ref())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum ArgumentKey {
     Name(String),
@@ -1508,6 +1691,17 @@ fn supplied_arguments(
             .map(|(name, value)| (ArgumentKey::Name(name), value))
             .collect(),
     )
+}
+
+fn supplied_context_arguments(
+    arguments: &BTreeMap<String, ContextValue>,
+    context: &mut Context,
+) -> Result<BTreeMap<ArgumentKey, Value>, EvaluationError> {
+    Ok(Scope::from_context_environment(arguments, context)?
+        .0
+        .into_iter()
+        .map(|(name, value)| (ArgumentKey::Name(name), value))
+        .collect())
 }
 
 fn invoke_pure(
@@ -1843,6 +2037,8 @@ enum Value {
     /// An OVB-2 annotated Blob retained as its already validated wire value,
     /// independently from legacy byte strings.
     AnnotatedBlob(Raw),
+    /// A Blob whose original value profile and format-3 capability pin remain live.
+    ContextualBlob(ContextValue),
     Date(String),
     Uuid([u8; 16]),
     /// OVB's complete stored identity is retained, including its snapshot pin.
@@ -2169,6 +2365,7 @@ impl Value {
             Self::String(value) => Raw::Text(value),
             Self::Blob(value) => Raw::Bytes(value),
             Self::AnnotatedBlob(value) => value,
+            Self::ContextualBlob(value) => value.raw().clone(),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
             Self::Reference(value) => value.raw().clone(),
@@ -2496,6 +2693,100 @@ impl Value {
             }
         }
     }
+    fn from_context_value(
+        value: &ContextValue,
+        context: &mut Context,
+        depth: usize,
+    ) -> Result<Self, EvaluationError> {
+        fn decode(
+            raw: &Raw,
+            profile: &ContextValue,
+            context: &mut Context,
+            depth: usize,
+        ) -> Result<Value, EvaluationError> {
+            match raw {
+                Raw::Tag(OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG, _) => {
+                    context.depth(depth)?;
+                    let blob = match (profile.format(), profile.context()) {
+                        (ValueFormat::Rov3 | ValueFormat::Sov3, Some(value_context)) => {
+                            ContextValue::new_in_context(value_context, profile.format(), raw.clone())
+                        }
+                        (ValueFormat::Rov3 | ValueFormat::Sov3, None) => {
+                            return Err(error("ORNA-EVAL-VALUE"));
+                        }
+                        (format, _) => ContextValue::new(format, raw.clone()),
+                    }
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                    Ok(Value::ContextualBlob(blob))
+                }
+                Raw::Array(values) => {
+                    context.depth(depth)?;
+                    context.items(values.len())?;
+                    values
+                        .iter()
+                        .map(|value| decode(value, profile, context, depth + 1))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(Value::List)
+                }
+                Raw::Tag(60015, boxed) => {
+                    context.depth(depth)?;
+                    let Raw::Array(values) = boxed.as_ref() else {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    };
+                    if values.is_empty() {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    }
+                    context.items(values.len())?;
+                    values
+                        .iter()
+                        .map(|value| decode(value, profile, context, depth + 1))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(Value::Tuple)
+                }
+                Raw::Map(values) => {
+                    context.depth(depth)?;
+                    context.items(values.len())?;
+                    let mut record = BTreeMap::new();
+                    for (key, value) in values {
+                        let Raw::Text(key) = key else {
+                            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+                        };
+                        if !key.nfc().eq(key.chars()) {
+                            return Err(error("ORNA-EVAL-VALUE"));
+                        }
+                        context.string(key.clone())?;
+                        if record
+                            .insert(key.clone(), decode(value, profile, context, depth + 1)?)
+                            .is_some()
+                        {
+                            return Err(error("ORNA-EVAL-VALUE"));
+                        }
+                    }
+                    Ok(Value::Record(record))
+                }
+                Raw::Tag(60013, boxed) => {
+                    context.depth(depth)?;
+                    let Raw::Array(parts) = boxed.as_ref() else {
+                        return Err(error("ORNA-EVAL-VALUE"));
+                    };
+                    match parts.as_slice() {
+                        [Raw::Int(tag)] if tag.is_zero() => Ok(Value::Option(None)),
+                        [Raw::Int(tag), value] if *tag == BigInt::from(1) => {
+                            Ok(Value::Option(Some(Box::new(decode(
+                                value,
+                                profile,
+                                context,
+                                depth + 1,
+                            )?))))
+                        }
+                        _ => Err(error("ORNA-EVAL-VALUE")),
+                    }
+                }
+                _ => Value::from_raw(raw, context, depth),
+            }
+        }
+        decode(value.raw(), value, context, depth)
+    }
     fn decimal_from_raw(raw: &Raw, context: &mut Context) -> Result<Self, EvaluationError> {
         let Raw::Array(parts) = raw else {
             return Err(error("ORNA-EVAL-VALUE"));
@@ -2701,6 +2992,27 @@ impl Scope {
             }
             let value = Value::from_raw(value.raw(), context, 0)?;
             values.insert(name.clone(), value);
+        }
+        Ok(Self(
+            values,
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+            BTreeSet::new(),
+        ))
+    }
+
+    fn from_context_environment(
+        environment: &BTreeMap<String, ContextValue>,
+        context: &mut Context,
+    ) -> Result<Self, EvaluationError> {
+        context.items(environment.len())?;
+        let mut values = BTreeMap::new();
+        for (name, value) in environment {
+            if name.len() > context.limits.max_string_bytes {
+                return Err(error("ORNA-EVAL-LIMIT"));
+            }
+            values.insert(name.clone(), Value::from_context_value(value, context, 0)?);
         }
         Ok(Self(
             values,
@@ -2953,14 +3265,58 @@ impl Context<'_, '_> {
     }
 
     fn ovb2_effect_value(&mut self, value: &ContextValue) -> Result<Value, EvaluationError> {
-        if value.format() != ValueFormat::Ovb2 {
+        let (format, accepts_context_values) = {
+            let handler = self
+                .ovb2_effects()
+                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+            (handler.value_format(), handler.accepts_context_values())
+        };
+        if value.format() != format || (!accepts_context_values && format != ValueFormat::Ovb2) {
             return Err(error("ORNA-EVAL-VALUE"));
         }
-        Value::from_raw(value.raw(), self, 0)
+        if accepts_context_values {
+            Value::from_context_value(value, self, 0)
+        } else {
+            Value::from_raw(value.raw(), self, 0)
+        }
     }
 
     fn ovb2_context_value(value: Value) -> Result<ContextValue, EvaluationError> {
         ContextValue::new(ValueFormat::Ovb2, value.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
+    }
+
+    fn effect_context_value(&mut self, value: Value) -> Result<ContextValue, EvaluationError> {
+        let (format, value_context, accepts_context_values) = {
+            let handler = self
+                .ovb2_effects()
+                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+            (
+                handler.value_format(),
+                handler.value_context().cloned(),
+                handler.accepts_context_values(),
+            )
+        };
+        if !accepts_context_values {
+            return Self::ovb2_context_value(value);
+        }
+        Self::contextual_value(value, format, value_context.as_ref())
+    }
+
+    fn contextual_value(
+        value: Value,
+        format: ValueFormat,
+        value_context: Option<&Format3Context>,
+    ) -> Result<ContextValue, EvaluationError> {
+        let raw = value.raw()?;
+        match format {
+            ValueFormat::Rov3 | ValueFormat::Sov3 => ContextValue::new_in_context(
+                value_context.ok_or_else(|| error("ORNA-EVAL-VALUE"))?,
+                format,
+                raw,
+            ),
+            ValueFormat::Ovb1 | ValueFormat::Ovb2 => ContextValue::new(format, raw),
+        }
+        .map_err(|_| error("ORNA-EVAL-VALUE"))
     }
 
     fn step(&mut self) -> Result<(), EvaluationError> {
@@ -5966,6 +6322,7 @@ impl Context<'_, '_> {
         };
         let raw = match (expected, value) {
             ("Blob", Value::AnnotatedBlob(raw)) => raw,
+            ("Blob", Value::ContextualBlob(value)) => value.raw().clone(),
             ("Blob", Value::Blob(_)) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
             ("Str", Value::String(text)) => Raw::Text(text),
             ("Str", Value::Null | Value::Option(None)) if optional => Raw::Null,
@@ -6253,11 +6610,8 @@ impl Context<'_, '_> {
                 let values = ordered_arguments
                     .iter()
                     .map(|argument| {
-                        Self::ovb2_context_value(self.evaluate(
-                            &argument.value,
-                            scope,
-                            depth + 1,
-                        )?)
+                        let value = self.evaluate(&argument.value, scope, depth + 1)?;
+                        self.effect_context_value(value)
                     })
                     .collect::<Result<Vec<_>, EvaluationError>>()?;
                 let remaining = self.limits.max_steps.saturating_sub(self.steps);
@@ -6468,7 +6822,7 @@ impl Context<'_, '_> {
                 if self.has_ovb2_effects() {
                     let values = values
                         .into_iter()
-                        .map(Self::ovb2_context_value)
+                        .map(|value| self.effect_context_value(value))
                         .collect::<Result<Vec<_>, _>>()?;
                     let remaining = self.limits.max_steps.saturating_sub(self.steps);
                     let mut budget = StepBudget::new(remaining);
@@ -8547,7 +8901,7 @@ impl Context<'_, '_> {
         let mut budget = StepBudget::new(remaining);
         let cancellation = self.cancellation;
         let value_raw = if self.has_ovb2_effects() {
-            let arguments = [Self::ovb2_context_value(Value::Int(BigInt::from(count)))?];
+            let arguments = [self.effect_context_value(Value::Int(BigInt::from(count)))?];
             let result = self
                 .ovb2_effects()
                 .expect("checked OVB-2 effect handler")
@@ -11145,6 +11499,7 @@ fn write_json_value(
         | Value::Money { .. }
         | Value::Blob(_)
         | Value::AnnotatedBlob(_)
+        | Value::ContextualBlob(_)
         | Value::Date(_)
         | Value::Uuid(_)
         | Value::Reference(_)
@@ -11273,6 +11628,7 @@ fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationEr
         Value::Option(Some(value)) => format!("Some({})", encode_orna_value(value, depth + 1)?),
         Value::Blob(value) => encode_orna_string(&encode_base64(value)),
         Value::AnnotatedBlob(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        Value::ContextualBlob(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         Value::Date(value) => format!("date{}", encode_orna_string(value)),
         Value::Instant { .. } | Value::Duration { .. } | Value::Money { .. } => {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
