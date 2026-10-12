@@ -236,6 +236,11 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let row_map = format
         .load_row_map(relation)
         .map_err(|error| query_error("Row map could not be loaded", format!("{error:?}")))?;
+    let binding = format
+        .resolve_committed_table_by_relation_id(relation)
+        .map_err(|error| {
+            query_error("Committed table descriptor could not be resolved", format!("{error:?}"))
+        })?;
     let graph = format
         .open_native_graph(&row_map)
         .map_err(|error| query_error("Native graph could not be opened", format!("{error:?}")))?;
@@ -262,7 +267,14 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             found.into_iter().collect::<Vec<_>>()
         }
         None => {
-            let range = KeyRange::new(None, None, options.limit)
+            // Read enough admitted rows to apply metadata predicates before
+            // the presentation limit. The indexed row walk remains bounded.
+            let candidate_limit = if options.predicate != BlobMetadataFilter::new() {
+                MAX_QUERY_LIMIT
+            } else {
+                options.limit
+            };
+            let range = KeyRange::new(None, None, candidate_limit)
                 .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
             graph
                 .range_rows(&range, &scope)
@@ -275,28 +287,22 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             format!("no row with key {:?}", options.key.unwrap_or_default()),
         ));
     }
-    // Each field is projected from the row's own stored tuple; a field that
-    // is not a Blob in canonical shape is not a Blob, so it is skipped rather
-    // than reported with a fabricated summary. Naming a field decodes only
-    // that field; otherwise the row is walked once so a Blob at any index is
-    // reported with the index it actually occupies.
+    // Decode every selected row against its authenticated committed-table
+    // descriptor before rendering anything. The API returns complete field
+    // metadata from the admitted row and never fetches media payload bytes.
     let mut listings = Vec::new();
     for row in &rows {
-        match options.field {
-            Some(field) => {
-                let metadata = row.blob_metadata(field).map_err(|error| {
-                    query_error("Row fields could not be decoded", format!("{error:?}"))
-                })?;
-                if let Some(metadata) = metadata {
-                    listings.push((row.key().clone(), field, metadata));
-                }
+        let admitted = graph
+            .decode_admitted_row_fields(row, &binding, &scope)
+            .map_err(|error| {
+                query_error("Admitted row fields could not be decoded", format!("{error:?}"))
+            })?;
+        for (field, value) in admitted.fields().iter().enumerate() {
+            if options.field.is_some_and(|selected| selected != field) {
+                continue;
             }
-            None => {
-                for (field, metadata) in row.blob_fields().map_err(|error| {
-                    query_error("Row fields could not be decoded", format!("{error:?}"))
-                })? {
-                    listings.push((row.key().clone(), field, metadata));
-                }
+            if let Some(metadata) = value.blob_metadata() {
+                listings.push((admitted.key().clone(), field, metadata.clone()));
             }
         }
     }
@@ -312,6 +318,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     );
     listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
     let matched = listings.len();
+    listings.truncate(options.limit);
     let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
     match options.format {
         QueryFormat::Human => {
