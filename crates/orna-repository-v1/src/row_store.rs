@@ -968,6 +968,72 @@ impl OrderedRowMap {
             .ok()
             .map(|index| &self.entries[index]))
     }
+    /// Iterates a bounded key range directly over the existing leaf pages.
+    /// The cursor seeks to the first page and entry at or after the inclusive
+    /// lower bound, and never clones rows or scans pages before that position.
+    pub fn range<'a>(&'a self, range: &'a KeyRange) -> impl Iterator<Item = &'a RowEntry> + 'a {
+        let page_index = range.lower_inclusive.as_ref().map_or(0, |lower| {
+            self.pages.partition_point(|page| {
+                page.entries()
+                    .last()
+                    .is_some_and(|entry| entry.key < *lower)
+            })
+        });
+        let entry_index = range
+            .lower_inclusive
+            .as_ref()
+            .and_then(|lower| {
+                self.pages
+                    .get(page_index)
+                    .map(|page| page.entries().partition_point(|entry| entry.key < *lower))
+            })
+            .unwrap_or(0);
+        OrderedRowRange {
+            pages: &self.pages,
+            page_index,
+            entry_index,
+            upper_exclusive: range.upper_exclusive(),
+            remaining: range.limit(),
+        }
+    }
+}
+
+struct OrderedRowRange<'a> {
+    pages: &'a [RowPage],
+    page_index: usize,
+    entry_index: usize,
+    upper_exclusive: Option<&'a TypedKey>,
+    remaining: usize,
+}
+
+impl<'a> Iterator for OrderedRowRange<'a> {
+    type Item = &'a RowEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        loop {
+            let page = self.pages.get(self.page_index)?;
+            let entries = page.entries();
+            if self.entry_index == entries.len() {
+                self.page_index += 1;
+                self.entry_index = 0;
+                continue;
+            }
+            let entry = &entries[self.entry_index];
+            self.entry_index += 1;
+            if self
+                .upper_exclusive
+                .is_some_and(|upper| entry.key >= *upper)
+            {
+                self.remaining = 0;
+                return None;
+            }
+            self.remaining -= 1;
+            return Some(entry);
+        }
+    }
 }
 
 pub struct RowMapBuilder {
@@ -1638,6 +1704,23 @@ mod tests {
                 TypedKey::Int(start + 2),
             ]
         );
+        let cursor_range = KeyRange::new(
+            Some(TypedKey::Int(start)),
+            Some(TypedKey::Int(start + 4)),
+            10,
+        )
+        .expect("valid cursor interval");
+        assert_eq!(
+            map.range(&cursor_range)
+                .map(|entry| entry.key().clone())
+                .collect::<Vec<_>>(),
+            [
+                TypedKey::Int(start),
+                TypedKey::Int(start + 1),
+                TypedKey::Int(start + 2),
+                TypedKey::Int(start + 3),
+            ]
+        );
         assert!(rows.iter().all(|row| row.version() == &version));
     }
 
@@ -1657,7 +1740,6 @@ mod tests {
         let snapshot = RowMapSnapshot::issue_lazy(version, [0x77; 32])
             .expect("seal persisted snapshot without materializing rows");
         let range = KeyRange::new(None, None, 1).expect("valid bounded range");
-
         assert!(matches!(
             snapshot.range(&range),
             Err(RowStoreError::PersistedLookupRequiresGraphContext)
