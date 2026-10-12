@@ -326,6 +326,7 @@ fn prepare_format3_migration_in(
         return Err(RepositoryError::PublicationRecoveryConflict);
     }
 
+    configure_migration_commit_identity(&root)?;
     let copy = Repository::discover(&root)?;
     let (working_tree_identity, working_tree_entries) = working_tree_identity(&copy)?;
     if working_tree_identity != source_working_tree_identity
@@ -687,6 +688,28 @@ fn sync_directory(path: &Path) -> Result<(), RepositoryError> {
     fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| RepositoryError::LocalStateUnavailable)
+}
+
+/// Gives the migration commit a stable identity independent of the caller's
+/// Git configuration. The source commit remains unchanged; this identity only
+/// names the explicit format-transition commit in the disposable copy.
+fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryError> {
+    for (key, value) in [
+        ("user.name", "Orna migration"),
+        ("user.email", "migration@orna.invalid"),
+        ("commit.gpgsign", "false"),
+    ] {
+        let mut command = git_command(root);
+        command.args(["config", "--local", key, value]);
+        crate::scrub_git_routing_environment(&mut command);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+    }
+    Ok(())
 }
 
 /// The recorded `format.orna` bytes of one legacy source.
