@@ -431,7 +431,7 @@ fn complete_copy_preserves_secondary_native_roots_after_source_removal() {
 
 #[test]
 fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
-    const DEPENDENCY_PATH: &str = "deps/reference";
+    const DEPENDENCY_PATH: &str = "deps/reference project";
     const DEPENDENCY_SOURCE: &[u8] = include_bytes!("fixtures/reference-project/main.orna");
 
     let (root, repository, _) = empty_format3_repository();
