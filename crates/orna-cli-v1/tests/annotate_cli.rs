@@ -13,17 +13,28 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn annotate(directory: &TempDir, source: &Path, media_type: &str) -> (Output, PathBuf) {
+    annotate_with_suffix(directory, source, media_type, None)
+}
+
+fn annotate_with_suffix(
+    directory: &TempDir,
+    source: &Path,
+    media_type: &str,
+    suffix: Option<&str>,
+) -> (Output, PathBuf) {
     let output_path = directory.path().join("annotated.ovb2");
-    let result = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
-        .current_dir(directory.path())
-        .args([
-            "annotate",
-            source.to_str().unwrap(),
-            "--type",
-            media_type,
-            "--output",
-            output_path.to_str().unwrap(),
-        ])
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    command.current_dir(directory.path()).args([
+        "annotate",
+        source.to_str().unwrap(),
+        "--type",
+        media_type,
+    ]);
+    if let Some(suffix) = suffix {
+        command.args(["--suffix", suffix]);
+    }
+    let result = command
+        .args(["--output", output_path.to_str().unwrap()])
         .output()
         .unwrap();
     (result, output_path)
@@ -67,6 +78,28 @@ fn annotates_real_song_fixture_without_opening_a_repository() {
 #[test]
 fn annotates_real_image_fixture_without_opening_a_repository() {
     assert_fixture_blob("pixel.png", "image/png");
+}
+
+#[test]
+fn preserves_explicit_nonpreferred_suffix_in_ovb2_output() {
+    let directory = TempDir::new().unwrap();
+    // The declared MIME is an annotation, not a content-format validation.
+    let source = fixture("tone.wav");
+    let (result, output_path) = annotate_with_suffix(&directory, &source, "audio/mp4", Some("m4b"));
+
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let blob = ContextValue::decode(&std::fs::read(output_path).unwrap(), ValueFormat::Ovb2)
+        .unwrap()
+        .blob()
+        .unwrap();
+    assert_eq!(blob.media_type(), "audio/mp4");
+    assert_eq!(blob.suffix(), Some("m4b"));
+    assert_eq!(blob.read_to_end().unwrap(), std::fs::read(source).unwrap());
 }
 
 #[test]
