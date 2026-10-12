@@ -1183,6 +1183,8 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         {
             self.format = row.format();
             self.context = Some(context.clone());
+            self.source_format = row.format();
+            self.source_context = Some(context.clone());
         }
         Ok(page)
     }
@@ -15185,7 +15187,7 @@ mod tests {
                             .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
                         self.consumed_context = Some(owner.database_uuid());
                         Ok(Some(
-                            ContextValue::new_in_context(owner, ValueFormat::Rov3, Raw::Bool(true))
+                            ContextValue::new(ValueFormat::Ovb1, Raw::Bool(true))
                                 .map_err(|_| error("ORNA-EVAL-VALUE"))?,
                         ))
                     }
@@ -15239,7 +15241,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let returned = ContextValue::from_blob(
+        let indexed_row = ContextValue::from_blob(
             &orna_value_v1::Blob::from_reference(
                 result_context
                     .reference(
@@ -15252,9 +15254,8 @@ mod tests {
             ValueFormat::Rov3,
         )
         .unwrap();
-        // The indexed row is authoritative for its owner; do not stamp it with
-        // a different context returned by the preceding effect.
-        let page_row = ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap();
+        let returned = ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap();
+        let page_row = indexed_row;
         let parsed = orna_syntax_v1::parse_module(include_str!(
             "../tests/fixtures/context-result-owner.orna"
         ));
@@ -15295,9 +15296,9 @@ mod tests {
         .unwrap_or_else(|error| panic!("source consumer failed: {}", error.code()));
 
         assert_eq!(result.format(), ValueFormat::Rov3);
-        assert_eq!(result.context().unwrap().database_uuid(), [0x31; 16]);
+        assert_eq!(result.context().unwrap().database_uuid(), [0x41; 16]);
         assert_eq!(result.raw(), &Raw::Bool(true));
-        assert_eq!(effects.consumed_context, Some([0x31; 16]));
+        assert_eq!(effects.consumed_context, Some([0x41; 16]));
         assert_eq!(effects.page_reads, 1);
     }
 
