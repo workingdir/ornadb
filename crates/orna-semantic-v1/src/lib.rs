@@ -8219,7 +8219,16 @@ fn infer(
                 return infer_recovery_pipeline(lhs, rhs, scope, local, diagnostics);
             }
             let left = infer(lhs, scope, local, diagnostics);
-            let right = infer(rhs, scope, local, diagnostics);
+            let right = if op == "??" {
+                match &left.ty {
+                    Type::Optional(inner) => {
+                        infer_contextual(rhs, inner, scope, local, diagnostics)
+                    }
+                    _ => infer(rhs, scope, local, diagnostics),
+                }
+            } else {
+                infer(rhs, scope, local, diagnostics)
+            };
             let mut effects = left.effects;
             effects.join(&right.effects);
             if matches!(op.as_str(), "==" | "!=")
@@ -8262,7 +8271,7 @@ fn infer(
             if op == "??" {
                 let ty = match (&left.ty, &right.ty) {
                     (Type::Optional(_), Type::Error) | (Type::Error, _) => Type::Error,
-                    (Type::Optional(inner), right) if inner.as_ref() == right => (**inner).clone(),
+                    (Type::Optional(inner), right) if types_match(inner, right) => (**inner).clone(),
                     _ => {
                         diagnostics.push(diag(
                             DIAG_TYPE,
@@ -25453,6 +25462,16 @@ mod tests {
             }
         );
         assert!(!has(&a, DIAG_TYPE));
+    }
+
+    #[test]
+    fn nested_optional_query_first_coalesces_with_integer_fallback() {
+        let analysis = checked(&[ModuleInput::new(
+            "query-coalesce.orna",
+            include_str!("../tests/fixtures/nested_optional_query_coalesce.orna"),
+        )]);
+
+        assert!(analysis.is_ok(), "diagnostics: {:?}", analysis.diagnostics);
     }
 
     #[test]
