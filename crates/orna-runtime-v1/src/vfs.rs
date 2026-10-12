@@ -15,6 +15,7 @@ use std::{
 use orna_repository_v1::{
     ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, RepositoryCaptureCapability,
 };
+use orna_value_v1::MimeRegistry;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -2619,8 +2620,11 @@ fn capture_vfs_blob_replacement(
     if actual != expected {
         return Err(VfsBlobReplacementError::IdentityMismatch { expected, actual });
     }
+    let annotation = MimeRegistry::mime1()
+        .canonical_annotation(media_type, suffix)
+        .map_err(|_| VfsBlobReplacementError::Capture(GraphError::InvalidBlobAnnotation))?;
     capture
-        .accept_captured_blob(candidate, media_type, suffix)
+        .accept_captured_blob(candidate, annotation.media_type(), annotation.suffix())
         .map_err(VfsBlobReplacementError::Capture)
 }
 /// Why a durable save was not admitted. Every variant is decided before the
@@ -2778,7 +2782,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, VfsSaveAdmissionError>>,
     {
-        let mut destination = self.state.lock().await;
+        let destination = self.state.lock().await;
         let mut draft_state = draft.state.lock().await;
         if destination.unlinked || !Arc::ptr_eq(&destination.image, &draft_state.baseline) {
             let diagnostic = stale_baseline_diagnostic();
@@ -2824,22 +2828,6 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         let admission = VfsSaveAdmission::<S>::begin(runtime, save, faults)
             .await
             .map_err(VfsSaveError::Activation)?;
-        let writer = admission.writer;
-        let coordinates = admission.coordinates();
-        let callback_bytes = Arc::clone(&candidate_bytes);
-        let candidate =
-            super::activation::with_activation_scope(runtime, writer, move || async move {
-                admit(coordinates, callback_bytes).await
-            })
-            .await
-            .map_err(|error| VfsSaveError::Activation(TableActivationError::Runtime(error)))?
-            .map_err(|error| match error {
-                VfsSaveAdmissionError::BlobCapture(error) => VfsSaveError::BlobCapture(error),
-                VfsSaveAdmissionError::Activation(error) => VfsSaveError::Activation(error),
-            })?;
-        admission
-            .validate_replacement(candidate.replacement())
-            .map_err(VfsSaveError::Activation)?;
         // A repeated accepted rename is served from `scratch_state.applied`
         // above. Matching replacement bytes alone cannot prove that another
         // writer committed this save; baseline mismatches therefore fail closed.
@@ -2861,6 +2849,22 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 diagnostic,
             });
         }
+        let writer = admission.writer;
+        let coordinates = admission.coordinates();
+        let callback_bytes = Arc::clone(&candidate_bytes);
+        let candidate =
+            super::activation::with_activation_scope(runtime, writer, move || async move {
+                admit(coordinates, callback_bytes).await
+            })
+            .await
+            .map_err(|error| VfsSaveError::Activation(TableActivationError::Runtime(error)))?
+            .map_err(|error| match error {
+                VfsSaveAdmissionError::BlobCapture(error) => VfsSaveError::BlobCapture(error),
+                VfsSaveAdmissionError::Activation(error) => VfsSaveError::Activation(error),
+            })?;
+        admission
+            .validate_replacement(candidate.replacement())
+            .map_err(VfsSaveError::Activation)?;
         // Admission callbacks may read or mutate the shared projection epoch.
         // Acquire its lock only after that callback and baseline check finish.
         let mut cache_generation = self.cache_epoch.generation.lock().await;
