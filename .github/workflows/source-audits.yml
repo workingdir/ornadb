@@ -150,6 +150,7 @@ jobs:
 
   focused-consumer:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
