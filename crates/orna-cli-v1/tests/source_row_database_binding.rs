@@ -90,7 +90,11 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
         Vec::new(),
         [0x76; 16],
     );
-    assert!(accepted.is_ok(), "matching repository context should admit the full tuple");
+    let accepted = accepted.expect("matching repository context should admit the full tuple");
+    assert_eq!(accepted.resolved_schema(), &schema);
+    let (_mutation, bindings, publication_schema) = accepted.into_publication_parts();
+    assert!(bindings.is_empty());
+    assert_eq!(&publication_schema, &schema);
 
     let mut foreign_database_id = *schema.database_id();
     foreign_database_id[15] ^= 1;

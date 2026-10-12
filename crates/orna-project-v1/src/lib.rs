@@ -156,7 +156,7 @@ impl ResolvedTableSchema {
     }
 
     pub fn table_object_id(&self) -> TableObjectId {
-        TableObjectId::new(*self.table.table_id())
+        TableObjectId::new(*self.table.table_object_id())
     }
 
     pub fn descriptor(&self) -> &SchemaDescriptor {
@@ -195,17 +195,11 @@ impl SourceBlobFieldBinding {
     }
 }
 
-/// A source row admitted against one committed schema and format-3 context.
-/// The mutation contains the canonical runtime key/field tuple; `blob_bindings`
-/// retains the exact per-field encoded values and pin owners through commit.
+/// An admitted source row and its exact validated, committed schema authority.
+/// Publication retains this artifact with the canonical mutation and Blob pins.
 #[derive(Debug)]
 pub struct AdmittedSourceRow {
-    table_name: String,
-    table_object_id: TableObjectId,
-    database_id: [u8; 16],
-    source_commit: GitCommitRef,
-    snapshot_id: [u8; 32],
-    schema: SchemaDescriptor,
+    resolved_schema: ResolvedTableSchema,
     canonical_key: Vec<u8>,
     canonical_fields: Vec<u8>,
     blob_bindings: Vec<SourceBlobFieldBinding>,
@@ -214,22 +208,25 @@ pub struct AdmittedSourceRow {
 
 impl AdmittedSourceRow {
     pub fn table_name(&self) -> &str {
-        &self.table_name
+        self.resolved_schema.declaration_name()
     }
-    pub const fn table_object_id(&self) -> TableObjectId {
-        self.table_object_id
+    pub fn table_object_id(&self) -> TableObjectId {
+        self.resolved_schema.table_object_id()
     }
     pub const fn database_id(&self) -> &[u8; 16] {
-        &self.database_id
+        self.resolved_schema.database_id()
     }
     pub fn source_commit(&self) -> &GitCommitRef {
-        &self.source_commit
+        self.resolved_schema.source_commit()
     }
     pub const fn snapshot_id(&self) -> &[u8; 32] {
-        &self.snapshot_id
+        self.resolved_schema.snapshot_id()
     }
     pub fn schema(&self) -> &SchemaDescriptor {
-        &self.schema
+        self.resolved_schema.descriptor()
+    }
+    pub fn resolved_schema(&self) -> &ResolvedTableSchema {
+        &self.resolved_schema
     }
     pub fn canonical_key(&self) -> &[u8] {
         &self.canonical_key
@@ -244,12 +241,15 @@ impl AdmittedSourceRow {
         &self.mutation
     }
 
-    /// Moves the complete canonical mutation and field-bound content pins to
-    /// the durable publication owner.
-    pub fn into_mutation_and_bindings(
+    /// Moves the canonical mutation, owned Blob pins, and schema artifact together.
+    pub fn into_publication_parts(
         self,
-    ) -> (TableMutation, Vec<SourceBlobFieldBinding>) {
-        (self.mutation, self.blob_bindings)
+    ) -> (
+        TableMutation,
+        Vec<SourceBlobFieldBinding>,
+        ResolvedTableSchema,
+    ) {
+        (self.mutation, self.blob_bindings, self.resolved_schema)
     }
 }
 
@@ -491,7 +491,7 @@ fn admit_source_row_with_owner_fields_inner(
     }
 
     let (descriptor_table_id, fields) = source_schema_fields(schema.descriptor())?;
-    if &descriptor_table_id != schema.table.table_id() {
+    if &descriptor_table_id != schema.table.table_object_id() {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
     for field_name in &owner_field_names {
@@ -564,7 +564,7 @@ fn admit_source_row_with_owner_fields_inner(
     schema
         .descriptor()
         .validate_stored_row(
-            *schema.table.table_id(),
+            *schema.table.table_object_id(),
             &lowered.canonical_key,
             &canonical_fields,
         )
@@ -585,12 +585,7 @@ fn admit_source_row_with_owner_fields_inner(
             .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     }
     Ok(AdmittedSourceRow {
-        table_name,
-        table_object_id: schema.table_object_id(),
-        database_id: *schema.database_id(),
-        source_commit: schema.source_commit.clone(),
-        snapshot_id: *schema.snapshot_id(),
-        schema: schema.descriptor().clone(),
+        resolved_schema: schema.clone(),
         canonical_key: lowered.canonical_key,
         canonical_fields,
         blob_bindings: retained_bindings,
@@ -777,7 +772,7 @@ impl ProjectLoader {
             .find(|record| {
                 record.kind() == ObjectKind::Table
                     && !record.is_retired()
-                    && record.id() == table_object_id.bytes()
+                    && *record.id() == table_object_id.bytes()
             })
             .ok_or(ProjectLoadError::InvalidTableSchema)?;
         let qualified_name = table_identity.qualified_name();
@@ -798,14 +793,14 @@ impl ProjectLoader {
             .source_snapshot_id()
             .ok_or(ProjectLoadError::InvalidTableSchema)?;
         let table = project.source_table_schema(&manifest, module_name, declaration_name)?;
-        if table.table_object_id() != table_object_id.bytes() {
+        if *table.table_object_id() != table_object_id.bytes() {
             return Err(ProjectLoadError::InvalidTableSchema);
         }
 
         let context = repository
             .open_pinned_format_context(commit.as_str())
             .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
-        if context.snapshot_pin().snapshot_id() != &snapshot_id {
+        if context.snapshot_pin().snapshot_id() != snapshot_id {
             return Err(ProjectLoadError::InvalidTableSchema);
         }
         let expected_database_id = context
