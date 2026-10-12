@@ -1601,6 +1601,32 @@ mod graph_bridge_tests {
         );
 
         let foreign_database_id = super::DatabaseId::new_v4();
+        let large_source = format!(
+            "{}{}",
+            " ".repeat(65 * 1024),
+            include_str!("../tests/fixtures/committed-table-binding.orna")
+        );
+        fs::write(root.join("media.orna"), large_source)
+            .expect("write valid imported source above the old bound");
+        commit(root);
+        let large_context = Repository::discover(root)
+            .expect("discover large imported module")
+            .open_format_context()
+            .expect("open large imported-module context");
+        let large_snapshot_id = large_context.snapshot_pin().snapshot_id();
+        let large_binding = large_context
+            .bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &large_snapshot_id,
+                &descriptor,
+            )
+            .expect("bind valid imported source within project byte budget");
+        assert_eq!(large_binding.descriptor(), &descriptor);
+
         fs::write(
             root.join(".orna/database.orna"),
             super::canonical_database_bytes(&foreign_database_id),
@@ -1628,34 +1654,8 @@ mod graph_bridge_tests {
                 &descriptor,
             ),
             Err(super::FormatContextError::TableBindingMismatch),
-            "binding rejects the UUID from a different repository context"
+            "binding rejects a foreign repository UUID"
         );
-
-        let large_source = format!(
-            "{}{}",
-            " ".repeat(65 * 1024),
-            include_str!("../tests/fixtures/committed-table-binding.orna")
-        );
-        fs::write(root.join("media.orna"), large_source)
-            .expect("write valid imported source above the old bound");
-        commit(root);
-        let large_context = Repository::discover(root)
-            .expect("discover large imported module")
-            .open_format_context()
-            .expect("open large imported-module context");
-        let large_snapshot_id = large_context.snapshot_pin().snapshot_id();
-        let large_binding = large_context
-            .bind_committed_table(
-                "media",
-                "media.orna",
-                "Audio",
-                relation_id,
-                foreign_database_id,
-                &large_snapshot_id,
-                &descriptor,
-            )
-            .expect("bind valid imported source within project byte budget");
-        assert_eq!(large_binding.descriptor(), &descriptor);
 
         fs::write(root.join("media.orna"), "pub table Audio(id: Int)\n")
             .expect("write malformed imported table source");
