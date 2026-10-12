@@ -720,8 +720,13 @@ async fn publish_preserves_compact_journal_and_tail_on_source_binding_mismatch()
     let mutation = TableMutation::new(
         [0xf1; 16],
         "media",
-        b"image".to_vec(),
-        Some(b"compact row".to_vec()),
+        CanonicalValue::int(1.into()).encode().unwrap(),
+        Some(
+            CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Int(1.into())]))
+                .unwrap()
+                .encode()
+                .unwrap(),
+        ),
     )
     .unwrap()
     .with_table_object_id(TableObjectId::new(*table.as_bytes()));
@@ -799,6 +804,7 @@ async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
         CanonicalValue::int(1.into()).encode().unwrap(),
         Some(
             CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Int(1.into())]))
+                .unwrap()
                 .encode()
                 .unwrap(),
         ),
