@@ -1179,9 +1179,9 @@ fn build_private_row_publication_candidate(
         .map_err(|_| Error::RepositoryUnavailable)
 }
 
-/// Lowers protected media rows using the pinned committed relation maps.
-/// Only text keys and canonical ROV3 Blob values are admitted here; row bytes
-/// and annotation metadata remain unchanged through durable publication.
+/// Lowers protected media rows using the source-bound primary-key descriptor
+/// from the committed project and the pinned relation maps. Raw mutation key
+/// bytes are decoded as canonical OVB before the declared text type is used.
 pub fn lower_protected_blob_mutations_for_publication(
     repository: &Repository,
     head: &GitCommitRef,
@@ -1192,20 +1192,62 @@ pub fn lower_protected_blob_mutations_for_publication(
     let format = repository
         .open_pinned_format_context(head.as_str())
         .map_err(|_| Error::RepositoryUnavailable)?;
+    let project = orna_project_v1::ProjectLoader::default()
+        .load_committed_snapshot(repository, head)
+        .map_err(|_| Error::InvalidRow)?;
+    let catalogue = project
+        .standard_catalogue(project.standard_sources().iter().cloned())
+        .map_err(|_| Error::InvalidRow)?;
+    let empty_catalogue = orna_semantic_v1::Catalogue::empty();
+    let analysis = orna_semantic_v1::analyze_with_catalogue(
+        project.modules(),
+        catalogue.as_ref().unwrap_or(&empty_catalogue),
+    );
+    if !analysis.is_ok() {
+        return Err(Error::InvalidRow);
+    }
+    let mut source_text_keys = BTreeSet::new();
+    for (namespace, module) in &analysis.modules {
+        for (name, symbol) in &module.symbols {
+            let Some(schema) = symbol.table_schema.as_ref() else {
+                continue;
+            };
+            let Some(admission) = schema.admission.as_ref() else {
+                continue;
+            };
+            if !admission.automatic_key
+                && matches!(admission.keys.as_slice(), [(_, orna_semantic_v1::Type::Text)])
+            {
+                let owner = if namespace.0.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", namespace.0.join("/"), name)
+                };
+                source_text_keys.insert(owner);
+            }
+        }
+    }
+
     let mut by_relation = BTreeMap::<[u8; 16], BTreeMap<TypedKey, &TableMutation>>::new();
     for mutation in mutations {
         let relation_id = mutation
             .table_object_id()
             .ok_or(Error::InvalidRow)?
             .bytes();
-        if mutation.rekey_to().is_some() {
+        if mutation.rekey_to().is_some() || !source_text_keys.contains(mutation.table()) {
             return Err(Error::InvalidRow);
         }
-        let key = std::str::from_utf8(mutation.key()).map_err(|_| Error::InvalidKey)?;
+        let decoded = orna_value_v1::Value::decode(mutation.key()).map_err(|_| Error::InvalidKey)?;
+        if decoded.encode().map_err(|_| Error::InvalidKey)?.as_slice() != mutation.key() {
+            return Err(Error::InvalidKey);
+        }
+        let orna_foundation_v1::OvbRaw::Text(key) = decoded.raw() else {
+            return Err(Error::InvalidKey);
+        };
         by_relation
             .entry(relation_id)
             .or_default()
-            .insert(TypedKey::Text(key.to_owned()), mutation);
+            .insert(TypedKey::Text(key.clone()), mutation);
     }
 
     let mut lowered = Vec::with_capacity(by_relation.len());

@@ -12,6 +12,8 @@ bytes = "1.10.1"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-evolution-v1 = { path = "../orna-evolution-v1" }
 orna-repository-v1 = { path = "../orna-repository-v1" }
+orna-project-v1 = { path = "../orna-project-v1" }
+orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-runtime-v1 = { path = "../orna-runtime-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
 parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
