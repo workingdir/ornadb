@@ -325,8 +325,11 @@ fn diff_refuses_an_endpoint_carried_by_more_than_one_ref() {
     ] {
         git_output(root, words, None);
     }
-    std::fs::write(root.join("main.orna"), b"module main;\n").unwrap();
-    git_output(root, &["add", "--all"], None);
+    std::fs::write(
+        root.join("main.orna"),
+        include_bytes!("fixtures/run/main.orna"),
+    )
+    .unwrap();
     git_output(root, &["commit", "--quiet", "-m", "one commit"], None);
     // One short name, two refs: a branch and a tag.
     git_output(root, &["branch", "twin"], None);
