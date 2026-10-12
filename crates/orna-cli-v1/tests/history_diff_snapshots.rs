@@ -194,6 +194,99 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     drop(directory);
 }
 
+/// Replacing a captured Blob's MIME declaration keeps its content commitment
+/// stable while both pinned snapshots retain their own publication metadata.
+#[tokio::test]
+async fn diff_reports_annotation_only_change_between_pinned_publications_without_payloads() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("tone.wav"),
+        source.path().join("tone.wav"),
+    )
+    .unwrap();
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x81; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x82; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x83; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let root = format!("{:?}", source.path().to_string_lossy().as_ref());
+    let annotated_fixture = |name: &str| {
+        std::fs::read_to_string(Path::new(MEDIA_FIXTURES).join(name))
+            .unwrap()
+            .replace("__MEDIA_ROOT__", &root)
+    };
+    let original = annotated_fixture("import-song.orna");
+    commit_capture(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &original,
+        "song",
+        0x80,
+        true,
+    )
+    .await;
+    let before = revision(directory.path(), "HEAD");
+
+    let reannotated = annotated_fixture("history-reannotate-song.orna");
+    commit_capture(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &reannotated,
+        "song",
+        0x90,
+        false,
+    )
+    .await;
+    let after = revision(directory.path(), "HEAD");
+    assert_ne!(before, after, "the re-annotation published a new snapshot");
+    drop(bindings);
+    drop(state);
+
+    let relation = relation_hex(relation_id);
+    let output = run_history(
+        directory.path(),
+        &[&relation, "--diff", &before, &after, "--format", "json"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "history --diff failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let diff: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(diff["added"], serde_json::json!(0));
+    assert_eq!(diff["changed"], serde_json::json!(1));
+    assert_eq!(diff["removed"], serde_json::json!(0));
+    assert_eq!(diff["media_payload_bytes_read"], serde_json::json!(0));
+    let change = &diff["changes"][0];
+    assert_eq!(change["change"], serde_json::json!("changed"));
+    assert_eq!(change["key"], serde_json::json!("song"));
+    assert_eq!(change["content_changed"], serde_json::json!(false));
+    let old = &change["before"]["annotations"][0];
+    let new = &change["after"]["annotations"][0];
+    assert_eq!(old["media_type"], serde_json::json!("audio/wav"));
+    assert_eq!(new["media_type"], serde_json::json!("application/octet-stream"));
+    assert_eq!(new["suffix"], serde_json::json!("wav"));
+    assert_eq!(old["length"], new["length"]);
+    assert_eq!(old["sha256"], new["sha256"]);
+}
+
 /// A repository records its database identity in the tracked metadata of every
 /// snapshot. A reinitialized repository rewrites that identity while its older
 /// commits stay reachable, so one repository can hold snapshots of two
