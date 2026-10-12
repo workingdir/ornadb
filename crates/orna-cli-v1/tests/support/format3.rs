@@ -159,7 +159,7 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
         native_fixture_node(root, &store_root, &[(relation_map_oid.as_str(), "tree")]);
     let database_oid = git_object(root, "blob", database.as_bytes());
     let manifest_oid = git_object(root, "blob", &manifest_bytes);
-    let source_oid = git_object(root, "blob", &schema_source);
+    let source_oid = git_object(root, "blob", media_source.as_bytes());
     let orna_tree = git_tree(
         root,
         &format!(
