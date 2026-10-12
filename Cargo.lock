@@ -1231,6 +1231,7 @@ dependencies = [
  "orna-runtime-v1",
  "orna-semantic-v1",
  "orna-syntax-v1",
+ "orna-value-v1",
  "sha2 0.10.9",
 ]
 
@@ -1425,6 +1426,7 @@ name = "orna-project-v1"
 version = "1.0.0"
 dependencies = [
  "orna-repository-v1",
+ "orna-runtime-v1",
  "orna-semantic-v1",
  "orna-syntax-v1",
  "orna-value-v1",
@@ -1515,6 +1517,8 @@ dependencies = [
 name = "orna-semantic-v1"
 version = "1.0.0"
 dependencies = [
+ "num-bigint 0.4.8",
+ "num-traits",
  "orna-foundation-v1",
  "orna-syntax-v1",
  "orna-sys-v1",
@@ -1523,6 +1527,7 @@ dependencies = [
  "sha2 0.10.9",
  "unicode-casefold",
  "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]
