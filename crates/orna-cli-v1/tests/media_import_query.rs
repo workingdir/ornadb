@@ -1542,6 +1542,35 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
         listed_length, on_disk,
         "the listing describes every committed payload byte without reading one"
     );
+    // `--from` is inclusive and `--until` exclusive over the committed
+    // byte-keyed rows: image is the lower endpoint, song the excluded upper.
+    let bounded = query_json(
+        directory.path(),
+        &[
+            &relation,
+            "--from",
+            "bytes:696d616765",
+            "--until",
+            "bytes:736f6e67",
+        ],
+    );
+    let bounded_listings = bounded["listings"].as_array().unwrap();
+    assert_eq!(
+        bounded_listings.len(),
+        1,
+        "only the lower endpoint row: {bounded}"
+    );
+    assert_eq!(bounded_listings[0]["key"], "image");
+    let image_listing = listings
+        .iter()
+        .find(|listing| listing["key"] == "image")
+        .expect("the committed image row is in the unbounded listing");
+    assert_eq!(bounded_listings[0], *image_listing);
+    assert_eq!(bounded["media_payload_bytes_read"].as_u64(), Some(0));
+    assert!(
+        bounded["native_objects_read"].as_u64().unwrap() > 0,
+        "the bounded query traversed the committed row graph: {bounded}"
+    );
 
     // The point read answers one named row with the metadata the listing gave.
     let song_json = query_json(directory.path(), &[&relation, "--key", "song"]);
