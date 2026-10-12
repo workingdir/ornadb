@@ -19,10 +19,10 @@ fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
 
 fn initialize_legacy_source(root: &Path) {
     git_output(root, &["init", "-b", "main"]);
-    git_output(root, &["config", "user.name", "Migration Fixture"]);
+    git_output(root, &["config", "user.name", "kierandrewett"]);
     git_output(
         root,
-        &["config", "user.email", "migration-fixture@example.invalid"],
+        &["config", "user.email", "kieran@drewett.dev"],
     );
     git_output(root, &["config", "commit.gpgsign", "false"]);
     fs::write(
