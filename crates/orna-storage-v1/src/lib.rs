@@ -850,6 +850,9 @@ pub struct FrozenBatch {
     pub id: MutationId,
     pub mutations: Vec<LooseMutation>,
     pub watermark: u64,
+    // The loose candidate stores opaque row bytes; retain protected transfer
+    // evidence beside them until runtime completion commits the transfer.
+    protected_source_mutations: Vec<TableMutation>,
 }
 
 impl FrozenBatch {
@@ -879,6 +882,7 @@ impl FrozenBatch {
             id,
             mutations,
             watermark,
+            protected_source_mutations: Vec::new(),
         })
     }
 }
@@ -1148,8 +1152,8 @@ pub fn build_private_publication_candidate(
 }
 
 /// Converts the runtime's validated typed table prefix into the loose-row
-/// representation. Key decoding remains schema-owned: this function refuses
-/// to invent path components for an opaque runtime key.
+/// representation without decoding or narrowing row values. Key decoding
+/// remains schema-owned: this function refuses to invent paths for opaque keys.
 pub fn lower_runtime_table_mutations(
     freeze: &PublicationFreeze,
     mutations: &[TableMutation],
@@ -1162,6 +1166,9 @@ pub fn lower_runtime_table_mutations(
 
 /// Converts the runtime's validated typed table prefix into the loose-row
 /// representation, reporting a prefix with no visible change as `None`.
+///
+/// Row values remain opaque and byte-exact. Graph-issued pin owners carried by
+/// the frozen prefix stay attached through publication completion.
 ///
 /// Lowering still refuses an empty prefix, because an empty freeze is not a
 /// publication. A prefix whose every row folds to the bytes already committed
@@ -1223,7 +1230,13 @@ pub fn lower_runtime_table_mutations_allow_empty(
         // frozen intent has no visible change to publish.
         return Ok(None);
     }
-    FrozenBatch::new(batch_id, visible, freeze.checkpoint.mutation_sequence).map(Some)
+    let mut batch = FrozenBatch::new(batch_id, visible, freeze.checkpoint.mutation_sequence)?;
+    batch.protected_source_mutations = mutations
+        .iter()
+        .filter(|mutation| !mutation.protected_content_transfers().is_empty())
+        .cloned()
+        .collect();
+    Ok(Some(batch))
 }
 
 /// A prepared, runtime-bound publication. Preparation creates only private
@@ -1234,8 +1247,10 @@ pub struct RuntimePublicationCoordinator {
     expected_index: IndexGeneration,
     candidate: PrivateCommit,
     journal: PublicationJournal,
+    // Retain protected transfer evidence across publication until the journal
+    // records successful runtime completion.
+    protected_source_mutations: Vec<TableMutation>,
 }
-
 /// The committed snapshot and pending-mutation window a logical compact reader
 /// must use for one observation.  The two choices deliberately make the
 /// publication boundary explicit: the frozen prefix is read either from the
@@ -1603,6 +1618,7 @@ impl RuntimePublicationCoordinator {
             expected_index,
             candidate,
             journal,
+            protected_source_mutations: batch.protected_source_mutations.clone(),
         })
     }
 
@@ -1661,7 +1677,9 @@ impl RuntimePublicationCoordinator {
             .map_err(|_| Error::RuntimeUnavailable)?;
         repository
             .mark_runtime_complete(freeze.intent_id, &mut self.journal)
-            .map_err(|_| Error::RepositoryUnavailable)
+            .map_err(|_| Error::RepositoryUnavailable)?;
+        self.protected_source_mutations.clear();
+        Ok(())
     }
 
     /// Recovers a persisted runtime publication after a process interruption.
@@ -3338,7 +3356,7 @@ mod tests {
 
     #[test]
     fn runtime_table_prefix_lowers_into_a_bound_publication() {
-        let (_temp, repository) = repository();
+        let (root, repository) = repository();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
         let freeze = PublicationFreeze {
@@ -3351,9 +3369,20 @@ mod tests {
             candidate_digest: [8; 32],
             mutations: Vec::new(),
         };
-        let mutation =
-            TableMutation::new([9; 16], "Contact", b"Alice".to_vec(), Some(b"row".to_vec()))
-                .unwrap();
+        let full_row = b"full typed row tuple\0primary field\0Blob field";
+        let candidate_path = LoosePath::for_key("Contact", &["Alice".into()])
+            .unwrap()
+            .as_managed_path()
+            .as_path()
+            .to_string_lossy()
+            .into_owned();
+        let mutation = TableMutation::new(
+            [9; 16],
+            "Contact",
+            b"Alice".to_vec(),
+            Some(full_row.to_vec()),
+        )
+        .unwrap();
         let batch = lower_runtime_table_mutations(
             &freeze,
             std::slice::from_ref(&mutation),
@@ -3366,6 +3395,8 @@ mod tests {
             |_path| Ok(None),
         )
         .unwrap();
+        assert!(batch.protected_source_mutations.is_empty());
+        assert_eq!(batch.mutations[0].next.as_ref().unwrap().bytes(), full_row);
         let plan = RuntimePublicationCoordinator::prepare(
             &repository,
             &head,
@@ -3375,9 +3406,21 @@ mod tests {
             "orna: publish runtime data",
         )
         .unwrap();
+        assert!(plan.protected_source_mutations.is_empty());
         assert_ne!(plan.candidate().commit(), &head);
         assert_eq!(plan.journal().runtime_intent_id(), Some([7; 16]));
         assert_eq!(plan.journal().entries().len(), 1);
+        assert_eq!(
+            git_output(
+                root.path(),
+                &[
+                    "show",
+                    &format!("{}:{candidate_path}", plan.candidate().commit()),
+                ],
+            )
+            .as_bytes(),
+            full_row
+        );
     }
 
     #[test]
@@ -4868,6 +4911,11 @@ mod tests {
     fn frozen_batch_builds_a_real_private_candidate_without_advancing_head() {
         let (root, repository) = repository();
         let head = repository.head().unwrap().unwrap();
+        fs::write(root.path().join("ordinary.txt"), "staged user content\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        let expected_index = repository.index_generation().unwrap();
+        let unstaged = b"unstaged user content\n";
+        fs::write(root.path().join("ordinary.txt"), unstaged).unwrap();
         let candidate = build_private_publication_candidate(
             &repository,
             &head,
@@ -4878,6 +4926,22 @@ mod tests {
 
         assert_ne!(candidate.commit(), &head);
         assert_eq!(repository.head().unwrap().unwrap(), head);
+        assert_eq!(repository.index_generation().unwrap(), expected_index);
+        assert_eq!(fs::read(root.path().join("ordinary.txt")).unwrap(), unstaged);
+        assert_eq!(
+            git_output(root.path(), &["show", ":ordinary.txt"]),
+            "staged user content"
+        );
+        assert_eq!(
+            git_output(
+                root.path(),
+                &[
+                    "show",
+                    &format!("{}:ordinary.txt", candidate.commit())
+                ]
+            ),
+            "base"
+        );
         assert_eq!(
             git_output(
                 root.path(),
