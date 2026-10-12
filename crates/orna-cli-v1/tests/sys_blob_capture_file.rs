@@ -339,9 +339,9 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap();
     let failed_context = state.begin_activation().await.unwrap();
     let failed_mutation = TableMutation::insert(
-        media_table_id,
-        "media",
-        b"flush".to_vec(),
+        [0x64; 16],
+        "captures",
+        b"flush.json".to_vec(),
         Vec::new(),
     )
     .unwrap()
@@ -364,7 +364,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     );
     assert_eq!(
         state
-            .committed_table_row("media", b"flush")
+            .committed_table_row("captures", b"flush.json")
             .await
             .unwrap(),
         None
@@ -403,7 +403,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     );
     assert_eq!(
         state
-            .committed_table_row("media", b"flush")
+            .committed_table_row("captures", b"flush.json")
             .await
             .unwrap(),
         None
