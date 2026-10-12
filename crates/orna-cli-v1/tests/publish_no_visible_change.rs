@@ -165,6 +165,7 @@ async fn commit_capture(
     writer: WriterLease,
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
+    table_object_id: [u8; 16],
     key: &[u8],
     ordinal: u8,
     insert_only: bool,
@@ -206,6 +207,7 @@ async fn commit_capture(
     .unwrap()
     .with_orp_blob_binding(binding)
     .unwrap();
+    let mutation = mutation.with_table_object_id(TableObjectId::new(table_object_id));
     let committed = state
         .commit_table_request_activation(
             writer,
@@ -286,6 +288,7 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
         writer,
         &mut bindings,
         &expression,
+        relation_id,
         b"\xff",
         0xe0,
         true,
@@ -550,6 +553,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         writer,
         &mut bindings,
         &expression,
+        relation_id,
         b"image",
         0xb0,
         true,
@@ -590,6 +594,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         writer,
         &mut bindings,
         &expression,
+        relation_id,
         b"image",
         0xc0,
         false,
@@ -683,6 +688,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         writer,
         &mut bindings,
         &expression,
+        relation_id,
         b"image",
         0xd0,
         true,
