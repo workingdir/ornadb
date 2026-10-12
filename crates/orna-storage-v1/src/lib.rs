@@ -1736,16 +1736,22 @@ impl RuntimePublicationCoordinator {
             let recovery = repository
                 .recover_compact_publication_boundary()
                 .map_err(map_publication_repository_error)?;
-            let pending = match recovery {
+            let (pending, descendant) = match recovery {
                 None => {
                     return repository
                         .index_generation()
                         .map(Some)
                         .map_err(map_publication_repository_error);
                 }
-                Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => pending,
-                Some(CompactPublicationRecovery::ReconciliationRequired(_)) => {
-                    return Err(Error::RefConflict);
+                Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => {
+                    (pending, false)
+                }
+                Some(CompactPublicationRecovery::ReconciliationRequired(reconciliation)) => {
+                    let pending = repository
+                        .compact_descendant_receipt_request(&reconciliation)
+                        .map_err(map_publication_repository_error)?
+                        .ok_or(Error::RefConflict)?;
+                    (pending, true)
                 }
             };
             // A validated receipt is enough to finalize; schema identity is needed only
@@ -1759,6 +1765,12 @@ impl RuntimePublicationCoordinator {
                     .finish_compact_with_receipt(&receipt)
                     .map(Some)
                     .map_err(map_publication_repository_error);
+            }
+            if descendant {
+                // A descendant already includes the candidate. Without its
+                // original durable receipt, rebuilding or re-consuming the
+                // frozen prefix could publish a duplicate generation.
+                return Err(Error::RefConflict);
             }
             let (profile, table_identity) = compact_profile.ok_or(Error::InvalidTransition)?;
             let trusted_schema = trusted_compact_schema_descriptor(
