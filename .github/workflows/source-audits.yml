@@ -6,6 +6,37 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      revision_sha:
+        description: Full 40-character commit SHA to test; empty runs the source audit.
+        required: false
+        type: string
+      cargo_package:
+        description: Whitelisted Cargo package for a focused consumer test.
+        required: false
+        type: choice
+        default: orna-cli-v1
+        options:
+          - orna-cli-v1
+          - orna-evaluator-v1
+          - orna-repository-v1
+          - orna-storage-v1
+      target_kind:
+        description: Select library unit tests or one integration-test target.
+        required: false
+        type: choice
+        default: lib
+        options:
+          - lib
+          - test
+      integration_target:
+        description: Cargo integration target required when target_kind is test.
+        required: false
+        type: string
+      test_filter:
+        description: One Rust test-name filter (not a shell command).
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -16,6 +47,7 @@ concurrency:
 
 jobs:
   fixture-and-editor-artifacts:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.revision_sha == '' }}
     runs-on: ubuntu-latest
     env:
       CARGO_BUILD_JOBS: 2
@@ -112,3 +144,86 @@ jobs:
 
       - name: Check Tree-sitter grammar syntax
         run: node --check editors/tree-sitter-orna/grammar.js
+
+  focused-consumer:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 2
+    steps:
+      - name: Validate focused test inputs
+        shell: bash
+        env:
+          REVISION_SHA: ${{ inputs.revision_sha }}
+          CARGO_PACKAGE: ${{ inputs.cargo_package }}
+          TARGET_KIND: ${{ inputs.target_kind }}
+          INTEGRATION_TARGET: ${{ inputs.integration_target }}
+          TEST_FILTER: ${{ inputs.test_filter }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REVISION_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::revision_sha must be a full 40-character lowercase commit SHA"
+            exit 1
+          fi
+          case "$CARGO_PACKAGE" in
+            orna-cli-v1|orna-evaluator-v1|orna-repository-v1|orna-storage-v1) ;;
+            *) echo "::error::cargo_package is not an allowed package"; exit 1 ;;
+          esac
+          case "$TARGET_KIND" in
+            lib)
+              [[ -z "$INTEGRATION_TARGET" ]] || { echo "::error::integration_target must be empty for lib tests"; exit 1; }
+              ;;
+            test)
+              [[ "$INTEGRATION_TARGET" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]] || { echo "::error::integration_target must be one valid Cargo target name"; exit 1; }
+              ;;
+            *) echo "::error::target_kind must be lib or test"; exit 1 ;;
+          esac
+          [[ "$TEST_FILTER" =~ ^[A-Za-z0-9_][A-Za-z0-9_:.-]{0,127}$ ]] || { echo "::error::test_filter must be one safe test-name filter"; exit 1; }
+
+      - name: Check out exact repository revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.revision_sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify exact checkout
+        shell: bash
+        env:
+          REVISION_SHA: ${{ inputs.revision_sha }}
+        run: |
+          set -euo pipefail
+          actual_revision="$(git rev-parse HEAD)"
+          printf 'Focused checkout revision: %s\n' "$actual_revision"
+          test "$actual_revision" = "$REVISION_SHA"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run focused consumer test
+        shell: bash
+        env:
+          CARGO_PACKAGE: ${{ inputs.cargo_package }}
+          TARGET_KIND: ${{ inputs.target_kind }}
+          INTEGRATION_TARGET: ${{ inputs.integration_target }}
+          TEST_FILTER: ${{ inputs.test_filter }}
+        run: |
+          set -euo pipefail
+          output_file="$RUNNER_TEMP/focused-consumer-test.log"
+          if [[ "$TARGET_KIND" == "lib" ]]; then
+            cargo test --locked -p "$CARGO_PACKAGE" --lib "$TEST_FILTER" -- --nocapture 2>&1 | tee "$output_file"
+          else
+            cargo test --locked -p "$CARGO_PACKAGE" --test "$INTEGRATION_TARGET" "$TEST_FILTER" -- --nocapture 2>&1 | tee "$output_file"
+          fi
+          python3 - "$output_file" <<'PY'
+          import re
+          import sys
+
+          output = open(sys.argv[1], encoding="utf-8").read()
+          if not re.search(r"\brunning [1-9][0-9]* tests?\b", output):
+              print("::error::cargo test completed without selecting any tests", file=sys.stderr)
+              raise SystemExit(1)
+          PY
