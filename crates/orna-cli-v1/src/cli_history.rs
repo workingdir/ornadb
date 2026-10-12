@@ -453,7 +453,7 @@ pub(super) fn bare_ref_selector_is_ambiguous(
     help: &'static str,
 ) -> Result<bool, Diagnostic> {
     // Only a name that could collide is checked. A commit id, a `HEAD~2`-style
-    // expression, a revision `@`/`:` syntax, a `a..b` range or a full `refs/`
+    // expression, an `@{...}` or `:` revision syntax, a `a..b` range or a full `refs/`
     // path names one object by construction. Slashed names such as
     // `origin/main` are *not* skipped: a branch and a remote-tracking branch
     // can share one.
@@ -461,7 +461,9 @@ pub(super) fn bare_ref_selector_is_ambiguous(
         || selector.starts_with('-')
         || selector.starts_with("refs/")
         || selector == "HEAD"
-        || selector.contains([':', '^', '~', '@'])
+        || selector == "@"
+        || selector.contains([':', '^', '~'])
+        || selector.contains("@{")
         || selector.contains("..")
     {
         return Ok(false);
