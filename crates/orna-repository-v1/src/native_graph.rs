@@ -7086,6 +7086,21 @@ mod persisted_orp_tests {
         let callback_key = key.clone();
         let callback_pin_ref = original_pin_ref.clone();
         let worktree = directory.path().to_path_buf();
+        // The original graph is a committed snapshot in production. Keep its
+        // fixture StoreRoot reachable while the callback runs `git gc`.
+        let baseline_ref = format!("refs/orna/test/baseline-{}", hex_encode(&graph.owner_id));
+        let baseline_oid = graph.store_root.to_hex();
+        let zero = "0".repeat(graph.algorithm.width() * 2);
+        let baseline = Command::new("git")
+            .current_dir(&worktree)
+            .args(["update-ref", &baseline_ref, &baseline_oid, &zero])
+            .output()
+            .expect("retain baseline StoreRoot through GC");
+        assert!(
+            baseline.status.success(),
+            "retain baseline StoreRoot: {}",
+            String::from_utf8_lossy(&baseline.stderr)
+        );
         let result = block_on(crate::commit_protected_blob_row(
             &graph,
             pin,
@@ -7227,6 +7242,7 @@ mod persisted_orp_tests {
         let pin_ref = pin.protected_ref.clone();
         let callback_pin_ref = pin_ref.clone();
         let worktree = directory.path().to_path_buf();
+        let wrong_target = graph.store_root.to_hex();
         let result = block_on(crate::commit_protected_blob_row(
             &graph,
             pin,
@@ -7254,10 +7270,14 @@ mod persisted_orp_tests {
                 for reference in [&candidate_ref, &callback_pin_ref] {
                     let output = Command::new("git")
                         .current_dir(&worktree)
-                        .args(["update-ref", reference, "HEAD"])
+                        .args(["update-ref", reference, &wrong_target])
                         .output()
                         .expect("replace cleanup ref target");
-                    assert!(output.status.success());
+                    assert!(
+                        output.status.success(),
+                        "replace cleanup ref target: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
                 }
                 Err::<(), _>("publication rejected after ref replacement")
             },
