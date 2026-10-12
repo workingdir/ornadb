@@ -1010,33 +1010,33 @@ impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
 /// Effect boundary for named source invocation with preserved ContextValues.
 /// Values passed to a handler retain their source profile and capability
 /// context, including nested format-3 Blob pins.
-pub trait ContextValueEffectHandler {
-    fn handle(
+pub trait ContextValueEffectHandler: EffectHandler {
+    fn handle_context(
         &mut self,
         callee: &Expr,
         arguments: &[ContextValue],
     ) -> Result<Option<ContextValue>, EvaluationError>;
 
-    fn handle_with_budget(
+    fn handle_context_with_budget(
         &mut self,
         callee: &Expr,
         arguments: &[ContextValue],
         _budget: &mut StepBudget,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        self.handle(callee, arguments)
+        self.handle_context(callee, arguments)
     }
 
-    fn handle_registered_with_budget(
+    fn handle_context_registered_with_budget(
         &mut self,
         _operation: &str,
         callee: &Expr,
         arguments: &[ContextValue],
         budget: &mut StepBudget,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        self.handle_with_budget(callee, arguments, budget)
+        self.handle_context_with_budget(callee, arguments, budget)
     }
 
-    fn handle_registered_with_cancellation_and_budget(
+    fn handle_context_registered_with_cancellation_and_budget(
         &mut self,
         operation: &str,
         callee: &Expr,
@@ -1044,7 +1044,7 @@ pub trait ContextValueEffectHandler {
         budget: &mut StepBudget,
         _cancellation: Option<&CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        self.handle_registered_with_budget(operation, callee, arguments, budget)
+        self.handle_context_registered_with_budget(operation, callee, arguments, budget)
     }
 }
 
@@ -1060,7 +1060,7 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         callee: &Expr,
         arguments: &[ContextValue],
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        self.handler.handle(callee, arguments)
+        self.handler.handle_context(callee, arguments)
     }
 
     fn handle_with_budget(
@@ -1069,7 +1069,8 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         arguments: &[ContextValue],
         budget: &mut StepBudget,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        self.handler.handle_with_budget(callee, arguments, budget)
+        self.handler
+            .handle_context_with_budget(callee, arguments, budget)
     }
 
     fn handle_registered_with_budget(
@@ -1080,7 +1081,7 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         budget: &mut StepBudget,
     ) -> Result<Option<ContextValue>, EvaluationError> {
         self.handler
-            .handle_registered_with_budget(operation, callee, arguments, budget)
+            .handle_context_registered_with_budget(operation, callee, arguments, budget)
     }
 
     fn handle_registered_with_cancellation_and_budget(
@@ -1091,13 +1092,14 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         budget: &mut StepBudget,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        self.handler.handle_registered_with_cancellation_and_budget(
-            operation,
-            callee,
-            arguments,
-            budget,
-            cancellation,
-        )
+        self.handler
+            .handle_context_registered_with_cancellation_and_budget(
+                operation,
+                callee,
+                arguments,
+                budget,
+                cancellation,
+            )
     }
 
     fn value_format(&self) -> ValueFormat {
@@ -1110,6 +1112,177 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
 
     fn accepts_context_values(&self) -> bool {
         true
+    }
+}
+
+impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        EffectHandler::handle(self.handler, callee, arguments)
+    }
+
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        EffectHandler::handle_with_budget(self.handler, callee, arguments, budget)
+    }
+
+    fn handle_registered_with_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        EffectHandler::handle_registered_with_budget(
+            self.handler,
+            operation,
+            callee,
+            arguments,
+            budget,
+        )
+    }
+
+    fn handle_registered_with_cancellation_and_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        EffectHandler::handle_registered_with_cancellation_and_budget(
+            self.handler,
+            operation,
+            callee,
+            arguments,
+            budget,
+            cancellation,
+        )
+    }
+
+    fn fork_task_child(&mut self, child_index: usize) -> Option<Box<dyn EffectHandler + Send>> {
+        EffectHandler::fork_task_child(self.handler, child_index)
+    }
+
+    fn resolve_reference(
+        &mut self,
+        reference: &CanonicalValue,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        EffectHandler::resolve_reference(self.handler, reference)
+    }
+
+    fn resolve_reference_with_budget(
+        &mut self,
+        reference: &CanonicalValue,
+        budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        EffectHandler::resolve_reference_with_budget(self.handler, reference, budget)
+    }
+
+    fn validate_relation_source(&mut self, source: &str) -> Result<(), EvaluationError> {
+        EffectHandler::validate_relation_source(self.handler, source)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        EffectHandler::scan_relation_page(self.handler, source, after, limit, budget)
+    }
+
+    fn scan_relation_page_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        EffectHandler::scan_relation_page_scoped(
+            self.handler,
+            source,
+            scope,
+            after,
+            limit,
+            budget,
+        )
+    }
+
+    fn validate_stream_source(
+        &mut self,
+        source: &str,
+        identity: &[u8; 32],
+        budget: &mut StepBudget,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<bool, EvaluationError> {
+        EffectHandler::validate_stream_source(
+            self.handler,
+            source,
+            identity,
+            budget,
+            cancellation,
+        )
+    }
+
+    fn poll_stream_sources(
+        &mut self,
+        sources: &[StreamSourceCursor],
+        max_events: usize,
+        budget: &mut StepBudget,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<StreamPage, EvaluationError> {
+        EffectHandler::poll_stream_sources(
+            self.handler,
+            sources,
+            max_events,
+            budget,
+            cancellation,
+        )
+    }
+
+    fn begin_stream_delivery(
+        &mut self,
+        checkpoints: &[StreamCheckpoint],
+        budget: &mut StepBudget,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), EvaluationError> {
+        EffectHandler::begin_stream_delivery(self.handler, checkpoints, budget, cancellation)
+    }
+
+    fn commit_stream_delivery(
+        &mut self,
+        checkpoints: &[StreamCheckpoint],
+        budget: &mut StepBudget,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), EvaluationError> {
+        EffectHandler::commit_stream_delivery(self.handler, checkpoints, budget, cancellation)
+    }
+
+    fn rollback_stream_delivery(
+        &mut self,
+        checkpoints: &[StreamCheckpoint],
+        budget: &mut StepBudget,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), EvaluationError> {
+        EffectHandler::rollback_stream_delivery(self.handler, checkpoints, budget, cancellation)
+    }
+
+    fn is_ovb2_binding(&self) -> bool {
+        true
+    }
+
+    fn ovb2_binding(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
+        Some(self)
     }
 }
 
@@ -1634,9 +1807,6 @@ pub fn invoke_named_with_context_effects(
         format,
         context: value_context.clone(),
     };
-    let mut effects_adapter = Ovb2EffectHandlerAdapter {
-        handler: &mut profiled_effects,
-    };
     let mut context = Context {
         limits,
         steps: 0,
@@ -1646,7 +1816,7 @@ pub fn invoke_named_with_context_effects(
         repl_bindings: false,
         restrict_function_names: false,
         reject_unhandled_field_calls: false,
-        effects: Some(&mut effects_adapter),
+        effects: Some(&mut profiled_effects),
         namespace: function_namespace(name),
         transfer: None,
         cancellation: None,
