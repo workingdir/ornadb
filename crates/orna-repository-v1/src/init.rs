@@ -19,7 +19,7 @@ use fs2::FileExt;
 use tempfile::TempDir;
 use uuid::{Uuid, Version};
 
-use crate::{scrub_git_routing_environment, valid_branch_name, Repository, RepositoryError};
+use crate::{Repository, RepositoryError, scrub_git_routing_environment, valid_branch_name};
 
 #[path = "format_context.rs"]
 pub(crate) mod format_context;
@@ -400,32 +400,56 @@ fn metadata_root(repository: &Repository) -> PathBuf {
     repository.worktree().join(FORMAT_DIRECTORY)
 }
 
+/// Atomically installs a staged directory without replacing any existing path.
 #[cfg(target_os = "linux")]
-fn publish_staging_directory(
-    repository: &Repository,
-    staging: &TempDir,
+pub(crate) fn publish_directory_noreplace(
+    parent: &Path,
+    staging: &Path,
+    destination: &Path,
 ) -> Result<(), RepositoryInitError> {
-    use rustix::fs::{renameat_with, RenameFlags};
+    use rustix::fs::{RenameFlags, renameat_with};
 
-    let parent = repository.worktree();
+    if staging.parent() != Some(parent) || destination.parent() != Some(parent) {
+        return Err(RepositoryInitError::LocalStateUnavailable);
+    }
     let parent_file = File::open(parent).map_err(|_| RepositoryInitError::LocalStateUnavailable)?;
     let staging_name = staging
-        .path()
+        .file_name()
+        .ok_or(RepositoryInitError::LocalStateUnavailable)?;
+    let destination_name = destination
         .file_name()
         .ok_or(RepositoryInitError::LocalStateUnavailable)?;
     renameat_with(
         &parent_file,
         Path::new(staging_name),
         &parent_file,
-        FORMAT_DIRECTORY,
+        Path::new(destination_name),
         RenameFlags::NOREPLACE,
     )
     .map_err(|error| match error.raw_os_error() {
         libc::EEXIST | libc::ENOTEMPTY => RepositoryInitError::MetadataChanged,
-        libc::ENOSYS | libc::EINVAL => RepositoryInitError::PlatformUnsupported,
+        libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP => RepositoryInitError::PlatformUnsupported,
         _ => RepositoryInitError::LocalStateUnavailable,
     })?;
     sync_directory(parent)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn publish_directory_noreplace(
+    _parent: &Path,
+    _staging: &Path,
+    _destination: &Path,
+) -> Result<(), RepositoryInitError> {
+    Err(RepositoryInitError::PlatformUnsupported)
+}
+
+#[cfg(target_os = "linux")]
+fn publish_staging_directory(
+    repository: &Repository,
+    staging: &TempDir,
+) -> Result<(), RepositoryInitError> {
+    let destination = repository.worktree().join(FORMAT_DIRECTORY);
+    publish_directory_noreplace(repository.worktree(), staging.path(), &destination)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -605,8 +629,8 @@ mod tests {
     };
 
     use super::{
-        initialize_repository, inspect_metadata, Repository, RepositoryInitError, DATABASE_FILE,
-        FORMAT_DIRECTORY, FORMAT_FILE,
+        DATABASE_FILE, FORMAT_DIRECTORY, FORMAT_FILE, Repository, RepositoryInitError,
+        initialize_repository, inspect_metadata,
     };
 
     fn git(directory: &Path, arguments: &[&str]) -> String {
@@ -695,11 +719,13 @@ mod tests {
         let error = initialize_repository(target.path()).unwrap_err();
         assert_eq!(error.code(), "ORNA-REPO-INIT-005");
         assert!(matches!(error, RepositoryInitError::MetadataIncomplete));
-        assert!(!target
-            .path()
-            .join(FORMAT_DIRECTORY)
-            .join(FORMAT_FILE)
-            .exists());
+        assert!(
+            !target
+                .path()
+                .join(FORMAT_DIRECTORY)
+                .join(FORMAT_FILE)
+                .exists()
+        );
         assert!(!target.path().join("main.orna").exists());
     }
 
@@ -964,6 +990,29 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("marker")).unwrap(),
             "preserve me\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_replace_publication_rejects_an_empty_destination_directory() {
+        let target = tempfile::tempdir().unwrap();
+        let destination = target.path().join("copy");
+        fs::create_dir(&destination).unwrap();
+        let staging = tempfile::Builder::new()
+            .prefix(".orna-copy-")
+            .tempdir_in(target.path())
+            .unwrap();
+        fs::write(staging.path().join("candidate"), b"staged bytes\n").unwrap();
+
+        let error = super::publish_directory_noreplace(target.path(), staging.path(), &destination)
+            .unwrap_err();
+        assert!(matches!(error, RepositoryInitError::MetadataChanged));
+        assert!(destination.is_dir());
+        assert!(fs::read_dir(&destination).unwrap().next().is_none());
+        assert_eq!(
+            fs::read(staging.path().join("candidate")).unwrap(),
+            b"staged bytes\n"
         );
     }
 }
