@@ -253,8 +253,35 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                             format!("{error:?}; journal and pending tail were preserved"),
                         )
                     })?;
+                let source_schema = orna_project_v1::ProjectLoader::default()
+                    .resolve_committed_table_schema(
+                        &repository,
+                        pending_journal.old_head(),
+                        &table_name,
+                        orna_runtime_v1::TableObjectId::new(table_id),
+                    )
+                    .map_err(|error| {
+                        publish_error(
+                            "compact publication source schema is not trusted",
+                            format!("{error:?}; journal and pending tail were preserved"),
+                        )
+                    })?;
+                if source_schema.declaration_name() != table_name
+                    || source_schema.table_object_id()
+                        != orna_runtime_v1::TableObjectId::new(table_id)
+                {
+                    return Err(publish_error(
+                        "compact publication table binding is not trusted",
+                        "the value owner resolved a different table identity; journal and pending tail were preserved",
+                    ));
+                }
                 let binding = source_context
-                    .bind_committed_table(&table_name, table_id)
+                    .bind_committed_table(
+                        &table_name,
+                        table_id,
+                        source_schema.snapshot_id(),
+                        source_schema.descriptor(),
+                    )
                     .map_err(|error| {
                         publish_error(
                             "compact publication table binding is not trusted",

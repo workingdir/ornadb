@@ -14,11 +14,15 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use base64::Engine;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::Repository;
+use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
+use orna_repository_v1::{
+    CompactManifest, CompactSegment, CompactSegmentRole, ManagedPath, Repository, Uuid,
+};
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation,
-    TerminalOutcome, WriterLease,
+    TableObjectId, TerminalOutcome, WriterLease,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
@@ -33,6 +37,90 @@ const REIMPORT_FIXTURE: &str = concat!(
     "/tests/fixtures/media/reimport-image-capture.orna"
 );
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
+
+const COMPACT_TABLE: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+fn compact_schema() -> SchemaDescriptor {
+    let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+    let uuid = |value: [u8; 16]| OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(value.to_vec())));
+    SchemaDescriptor::new(OvbRaw::Map(vec![
+        (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+        (OvbRaw::Int(1.into()), uuid(COMPACT_TABLE)),
+        (
+            OvbRaw::Int(2.into()),
+            OvbRaw::Array(vec![uuid(*field.as_bytes())]),
+        ),
+        (
+            OvbRaw::Int(3.into()),
+            OvbRaw::Array(vec![OvbRaw::Array(vec![
+                uuid(*field.as_bytes()),
+                OvbRaw::Text(format!("f_{}", field.simple())),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+                OvbRaw::Int(0.into()),
+                OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+            ])]),
+        ),
+        (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+    ]))
+    .unwrap()
+}
+
+fn compact_schema_fingerprint(schema: &SchemaDescriptor) -> [u8; 32] {
+    use sha2::Digest;
+
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"orna.schema.v1\0");
+    digest.update(schema.encode().unwrap());
+    digest.finalize().into()
+}
+
+fn compact_columns() -> Vec<u8> {
+    let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+    CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
+        OvbRaw::Array(vec![OvbRaw::Tag(
+            37,
+            Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+        )]),
+        OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", field.simple()))]),
+        OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
+        OvbRaw::Text("int64".into()),
+        OvbRaw::Array(Vec::new()),
+    ])]))
+    .unwrap()
+    .encode()
+    .unwrap()
+}
+
+fn compact_segment() -> (Uuid, [u8; 32], CompactSegment) {
+    const PARQUET: &str = "UEFSMRUGFRAVEBWRgLnnCkwVAhUAFQIVABUAFQASAAABAAAAAAAAABkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTwWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklAAYZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY8FkgmCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABaCARUUFkQVPgAWPBYCJggWSBQAABl8GAxvcm5hLnByb2ZpbGUYEmNvbXBhY3Qtc3RvcmFnZS12MQAYCm9ybmEudGFibGUYJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAYEm9ybmEuc2NoZW1hLnNoYTI1NhhANThhMDg5NzBhZGMyMzE4N2U5Nzk0NDVlOTNiODQzN2ExNjI3ZWUxMDk0ZjI2NTg5YTJlZmVmZWE4NTFiMmExZQAYD29ybmEuc2NoZW1hLm92YhiYAXBRQUJBZGdsVUFBQUFBQUFBQUFBQUFBQUFBQUFBQUVDZ2RnbFVBR1BBQUFBQUhBQWdBQUFBQUFBQUFFRGdZWFlKVkFCandBQUFBQndBSUFBQUFBQUFBQUJlQ0ptWHpBeE9HWXdNREF3TURBd01EY3dNREE0TURBd01EQXdNREF3TURBd01EQXhnZ0JqU1c1MEFJRUFCSUE9ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBQWNBQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAA3AIAAFBBUjE=";
+    let schema = compact_schema();
+    let fingerprint = compact_schema_fingerprint(&schema);
+    let table = Uuid::from_u64_pair(0, 1);
+    let id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(PARQUET)
+        .unwrap();
+    let segment = CompactSegment::new(
+        id,
+        CompactSegmentRole::Data,
+        fingerprint,
+        "test-encoder-v1",
+        ManagedPath::new(format!(
+            ".orna/storage/{table}/data/{}/{id}.parquet",
+            &id.to_string()[..2]
+        ))
+        .unwrap(),
+        bytes,
+        CanonicalValue::int(1.into()).encode().unwrap(),
+        CanonicalValue::int(1.into()).encode().unwrap(),
+        1,
+        compact_columns(),
+        true,
+        false,
+    )
+    .unwrap();
+    (table, fingerprint, segment)
+}
 
 /// Runs `orna-cli-v1 <arguments>` in `directory` with Git routing isolated, so
 /// the developer's own Git configuration cannot decide the outcome.
@@ -612,4 +700,80 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         .await
         .unwrap();
     assert_eq!(recovered.pending_count().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn publish_preserves_compact_journal_and_tail_on_source_binding_mismatch() {
+    let (directory, repository, _) = empty_format3_repository();
+    let root_path = directory.path();
+    let old_head = repository.head().unwrap().unwrap();
+    let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let activation = state.begin_activation().await.unwrap();
+    let (table, schema_fingerprint, segment) = compact_segment();
+    let mutation = TableMutation::new(
+        [0xf1; 16],
+        "media",
+        b"image".to_vec(),
+        Some(b"compact row".to_vec()),
+    )
+    .unwrap()
+    .with_table_object_id(TableObjectId::new(*table.as_bytes()));
+    state
+        .commit_table_activation(writer, &activation, &[mutation], [0xf2; 32], &NoFault)
+        .await
+        .unwrap();
+    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+    let intent_id = [0xf3; 16];
+    let freeze = state.freeze(intent_id, &checkpoint).await.unwrap();
+    let candidate = repository
+        .prepare_compact_publication(
+            &old_head,
+            repository.index_generation().unwrap(),
+            CompactManifest::empty(table, schema_fingerprint),
+            intent_id,
+            freeze.checkpoint.digest,
+            &[segment],
+            "orna: interrupted compact publication",
+        )
+        .unwrap();
+    repository
+        .publish_compact_repository_boundary(candidate)
+        .unwrap();
+    let published_head = head(root_path);
+    let journal = repository.read_publication_journal().unwrap().unwrap();
+    assert_ne!(published_head, old_head.as_str());
+    assert_eq!(
+        repository.head().unwrap().as_ref(),
+        Some(journal.new_head())
+    );
+    assert!(journal.compact_manifest().is_some());
+    assert!(state.pending_count().await.unwrap() > 0);
+    drop(state);
+
+    // The new CLI process must resolve this compact table through the old
+    // source snapshot; the fixture has no committed `media` declaration.
+    let output = run(root_path, &["publish"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("compact publication source schema is not trusted"),
+        "unexpected compact recovery diagnostic: {stderr}"
+    );
+    assert_eq!(head(root_path), published_head);
+    assert_eq!(
+        repository.read_publication_journal().unwrap(),
+        Some(journal)
+    );
+
+    let preserved = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    assert!(preserved.pending_count().await.unwrap() > 0);
 }
