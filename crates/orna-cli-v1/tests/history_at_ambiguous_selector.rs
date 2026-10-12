@@ -187,3 +187,47 @@ fn head_is_not_refused() {
         stderr_of(&output)
     );
 }
+
+#[test]
+fn a_full_commit_id_is_not_confused_with_colliding_refs() {
+    let directory = repository_with_one_commit();
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let selector = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    run_git(directory.path(), &["branch", &selector]);
+    run_git(directory.path(), &["tag", &selector]);
+
+    let output = run_history(directory.path(), &selector);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("Snapshot is a legacy format-1/2 input"),
+        "the full commit id reaches its pinned snapshot: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Snapshot name is ambiguous"),
+        "a full commit id names an object despite colliding ref spellings: {stderr}"
+    );
+}
+
+#[test]
+fn an_unresolved_full_width_hex_ref_name_remains_ambiguous() {
+    let directory = repository_with_one_commit();
+    let selector = "1111111111111111111111111111111111111111";
+    run_git(directory.path(), &["branch", selector]);
+    run_git(directory.path(), &["tag", selector]);
+
+    let output = run_history(directory.path(), selector);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr_of(&output).contains("Snapshot name is ambiguous"),
+        "a missing hash-shaped selector cannot bypass the ambiguity guard: {}",
+        stderr_of(&output)
+    );
+}

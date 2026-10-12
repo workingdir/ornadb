@@ -452,11 +452,11 @@ pub(super) fn bare_ref_selector_is_ambiguous(
     selector: &str,
     help: &'static str,
 ) -> Result<bool, Diagnostic> {
-    // Only a name that could collide is checked. A commit id, a `HEAD~2`-style
-    // expression, an `@{...}` or `:` revision syntax, a `a..b` range or a full `refs/`
-    // path names one object by construction. Slashed names such as
-    // `origin/main` are *not* skipped: a branch and a remote-tracking branch
-    // can share one.
+    // Only a name that could collide is checked. A complete commit object ID,
+    // `HEAD~2`-style expression, an `@{...}` or `:` revision syntax, a `a..b`
+    // range or a full `refs/` path names one object by construction. Slashed
+    // names such as `origin/main` are *not* skipped: a branch and a remote-
+    // tracking branch can share one.
     if selector.is_empty()
         || selector.starts_with('-')
         || selector.starts_with("refs/")
@@ -465,9 +465,11 @@ pub(super) fn bare_ref_selector_is_ambiguous(
         || selector.contains([':', '^', '~'])
         || selector.contains("@{")
         || selector.contains("..")
+        || full_commit_id_is_commit(directory, selector)
     {
         return Ok(false);
     }
+
     let output = std::process::Command::new("git")
         .args([
             "for-each-ref",
@@ -506,6 +508,41 @@ pub(super) fn bare_ref_selector_is_ambiguous(
         .filter(|name| wanted.iter().any(|candidate| candidate == name))
         .count();
     Ok(matches > 1)
+}
+
+/// A full-width hexadecimal string is a commit selector only when the object
+/// database contains that exact commit. `--disambiguate` consults object names
+/// rather than ref precedence, so a missing hash-shaped ref remains subject to
+/// the ambiguity guard; the caller still enforces repository reachability.
+fn full_commit_id_is_commit(directory: &str, selector: &str) -> bool {
+    if !matches!(selector.len(), 40 | 64)
+        || !selector.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    let normalized = selector.to_ascii_lowercase();
+    let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", &format!("--disambiguate={normalized}")])
+        .current_dir(directory)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|oid| oid == normalized)
+    {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("git")
+        .args(["cat-file", "-t", &normalized])
+        .current_dir(directory)
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "commit"
 }
 
 /// One row's change between the two compared snapshots.
