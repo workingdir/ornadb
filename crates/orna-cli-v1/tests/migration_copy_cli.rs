@@ -48,6 +48,7 @@ fn run_copy(source: &Path, destination: &Path, count: &str) -> std::process::Out
         .args([
             "--db",
             source.to_str().unwrap(),
+            "--debug",
             "migrate",
             "copy",
             destination.to_str().unwrap(),
