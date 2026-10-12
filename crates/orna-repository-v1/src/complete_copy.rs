@@ -155,6 +155,15 @@ pub struct CompleteCopyDependency {
     pub member: String,
 }
 
+/// One payload-free metadata projection from a restored complete-copy member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompleteCopyBlobMetadataPage {
+    /// The bounded committed row interval and its stored Blob metadata.
+    pub rows: Vec<(crate::TypedKey, crate::BlobMetadata)>,
+    /// Media payload bytes read while projecting this page.
+    pub payload_bytes_read: u64,
+}
+
 /// The verified contents of one complete-copy manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompleteCopyManifest {
@@ -191,21 +200,20 @@ impl CompleteCopyManifest {
             .find(|member| member.commit.eq_ignore_ascii_case(commit))
     }
 
-    /// Projects one bounded row interval from a selected member of a restored copy.
+    /// Projects one bounded interval through an authenticated relation descriptor.
     ///
-    /// The relation id is supplied by the caller because the repository API does
-    /// not enumerate relation ids. The member commit is resolved from this
-    /// manifest, then pinned once; the native graph reads only that snapshot's
-    /// admitted row map. It returns stored Blob metadata without reading Blob
-    /// payload bytes; descriptor validation follows the native graph contract.
+    /// The member commit is resolved from this manifest and pinned once. The
+    /// supplied row map must be the committed descriptor for that exact member;
+    /// the pinned context verifies its authority before the native graph reads
+    /// metadata. Media payload reads are counted separately and remain zero.
     pub fn project_member_blob_metadata(
         &self,
         repository: &Repository,
         member_commit: &str,
-        relation_id: [u8; 16],
+        row_map: &crate::RowMapSnapshot,
         range: &crate::KeyRange,
         field: usize,
-    ) -> Result<Vec<(crate::TypedKey, crate::BlobMetadata)>, CompleteCopyReadError> {
+    ) -> Result<CompleteCopyBlobMetadataPage, CompleteCopyReadError> {
         let member =
             self.member(member_commit)
                 .ok_or_else(|| CompleteCopyReadError::MemberNotInCopy {
@@ -220,18 +228,19 @@ impl CompleteCopyManifest {
                 actual: commit.as_str().to_owned(),
             });
         }
-        let row_map = format
-            .load_row_map(relation_id)
-            .map_err(CompleteCopyReadError::FormatContext)?;
         let graph = format
-            .open_native_graph(&row_map)
+            .open_native_graph(row_map)
             .map_err(CompleteCopyReadError::FormatContext)?;
         let scope = graph
             .open_read_scope()
             .map_err(CompleteCopyReadError::NativeGraph)?;
-        graph
+        let rows = graph
             .project_blob_metadata_range(range, field, &scope)
-            .map_err(CompleteCopyReadError::NativeGraph)
+            .map_err(CompleteCopyReadError::NativeGraph)?;
+        Ok(CompleteCopyBlobMetadataPage {
+            rows,
+            payload_bytes_read: scope.payload_bytes_read(),
+        })
     }
 
     /// Decodes one manifest document.
