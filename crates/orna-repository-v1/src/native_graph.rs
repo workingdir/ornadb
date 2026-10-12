@@ -20,6 +20,7 @@ use std::{
     },
 };
 
+use fs2::FileExt;
 use orna_value_v1::{BlobMetadata, MediaAnnotation};
 use sha2::{Digest, Sha256};
 
@@ -1929,6 +1930,21 @@ impl NativeGraphContext {
             &mut written,
             scope.max_objects,
         )?;
+        // Root the finished graph before the potentially long full-closure
+        // verification and durability pass. Git GC must not collect a child
+        // edge after it has been written but before the candidate is issued.
+        let pin_id = *crate::Uuid::new_v4().as_bytes();
+        let provisional_ref = scratch_content_ref(&self.owner_id, &pin_id);
+        if let Err(error) = self.create_protected_ref(&provisional_ref, &descriptor_oid) {
+            let _ = self.delete_protected_ref(&provisional_ref, &descriptor_oid);
+            return Err(error);
+        }
+        let cleanup = PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            provisional_ref,
+            descriptor_oid.clone(),
+        );
+
         let descriptor = self.read_blob_descriptor(
             &descriptor_oid,
             scope,
@@ -1944,17 +1960,6 @@ impl NativeGraphContext {
         let objects = self.verify_full_blob(&reference, scope)?;
         self.sync_object_closure(&objects, scope)?;
 
-        let pin_id = *crate::Uuid::new_v4().as_bytes();
-        let provisional_ref = scratch_content_ref(&self.owner_id, &pin_id);
-        if let Err(error) = self.create_protected_ref(&provisional_ref, &descriptor_oid) {
-            let _ = self.delete_protected_ref(&provisional_ref, &descriptor_oid);
-            return Err(error);
-        }
-        let cleanup = PendingPrivateRefCleanup::new(
-            Arc::clone(&self.private_ref_owner),
-            provisional_ref,
-            descriptor_oid.clone(),
-        );
         Ok(CapturedBlobCandidate {
             context: self.identity,
             repository_id: self.repository_id,
@@ -2020,6 +2025,7 @@ impl NativeGraphContext {
                 descriptor.identity.length(),
                 None,
                 0,
+                descriptor.identity.length(),
                 &range,
                 scope,
                 &mut objects,
@@ -2602,6 +2608,7 @@ impl NativeGraphContext {
         expected_length: u64,
         expected_height: Option<u8>,
         base_offset: u64,
+        blob_length: u64,
         requested: &Range<u64>,
         scope: &RepositoryReadScope,
         objects: &mut ObjectBudget,
@@ -2642,7 +2649,10 @@ impl NativeGraphContext {
                 continue;
             }
             if height == 0 {
-                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
+                if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64
+                    || (child_end != blob_length
+                        && entry.span_length < crate::blob_store::GEAR_MINIMUM as u64)
+                {
                     return Err(GraphError::InvalidByteIndex);
                 }
                 let reservation = scope.reserve_payload(entry.span_length)?;
@@ -2670,6 +2680,7 @@ impl NativeGraphContext {
                     entry.span_length,
                     Some(height - 1),
                     child_start,
+                    blob_length,
                     requested,
                     scope,
                     objects,
@@ -3823,37 +3834,90 @@ fn algorithm_for_hex(hex: &str) -> Option<GitHashAlgorithm> {
     }
 }
 
-/// Reclaims the private pin refs of a runtime owner that exited without
-/// running its drop-time cleanup, for example under `SIGKILL`.
+/// RAII handle for the same coordination lock used by repository publishers.
+/// Reconciliation must hold this lock from the journal check through the last
+/// private-ref deletion, otherwise a publisher can journal a root between them.
+struct NativeGraphCoordinationLock {
+    _file: File,
+}
+
+impl NativeGraphCoordinationLock {
+    fn acquire(repository: &crate::Repository) -> Result<Self, GraphError> {
+        let locks = repository.runtime_paths().locks();
+        fs::create_dir_all(&locks).map_err(|_| GraphError::DurabilityFailed)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(locks.join("coordination.lock"))
+            .map_err(|_| GraphError::DurabilityFailed)?;
+        file.try_lock_exclusive()
+            .map_err(|_| GraphError::PublicationNotTerminal)?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Reclaims a departed runtime owner's private refs after durable runtime
+/// state has been recovered. Accepted pending pins are retained only when the
+/// recovered manifest names both their pin IDs and descriptor OIDs.
 ///
-/// Capture, promotion and row-candidate preparation root their OGB-2 closure
-/// through `refs/orna/pins/<owner>/...` and release it from `Drop`. A killed
-/// owner never runs that cleanup, so those refs outlive the process and would
-/// pin objects forever. The surviving runtime owner lock records the departed
-/// identity, so a restart that re-acquires the lock for this worktree can
-/// reclaim exactly the departed owner's pin refs.
+/// Capture, promotion and row-candidate preparation root OGB-2 closures under
+/// `refs/orna/pins/<owner>/...`. A killed owner never runs drop-time cleanup.
+/// Recovery must therefore reconcile those refs against durable accepted-pin
+/// evidence before deleting anything; an absent in-memory handle is not proof
+/// that a pending pin is orphaned.
 ///
-/// Only refs under the departed owner's own namespace are considered, and only
-/// when the name resolves to a native object id this repository can verify; an
-/// unresolvable ref is left in place rather than guessed at.
-pub fn reclaim_dead_owner_pin_refs(
+/// Only refs under the departed owner's namespace are considered. Every
+/// retained pending ref must still resolve to its manifest's descriptor OID;
+/// other refs are deleted only after their native object IDs are resolved.
+pub(crate) fn reclaim_dead_owner_pin_refs(
     repository: &crate::Repository,
     dead_owner: [u8; 16],
+    accepted_pending: &BTreeMap<[u8; 16], NativeOid>,
 ) -> Result<usize, GraphError> {
+    let _coordination_lock = NativeGraphCoordinationLock::acquire(repository)?;
+    if repository
+        .read_publication_journal_locked()
+        .map_err(|_| GraphError::DurabilityFailed)?
+        .is_some()
+    {
+        return Err(GraphError::PublicationNotTerminal);
+    }
     let owner = PrivateRefCleanupOwner {
         repository: repository.clone(),
     };
     let prefix = format!("refs/orna/pins/{}/", hex_encode(&dead_owner));
     let listing = owner.git_output(&["for-each-ref", "--format=%(refname)", &prefix])?;
     let listing = String::from_utf8(listing).map_err(|_| GraphError::MalformedReferenceName)?;
+
+    let accepted_refs = accepted_pending
+        .iter()
+        .map(|(pin_id, oid)| (accepted_content_ref(&dead_owner, pin_id), oid))
+        .collect::<BTreeMap<_, _>>();
+    for (reference, expected_oid) in &accepted_refs {
+        let resolved = owner
+            .git_output(&["rev-parse", "--verify", reference])
+            .map_err(|_| GraphError::InvalidProtectedRef)?;
+        let resolved = String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
+        let resolved = resolved.trim();
+        let algorithm = algorithm_for_hex(resolved).ok_or(GraphError::MalformedReferenceName)?;
+        let oid = NativeOid::from_hex(algorithm, resolved)?;
+        if &oid != *expected_oid {
+            return Err(GraphError::InvalidProtectedRef);
+        }
+    }
+
     let mut reclaimed = 0;
     for name in listing.lines().map(str::trim).filter(|line| !line.is_empty()) {
         if !name.starts_with(&prefix) {
             continue;
         }
+        if accepted_refs.contains_key(name) {
+            continue;
+        }
         let resolved = owner.git_output(&["rev-parse", "--verify", name])?;
-        let resolved =
-            String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
+        let resolved = String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
         let resolved = resolved.trim();
         let algorithm = algorithm_for_hex(resolved).ok_or(GraphError::MalformedReferenceName)?;
         let oid = NativeOid::from_hex(algorithm, resolved)?;
@@ -7061,6 +7125,21 @@ mod persisted_orp_tests {
         let callback_key = key.clone();
         let callback_pin_ref = original_pin_ref.clone();
         let worktree = directory.path().to_path_buf();
+        // The original graph is a committed snapshot in production. Keep its
+        // fixture StoreRoot reachable while the callback runs `git gc`.
+        let baseline_ref = format!("refs/orna/test/baseline-{}", hex_encode(&graph.owner_id));
+        let baseline_oid = graph.store_root.to_hex();
+        let zero = "0".repeat(graph.algorithm.width() * 2);
+        let baseline = Command::new("git")
+            .current_dir(&worktree)
+            .args(["update-ref", &baseline_ref, &baseline_oid, &zero])
+            .output()
+            .expect("retain baseline StoreRoot through GC");
+        assert!(
+            baseline.status.success(),
+            "retain baseline StoreRoot: {}",
+            String::from_utf8_lossy(&baseline.stderr)
+        );
         let result = block_on(crate::commit_protected_blob_row(
             &graph,
             pin,
@@ -7202,6 +7281,7 @@ mod persisted_orp_tests {
         let pin_ref = pin.protected_ref.clone();
         let callback_pin_ref = pin_ref.clone();
         let worktree = directory.path().to_path_buf();
+        let wrong_target = graph.store_root.to_hex();
         let result = block_on(crate::commit_protected_blob_row(
             &graph,
             pin,
@@ -7229,10 +7309,14 @@ mod persisted_orp_tests {
                 for reference in [&candidate_ref, &callback_pin_ref] {
                     let output = Command::new("git")
                         .current_dir(&worktree)
-                        .args(["update-ref", reference, "HEAD"])
+                        .args(["update-ref", reference, &wrong_target])
                         .output()
                         .expect("replace cleanup ref target");
-                    assert!(output.status.success());
+                    assert!(
+                        output.status.success(),
+                        "replace cleanup ref target: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
                 }
                 Err::<(), _>("publication rejected after ref replacement")
             },
@@ -7251,7 +7335,7 @@ mod persisted_orp_tests {
         let candidate_ref = cleanup
             .iter()
             .map(|(reference, _)| reference)
-            .find(|reference| reference.contains("/pending/row-"))
+            .find(|reference| reference.contains("/scratch/row-"))
             .expect("candidate cleanup identity");
         assert!(fixture_ref_exists(directory.path(), &pin_ref));
         assert!(fixture_ref_exists(directory.path(), candidate_ref));
@@ -7833,13 +7917,125 @@ mod persisted_orp_tests {
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
     }
 
+    #[test]
+    fn owner_pin_reclaim_defers_across_publication_journal_interleaving() {
+        let (directory, graph) = capture_test_context();
+        let root = directory.path();
+        let repository = crate::Repository::discover(root).expect("discover capture repository");
+        let scope = graph.open_read_scope().expect("owner read scope");
+
+        let accepted_payload = b"accepted graph pin retained through publication";
+        let accepted_candidate = graph
+            .capture_blob_candidate(&accepted_payload[..], accepted_payload.len() as u64, &scope)
+            .expect("capture accepted payload");
+        let accepted_pin = graph
+            .protect_captured_blob(accepted_candidate, &scope)
+            .expect("protect accepted payload");
+        let accepted_ref = accepted_pin.protected_ref.clone();
+        let accepted_pending = BTreeMap::from([(
+            *accepted_pin.pin_id(),
+            accepted_pin.descriptor_oid.clone(),
+        )]);
+
+        let unaccepted_payload = b"unaccepted graph pin awaiting safe cleanup";
+        let unaccepted_candidate = graph
+            .capture_blob_candidate(&unaccepted_payload[..], unaccepted_payload.len() as u64, &scope)
+            .expect("capture unaccepted payload");
+        let unaccepted_pin = graph
+            .protect_captured_blob(unaccepted_candidate, &scope)
+            .expect("protect unaccepted payload");
+        let unaccepted_ref = unaccepted_pin.protected_ref.clone();
+
+        let commit = |message: &str| {
+            let output = Command::new("git")
+                .current_dir(root)
+                .args([
+                    "-c",
+                    "user.name=kierandrewett",
+                    "-c",
+                    "user.email=kieran@drewett.dev",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                ])
+                .output()
+                .expect("create journal fixture commit");
+            assert!(
+                output.status.success(),
+                "create journal fixture commit: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        commit("journal baseline");
+        let old_head = repository
+            .head()
+            .expect("read journal baseline")
+            .expect("journal baseline commit");
+        commit("journal candidate");
+        let new_head = repository
+            .head()
+            .expect("read journal candidate")
+            .expect("journal candidate commit");
+        let journal = crate::PublicationJournal::new(
+            old_head,
+            new_head,
+            vec![crate::PublicationJournalEntry::new(
+                crate::ManagedPath::new("pending.orna").expect("managed fixture path"),
+                None,
+                Some(b"candidate".to_vec()),
+            )],
+        )
+        .expect("valid publication journal");
+
+        let publication_lock = NativeGraphCoordinationLock::acquire(&repository)
+            .expect("hold publication coordination lock");
+        let worker_repository = repository.clone();
+        let worker_accepted = accepted_pending.clone();
+        let dead_owner = graph.owner_id;
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal cleanup attempt");
+            reclaim_dead_owner_pin_refs(&worker_repository, dead_owner, &worker_accepted)
+        });
+        started_rx.recv().expect("cleanup attempt started");
+        assert_eq!(
+            worker.join().expect("join concurrent cleanup"),
+            Err(GraphError::PublicationNotTerminal),
+            "cleanup must defer while a publisher holds the shared lock"
+        );
+
+        repository
+            .write_publication_journal_locked(&journal)
+            .expect("persist journal under the held publication lock");
+        drop(publication_lock);
+
+        assert_eq!(
+            reclaim_dead_owner_pin_refs(&repository, graph.owner_id, &accepted_pending),
+            Err(GraphError::PublicationNotTerminal),
+            "cleanup must recheck the durable journal while holding the lock"
+        );
+        assert!(fixture_ref_exists(root, &accepted_ref));
+        assert!(fixture_ref_exists(root, &unaccepted_ref));
+
+        repository
+            .clear_publication_journal()
+            .expect("clear completed fixture journal");
+        assert_eq!(
+            reclaim_dead_owner_pin_refs(&repository, graph.owner_id, &accepted_pending),
+            Ok(1),
+            "retry removes only the unaccepted pin"
+        );
+        assert!(fixture_ref_exists(root, &accepted_ref));
+        assert!(!fixture_ref_exists(root, &unaccepted_ref));
+    }
+
     const KILLED_OWNER_ROOT: &str = "ORNA_DEAD_OWNER_CAPTURE_ROOT";
     const KILLED_OWNER_TEST: &str =
-        "native_graph::persisted_orp_tests::restart_reclaims_pin_refs_of_a_killed_owner";
+        "native_graph::persisted_orp_tests::restart_preserves_accepted_pin_and_reclaims_unaccepted_pin";
 
-    /// Captures and protects a real fixture, then kills this process without
-    /// unwinding, exactly as an operator `SIGKILL` does. The kernel releases
-    /// the owner lock and nothing runs the pin's drop-time cleanup.
+    /// Captures two protected fixtures, then kills this process without
+    /// unwinding, exactly as an operator `SIGKILL` does.
     fn killed_owner_child_body(root: &Path) {
         let graph = capture_context_in(root);
         let repository =
@@ -7848,17 +8044,26 @@ mod persisted_orp_tests {
             .acquire_runtime_owner_lock(graph.owner_id)
             .expect("killed owner acquires its lock");
         let scope = graph.open_read_scope().expect("killed owner read scope");
-        let payload: &[u8] = include_bytes!("../tests/fixtures/pin-roundtrip.orna");
-        let candidate = graph
-            .capture_blob_candidate(payload, payload.len() as u64, &scope)
-            .expect("capture authorized fixture stream");
-        let pin = graph
-            .protect_captured_blob(candidate, &scope)
-            .expect("protect complete OGB-2 closure");
+        let accepted_payload: &[u8] = include_bytes!("../tests/fixtures/pin-roundtrip.orna");
+        let accepted_candidate = graph
+            .capture_blob_candidate(accepted_payload, accepted_payload.len() as u64, &scope)
+            .expect("capture accepted fixture stream");
+        let accepted_pin = graph
+            .protect_captured_blob(accepted_candidate, &scope)
+            .expect("protect accepted OGB-2 closure");
+        let unaccepted_payload = b"captured but not accepted before process death";
+        let unaccepted_candidate = graph
+            .capture_blob_candidate(&unaccepted_payload[..], unaccepted_payload.len() as u64, &scope)
+            .expect("capture unaccepted fixture stream");
+        let unaccepted_pin = graph
+            .protect_captured_blob(unaccepted_candidate, &scope)
+            .expect("protect unaccepted OGB-2 closure");
         println!(
-            "{} {}",
+            "{} {} {} {}",
             hex_encode(&graph.owner_id),
-            pin.descriptor_oid.to_hex()
+            hex_encode(accepted_pin.pin_id()),
+            accepted_pin.descriptor_oid.to_hex(),
+            hex_encode(unaccepted_pin.pin_id()),
         );
         std::io::stdout().flush().expect("flush pin evidence");
         let status = Command::new("kill")
@@ -7886,11 +8091,22 @@ mod persisted_orp_tests {
             .collect()
     }
 
-    /// A runtime owner killed between capture and row acceptance never runs its
-    /// drop-time ref cleanup: the kernel releases the owner lock, the pin refs
-    /// stay. Restart must reclaim exactly those refs, and only that owner's.
+    fn decode_pin_id(hex: &str) -> [u8; 16] {
+        let mut pin_id = [0; 16];
+        for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+            pin_id[index] = u8::from_str_radix(
+                std::str::from_utf8(pair).expect("pin ID is ASCII"),
+                16,
+            )
+            .expect("pin ID is hexadecimal");
+        }
+        pin_id
+    }
+
+    /// Restart must keep refs named by durable accepted-pin evidence, reclaim
+    /// unaccepted refs, and still read the accepted OGB-2 bytes after reopen.
     #[test]
-    fn restart_reclaims_pin_refs_of_a_killed_owner() {
+    fn restart_preserves_accepted_pin_and_reclaims_unaccepted_pin() {
         if let Some(root) = std::env::var_os(KILLED_OWNER_ROOT) {
             killed_owner_child_body(Path::new(&root));
             return;
@@ -7917,32 +8133,42 @@ mod persisted_orp_tests {
         );
 
         let evidence = String::from_utf8(output.stdout).expect("owner evidence is UTF-8");
-        // The child shares the libtest harness, which writes `test <name> ... `
-        // to stdout without a trailing newline before the test body runs, so the
-        // evidence is not at the start of its line. Scan every whitespace token
-        // for the one `owner descriptor` pair the owner prints before dying.
-        let (owner_hex, descriptor_hex) = evidence
+        // The child shares the libtest harness, which writes the test name and
+        // status before the body runs. Scan tokens for its four-value record.
+        let (owner_hex, accepted_pin_hex, descriptor_hex, unaccepted_pin_hex) = evidence
             .split_whitespace()
             .collect::<Vec<_>>()
-            .windows(2)
-            .find_map(|pair| {
-                let [owner, descriptor] = pair else {
+            .windows(4)
+            .find_map(|tokens| {
+                let [owner, pin, descriptor, unaccepted] = tokens else {
                     return None;
                 };
                 let hex_token = |token: &str, width: usize| {
                     token.len() == width && token.bytes().all(|byte| byte.is_ascii_hexdigit())
                 };
-                (hex_token(owner, 32) && hex_token(descriptor, 40))
-                    .then(|| ((*owner).to_owned(), (*descriptor).to_owned()))
+                (hex_token(owner, 32)
+                    && hex_token(pin, 32)
+                    && hex_token(descriptor, 40)
+                    && hex_token(unaccepted, 32))
+                .then(|| {
+                    (
+                        (*owner).to_owned(),
+                        (*pin).to_owned(),
+                        (*descriptor).to_owned(),
+                        (*unaccepted).to_owned(),
+                    )
+                })
             })
-            .expect("the killed owner prints its pin evidence before dying");
+            .expect("the killed owner prints pin evidence before dying");
 
-        assert!(
-            !pin_ref_names(root, &owner_hex).is_empty(),
-            "a killed owner must leave its pin refs behind, or this proof is vacuous"
-        );
+        assert_eq!(pin_ref_names(root, &owner_hex).len(), 2);
+        let accepted_pin_id = decode_pin_id(&accepted_pin_hex);
+        let unaccepted_pin_id = decode_pin_id(&unaccepted_pin_hex);
+        let accepted_oid = NativeOid::from_hex(GitHashAlgorithm::Sha1, &descriptor_hex)
+            .expect("accepted descriptor OID");
+        let accepted_pending = BTreeMap::from([(accepted_pin_id, accepted_oid.clone())]);
 
-        // A sibling pin namespace must never be reclaimed by this takeover.
+        // A sibling namespace must never be reclaimed by this takeover.
         let foreign_owner = [0x99; 16];
         let foreign_ref = accepted_content_ref(&foreign_owner, &[0x77; 16]);
         let zero = "0".repeat(40);
@@ -7958,20 +8184,378 @@ mod persisted_orp_tests {
         let second = repository
             .acquire_runtime_owner_lock([0x42; 16])
             .expect("takeover after the owner was killed");
-        assert_eq!(
-            second.previous_owner().map(|owner| hex_encode(&owner)),
-            Some(owner_hex.clone()),
-            "the takeover must observe the killed owner identity"
-        );
+        assert_eq!(second.previous_owner(), Some(decode_pin_id(&owner_hex)));
+        assert_eq!(second.reclaim_previous_owner_pins(&accepted_pending).unwrap(), 1);
+        let accepted_ref = accepted_content_ref(&decode_pin_id(&owner_hex), &accepted_pin_id);
+        assert_eq!(pin_ref_names(root, &owner_hex), vec![accepted_ref]);
         assert!(
-            pin_ref_names(root, &owner_hex).is_empty(),
-            "a killed owner's pin refs must not survive the next takeover"
+            !fixture_ref_exists(
+                root,
+                &accepted_content_ref(&decode_pin_id(&owner_hex), &unaccepted_pin_id),
+            ),
+            "unaccepted pending content is reclaimed"
         );
+
+        let gc = Command::new("git")
+            .current_dir(root)
+            .args(["gc", "--prune=now", "--quiet"])
+            .output()
+            .expect("collect objects after owner recovery");
+        assert!(
+            gc.status.success(),
+            "git gc failed after recovery: {}",
+            String::from_utf8_lossy(&gc.stderr)
+        );
+
+        // The remaining private root must still serve its full OGB-2 content
+        // after constructing a fresh graph context over the reopened repo.
+        let reopened_graph = capture_context_in(root);
+        let scope = reopened_graph.open_read_scope().unwrap();
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let descriptor = reopened_graph
+            .read_blob_descriptor(&accepted_oid, &scope, &mut objects)
+            .unwrap();
+        let reference = reopened_graph.admit_blob(descriptor).unwrap();
+        let payload: &[u8] = include_bytes!("../tests/fixtures/pin-roundtrip.orna");
+        let range = reopened_graph
+            .read_blob_range(&reference, 0..payload.len() as u64, &scope)
+            .unwrap();
+        assert_eq!(range.bytes(), payload);
+
         assert_eq!(
             pin_ref_names(root, &hex_encode(&foreign_owner)),
             vec![foreign_ref],
             "reclamation must stay inside the killed owner's pin namespace"
         );
+    }
+    #[test]
+    fn bounded_range_reads_the_first_child_above_its_upper_bound_only() {
+        let (_directory, mut graph) = capture_test_context();
+        let seed_scope = graph.open_read_scope().expect("owner seed scope");
+        let seed_value = RowValue::decode_canonical_fields(vec![0x80])
+            .expect("empty canonical fixture row");
+        let mutations: Vec<_> = (0..700)
+            .map(|index| RowIndexMutation::Insert {
+                key: TypedKey::Text(format!("row-{index:04}")),
+                value: seed_value.clone(),
+            })
+            .collect();
+        let seeded = graph
+            .maintain_row_index(&mutations, &seed_scope)
+            .expect("build a multi-page row map");
+        let version = graph.row_snapshot.version();
+        let seeded_store_root = graph
+            .replace_relation_primary_root(
+                version.store_root(),
+                version,
+                seeded.primary_root(),
+                seeded.row_count(),
+                &seed_scope,
+            )
+            .expect("publish seeded row root into relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            seeded_store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            *version.relation_id(),
+        )
+        .expect("load seeded format-3 row map");
+        graph.store_root = seeded_store_root;
+        drop(seed_scope);
+
+        let bounded_scope = graph.open_read_scope().expect("bounded query scope");
+        let bounded_range = crate::row_store::KeyRange::new(
+            Some(TypedKey::Text("row-0150".to_owned())),
+            Some(TypedKey::Text("row-0154".to_owned())),
+            10,
+        )
+        .expect("valid bounded key interval");
+        let bounded_rows = graph
+            .range_rows(&bounded_range, &bounded_scope)
+            .expect("read only the matching range and its upper boundary child");
+        let bounded_keys: Vec<_> = bounded_rows
+            .into_iter()
+            .map(|row| row.key().clone())
+            .collect();
+        assert_eq!(
+            bounded_keys,
+            (150..154)
+                .map(|index| TypedKey::Text(format!("row-{index:04}")))
+                .collect::<Vec<_>>()
+        );
+        let bounded_objects = bounded_scope.objects_read();
+
+        let full_scope = graph.open_read_scope().expect("full query scope");
+        let mut full_rows = Vec::with_capacity(700);
+        for (lower, upper) in [
+            (None, Some(TypedKey::Text("row-0256".to_owned()))),
+            (
+                Some(TypedKey::Text("row-0256".to_owned())),
+                Some(TypedKey::Text("row-0512".to_owned())),
+            ),
+            (Some(TypedKey::Text("row-0512".to_owned())), None),
+        ] {
+            let page = crate::row_store::KeyRange::new(lower, upper, 256)
+                .expect("valid bounded key page");
+            full_rows.extend(
+                graph
+                    .range_rows(&page, &full_scope)
+                    .expect("read one valid row-map page"),
+            );
+        }
+        assert_eq!(full_rows.len(), 700);
+        assert!(
+            bounded_objects < full_scope.objects_read(),
+            "bounded traversal read {bounded_objects} Git objects, full traversal read {}",
+            full_scope.objects_read()
+        );
+        assert_eq!(bounded_scope.payload_bytes_read(), 0);
+    }
+
+    #[test]
+    fn requested_range_verifies_only_intersecting_real_media_chunks() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("capture scope");
+        let wave = include_bytes!("../tests/fixtures/media/tone.wav");
+        assert_eq!(&wave[..4], b"RIFF");
+        assert_eq!(&wave[8..12], b"WAVE");
+        let mut payload = wave.to_vec();
+        let pcm = payload[44..].to_vec();
+        let target_length = 2 * crate::blob_store::GEAR_MAXIMUM + 73;
+        while payload.len() < target_length {
+            let remaining = target_length - payload.len();
+            payload.extend_from_slice(&pcm[..remaining.min(pcm.len())]);
+        }
+        payload.truncate(target_length);
+        let riff_length = (payload.len() - 8) as u32;
+        let pcm_length = (payload.len() - 44) as u32;
+        payload[4..8].copy_from_slice(&riff_length.to_le_bytes());
+        payload[40..44].copy_from_slice(&pcm_length.to_le_bytes());
+        let spans = crate::blob_store::GearChunker::new()
+            .spans(&payload)
+            .expect("chunk valid expanded PCM waveform");
+        assert!(spans.len() > 1, "waveform fixture must span multiple chunks");
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture actual WAV media payload");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("verify and protect media closure");
+        let binding = graph
+            .accept_protected_blob_pin(pin)
+            .expect("admit captured media descriptor");
+        let mut objects = graph.stats_budget(&scope);
+        let descriptor = graph
+            .read_blob_descriptor(binding.descriptor_oid(), &scope, &mut objects)
+            .expect("read pinned media descriptor");
+        let reference = graph.admit_blob(descriptor).expect("bind media descriptor");
+        let selected = spans[0].length()..spans[0].length() + 32;
+        let range_scope = graph.open_read_scope().expect("range scope");
+        let before_objects = range_scope.objects_read();
+        let result = graph
+            .read_blob_range(&reference, selected.clone(), &range_scope)
+            .expect("read media bytes from selected chunk");
+        assert_eq!(
+            result.bytes(),
+            &payload[selected.start as usize..selected.end as usize]
+        );
+        assert_eq!(range_scope.payload_bytes_read(), spans[1].length());
+        assert!(range_scope.objects_read() > before_objects);
+        assert!(range_scope.payload_bytes_read() < payload.len() as u64);
+
+        let empty_scope = graph.open_read_scope().expect("empty range scope");
+        let before_empty = empty_scope.payload_bytes_read();
+        let empty = graph
+            .read_blob_range(&reference, 7..7, &empty_scope)
+            .expect("empty requested range still validates its descriptor");
+        assert!(empty.bytes().is_empty());
+        assert!(empty_scope.objects_read() > 0);
+        assert_eq!(empty_scope.payload_bytes_read() - before_empty, 0);
+    }
+
+    #[test]
+    fn requested_range_rejects_a_fetched_chunk_with_wrong_raw_digest() {
+        let (directory, graph) = capture_test_context();
+        let chunk = b"content-addressed object with corrupt OGB-2 leaf digest";
+        let target = fixture_git_object(directory.path(), "blob", chunk);
+        let byte_root = fixture_git_node(
+            directory.path(),
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: chunk.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: chunk.len() as u64,
+                    target,
+                    chunk_sha256: Some([0; 32]),
+                }],
+            },
+        );
+        let identity = crate::blob_store::digest_bytes(chunk);
+        let descriptor_oid = fixture_git_node(
+            directory.path(),
+            &NodeData::BlobDescriptor {
+                length: identity.length(),
+                raw_sha256: identity.sha256(),
+                byte_root: Some(byte_root),
+            },
+        );
+        let reference = AdmittedBlobReference {
+            context: graph.identity,
+            database_id: graph.database_id,
+            owner_id: graph.owner_id,
+            snapshot_id: graph.snapshot_id,
+            descriptor_oid,
+            identity,
+        };
+        let scope = graph.open_read_scope().expect("range scope");
+        assert!(matches!(
+            graph.read_blob_range(&reference, 0..identity.length(), &scope),
+            Err(GraphError::ChunkDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn requested_range_rejects_short_nonfinal_chunk_without_fetching_it() {
+        let (directory, graph) = capture_test_context();
+        let first = b"tiny";
+        let last = b"tail";
+        let first_oid = fixture_git_object(directory.path(), "blob", first);
+        let last_oid = fixture_git_object(directory.path(), "blob", last);
+        let byte_root = fixture_git_node(
+            directory.path(),
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: (first.len() + last.len()) as u64,
+                entries: vec![
+                    ByteIndexEntry {
+                        span_length: first.len() as u64,
+                        target: first_oid,
+                        chunk_sha256: Some(crate::blob_store::digest_bytes(first).sha256()),
+                    },
+                    ByteIndexEntry {
+                        span_length: last.len() as u64,
+                        target: last_oid,
+                        chunk_sha256: Some(crate::blob_store::digest_bytes(last).sha256()),
+                    },
+                ],
+            },
+        );
+        let payload = [first.as_slice(), last.as_slice()].concat();
+        let identity = crate::blob_store::digest_bytes(&payload);
+        let descriptor_oid = fixture_git_node(
+            directory.path(),
+            &NodeData::BlobDescriptor {
+                length: identity.length(),
+                raw_sha256: identity.sha256(),
+                byte_root: Some(byte_root),
+            },
+        );
+        let reference = AdmittedBlobReference {
+            context: graph.identity,
+            database_id: graph.database_id,
+            owner_id: graph.owner_id,
+            snapshot_id: graph.snapshot_id,
+            descriptor_oid,
+            identity,
+        };
+        let scope = graph.open_read_scope().expect("range scope");
+        assert!(matches!(
+            graph.read_blob_range(&reference, 0..1, &scope),
+            Err(GraphError::InvalidByteIndex)
+        ));
+        assert_eq!(scope.payload_bytes_read(), 0);
+    }
+
+    #[test]
+    fn row_index_rewrite_reuses_blob_descriptor_without_reading_payload_bytes() {
+        let (_directory, mut graph) = capture_test_context();
+        let seed_scope = graph.open_read_scope().expect("owner seed scope");
+        let payload = b"ORP page rewrite keeps this media payload pinned";
+        let captured = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &seed_scope)
+            .expect("capture payload candidate");
+        let pin = graph
+            .protect_captured_blob(captured, &seed_scope)
+            .expect("protect descriptor and payload closure");
+        let binding = graph
+            .accept_protected_blob_pin(pin)
+            .expect("admit protected Blob for a row");
+        let mut blob_row = vec![0x81];
+        blob_row.extend_from_slice(binding.encoded_value());
+        let blob_value = RowValue::decode_canonical_fields(blob_row)
+            .expect("canonical row with one Blob value");
+        let empty_value = RowValue::decode_canonical_fields(vec![0x80])
+            .expect("empty canonical fixture row");
+        let mutations: Vec<_> = (0..300)
+            .map(|index| RowIndexMutation::Insert {
+                key: TypedKey::Text(format!("row-{index:04}")),
+                value: if index == 150 {
+                    blob_value.clone()
+                } else {
+                    empty_value.clone()
+                },
+            })
+            .collect();
+        let seeded = graph
+            .maintain_row_index(&mutations, &seed_scope)
+            .expect("build row pages containing the protected Blob reference");
+        let version = graph.row_snapshot.version();
+        let seeded_store_root = graph
+            .replace_relation_primary_root(
+                version.store_root(),
+                version,
+                seeded.primary_root(),
+                seeded.row_count(),
+                &seed_scope,
+            )
+            .expect("publish seeded row root into relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            seeded_store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            *version.relation_id(),
+        )
+        .expect("load seeded format-3 row map");
+        graph.store_root = seeded_store_root;
+        drop(seed_scope);
+
+        let query_scope = graph.open_read_scope().expect("row query scope");
+        let blob_range = crate::row_store::KeyRange::new(
+            Some(TypedKey::Text("row-0150".to_owned())),
+            Some(TypedKey::Text("row-0151".to_owned())),
+            1,
+        )
+        .expect("valid Blob row interval");
+        let blob_rows = graph
+            .range_rows(&blob_range, &query_scope)
+            .expect("read Blob reference from its row page");
+        assert_eq!(blob_rows.len(), 1);
+        assert_eq!(blob_rows[0].key(), &TypedKey::Text("row-0150".to_owned()));
+        assert_eq!(query_scope.payload_bytes_read(), 0);
+
+        let rewrite_scope = graph.open_read_scope().expect("rewrite scope");
+        let rewrite = graph
+            .maintain_row_index(
+                &[RowIndexMutation::Insert {
+                    key: TypedKey::Text("row-0300".to_owned()),
+                    value: empty_value,
+                }],
+                &rewrite_scope,
+            )
+            .expect("rewrite the index while preserving the Blob row");
+        assert_eq!(rewrite.payload_objects_reused().len(), 1);
+        assert_eq!(rewrite.row_count(), 301);
+        assert_eq!(rewrite_scope.payload_bytes_read(), 0);
     }
 }
 

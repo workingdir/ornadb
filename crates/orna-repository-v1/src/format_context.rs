@@ -2988,6 +2988,35 @@ mod graph_bridge_tests {
         ));
     }
 
+    #[test]
+    fn indexed_range_includes_fence_and_excludes_next_child_minimum() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x7a; 16];
+        install_nested_row_store(root, &context(root), relation_id, 2, 2, 4);
+
+        let pinned = context(root);
+        let snapshot = pinned.load_row_map(relation_id).expect("load ORP identity");
+        let graph = pinned.open_native_graph(&snapshot).expect("issue graph");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let range = KeyRange::new(Some(TypedKey::UInt(40)), Some(TypedKey::UInt(90)), 8)
+            .expect("valid fence-aligned range");
+
+        let rows = graph.range_rows(&range, &scope).expect("bounded ORP range");
+        let keys: Vec<_> = rows.iter().map(|row| row.key().clone()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                TypedKey::UInt(40),
+                TypedKey::UInt(50),
+                TypedKey::UInt(60),
+                TypedKey::UInt(70),
+                TypedKey::UInt(80),
+            ]
+        );
+        assert_eq!(scope.payload_bytes_read_for_test(), 0);
+    }
+
     /// One relation's index shape and the objects a point lookup, a missing-key
     /// lookup and a bounded range read from it.
     struct IndexReads {
@@ -3344,11 +3373,17 @@ mod graph_bridge_tests {
             7..7,
         ] {
             let range_scope = admitted_graph.open_read_scope().unwrap();
-            let expected_payload_reads = chunk_spans
-                .iter()
-                .filter(|span| span.offset() < range.end && span.offset() + span.length() > range.start)
-                .map(crate::blob_store::ChunkSpan::length)
-                .sum::<u64>();
+            let expected_payload_reads = if range.is_empty() {
+                0
+            } else {
+                chunk_spans
+                    .iter()
+                    .filter(|span| {
+                        span.offset() < range.end && span.offset() + span.length() > range.start
+                    })
+                    .map(crate::blob_store::ChunkSpan::length)
+                    .sum::<u64>()
+            };
             let read = admitted_graph
                 .read_blob_range(&reference, range.clone(), &range_scope)
                 .unwrap_or_else(|error| panic!("range {range:?} failed: {error:?}"));
@@ -3809,7 +3844,7 @@ mod graph_bridge_tests {
         assert_eq!(copied_key, TypedKey::UInt(key));
         assert_eq!(metadata.length(), payload.len() as u64);
         let expected_sha: [u8; 32] = Sha256::digest(&payload).into();
-        assert_eq!(metadata.sha256(), &expected_sha);
+        assert_eq!(metadata.sha256(), expected_sha);
         assert_eq!(metadata.media_type(), "audio/wav");
         assert_eq!(metadata.suffix(), Some("wav"));
         assert_eq!(metadata_scope.payload_bytes_read(), 0);

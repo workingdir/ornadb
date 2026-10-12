@@ -8,10 +8,12 @@
 //! than to a private one.
 
 use std::{
+    io::Read,
     path::Path,
     process::{Command, Output},
 };
 
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[path = "support/format3.rs"]
@@ -224,6 +226,16 @@ fn committed_rows(
 async fn publish_then_history_then_offline_copy_carries_the_publication_commit() {
     let (root, repository, relation_id) = empty_format3_repository();
     let project: &Path = root.path();
+    let source_repository_path = project.to_path_buf();
+    git(
+        project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "file:///deliberately-unavailable/original.git",
+        ],
+    );
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),
@@ -270,13 +282,14 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
     // Next: reader inputs — the relation id, a key spelling that names the
     // imported row, and the committed bytes the copy must reproduce.
     let relation = hex(&relation_id);
-    let source_rows = committed_rows(&repository, relation_id);
-    assert_eq!(source_rows.len(), 1, "one imported row is committed");
     let bytes_on_disk = std::fs::metadata(Path::new(MEDIA_FIXTURES).join("pixel.png"))
         .unwrap()
         .len();
 
-    // Step 1: `orna publish` names the commit it froze.
+    let parent = String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
     let published = run(project, &["publish"]);
     assert_eq!(
         published.status.code(),
@@ -284,6 +297,10 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
         "publish failed: {}",
         stderr(&published)
     );
+    let published_repository =
+        orna_repository_v1::Repository::discover(project).expect("discover published repository");
+    let source_rows = committed_rows(&published_repository, relation_id);
+    assert_eq!(source_rows.len(), 1, "publish commits the imported row");
     let publication = stdout(&published)
         .split_whitespace()
         .find(|word| word.len() == 40 && word.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -333,17 +350,27 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
     let outside = TempDir::new().unwrap();
     let archive = outside.path().join("publication-archive");
     let archive_path = archive.to_str().unwrap();
-    let exported = run(project, &["export", archive_path, "--at", "HEAD"]);
+    let exported = run(
+        project,
+        &["export", archive_path, "--at", "HEAD", "--at", &parent],
+    );
     assert_eq!(
         exported.status.code(),
         Some(0),
         "export failed: {}",
         stderr(&exported)
     );
+    drop(repository);
+    drop(root);
+    drop(source);
+    assert!(
+        !source_repository_path.exists(),
+        "the source repository is gone"
+    );
     let restored = outside.path().join("restored");
     let restored_path = restored.to_str().unwrap();
     let reconstructed = run(
-        project,
+        outside.path(),
         &[
             "export",
             archive_path,
@@ -359,10 +386,66 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
         stderr(&reconstructed)
     );
 
-    // Step 4: the copy opens offline, with the source gone, and reads the same
-    // row. The reader fetches no media payload: a complete copy that had left
-    // the blob behind would fail the row read instead of returning it.
-    drop(repository);
+    // Step 4: the copy opens offline, recovers the committed key, and reads its
+    // raw Blob bytes. A missing payload or descriptor closure fails the read.
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the restored repository has no configured remotes"
+    );
+    for commit in [&parent, &publication] {
+        assert_eq!(
+            String::from_utf8(git_output(
+                &restored,
+                &["show", &format!("{commit}:main.orna")],
+                None,
+            ))
+            .unwrap(),
+            "capture test schema",
+            "each snapshot independently recovers its module source"
+        );
+        let database = String::from_utf8(git_output(
+            &restored,
+            &["show", &format!("{commit}:.orna/database.orna")],
+            None,
+        ))
+        .unwrap();
+        assert!(
+            database.contains("repository_format: 3"),
+            "each snapshot independently recovers its format-3 database schema"
+        );
+        git_output(&restored, &["checkout", "--force", commit], None);
+        let member_copy = orna_repository_v1::Repository::discover(&restored)
+            .expect("discover the selected copied snapshot");
+        let checked_out =
+            String::from_utf8(git_output(&restored, &["rev-parse", "HEAD"], None)).unwrap();
+        assert_eq!(
+            checked_out.trim(),
+            commit,
+            "the selected snapshot is checked out"
+        );
+        let member_rows = committed_rows(&member_copy, relation_id);
+        if commit == &publication {
+            assert_eq!(
+                member_rows, source_rows,
+                "the published member recovers its row"
+            );
+            assert!(
+                member_rows.iter().any(|row| {
+                    row.key() == &orna_repository_v1::TypedKey::Bytes(b"image".to_vec())
+                        || row.key() == &orna_repository_v1::TypedKey::Text("image".to_owned())
+                }),
+                "the copied publication retains the concrete image key"
+            );
+        } else {
+            assert!(
+                member_rows.is_empty(),
+                "the pre-publication snapshot has no row"
+            );
+        }
+    }
     let copy = orna_repository_v1::Repository::discover(&restored).expect("open the copy");
     assert_eq!(
         String::from_utf8(git_output(&restored, &["remote"], None))
@@ -379,6 +462,54 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
     let row = copy_rows.first().expect("the copy carries the row");
     let drawn = row.blob_fields().expect("the row decodes its Blob fields");
     assert_eq!(drawn.len(), 1, "the row carries exactly one Blob field");
+    let raw_payload = std::fs::read(Path::new(MEDIA_FIXTURES).join("pixel.png")).unwrap();
+    let expected_sha256: [u8; 32] = Sha256::digest(&raw_payload).into();
+    let format = copy
+        .open_format_context()
+        .expect("open the restored format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the restored committed row map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the restored native graph");
+    let scope = graph
+        .open_read_scope()
+        .expect("open the restored read scope");
+    let copied_row = graph
+        .lookup_row(row.key(), &scope)
+        .expect("look up the copied image row")
+        .expect("the image key remains present");
+    let descriptor = copied_row
+        .value()
+        .dependencies()
+        .into_iter()
+        .find(|dependency| dependency.kind() == orna_repository_v1::NativeObjectKind::Tree)
+        .expect("the copied row depends on its Blob descriptor")
+        .oid()
+        .clone();
+    let reference = graph
+        .admit_blob_reference(&copied_row, &descriptor, &scope)
+        .expect("admit the copied descriptor from its row");
+    let copied_payload = graph
+        .read_blob_range(&reference, 0..drawn[0].1.length(), &scope)
+        .expect("read raw Blob bytes from the restored snapshot")
+        .bytes()
+        .to_vec();
+    assert_eq!(
+        copied_payload, raw_payload,
+        "the restored Blob bytes match the fixture"
+    );
+    let copied_sha256: [u8; 32] = Sha256::digest(&copied_payload).into();
+    assert_eq!(
+        copied_sha256, expected_sha256,
+        "the restored raw Blob hash matches"
+    );
+    assert_eq!(
+        drawn[0].1.sha256(),
+        expected_sha256,
+        "the restored Blob row preserves its raw content hash"
+    );
     assert_eq!(
         drawn[0].1.length(),
         bytes_on_disk,
@@ -405,4 +536,257 @@ fn export_discovers_the_repository_from_a_subdirectory() {
         stderr(&exported)
     );
     assert!(archive.join("manifest.tsv").is_file());
+}
+
+/// A promised object that exists only at `origin` must not be fetched to make
+/// an otherwise incomplete local snapshot exportable.
+#[test]
+fn export_fails_locally_for_a_missing_promisor_object() {
+    let (root, _repository, _) = empty_format3_repository();
+    let source = root.path();
+    std::fs::write(source.join("remote-only.txt"), b"promisor-only payload").unwrap();
+    git(source, &["add", "remote-only.txt"]);
+    git(source, &["commit", "--quiet", "-m", "promisor source"]);
+    let oid = String::from_utf8(git_output(
+        source,
+        &["rev-parse", "HEAD:remote-only.txt"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let source_object = source.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+    assert!(source_object.is_file(), "origin has the promised object");
+
+    let outside = TempDir::new().unwrap();
+    let partial = outside.path().join("partial");
+    git_output(
+        outside.path(),
+        &[
+            "clone",
+            "--local",
+            source.to_str().unwrap(),
+            partial.to_str().unwrap(),
+        ],
+        None,
+    );
+    git(&partial, &["config", "extensions.partialClone", "origin"]);
+    git(&partial, &["config", "remote.origin.promisor", "true"]);
+    git(
+        &partial,
+        &["config", "remote.origin.partialclonefilter", "blob:none"],
+    );
+    let partial_object = partial.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+    assert!(
+        partial_object.is_file(),
+        "the clone initially has the object"
+    );
+    std::fs::remove_file(&partial_object).unwrap();
+
+    let has_local_object = || {
+        Command::new("git")
+            .current_dir(&partial)
+            .args(["cat-file", "-e", &oid])
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .status()
+            .expect("check the local object database")
+            .success()
+    };
+    assert!(
+        !has_local_object(),
+        "the object is missing locally before export"
+    );
+    assert!(
+        source_object.is_file(),
+        "the origin can still serve the object"
+    );
+
+    let archive = outside.path().join("incomplete-copy");
+    std::fs::create_dir(&archive).unwrap();
+    let exported = run(
+        &partial,
+        &["export", archive.to_str().unwrap(), "--at", "HEAD"],
+    );
+    assert_ne!(
+        exported.status.code(),
+        Some(0),
+        "export refuses a locally incomplete snapshot: {} {}",
+        stdout(&exported),
+        stderr(&exported)
+    );
+    assert!(
+        stderr(&exported).contains(&oid),
+        "diagnostic names missing object {oid}: {}",
+        stderr(&exported)
+    );
+    assert!(
+        std::fs::read_dir(&archive).unwrap().next().is_none(),
+        "a failed export preserves its existing empty destination"
+    );
+    assert!(
+        !has_local_object(),
+        "export does not fetch the promised object from origin"
+    );
+
+    // An actual offline source: the promisor URL no longer resolves, but the
+    // export still reports the missing object rather than a host-file fallback.
+    let disabled_origin = outside.path().join("disabled-origin");
+    git(
+        &partial,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            disabled_origin.to_str().unwrap(),
+        ],
+    );
+    let offline_archive = outside.path().join("offline-copy");
+    let offline_export = run(
+        &partial,
+        &["export", offline_archive.to_str().unwrap(), "--at", "HEAD"],
+    );
+    assert_ne!(
+        offline_export.status.code(),
+        Some(0),
+        "offline export must fail"
+    );
+    assert!(
+        stderr(&offline_export).contains(&oid),
+        "offline diagnostic names missing object {oid}: {}",
+        stderr(&offline_export)
+    );
+    assert!(
+        !offline_archive.exists(),
+        "offline failure creates no destination"
+    );
+    assert!(
+        !has_local_object(),
+        "offline export keeps the object absent locally"
+    );
+}
+
+/// A streamed blob remains byte-identical after the source and its configured
+/// origin are unavailable; restore publishes only the verified local copy.
+#[test]
+fn restore_streams_large_blob_after_source_and_origin_are_gone() {
+    let (root, repository, _) = empty_format3_repository();
+    let source = root.path();
+    let outside = TempDir::new().unwrap();
+    let unavailable_origin = outside.path().join("unavailable-origin");
+    git(
+        source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            unavailable_origin.to_str().unwrap(),
+        ],
+    );
+
+    let payload_length = 8 * 1024 * 1024;
+    let payload: Vec<u8> = (0..payload_length)
+        .map(|index| ((index * 31 + (index >> 8)) & 0xff) as u8)
+        .collect();
+    let expected_sha256: [u8; 32] = Sha256::digest(&payload).into();
+    std::fs::write(source.join("large-payload.bin"), &payload).unwrap();
+    git(source, &["add", "large-payload.bin"]);
+    git(
+        source,
+        &["commit", "--quiet", "-m", "large offline payload"],
+    );
+    let source_oid = String::from_utf8(git_output(
+        source,
+        &["rev-parse", "HEAD:large-payload.bin"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let archive = outside.path().join("archive");
+    let exported = run(
+        source,
+        &["export", archive.to_str().unwrap(), "--at", "HEAD"],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "offline-local export failed: {}",
+        stderr(&exported)
+    );
+    assert_eq!(
+        String::from_utf8(git_output(source, &["remote", "get-url", "origin"], None))
+            .unwrap()
+            .trim(),
+        unavailable_origin.to_str().unwrap(),
+        "the source remote is explicitly unavailable"
+    );
+
+    drop(repository);
+    std::fs::remove_dir_all(source).unwrap();
+    assert!(
+        !source.exists(),
+        "the source repository is gone before restore"
+    );
+    assert!(
+        !unavailable_origin.exists(),
+        "the configured origin is unavailable"
+    );
+
+    let restored = outside.path().join("restored");
+    std::fs::create_dir(&restored).unwrap();
+    let restored_output = run(
+        outside.path(),
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--restore",
+            restored.to_str().unwrap(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        restored_output.status.code(),
+        Some(0),
+        "offline restore failed: {}",
+        stderr(&restored_output)
+    );
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the reconstructed repository has no remote"
+    );
+    let restored_oid = String::from_utf8(git_output(
+        &restored,
+        &["rev-parse", "HEAD:large-payload.bin"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert_eq!(
+        restored_oid, source_oid,
+        "the pinned blob object is preserved"
+    );
+
+    let mut payload_file = std::fs::File::open(restored.join("large-payload.bin")).unwrap();
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut restored_length = 0_u64;
+    loop {
+        let count = payload_file.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        restored_length += count as u64;
+        hasher.update(&buffer[..count]);
+    }
+    assert_eq!(restored_length, payload_length as u64);
+    let restored_sha256: [u8; 32] = hasher.finalize().into();
+    assert_eq!(
+        restored_sha256, expected_sha256,
+        "streamed raw payload hash"
+    );
 }
