@@ -19,9 +19,10 @@ use orna_repository_v1::{
 };
 use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
-    Analysis, Catalogue, ModuleInput, Namespace, RowUnitInput, SourceTableSchemaArtifact,
-    StandardCatalogueError, StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
-    lower_row_unit_with_owner_fields, source_table_schema_with_ids,
+    Analysis, Catalogue, ModuleInput, Namespace, ObjectIdentityManifest, RowUnitInput,
+    SourceTableSchemaArtifact, StandardCatalogueError, StandardDependencyProfile, SymbolKind,
+    analyze, analyze_with_catalogue, lower_row_unit_with_owner_fields,
+    source_table_schema as build_source_table_schema, source_table_schema_with_ids,
 };
 use orna_syntax_v1::{Declaration, parse_module};
 use orna_value_v1::{
@@ -44,6 +45,11 @@ pub use attachments::{
     NestedPairDepthLabel, PackagePin, PackagePinManifest, PackagePinSpec, PackageResolver,
     PinnedDatabase, ReboundPathCheckpoint, ReboundPathResolution, SiblingRebindResolution,
 };
+
+/// Committed owner-issued UUID inventory for source table and field identities.
+pub const OBJECT_IDENTITY_MANIFEST_PATH: &str = ".orna/object-identities.cbor";
+
+const MAX_OBJECT_IDENTITY_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// Bounded resource limits applied before source contents are read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -338,6 +344,31 @@ impl LoadedProject {
             .map(|profile| Catalogue::from_standard_sources(profile, sources))
             .transpose()
     }
+    /// Builds a source-only table schema with identities from a caller-supplied
+    /// persisted manifest. Analysis uses only this project's modules and pinned
+    /// standard catalogue; the module must match a loaded source identity.
+    pub fn source_table_schema(
+        &self,
+        manifest: &ObjectIdentityManifest,
+        module_name: &str,
+        declaration_name: &str,
+    ) -> Result<SourceTableSchemaArtifact, ProjectLoadError> {
+        if !self.identities.iter().any(|identity| {
+            Namespace(identity.namespace().to_vec()).display() == module_name
+        }) {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+        let catalogue = self
+            .standard_catalogue(self.standard_sources.iter().cloned())
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let analysis = match catalogue.as_ref() {
+            Some(catalogue) => analyze_with_catalogue(&self.modules, catalogue),
+            None => analyze(&self.modules),
+        };
+        build_source_table_schema(&analysis, manifest, module_name, declaration_name)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)
+    }
+
 }
 /// Admit a source row expression and accepted captured Blob bindings as one
 /// canonical mutation. This variant accepts no source-owner scalar fields.
@@ -832,6 +863,38 @@ impl ProjectLoader {
             table,
             database_id,
         })
+    }
+
+    /// Resolves a table using identities read from the exact committed source
+    /// snapshot, then binds the complete source schema to its repository context.
+    pub fn resolve_committed_source_table_schema(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+        module_name: &str,
+        declaration_name: &str,
+    ) -> Result<ResolvedTableSchema, ProjectLoadError> {
+        let manifest_bytes = repository
+            .read_committed_file(
+                commit,
+                OBJECT_IDENTITY_MANIFEST_PATH,
+                MAX_OBJECT_IDENTITY_MANIFEST_BYTES,
+            )
+            .map_err(ProjectLoadError::Repository)?;
+        let manifest = ObjectIdentityManifest::decode(&manifest_bytes)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        let project = self.load_committed_snapshot(repository, commit)?;
+        let table = project.source_table_schema(&manifest, module_name, declaration_name)?;
+        let schema = self.resolve_committed_table_schema(
+            repository,
+            commit,
+            declaration_name,
+            TableObjectId::new(*table.table_id()),
+        )?;
+        if schema.descriptor() != table.descriptor() {
+            return Err(ProjectLoadError::InvalidTableSchema);
+        }
+        Ok(schema)
     }
 
     /// Loads the root module and reachable imports from the immutable tree of
