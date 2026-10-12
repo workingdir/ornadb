@@ -1,14 +1,16 @@
 //! Commits one captured media row through an admitted request, the same path
 //! the media import tests use. `insert_only` chooses an insert or a replace.
 
+use orna_conformance_v1::DurableTransactionalEvaluator;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_project_v1::{ProjectLoader, admit_source_row_with_owner_fields};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TerminalOutcome,
-    WriterLease,
+    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TableObjectId,
+    TerminalOutcome, WriterLease,
 };
-
-use super::format3::publish_media_row;
+use orna_storage_v1::LoosePath;
+use orna_value_v1::{Format3Context, Raw};
 
 pub async fn commit_capture(
     repository: &Repository,
@@ -71,5 +73,138 @@ pub async fn commit_capture(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
-    publish_media_row(repository, state, key, ordinal + 0x10).await;
+    crate::format3::publish_media_row(repository, state, key, ordinal + 0x10).await;
+}
+/// Captures and commits complete source-owned Object rows. The schema, row
+/// candidates, canonical keys, ordered field tuple, and protected Blob pins all
+/// come from the same committed ProjectLoader artifact and repository graph.
+pub async fn commit_source_captures(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    relation_id: [u8; 16],
+    format_context: &Format3Context,
+    captures: &[(&str, &str, u8)],
+) {
+    assert!(!captures.is_empty());
+    let commit = repository.head().unwrap().unwrap();
+    let loader = ProjectLoader::default();
+    let project = loader
+        .load_committed_snapshot(repository, &commit)
+        .expect("load the committed source project");
+    let schema = loader
+        .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
+        .expect("resolve the Object table from its committed identity manifest");
+    assert_eq!(schema.declaration_name(), "Object");
+    assert_eq!(schema.table_object_id(), TableObjectId::new(relation_id));
+
+    let mut mutations = Vec::with_capacity(captures.len());
+    let mut paths_by_key = std::collections::BTreeMap::new();
+    let mut retained_sources = Vec::with_capacity(captures.len());
+    for (expression, key, ordinal) in captures {
+        let logical_path = format!("Object/{key}.orna");
+        let row = project
+            .loose_rows()
+            .iter()
+            .find(|row| row.logical_path() == logical_path)
+            .expect("the committed project contains this source Object row");
+        let value = evaluate_expression_ovb2_with_effects(
+            expression,
+            &Default::default(),
+            Limits::default(),
+            bindings,
+        )
+        .expect("capture the source payload");
+        let blob_binding = bindings
+            .accept_captured_blob_for_row(&value)
+            .expect("accept the captured Blob for this row");
+        let size_mib = blob_binding.content_identity().length() as f64 / (1024.0 * 1024.0);
+        let admitted = admit_source_row_with_owner_fields(
+            &project,
+            row.logical_path(),
+            row.source(),
+            &schema,
+            format_context,
+            vec![("payload".to_owned(), blob_binding)],
+            vec![("size".to_owned(), Raw::Float(size_mib.to_bits()))],
+            [ordinal.wrapping_add(3); 16],
+        )
+        .expect("admit a source-bound full Object row");
+        let (mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
+        assert_eq!(
+            resolved_schema.table_object_id(),
+            TableObjectId::new(relation_id)
+        );
+        assert_eq!(mutation.table(), "Object");
+        assert_eq!(
+            mutation.table_object_id(),
+            Some(TableObjectId::new(relation_id))
+        );
+        assert!(mutation.value().is_some_and(|value| !value.is_empty()));
+        assert_eq!(
+            paths_by_key.insert(mutation.key().to_vec(), (*key).to_owned()),
+            None
+        );
+        mutations.push(mutation);
+        retained_sources.push((source_bindings, resolved_schema));
+    }
+
+    let ordinal = captures[0].2;
+    let request_identity = RequestIdentity {
+        session_id: [ordinal; 16],
+        request_id: [ordinal.wrapping_add(1); 16],
+    };
+    let fingerprint = [ordinal.wrapping_add(2); 32];
+    let (_, admission) = state
+        .reserve_request_with_admission(request_identity, fingerprint)
+        .await
+        .unwrap();
+    state
+        .start_request_with_owner_and_admission(
+            request_identity,
+            fingerprint,
+            writer,
+            admission.expect("new request returns its admission capability"),
+        )
+        .await
+        .unwrap();
+    let activation = state.begin_activation().await.unwrap();
+    let committed = state
+        .commit_table_request_activation(
+            writer,
+            request_identity,
+            fingerprint,
+            &activation,
+            &mutations,
+            [ordinal.wrapping_add(4); 32],
+            TerminalOutcome::new(vec![ordinal.wrapping_add(5)]).unwrap(),
+            &NoFault,
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.request.state, RequestState::Completed);
+
+    let checkpoint = state
+        .latest_checkpoint()
+        .await
+        .unwrap()
+        .expect("the source rows leave a checkpoint");
+    DurableTransactionalEvaluator::default()
+        .publish_pending(
+            repository,
+            state,
+            [ordinal.wrapping_add(0x10); 16],
+            &checkpoint,
+            |mutation| {
+                let key = paths_by_key
+                    .get(mutation.key())
+                    .expect("every pending Object row has a source key");
+                LoosePath::for_key(mutation.table(), &[key.clone()])
+            },
+            "orna: publish source Object rows",
+        )
+        .await
+        .expect("the source Object rows publish together");
+    drop(retained_sources);
 }
