@@ -4368,6 +4368,7 @@ mod tests {
         )
         .with_expected_baseline_row(None);
         let identity_for_admit = identity.clone();
+        let accepted_for_validation = accepted_for_admit.clone();
         let applied = target
             .commit_durable_temporary_rename(
                 &scratch,
@@ -4386,7 +4387,7 @@ mod tests {
                         Box::new(DurableRenameValidator {
                             table: identity_for_admit.table().to_owned(),
                             object_id: identity_for_admit.object_id(),
-                            accepted: accepted_for_admit.clone(),
+                            accepted: accepted_for_validation.clone(),
                             cwd_generation: cwd_for_admit.clone(),
                         }),
                     ))
