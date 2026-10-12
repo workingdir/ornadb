@@ -1459,10 +1459,21 @@ mod graph_bridge_tests {
             "binding rejects a foreign source snapshot"
         );
 
-        let other_id = [0xa2; 16];
-        let wrong_descriptor = descriptor_for_table(other_id);
+        let wrong_descriptor = descriptor_for_table(relation_id, "Str");
         assert_eq!(
             context.bind_committed_table("Audio", relation_id, &snapshot_id, &wrong_descriptor),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a differing field type under the same table ID"
+        );
+        let other_id = [0xa2; 16];
+        let wrong_table_descriptor = descriptor_for_table(other_id, "Int");
+        assert_eq!(
+            context.bind_committed_table(
+                "Audio",
+                relation_id,
+                &snapshot_id,
+                &wrong_table_descriptor,
+            ),
             Err(super::FormatContextError::TableBindingMismatch),
             "binding rejects an expected descriptor for another table"
         );
@@ -1480,7 +1491,7 @@ mod graph_bridge_tests {
             .expect("admit fixture format context")
     }
 
-    fn descriptor_for_table(relation_id: [u8; 16]) -> SchemaDescriptor {
+    fn descriptor_for_table(relation_id: [u8; 16], key_type: &str) -> SchemaDescriptor {
         let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
         let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
             Raw::Array(vec![
@@ -1501,7 +1512,7 @@ mod graph_bridge_tests {
                     field(
                         [0x11; 16],
                         "id",
-                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]),
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text(key_type.into())]),
                         0,
                     ),
                     field(
@@ -1520,11 +1531,12 @@ mod graph_bridge_tests {
     fn seeded_table_binding(relation_id: [u8; 16]) -> (TempDir, SchemaDescriptor) {
         let directory = repository();
         let root = directory.path();
-        fs::write(
-            root.join("main.orna"),
-            include_str!("../tests/fixtures/committed-table-binding.orna"),
-        )
-        .expect("write committed table declaration");
+        let source = format!(
+            "{}{}",
+            MAIN_SOURCE,
+            include_str!("../tests/fixtures/committed-table-binding.orna")
+        );
+        fs::write(root.join("main.orna"), source).expect("write committed table declaration");
         commit(root);
         let initial = context(root);
         let algorithm = initial
@@ -1532,7 +1544,7 @@ mod graph_bridge_tests {
             .expect("pinned store root")
             .oid
             .algorithm();
-        let descriptor = descriptor_for_table(relation_id);
+        let descriptor = descriptor_for_table(relation_id, "Int");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
         let schema_digest = Sha256::digest(&schema_bytes).into();
         let schema_oid = schema_descriptor_node(
