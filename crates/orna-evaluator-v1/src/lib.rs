@@ -1839,6 +1839,7 @@ pub fn invoke_named_with_context_effects(
         source_context: value_context.clone(),
     };
     let mut context = Context {
+        limits,
         steps: 0,
         functions,
         aliases: None,
