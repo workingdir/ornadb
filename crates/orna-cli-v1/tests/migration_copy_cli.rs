@@ -358,3 +358,54 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
         source_status
     );
 }
+
+#[test]
+fn cli_migration_copy_rejects_mixed_worktree_metadata() {
+    for (label, metadata_file, marker) in [
+        ("mixed", ".orna/format.orna", &b"format 3\n"[..]),
+        ("unknown", ".orna/format.orna", &b"format 99\n"[..]),
+        (
+            "changed database identity",
+            ".orna/database.orna",
+            &b"{database_id: \"00000000-0000-4000-8000-000000000000\"}\n"[..],
+        ),
+    ] {
+        let parent = TempDir::new().unwrap();
+        let source = parent.path().join("source");
+        fs::create_dir(&source).unwrap();
+        initialize_legacy_source(&source);
+        let source_head = git_output(&source, &["rev-parse", "HEAD"]);
+        let source_index = git_output(&source, &["write-tree"]);
+        let metadata_path = source.join(metadata_file);
+        fs::write(&metadata_path, marker).unwrap();
+        let source_status = git_output(
+            &source,
+            &["status", "--porcelain=v2", "--untracked-files=all"],
+        );
+        let destination = parent.path().join("migrated");
+        let trace = parent.path().join("git-trace.log");
+
+        let output = run_copy(&source, &destination, "0", &trace);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{label} worktree metadata must fail closed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("E2100"));
+        assert!(
+            !destination.exists(),
+            "{label} source must not create a candidate"
+        );
+        assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), source_head);
+        assert_eq!(git_output(&source, &["write-tree"]), source_index);
+        assert_eq!(
+            git_output(
+                &source,
+                &["status", "--porcelain=v2", "--untracked-files=all"]
+            ),
+            source_status
+        );
+        assert_eq!(fs::read(metadata_path).unwrap(), marker);
+    }
+}

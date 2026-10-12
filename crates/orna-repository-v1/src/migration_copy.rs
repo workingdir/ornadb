@@ -35,7 +35,10 @@ use std::process::{Command, Stdio};
 
 use sha2::{Digest, Sha256};
 
-use crate::init::format_context::{LEGACY_FORMAT_PATH, canonical_database_bytes};
+use crate::init::format_context::{
+    FORMAT_CONTEXT_MAX_METADATA_BYTES, LEGACY_FORMAT_PATH, RepositoryFormatContext,
+    canonical_database_bytes,
+};
 use crate::{
     DatabaseId, GitCommitRef, IndexGeneration, LegacyAnnotationCandidate,
     MigrationAnnotationDefaults, MigrationContinuityRecord, PublicationJournal,
@@ -302,6 +305,7 @@ fn prepare_format3_migration_in(
         return Err(RepositoryError::InvalidFormatMigration);
     }
     let source_format = context.repository_format();
+    require_legacy_worktree_metadata_matches(source, &context)?;
     let source_commit = source.head()?.ok_or(RepositoryError::UnbornHead)?;
     let source_index_generation = source.index_generation()?;
     require_index_tree(&source_index_generation)?;
@@ -404,6 +408,54 @@ fn prepare_format3_migration_in(
         annotation_defaults,
         continuity,
     })
+}
+
+fn require_legacy_worktree_metadata_matches(
+    source: &Repository,
+    context: &RepositoryFormatContext,
+) -> Result<(), RepositoryError> {
+    let format_path = source.worktree().join(LEGACY_FORMAT_PATH);
+    let worktree_format =
+        read_regular_metadata_file(&format_path)?.ok_or(RepositoryError::InvalidFormatMigration)?;
+    let committed_format = context
+        .read_committed_file(LEGACY_FORMAT_PATH, FORMAT_CONTEXT_MAX_METADATA_BYTES)
+        .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+    if worktree_format != committed_format {
+        return Err(RepositoryError::InvalidFormatMigration);
+    }
+
+    let database_path = source.worktree().join(".orna/database.orna");
+    let worktree_database = read_regular_metadata_file(&database_path)?;
+    match context.database_id() {
+        Some(_) => {
+            let committed_database = context
+                .read_committed_file(".orna/database.orna", FORMAT_CONTEXT_MAX_METADATA_BYTES)
+                .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+            if worktree_database.as_deref() != Some(committed_database.as_slice()) {
+                return Err(RepositoryError::InvalidFormatMigration);
+            }
+        }
+        None if worktree_database.is_some() => {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn read_regular_metadata_file(path: &Path) -> Result<Option<Vec<u8>>, RepositoryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let bytes = fs::read(path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            if bytes.len() > FORMAT_CONTEXT_MAX_METADATA_BYTES {
+                return Err(RepositoryError::InvalidFormatMigration);
+            }
+            Ok(Some(bytes))
+        }
+        Ok(_) => Err(RepositoryError::InvalidFormatMigration),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(RepositoryError::LocalStateUnavailable),
+    }
 }
 
 fn canonical_destination(destination: &Path) -> Result<PathBuf, RepositoryError> {
