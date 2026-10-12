@@ -539,12 +539,6 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
         if object_id.is_empty() || !object_id.iter().all(u8::is_ascii_hexdigit) {
             return Err(RepositoryError::GitOperationFailed);
         }
-        // `git add -N` stores a zero-OID placeholder in the index. The copied
-        // index preserves that valid intent-to-add entry; there is no blob to
-        // materialize in either object database.
-        if matches!(object_id.len(), 40 | 64) && object_id.iter().all(|byte| *byte == b'0') {
-            continue;
-        }
         let object_id =
             std::str::from_utf8(object_id).map_err(|_| RepositoryError::GitOperationFailed)?;
 
