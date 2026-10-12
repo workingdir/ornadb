@@ -6408,7 +6408,8 @@ mod tests {
             stored_blob_reference("not a mime", Raw::Null),
             stored_blob_reference("image/png", Raw::Text("PNG".into())),
         ] {
-            let fields = encode_raw(&Raw::Array(vec![malformed_reference])).unwrap();
+            let mut fields = Vec::new();
+            write_raw(&Raw::Array(vec![malformed_reference]), &mut fields).unwrap();
             assert!(schema
                 .validate_stored_row([9; 16], &key, &fields)
                 .is_err());
@@ -6440,7 +6441,10 @@ mod tests {
         .unwrap();
         let option_fields = encode_canonical_storage_value(&Raw::Array(vec![Raw::Tag(
             60013,
-            Box::new(stored_blob_reference("image/png", Raw::Null)),
+            Box::new(Raw::Array(vec![
+                Raw::Int(1.into()),
+                stored_blob_reference("image/png", Raw::Null),
+            ])),
         )]))
         .unwrap();
         assert!(option_schema
@@ -6456,7 +6460,6 @@ mod tests {
             .validate_stored_row([9; 16], &key, &malformed_none)
             .is_err());
     }
-
 
     #[test]
     fn schema_descriptor_rejects_malformed_nested_datetime_payload() {
