@@ -2513,6 +2513,7 @@ fn run_fetch(
 /// detached `HEAD` is refused rather than guessing a name. A remote that is
 /// missing a selected continuity ref, or names it with a different object ID,
 /// is reported as a conflict before anything is transferred.
+/// A pending publication is recovered first; any unresolved journal blocks the push.
 fn run_push(
     endpoint: &Endpoint,
     remote: &str,
@@ -2544,6 +2545,78 @@ fn run_push(
             )
         })?,
     };
+    if repository
+        .read_publication_journal()
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2200",
+                "local publication state could not be read",
+                "recover or repair the pending local publication before retrying `push`",
+                error.to_string(),
+            )
+        })?
+        .is_some()
+    {
+        if !repository.runtime_paths().state_db().exists() {
+            return Err(Diagnostic::target(
+                "E2200",
+                "pending local publication has no runtime state",
+                "restore the repository's runtime state and recover the publication before `push`",
+            ));
+        }
+        let (identity, initial_digest) = runtime_identity(&repository)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| {
+                Diagnostic::target(
+                    "E2200",
+                    "local runtime publication recovery could not start",
+                    "retry `push` after checking the local runtime state",
+                )
+            })?;
+        let state = runtime
+            .block_on(RuntimeState::open(&repository, identity, initial_digest))
+            .map_err(|error| {
+                Diagnostic::target_with_detail(
+                    "E2200",
+                    "local runtime publication state could not be opened",
+                    "recover or repair the pending local publication before retrying `push`",
+                    error.to_string(),
+                )
+            })?;
+        runtime
+            .block_on(orna_storage_v1::RuntimePublicationCoordinator::recover(
+                &repository,
+                &state,
+            ))
+            .map_err(|error| {
+                Diagnostic::target_with_detail(
+                    "E2200",
+                    "pending local publication could not be recovered",
+                    "resolve the publication recovery error before retrying `push`",
+                    error.to_string(),
+                )
+            })?;
+        if repository
+            .read_publication_journal()
+            .map_err(|error| {
+                Diagnostic::target_with_detail(
+                    "E2200",
+                    "local publication state could not be verified",
+                    "verify the pending publication before retrying `push`",
+                    error.to_string(),
+                )
+            })?
+            .is_some()
+        {
+            return Err(Diagnostic::target(
+                "E2200",
+                "local publication recovery remains pending",
+                "resolve the publication recovery before retrying `push`",
+            ));
+        }
+    }
     repository
         .push_ordinary_with_local_continuity(remote, branch.clone())
         .map_err(|error| {
