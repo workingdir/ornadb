@@ -212,7 +212,7 @@ impl VfsRepositoryCache {
         if !Arc::ptr_eq(&target.cache_epoch.generation, &self.epoch.generation) {
             return Err(VfsSaveError::WrongRepositoryScope);
         }
-        target
+        let result = target
             .commit_durable_temporary_blob_rename(
                 scratch,
                 runtime,
@@ -224,7 +224,8 @@ impl VfsRepositoryCache {
                 admit,
                 faults,
             )
-            .await
+            .await;
+        result
     }
 
     async fn has_current_projection<S>(&self, image: &VfsFileSnapshot<S>) -> bool {
@@ -240,6 +241,7 @@ impl VfsRepositoryCache {
                 image,
                 unlinked: false,
             }),
+            operation: Mutex::new(()),
             cache_epoch: self.epoch.clone(),
         })
     }
@@ -612,6 +614,7 @@ impl<S> DraftState<S> {
 /// activation path. Dropping or releasing the draft never accepts it.
 pub struct EditDraft<S> {
     state: Mutex<DraftState<S>>,
+    operation: Mutex<()>,
     max_file_bytes: usize,
 }
 
@@ -682,6 +685,7 @@ impl<S> ManagedFileStat<S> {
 /// image; open handles keep the immutable image captured when they opened.
 pub struct ManagedFile<S> {
     state: Mutex<ManagedFileState<S>>,
+    operation: Mutex<()>,
     cache_epoch: SharedCacheEpoch,
 }
 
@@ -728,7 +732,7 @@ impl<S> ManagedFile<S> {
         max_file_bytes: usize,
     ) -> TemporarySave<S> {
         let baseline = Arc::clone(&self.state.lock().await.image);
-        let draft = EditDraft::open(Arc::clone(&baseline), max_file_bytes);
+        let draft = Arc::new(EditDraft::open(Arc::clone(&baseline), max_file_bytes));
         // A typical editor temp starts empty; its commit baseline remains the
         // managed destination image captured above.
         draft
@@ -738,6 +742,7 @@ impl<S> ManagedFile<S> {
         TemporarySave {
             target: Arc::clone(self),
             baseline,
+            operation: Mutex::new(()),
             state: Mutex::new(TemporarySaveState {
                 draft,
                 synced_revision: None,
@@ -760,8 +765,9 @@ impl<S> ManagedFile<S> {
         TemporarySave {
             target: Arc::clone(self),
             baseline: Arc::clone(&baseline),
+            operation: Mutex::new(()),
             state: Mutex::new(TemporarySaveState {
-                draft: EditDraft::open(baseline, max_file_bytes),
+                draft: Arc::new(EditDraft::open(baseline, max_file_bytes)),
                 synced_revision: None,
                 applied: None,
             }),
@@ -785,7 +791,9 @@ impl<S> ManagedFile<S> {
             return Err(TemporaryRenameError::WrongDestination);
         }
 
+        let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
+        let _scratch_operation = scratch.operation.lock().await;
         let mut scratch_state = scratch.state.lock().await;
         if let Some((generation, handle)) = &scratch_state.applied {
             return Ok(TemporaryRenameOutcome::Applied {
@@ -890,6 +898,7 @@ impl<S> ManagedFile<S> {
         if !Arc::ptr_eq(&self.cache_epoch.generation, &baseline.epoch.generation) {
             return Err(TemporaryRenameError::WrongRepositoryScope);
         }
+        let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
         let reads_baseline =
             !destination.unlinked && Arc::ptr_eq(&destination.image, &baseline.image) && {
@@ -945,6 +954,7 @@ impl<S> ManagedFile<S> {
         F: FnOnce(ActivationCandidate<S>) -> Fut,
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
+        let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
         let (based_on_current, revision) = {
             let draft_state = draft.state.lock().await;
@@ -1008,6 +1018,7 @@ impl<S> ManagedFile<S> {
         F: FnOnce(ActivationCandidate<S>) -> Fut,
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
+        let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
         if destination.unlinked {
             return Ok(UnlinkOutcome::AlreadyUnlinked);
@@ -1047,7 +1058,7 @@ pub enum UnlinkOutcome {
 }
 
 struct TemporarySaveState<S> {
-    draft: EditDraft<S>,
+    draft: Arc<EditDraft<S>>,
     synced_revision: Option<u64>,
     applied: Option<(u64, SnapshotReadHandle<S>)>,
 }
@@ -1058,11 +1069,13 @@ struct TemporarySaveState<S> {
 pub struct TemporarySave<S> {
     target: Arc<ManagedFile<S>>,
     baseline: Arc<VfsFileSnapshot<S>>,
+    operation: Mutex<()>,
     state: Mutex<TemporarySaveState<S>>,
 }
 
 impl<S> TemporarySave<S> {
     pub async fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), EditDraftError> {
+        let _operation = self.operation.lock().await;
         let state = self.state.lock().await;
         if state.applied.is_some() {
             return Err(EditDraftError::AlreadyApplied);
@@ -1071,6 +1084,7 @@ impl<S> TemporarySave<S> {
     }
 
     pub async fn truncate(&self, length: u64) -> Result<(), EditDraftError> {
+        let _operation = self.operation.lock().await;
         let state = self.state.lock().await;
         if state.applied.is_some() {
             return Err(EditDraftError::AlreadyApplied);
@@ -1093,6 +1107,7 @@ impl<S> TemporarySave<S> {
         F: FnOnce(u64, Arc<[u8]>) -> Fut,
         Fut: Future<Output = Result<(), E>>,
     {
+        let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
         if let Some((revision, _)) = &state.applied {
             return Ok(*revision);
@@ -1216,6 +1231,7 @@ impl<S> EditDraft<S> {
                 last_accepted: None,
                 retained_invalid: None,
             }),
+            operation: Mutex::new(()),
             max_file_bytes,
         }
     }
@@ -1243,6 +1259,7 @@ impl<S> EditDraft<S> {
             return Err(EditDraftError::FileTooLarge);
         }
 
+        let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
         let current_len = state
             .candidate
@@ -1271,6 +1288,7 @@ impl<S> EditDraft<S> {
         if length > self.max_file_bytes {
             return Err(EditDraftError::FileTooLarge);
         }
+        let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
         let current_len = state
             .candidate
@@ -1320,6 +1338,7 @@ impl<S> EditDraft<S> {
         F: FnOnce(ActivationCandidate<S>) -> Fut,
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
+        let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
         let Some(bytes) = state.candidate.as_ref() else {
             if let Some((revision, image)) = &state.last_accepted
@@ -2458,6 +2477,9 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
         save: VfsDurableSave,
         faults: &'a dyn FaultInjector,
     ) -> Result<Self, TableActivationError> {
+        if super::activation::runtime_activation_active(runtime) {
+            return Err(TableActivationError::Runtime(RuntimeError::AdminBusy));
+        }
         let writer = runtime
             .acquire_lease(save.owner_id)
             .await
@@ -2530,6 +2552,9 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
         &self,
         candidate: VfsSaveCandidate,
     ) -> Result<CwdCapture, TableActivationError> {
+        if super::activation::runtime_activation_active(self.runtime) {
+            return Err(TableActivationError::Runtime(RuntimeError::AdminBusy));
+        }
         let VfsSaveCandidate {
             replacement,
             mut validator,
@@ -2656,6 +2681,8 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
+        let _operation = self.operation.lock().await;
+        let _draft_operation = draft.operation.lock().await;
         self.commit_durable_save(
             draft,
             runtime,
@@ -2689,35 +2716,37 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, Arc<[u8]>) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
-        self.commit_durable_temporary_save(
-            scratch,
-            runtime,
-            save,
-            move |coordinates, bytes| async move {
-                let binding = capture_vfs_blob_replacement(
-                    capture,
-                    &bytes,
-                    expected_identity,
-                    media_type,
-                    suffix,
-                )
-                .map_err(VfsSaveAdmissionError::BlobCapture)?;
-                let encoded_value: Arc<[u8]> = Arc::from(binding.encoded_value());
-                let pin = binding.into_pin();
-                let candidate = admit(coordinates, bytes, encoded_value)
-                    .await
-                    .map_err(VfsSaveAdmissionError::Activation)?;
-                let replacement = candidate
-                    .replacement
-                    .with_protected_content_pin(pin)
-                    .map_err(|error| {
-                        VfsSaveAdmissionError::Activation(TableActivationError::Runtime(error))
-                    })?;
-                Ok(VfsSaveCandidate::new(replacement, candidate.validator))
-            },
-            faults,
-        )
-        .await
+        let result = self
+            .commit_durable_temporary_save(
+                scratch,
+                runtime,
+                save,
+                move |coordinates, bytes| async move {
+                    let binding = capture_vfs_blob_replacement(
+                        capture,
+                        &bytes,
+                        expected_identity,
+                        media_type,
+                        suffix,
+                    )
+                    .map_err(VfsSaveAdmissionError::BlobCapture)?;
+                    let encoded_value: Arc<[u8]> = Arc::from(binding.encoded_value());
+                    let pin = binding.into_pin();
+                    let candidate = admit(coordinates, bytes, encoded_value)
+                        .await
+                        .map_err(VfsSaveAdmissionError::Activation)?;
+                    let replacement = candidate
+                        .replacement
+                        .with_protected_content_pin(pin)
+                        .map_err(|error| {
+                            VfsSaveAdmissionError::Activation(TableActivationError::Runtime(error))
+                        })?;
+                    Ok(VfsSaveCandidate::new(replacement, candidate.validator))
+                },
+                faults,
+            )
+            .await;
+        result
     }
 
     /// Adopts one complete VFS row-document save through the same durable
@@ -2784,24 +2813,21 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         // One shared image of the candidate bytes is handed to the caller and
         // published on acceptance, so no second copy is made at either end.
         let candidate_bytes: Arc<[u8]> = Arc::from(candidate.as_slice());
+        drop(draft_state);
+        drop(destination);
 
-        // Serialize admissions in this repository epoch and keep the epoch lock
-        // across admission and commit, so no projection observes a partially
-        // advanced generation. A failed or rejected save leaves it unchanged.
-        let mut cache_generation = self.cache_epoch.generation.lock().await;
-        let next_generation = match cache_generation.checked_add(1) {
-            Some(next) => next,
-            None => {
-                return Err(VfsSaveError::Activation(TableActivationError::Runtime(
-                    RuntimeError::RecoveryInvalid,
-                )));
-            }
-        };
         let admission = VfsSaveAdmission::<S>::begin(runtime, save, faults)
             .await
             .map_err(VfsSaveError::Activation)?;
-        let candidate = admit(admission.coordinates(), Arc::clone(&candidate_bytes))
+        let writer = admission.writer;
+        let coordinates = admission.coordinates();
+        let callback_bytes = Arc::clone(&candidate_bytes);
+        let candidate =
+            super::activation::with_activation_scope(runtime, writer, move || async move {
+                admit(coordinates, callback_bytes).await
+            })
             .await
+            .map_err(|error| VfsSaveError::Activation(TableActivationError::Runtime(error)))?
             .map_err(|error| match error {
                 VfsSaveAdmissionError::BlobCapture(error) => VfsSaveError::BlobCapture(error),
                 VfsSaveAdmissionError::Activation(error) => VfsSaveError::Activation(error),
@@ -2820,15 +2846,34 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             .is_some_and(|matches| !matches)
         {
             let diagnostic = stale_baseline_diagnostic();
-            draft_state.retain_retryable_conflict(revision, diagnostic);
+            draft
+                .state
+                .lock()
+                .await
+                .retain_retryable_conflict(revision, diagnostic);
             return Err(VfsSaveError::Stale {
-                generation: *cache_generation,
+                generation: *self.cache_epoch.generation.lock().await,
                 diagnostic,
             });
         }
+        // Admission callbacks may read or mutate the shared projection epoch.
+        // Acquire its lock only after that callback and baseline check finish.
+        let mut cache_generation = self.cache_epoch.generation.lock().await;
+        let next_generation = match cache_generation.checked_add(1) {
+            Some(next) => next,
+            None => {
+                return Err(VfsSaveError::Activation(TableActivationError::Runtime(
+                    RuntimeError::RecoveryInvalid,
+                )));
+            }
+        };
         match admission.commit(candidate).await {
             Err(TableActivationError::ValidationFailed(diagnostic)) => {
-                draft_state.retain_rejection(revision, diagnostic);
+                draft
+                    .state
+                    .lock()
+                    .await
+                    .retain_rejection(revision, diagnostic);
                 return Err(VfsSaveError::Rejected {
                     generation: *cache_generation,
                     diagnostic,
@@ -2838,9 +2883,11 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             Ok(_capture) => {}
         }
         {
-            // Mirror the temp-rename route: the accepted handle carries the
-            // candidate bytes, and the image new opens see carries the
-            // advanced projection (VFS-019).
+            // The runtime transaction has committed; now publish its accepted
+            // image under short-lived VFS state locks. Operation gates kept the
+            // destination and draft stable while those locks were released.
+            let mut destination = self.state.lock().await;
+            let mut draft_state = draft.state.lock().await;
             let accepted = Arc::new(VfsFileSnapshot::new(
                 draft_state.baseline.pin.clone_pin(),
                 Arc::clone(&candidate_bytes),
@@ -2914,18 +2961,24 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         if save.expected_baseline_row.is_none() {
             return Err(VfsSaveError::MissingBaseline);
         }
-        let mut scratch_state = scratch.state.lock().await;
-        if let Some((generation, handle)) = &scratch_state.applied {
-            return Ok(TemporaryRenameOutcome::Applied {
-                generation: *generation,
-                handle: handle.clone(),
-            });
-        }
+        let _operation = self.operation.lock().await;
+        let _scratch_operation = scratch.operation.lock().await;
+        let draft = {
+            let scratch_state = scratch.state.lock().await;
+            if let Some((generation, handle)) = &scratch_state.applied {
+                return Ok(TemporaryRenameOutcome::Applied {
+                    generation: *generation,
+                    handle: handle.clone(),
+                });
+            }
+            Arc::clone(&scratch_state.draft)
+        };
+        let _draft_operation = draft.operation.lock().await;
         let outcome = self
-            .commit_durable_save(&scratch_state.draft, runtime, save, admit, faults)
+            .commit_durable_save(&draft, runtime, save, admit, faults)
             .await?;
         if let TemporaryRenameOutcome::Applied { generation, handle } = &outcome {
-            scratch_state.applied = Some((*generation, handle.clone()));
+            scratch.state.lock().await.applied = Some((*generation, handle.clone()));
         }
         Ok(outcome)
     }
@@ -3688,6 +3741,7 @@ mod tests {
                 image,
                 unlinked: false,
             }),
+            operation: Mutex::new(()),
             cache_epoch: SharedCacheEpoch::default(),
         };
 
@@ -4957,12 +5011,19 @@ mod tests {
             "stale rejection removes its provisional graph pin"
         );
 
+        let cache_for_admit = cache;
         let encoded_row = Arc::new(TestMutex::new(None));
         let encoded_row_for_admit = Arc::clone(&encoded_row);
         let save_table = table.clone();
         let save_table_name = save_table.table().to_owned();
         let save_object_id = save_table.object_id();
         let save_cwd_generation = cwd_generation.clone();
+        let target_for_admit = Arc::clone(&target);
+        let scratch_for_admit = &scratch;
+        let state_for_admit = &state;
+        let nested_save =
+            VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone());
+        let save_key = key.clone();
         let saved = cache
             .commit_durable_blob_rename(
                 &target,
@@ -4975,6 +5036,31 @@ mod tests {
                 "image/png",
                 Some("png"),
                 move |coordinates, _, encoded_blob| async move {
+                    assert_eq!(cache_for_admit.generation().await, 0);
+                    assert_eq!(
+                        target_for_admit
+                            .open_read()
+                            .await
+                            .read_at(0, row_fixture.len()),
+                        row_fixture
+                    );
+                    assert_eq!(scratch_for_admit.candidate_bytes().await.as_ref(), PIXEL);
+                    assert_eq!(
+                        state_for_admit
+                            .committed_table_row("media", &save_key)
+                            .await
+                            .unwrap(),
+                        None
+                    );
+                    assert!(matches!(
+                        VfsSaveAdmission::<u64>::begin(
+                            state_for_admit,
+                            nested_save,
+                            &crate::NoFault,
+                        )
+                        .await,
+                        Err(TableActivationError::Runtime(RuntimeError::AdminBusy))
+                    ));
                     let mut row_value = vec![0x81];
                     row_value.extend_from_slice(&encoded_blob);
                     *encoded_row_for_admit.lock().unwrap() = Some(row_value.clone());
