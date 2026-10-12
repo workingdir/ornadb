@@ -32,6 +32,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  export ARCHIVE --check                         report what one archive records",
     "  export ARCHIVE --restore DEST [--worktree]     reconstruct, verify, then materialise",
     "  export exit status: 0 archive written, verified, or restored; 1 snapshot, object closure, or pinned dependency unavailable",
+    "  migrate copy DEST --annotation-defaults N --no-persistent-consumers",
     "  publish [--message MESSAGE]                    commit the durable runtime tail as one publication commit",
     "  publish exit status: 0 published or nothing to publish; 1 repository, runtime, or publication conflict",
     "Editor tooling:",
@@ -84,6 +85,10 @@ mod tests {
         assert!(HELP_LINES.contains(
             &"  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid"
         ));
+        assert!(
+            HELP_LINES
+                .contains(&"  migrate copy DEST --annotation-defaults N --no-persistent-consumers")
+        );
         assert!(HELP_LINES.contains(&"  status [--porcelain|--short|--format human|short|json]"));
     }
 
