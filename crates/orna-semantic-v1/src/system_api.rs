@@ -673,6 +673,15 @@ impl SystemApi {
             .get(field)
     }
 
+    pub(crate) fn value_type_fields(
+        &self,
+        type_name: &str,
+    ) -> Option<&BTreeMap<String, SystemType>> {
+        self.types
+            .get(type_name)
+            .map(|descriptor| &descriptor.fields)
+    }
+
     pub(crate) fn type_parameters(&self, type_name: &str) -> Option<&[String]> {
         self.types
             .get(type_name)
