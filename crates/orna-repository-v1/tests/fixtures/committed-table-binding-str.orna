@@ -1,4 +1,3 @@
-module main;
 pub table Audio(id: Str) {
     payload: Blob,
 }
