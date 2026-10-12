@@ -11,6 +11,7 @@ use std::{
     process::{Command, Output},
 };
 
+use orna_repository_v1::{ManagedPath, PublicationJournal, PublicationJournalEntry, Repository};
 use tempfile::TempDir;
 
 const ALLOCATOR_REF: &str = "refs/orna/allocator";
@@ -73,6 +74,7 @@ struct Fixture {
     worktree: PathBuf,
     remote: PathBuf,
     initial: String,
+    initial_head: orna_repository_v1::GitCommitRef,
 }
 
 impl Fixture {
@@ -85,12 +87,12 @@ impl Fixture {
         let remote = root.path().join("remote.git");
         fs::create_dir(&worktree).unwrap();
         git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
-        git(root.path(), &["init", "-b", "main", worktree.to_str().unwrap()]);
-        git(&worktree, &["config", "user.name", "kierandrewett"]);
         git(
-            &worktree,
-            &["config", "user.email", "kieran@drewett.dev"],
+            root.path(),
+            &["init", "-b", "main", worktree.to_str().unwrap()],
         );
+        git(&worktree, &["config", "user.name", "kierandrewett"]);
+        git(&worktree, &["config", "user.email", "kieran@drewett.dev"]);
         git(&worktree, &["config", "commit.gpgsign", "false"]);
         git(
             &worktree,
@@ -100,16 +102,18 @@ impl Fixture {
         git(&worktree, &["add", "main.orna"]);
         git(&worktree, &["commit", "-m", "initial"]);
         let initial = git(&worktree, &["rev-parse", "HEAD"]);
-        git(
-            &worktree,
-            &["update-ref", ALLOCATOR_REF, &initial],
-        );
-        git(
-            &worktree,
-            &["update-ref", CHECKPOINT_REF, &initial],
-        );
+        let initial_head = Repository::discover(&worktree)
+            .unwrap()
+            .head()
+            .unwrap()
+            .unwrap();
+        git(&worktree, &["update-ref", ALLOCATOR_REF, &initial]);
+        git(&worktree, &["update-ref", CHECKPOINT_REF, &initial]);
         git(&worktree, &["update-ref", PIN_REF, &initial]);
-        git(&worktree, &["push", "origin", "refs/heads/main:refs/heads/main"]);
+        git(
+            &worktree,
+            &["push", "origin", "refs/heads/main:refs/heads/main"],
+        );
         git(
             &worktree,
             &[
@@ -126,6 +130,7 @@ impl Fixture {
             _root: root,
             worktree,
             initial,
+            initial_head,
             remote,
         }
     }
@@ -182,6 +187,55 @@ fn push_publishes_the_branch_and_never_exposes_private_pins() {
 }
 
 #[test]
+fn push_refuses_a_pending_publication_without_runtime_state() {
+    let fixture = Fixture::new();
+    let repository = Repository::discover(&fixture.worktree).unwrap();
+    let candidate = repository.head().unwrap().unwrap();
+    let journal = PublicationJournal::new(
+        fixture.initial_head.clone(),
+        candidate.clone(),
+        vec![PublicationJournalEntry::new(
+            ManagedPath::new("main.orna").unwrap(),
+            Some(b"module main;\n".to_vec()),
+            Some(b"module main;\n\n// next\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repository.write_publication_journal(&journal).unwrap();
+
+    let output = run(&fixture.worktree, &["push"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "push must not publish while a journal cannot be recovered"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("pending local publication has no runtime state"),
+        "CLI should explain why recovery blocked push: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fixture.remote_ref("refs/heads/main").as_deref(),
+        Some(fixture.initial.as_str())
+    );
+    assert_eq!(
+        fixture.remote_ref(ALLOCATOR_REF).as_deref(),
+        Some(fixture.initial.as_str())
+    );
+    assert_eq!(
+        fixture.remote_ref(CHECKPOINT_REF).as_deref(),
+        Some(fixture.initial.as_str())
+    );
+    assert_eq!(repository.head().unwrap().as_ref(), Some(&candidate));
+    assert_eq!(
+        repository.read_publication_journal().unwrap(),
+        Some(journal)
+    );
+}
+
+#[test]
 fn push_refuses_a_remote_that_dropped_a_continuity_ref() {
     let fixture = Fixture::new();
     let before = fixture.head();
@@ -206,7 +260,11 @@ fn push_refuses_a_remote_that_dropped_a_continuity_ref() {
         None,
         "a refused push must not re-create the refused continuity ref"
     );
-    assert_eq!(fixture.head(), before, "a refused push must not move local HEAD");
+    assert_eq!(
+        fixture.head(),
+        before,
+        "a refused push must not move local HEAD"
+    );
 }
 
 #[test]
