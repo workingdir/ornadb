@@ -273,6 +273,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         "offline query failed: {}",
         String::from_utf8_lossy(&query.stderr)
     );
+    let report: serde_json::Value = serde_json::from_slice(&query.stdout).unwrap();
     let listings = report["listings"].as_array().unwrap();
     assert_eq!(listings.len(), expected_payloads.len());
     for (key, expected_payload) in &expected_payloads {
@@ -298,6 +299,18 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     let graph = format
         .open_native_graph(&row_map)
         .expect("open pinned native graph");
+    let algorithm = match String::from_utf8(git_output(
+        &restored,
+        &["rev-parse", "--show-object-format"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    {
+        "sha1" => GitHashAlgorithm::Sha1,
+        "sha256" => GitHashAlgorithm::Sha256,
+        other => panic!("unsupported Git object format {other:?}"),
+    };
     for (key, expected_payload) in &expected_payloads {
         let scope = graph.open_read_scope().expect("open pinned read scope");
         let row = graph
