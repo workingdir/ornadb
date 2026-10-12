@@ -82,7 +82,7 @@ fn context_backed_resolver_rejects_foreign_store_root_bindings() {
     assert_eq!(decoded.content_identity(), identity);
     assert_eq!(decoded.descriptor_oid(), Some(&descriptor_oid));
     assert_eq!(decoded.media_type(), "audio/mpeg");
-    assert_eq!(decoded.suffix(), Some("mp3"));
+    assert_eq!(decoded.suffix(), None);
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
 
     let uncommitted_descriptor = context
@@ -529,7 +529,8 @@ fn annotate_canonicalizes_mime_and_suffix_without_hydrating_content() {
 fn annotation_rewrite_roundtrips_canonical_metadata_and_context_across_profiles() {
     let bytes = b"annotated payload";
     let identity = ContentIdentity::from_bytes(bytes);
-    let context = test_context(counting_resolver(bytes));
+    let resolver = counting_resolver(bytes);
+    let context = test_context(resolver.clone());
     let descriptor_oid = NativeOid::from_bytes(&[0x55; 20]).unwrap();
     let reference = context.reference(identity, descriptor_oid.clone()).unwrap();
     let rov3_blob = Blob::from_reference_with_annotation(reference, "audio/mpeg", None).unwrap();
@@ -585,11 +586,17 @@ fn annotation_rewrite_roundtrips_canonical_metadata_and_context_across_profiles(
     assert_eq!(rov3_decoded.descriptor_oid(), Some(&descriptor_oid));
     assert_eq!(rov3_decoded.media_type(), "audio/mpeg");
     assert_eq!(rov3_decoded.suffix(), Some("mp2"));
-    assert_eq!(rov3_round_trip.context().unwrap().store_root(), context.store_root());
+    assert_eq!(
+        rov3_round_trip.context().unwrap().store_root(),
+        context.store_root()
+    );
     assert_eq!(sov3_decoded.content_identity(), identity);
     assert_eq!(sov3_decoded.media_type(), "audio/mpeg");
     assert_eq!(sov3_decoded.suffix(), Some("mp2"));
-    assert_eq!(sov3_round_trip.context().unwrap().store_root(), context.store_root());
+    assert_eq!(
+        sov3_round_trip.context().unwrap().store_root(),
+        context.store_root()
+    );
 
     let ovb2_blob = Blob::from_bytes_with_annotation(bytes.to_vec(), "audio/mpeg", None).unwrap();
     let ovb2 = ContextValue::from_blob(&ovb2_blob, ValueFormat::Ovb2).unwrap();
@@ -617,6 +624,7 @@ fn annotation_rewrite_roundtrips_canonical_metadata_and_context_across_profiles(
     assert_eq!(ovb2_decoded.suffix(), Some("mp2"));
     assert_eq!(ovb2_decoded.read_to_end().unwrap(), bytes);
     assert!(ovb2_round_trip.context().is_none());
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
 }
 
 #[test]
