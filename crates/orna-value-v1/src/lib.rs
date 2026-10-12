@@ -4402,9 +4402,7 @@ fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> 
                     _ => Err(Error::InvalidValue),
                 };
             }
-            if let Raw::Tag(tag, payload) = value {
-                validate_tag(*tag, payload)?;
-            }
+            validate_raw(value, 0)?;
             validate_value_as_type(value, ty)
         }
         1 => {
@@ -6456,6 +6454,49 @@ mod tests {
         .unwrap();
         assert!(option_schema
             .validate_stored_row([9; 16], &key, &malformed_none)
+            .is_err());
+    }
+
+
+    #[test]
+    fn schema_descriptor_rejects_malformed_nested_datetime_payload() {
+        let schema = SchemaDescriptor::new(schema_for_type(
+            schema_type(0, Raw::Text("ZonedDateTime".into())),
+            vec![],
+        ))
+        .unwrap();
+        let key = encode_raw(&Raw::Int(7.into())).unwrap();
+        let valid_value = Raw::Tag(
+            60018,
+            Box::new(Raw::Array(vec![
+                Raw::Tag(
+                    60002,
+                    Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
+                ),
+                Raw::Tag(60004, Box::new(Raw::Text("UTC".into()))),
+                Raw::Int(0.into()),
+            ])),
+        );
+        let valid_fields = encode_raw(&Raw::Array(vec![valid_value])).unwrap();
+        assert!(schema
+            .validate_stored_row([9; 16], &key, &valid_fields)
+            .is_ok());
+
+        let malformed_value = Raw::Tag(
+            60018,
+            Box::new(Raw::Array(vec![
+                Raw::Tag(
+                    60002,
+                    Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
+                ),
+                Raw::Tag(60004, Box::new(Raw::Int(0.into()))),
+                Raw::Int(0.into()),
+            ])),
+        );
+        let mut malformed_fields = Vec::new();
+        write_raw(&Raw::Array(vec![malformed_value]), &mut malformed_fields).unwrap();
+        assert!(schema
+            .validate_stored_row([9; 16], &key, &malformed_fields)
             .is_err());
     }
 
