@@ -2636,6 +2636,29 @@ mod graph_bridge_tests {
         (schema_oid, schema_digest)
     }
 
+    fn schema_node_for_relation(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+    ) -> (NativeOid, [u8; 32]) {
+        let algorithm = context
+            .validate_schema_root()
+            .expect("pinned source schema root")
+            .oid
+            .algorithm();
+        let descriptor = descriptor_for_table(relation_id, "Int");
+        let schema_bytes = descriptor.encode().expect("encode schema descriptor");
+        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            directory,
+            algorithm,
+            &schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+        (schema_oid, schema_digest)
+    }
+
     fn install_overflow_row_store(
         directory: &Path,
         context: &RepositoryFormatContext,
@@ -2668,7 +2691,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
         let semantic_digest: [u8; 32] = Sha256::digest(overflow_bytes).into();
         let stored_digest = semantic_digest_override.unwrap_or(semantic_digest);
         let chunk_oid = write_git_object(directory, algorithm, "blob", &overflow_bytes);
@@ -2747,7 +2770,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
 
         let mut branch_entries = Vec::new();
         for &(key, stored_fence) in rows_and_fences {
@@ -2820,7 +2843,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
         let domain = row_domain(relation_id, schema_digest);
 
         let mut next_key = 0u64;
@@ -3384,12 +3407,11 @@ mod graph_bridge_tests {
 
     #[test]
     fn pinned_orp_loader_issues_lazy_snapshot_and_reads_verified_overflow_by_point_and_range() {
-        let directory = repository();
+        let relation_id = [0x72; 16];
+        let (directory, _descriptor) = seeded_table_binding(relation_id);
         let root = directory.path();
         let initial = context(root);
-        let relation_id = [0x72; 16];
-        let (relation_id, expected_digest) =
-            install_overflow_row_store(root, &initial, relation_id, None);
+        let (_, expected_digest) = install_overflow_row_store(root, &initial, relation_id, None);
         let pinned = context(root);
         let snapshot = pinned
             .load_row_map(relation_id)
@@ -3414,11 +3436,12 @@ mod graph_bridge_tests {
         assert_eq!(reference.semantic_digest(), &expected_digest);
 
         let range = KeyRange::new(Some(TypedKey::UInt(7)), None, 1).unwrap();
-        let ranged = graph
-            .range_rows(&range, &scope)
+        let ranged = snapshot
+            .range_with_graph_context(&graph, &scope, &range)
             .expect("bounded ORP range lookup");
         assert_eq!(ranged, vec![row]);
 
+        assert_eq!(scope.payload_bytes_read_for_test(), 0);
         let bad_digest = [0x99; 32];
         install_overflow_row_store(root, &pinned, relation_id, Some(bad_digest));
         let tampered_context = context(root);
@@ -3579,9 +3602,9 @@ mod graph_bridge_tests {
 
     #[test]
     fn indexed_range_includes_fence_and_excludes_next_child_minimum() {
-        let directory = repository();
-        let root = directory.path();
         let relation_id = [0x7a; 16];
+        let (directory, _descriptor) = seeded_table_binding(relation_id);
+        let root = directory.path();
         install_nested_row_store(root, &context(root), relation_id, 2, 2, 4);
 
         let pinned = context(root);
@@ -3591,7 +3614,9 @@ mod graph_bridge_tests {
         let range = KeyRange::new(Some(TypedKey::UInt(40)), Some(TypedKey::UInt(90)), 8)
             .expect("valid fence-aligned range");
 
-        let rows = graph.range_rows(&range, &scope).expect("bounded ORP range");
+        let rows = snapshot
+            .range_with_graph_context(&graph, &scope, &range)
+            .expect("bounded ORP range");
         let keys: Vec<_> = rows.iter().map(|row| row.key().clone()).collect();
         assert_eq!(
             keys,
@@ -3604,6 +3629,38 @@ mod graph_bridge_tests {
             ]
         );
         assert_eq!(scope.payload_bytes_read_for_test(), 0);
+
+        let limited = KeyRange::new(Some(TypedKey::UInt(40)), Some(TypedKey::UInt(90)), 3)
+            .expect("valid limited range");
+        let limited_rows = snapshot
+            .range_with_graph_context(&graph, &scope, &limited)
+            .expect("bounded limited range");
+        assert_eq!(
+            limited_rows
+                .iter()
+                .map(|row| row.key().clone())
+                .collect::<Vec<_>>(),
+            vec![TypedKey::UInt(40), TypedKey::UInt(50), TypedKey::UInt(60)]
+        );
+
+        let (later_directory, _descriptor) = seeded_table_binding(relation_id);
+        let later_root = later_directory.path();
+        install_nested_row_store(later_root, &context(later_root), relation_id, 2, 1, 4);
+        let later_pinned = context(later_root);
+        let later_snapshot = later_pinned
+            .load_row_map(relation_id)
+            .expect("load later ORP identity");
+        let later_graph = later_pinned
+            .open_native_graph(&later_snapshot)
+            .expect("issue later graph context");
+        let later_scope = later_graph
+            .open_read_scope()
+            .expect("later owner read scope");
+        assert!(matches!(
+            snapshot.range_with_graph_context(&later_graph, &later_scope, &range),
+            Err(crate::row_store::RowStoreError::BoundaryMismatch)
+        ));
+        assert_eq!(later_scope.objects_read_for_test(), 0);
     }
 
     /// One relation's index shape and the objects a point lookup, a missing-key
@@ -3660,8 +3717,8 @@ mod graph_bridge_tests {
 
         let range = KeyRange::new(Some(TypedKey::UInt(30)), Some(TypedKey::UInt(80)), 256).unwrap();
         let before = scope.objects_read_for_test();
-        let ranged = graph
-            .range_rows(&range, &scope)
+        let ranged = snapshot
+            .range_with_graph_context(&graph, &scope, &range)
             .expect("bounded range read");
         let range_reads = scope.objects_read_for_test() - before;
         let keys: Vec<_> = ranged.iter().map(|row| row.key().clone()).collect();
@@ -3685,8 +3742,8 @@ mod graph_bridge_tests {
         assert!(total <= MAX_ROW_RANGE_LIMIT as u64 * 3);
         let unbounded = KeyRange::new(None, None, MAX_ROW_RANGE_LIMIT).unwrap();
         let before = scope.objects_read_for_test();
-        let all = graph
-            .range_rows(&unbounded, &scope)
+        let all = snapshot
+            .range_with_graph_context(&graph, &scope, &unbounded)
             .expect("full index walk");
         let full = scope.objects_read_for_test() - before;
         assert_eq!(all.len() as u64, total);

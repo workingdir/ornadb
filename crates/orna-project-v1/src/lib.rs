@@ -2173,10 +2173,7 @@ mod committed_loose_row_projection_tests {
             fs::write(path, source).unwrap();
         }
         git(root.path(), &["init", "--quiet"]);
-        git(
-            root.path(),
-            &["config", "user.email", "kieran@drewett.dev"],
-        );
+        git(root.path(), &["config", "user.email", "kieran@drewett.dev"]);
         git(root.path(), &["config", "user.name", "kierandrewett"]);
         git(root.path(), &["config", "commit.gpgsign", "false"]);
         git(root.path(), &["add", "."]);
