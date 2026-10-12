@@ -702,6 +702,7 @@ async fn import_media(
         TableMutation::new(id, "media", key, Some(row))
     }
     .unwrap()
+    .with_table_object_id(orna_runtime_v1::TableObjectId::new([0x43; 16]))
     .with_orp_blob_binding(binding)
     .unwrap();
     let committed = state
@@ -1202,8 +1203,14 @@ async fn delete_media(
         .unwrap();
     let context = state.begin_activation().await.unwrap();
     // A row mutation without a value deletes the committed row.
-    let mutation =
-        TableMutation::new([ordinal + 3; 16], "media", key.as_bytes().to_vec(), None).unwrap();
+    let mutation = TableMutation::new(
+        [ordinal + 3; 16],
+        "media",
+        key.as_bytes().to_vec(),
+        None,
+    )
+    .unwrap()
+    .with_table_object_id(orna_runtime_v1::TableObjectId::new([0x43; 16]));
     let committed = state
         .commit_table_request_activation(
             writer,
