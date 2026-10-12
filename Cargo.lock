@@ -1518,6 +1518,7 @@ dependencies = [
 name = "orna-semantic-v1"
 version = "1.0.0"
 dependencies = [
+ "num-traits",
  "orna-foundation-v1",
  "orna-syntax-v1",
  "orna-sys-v1",
