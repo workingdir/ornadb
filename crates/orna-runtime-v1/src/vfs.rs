@@ -1108,13 +1108,16 @@ impl<S> TemporarySave<S> {
         Fut: Future<Output = Result<(), E>>,
     {
         let _operation = self.operation.lock().await;
-        let mut state = self.state.lock().await;
-        if let Some((revision, _)) = &state.applied {
-            return Ok(*revision);
-        }
         let (revision, bytes) = {
+            let state = self.state.lock().await;
+            if let Some((revision, _)) = &state.applied {
+                return Ok(*revision);
+            }
             let draft = state.draft.state.lock().await;
             let revision = draft.revision;
+            if state.synced_revision == Some(revision) {
+                return Ok(revision);
+            }
             let bytes: Arc<[u8]> = Arc::from(
                 draft
                     .candidate
@@ -1123,11 +1126,8 @@ impl<S> TemporarySave<S> {
             );
             (revision, bytes)
         };
-        if state.synced_revision == Some(revision) {
-            return Ok(revision);
-        }
         persist(revision, bytes).await?;
-        state.synced_revision = Some(revision);
+        self.state.lock().await.synced_revision = Some(revision);
         Ok(revision)
     }
 }
@@ -4932,13 +4932,24 @@ mod tests {
             scratch.candidate_bytes().await.as_ref(),
             replacement_bytes.as_slice()
         );
-        scratch
-            .fsync_scratch_with(|_, bytes| async move {
-                assert_eq!(bytes.as_ref(), replacement_bytes.as_slice());
-                Ok::<_, ()>(())
-            })
-            .await
-            .unwrap();
+        let scratch_for_persist = &scratch;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            scratch.fsync_scratch_with(|_, bytes| {
+                let expected_bytes = replacement_bytes.as_slice();
+                async move {
+                    assert_eq!(bytes.as_ref(), expected_bytes);
+                    assert_eq!(
+                        scratch_for_persist.candidate_bytes().await.as_ref(),
+                        expected_bytes
+                    );
+                    Ok::<_, ()>(())
+                }
+            }),
+        )
+        .await
+        .expect("scratch persistence must release its state mutex")
+        .unwrap();
         let owner_id = [0x63; 16];
         let table = RuntimeTableIdentity::new("media", TableObjectId::new(relation_id)).unwrap();
         let key = b"image".to_vec();
