@@ -72,7 +72,7 @@ fn native_sys_blob_annotate_canonicalizes_mime_and_preserves_content_identity() 
     let environment = BTreeMap::from([("asset".to_owned(), blob_value.clone())]);
 
     let annotated = evaluate_expression_ovb2(
-        "sys.blob.annotate(asset, \"Application/JavaScript\", \"MJS\")",
+        include_str!("fixtures/sys-blob-annotate-mime1.orna").trim(),
         &environment,
         Limits::default(),
     )
@@ -85,7 +85,7 @@ fn native_sys_blob_annotate_canonicalizes_mime_and_preserves_content_identity() 
     assert_eq!(blob.read_to_end().unwrap(), bytes);
 
     let preferred = evaluate_expression_ovb2(
-        "sys.blob.annotate(asset, \"text/javascript\", \"JS\")",
+        include_str!("fixtures/sys-blob-annotate-preferred-suffix.orna").trim(),
         &environment,
         Limits::default(),
     )
@@ -94,6 +94,17 @@ fn native_sys_blob_annotate_canonicalizes_mime_and_preserves_content_identity() 
     assert_eq!(preferred_blob.media_type(), "text/javascript");
     assert_eq!(preferred_blob.suffix(), None);
     assert_eq!(preferred_blob.content_identity(), original_identity);
+
+    let defaulted = evaluate_expression_ovb2(
+        include_str!("fixtures/sys-blob-annotate-default-suffix.orna").trim(),
+        &environment,
+        Limits::default(),
+    )
+    .expect("generated null default supplies the optional suffix");
+    let defaulted_blob = defaulted.blob().unwrap();
+    assert_eq!(defaulted_blob.media_type(), "text/javascript");
+    assert_eq!(defaulted_blob.suffix(), None);
+    assert_eq!(defaulted_blob.content_identity(), original_identity);
 }
 
 #[test]
@@ -102,15 +113,15 @@ fn native_sys_blob_annotate_reports_mime_policy_failures() {
     let environment = BTreeMap::from([("asset".to_owned(), blob_value)]);
     for (call, expected) in [
         (
-            "sys.blob.annotate(asset, \"image/*\")",
+            include_str!("fixtures/sys-blob-annotate-invalid-media-type.orna").trim(),
             "sys.blob.invalid_media_type",
         ),
         (
-            "sys.blob.annotate(asset, \"image/jpeg\", \"../jpg\")",
+            include_str!("fixtures/sys-blob-annotate-invalid-suffix.orna").trim(),
             "sys.blob.invalid_suffix",
         ),
         (
-            "sys.blob.annotate(asset, \"image/jpeg\", \"png\")",
+            include_str!("fixtures/sys-blob-annotate-incompatible-suffix.orna").trim(),
             "sys.blob.incompatible_suffix",
         ),
     ] {
