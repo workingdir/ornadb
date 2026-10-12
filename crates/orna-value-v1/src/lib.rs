@@ -6466,14 +6466,18 @@ mod tests {
         ))
         .unwrap();
         let key = encode_raw(&Raw::Int(7.into())).unwrap();
+        let valid_instant = || {
+            Raw::Tag(
+                60002,
+                Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
+            )
+        };
+        let valid_zone = || Raw::Tag(60004, Box::new(Raw::Text("UTC".into())));
         let valid_value = Raw::Tag(
             60018,
             Box::new(Raw::Array(vec![
-                Raw::Tag(
-                    60002,
-                    Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
-                ),
-                Raw::Tag(60004, Box::new(Raw::Text("UTC".into()))),
+                valid_instant(),
+                valid_zone(),
                 Raw::Int(0.into()),
             ])),
         );
@@ -6482,22 +6486,31 @@ mod tests {
             .validate_stored_row([9; 16], &key, &valid_fields)
             .is_ok());
 
-        let malformed_value = Raw::Tag(
-            60018,
-            Box::new(Raw::Array(vec![
-                Raw::Tag(
-                    60002,
-                    Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Int(0.into())])),
-                ),
-                Raw::Tag(60004, Box::new(Raw::Int(0.into()))),
-                Raw::Int(0.into()),
-            ])),
-        );
-        let mut malformed_fields = Vec::new();
-        write_raw(&Raw::Array(vec![malformed_value]), &mut malformed_fields).unwrap();
-        assert!(schema
-            .validate_stored_row([9; 16], &key, &malformed_fields)
-            .is_err());
+        let malformed_values = [
+            Raw::Tag(
+                60018,
+                Box::new(Raw::Array(vec![
+                    Raw::Tag(60002, Box::new(Raw::Int(0.into()))),
+                    valid_zone(),
+                    Raw::Int(0.into()),
+                ])),
+            ),
+            Raw::Tag(
+                60018,
+                Box::new(Raw::Array(vec![
+                    valid_instant(),
+                    Raw::Tag(60004, Box::new(Raw::Int(0.into()))),
+                    Raw::Int(0.into()),
+                ])),
+            ),
+        ];
+        for malformed_value in malformed_values {
+            let mut malformed_fields = Vec::new();
+            write_raw(&Raw::Array(vec![malformed_value]), &mut malformed_fields).unwrap();
+            assert!(schema
+                .validate_stored_row([9; 16], &key, &malformed_fields)
+                .is_err());
+        }
     }
 
     #[test]
