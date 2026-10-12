@@ -446,7 +446,15 @@ fn require_legacy_worktree_metadata_matches(
 fn read_regular_metadata_file(path: &Path) -> Result<Option<Vec<u8>>, RepositoryError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {
-            let bytes = fs::read(path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            let file = fs::File::open(path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            let read_limit = u64::try_from(FORMAT_CONTEXT_MAX_METADATA_BYTES)
+                .map_err(|_| RepositoryError::InvalidFormatMigration)?
+                .checked_add(1)
+                .ok_or(RepositoryError::InvalidFormatMigration)?;
+            let mut bytes = Vec::new();
+            file.take(read_limit)
+                .read_to_end(&mut bytes)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
             if bytes.len() > FORMAT_CONTEXT_MAX_METADATA_BYTES {
                 return Err(RepositoryError::InvalidFormatMigration);
             }
