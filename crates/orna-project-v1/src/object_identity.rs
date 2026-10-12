@@ -15,7 +15,6 @@ use orna_semantic_v1::{Analysis, ModuleInput, SymbolKind, TableAdmission, TableS
 use orna_syntax_v1::{Declaration, Pattern, TableMember, parse_module};
 use orna_value_v1::{Raw, SchemaDescriptor, Value};
 
-
 /// Repository-relative committed location of the object identity inventory.
 pub const OBJECT_IDENTITY_MANIFEST_PATH: &str = ".orna/object-identities.cbor";
 const MAX_OBJECT_IDENTITY_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
@@ -47,10 +46,18 @@ pub struct ObjectIdentity {
 }
 
 impl ObjectIdentity {
-    pub const fn kind(&self) -> ObjectKind { self.kind }
-    pub fn qualified_name(&self) -> &str { &self.qualified_name }
-    pub const fn id(&self) -> &[u8; 16] { &self.id }
-    pub const fn is_retired(&self) -> bool { self.retired }
+    pub const fn kind(&self) -> ObjectKind {
+        self.kind
+    }
+    pub fn qualified_name(&self) -> &str {
+        &self.qualified_name
+    }
+    pub const fn id(&self) -> &[u8; 16] {
+        &self.id
+    }
+    pub const fn is_retired(&self) -> bool {
+        self.retired
+    }
 }
 
 /// Canonical, persistent table/field identity inventory for a source project.
@@ -66,7 +73,6 @@ pub enum ObjectIdentityError {
     IdentityCollision,
     Io,
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceTableSchemaError {
@@ -96,12 +102,24 @@ pub struct SourceTableSchemaArtifact {
 }
 
 impl SourceTableSchemaArtifact {
-    pub fn module_name(&self) -> &str { &self.module_name }
-    pub fn source_path(&self) -> &str { &self.source_path }
-    pub fn declaration_name(&self) -> &str { &self.declaration_name }
-    pub const fn table_object_id(&self) -> &[u8; 16] { &self.table_object_id }
-    pub fn field_object_ids(&self) -> &BTreeMap<String, [u8; 16]> { &self.field_object_ids }
-    pub fn descriptor(&self) -> &SchemaDescriptor { &self.descriptor }
+    pub fn module_name(&self) -> &str {
+        &self.module_name
+    }
+    pub fn source_path(&self) -> &str {
+        &self.source_path
+    }
+    pub fn declaration_name(&self) -> &str {
+        &self.declaration_name
+    }
+    pub const fn table_object_id(&self) -> &[u8; 16] {
+        &self.table_object_id
+    }
+    pub fn field_object_ids(&self) -> &BTreeMap<String, [u8; 16]> {
+        &self.field_object_ids
+    }
+    pub fn descriptor(&self) -> &SchemaDescriptor {
+        &self.descriptor
+    }
 }
 
 impl ObjectIdentityManifest {
@@ -114,24 +132,40 @@ impl ObjectIdentityManifest {
         source_path: &str,
         declaration_name: &str,
     ) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
-        let namespace = module_namespace(source_path).ok_or(SourceTableSchemaError::InvalidModulePath)?;
+        let namespace =
+            module_namespace(source_path).ok_or(SourceTableSchemaError::InvalidModulePath)?;
         if !analysis.is_ok() || namespace != module_name {
             return Err(SourceTableSchemaError::InvalidAnalysis);
         }
         let mut selected = None;
         for (candidate_namespace, module) in &analysis.modules {
-            if candidate_namespace.display() != module_name { continue; }
+            if candidate_namespace.display() != module_name {
+                continue;
+            }
             if selected.replace((candidate_namespace, module)).is_some() {
                 return Err(SourceTableSchemaError::AmbiguousModule);
             }
         }
         let (_, module) = selected.ok_or(SourceTableSchemaError::ModuleNotFound)?;
-        let symbol = module.symbols.get(declaration_name).ok_or(SourceTableSchemaError::DeclarationNotFound)?;
-        if symbol.kind != SymbolKind::Table { return Err(SourceTableSchemaError::NotTable); }
-        let schema = symbol.table_schema.as_ref().ok_or(SourceTableSchemaError::MissingSchema)?;
-        let admission = schema.admission.as_ref().ok_or(SourceTableSchemaError::MissingAdmission)?;
+        let symbol = module
+            .symbols
+            .get(declaration_name)
+            .ok_or(SourceTableSchemaError::DeclarationNotFound)?;
+        if symbol.kind != SymbolKind::Table {
+            return Err(SourceTableSchemaError::NotTable);
+        }
+        let schema = symbol
+            .table_schema
+            .as_ref()
+            .ok_or(SourceTableSchemaError::MissingSchema)?;
+        let admission = schema
+            .admission
+            .as_ref()
+            .ok_or(SourceTableSchemaError::MissingAdmission)?;
         let qualified_table = qualify(module_name, declaration_name);
-        let table_object_id = *self.id(ObjectKind::Table, &qualified_table).ok_or(SourceTableSchemaError::MissingIdentity)?;
+        let table_object_id = *self
+            .id(ObjectKind::Table, &qualified_table)
+            .ok_or(SourceTableSchemaError::MissingIdentity)?;
         let field_object_ids = schema
             .fields
             .keys()
@@ -144,9 +178,11 @@ impl ObjectIdentityManifest {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         let expected_identities = std::iter::once((ObjectKind::Table, qualified_table.clone()))
-            .chain(field_object_ids.keys().map(|name| {
-                (ObjectKind::Field, format!("{qualified_table}.{name}"))
-            }))
+            .chain(
+                field_object_ids
+                    .keys()
+                    .map(|name| (ObjectKind::Field, format!("{qualified_table}.{name}"))),
+            )
             .collect::<BTreeSet<_>>();
         let field_prefix = format!("{qualified_table}.");
         let active_identities = self
@@ -167,7 +203,8 @@ impl ObjectIdentityManifest {
         if active_identities != expected_identities {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
-        let descriptor = build_source_descriptor(table_object_id, &field_object_ids, schema, admission)?;
+        let descriptor =
+            build_source_descriptor(table_object_id, &field_object_ids, schema, admission)?;
         Ok(SourceTableSchemaArtifact {
             module_name: module_name.to_owned(),
             source_path: source_path.to_owned(),
@@ -179,79 +216,137 @@ impl ObjectIdentityManifest {
     }
 }
 impl ObjectIdentityManifest {
-    pub fn records(&self) -> &[ObjectIdentity] { &self.records }
+    pub fn records(&self) -> &[ObjectIdentity] {
+        &self.records
+    }
 
     pub fn id(&self, kind: ObjectKind, qualified_name: &str) -> Option<&[u8; 16]> {
-        self.records.iter().find(|record| {
-            !record.retired && record.kind == kind && record.qualified_name == qualified_name
-        }).map(|record| &record.id)
+        self.records
+            .iter()
+            .find(|record| {
+                !record.retired && record.kind == kind && record.qualified_name == qualified_name
+            })
+            .map(|record| &record.id)
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, ObjectIdentityError> {
         validate_records(&self.records)?;
         let raw = Raw::Array(vec![
             Raw::Int(MANIFEST_VERSION.into()),
-            Raw::Array(self.records.iter().map(|record| Raw::Array(vec![
-                Raw::Int((record.kind as u64).into()),
-                Raw::Text(record.qualified_name.clone()),
-                Raw::Bytes(record.id.to_vec()),
-                Raw::Bool(record.retired),
-            ])).collect()),
+            Raw::Array(
+                self.records
+                    .iter()
+                    .map(|record| {
+                        Raw::Array(vec![
+                            Raw::Int((record.kind as u64).into()),
+                            Raw::Text(record.qualified_name.clone()),
+                            Raw::Bytes(record.id.to_vec()),
+                            Raw::Bool(record.retired),
+                        ])
+                    })
+                    .collect(),
+            ),
         ]);
-        Value::new(raw).and_then(|value| value.encode()).map_err(|_| ObjectIdentityError::InvalidEncoding)
+        Value::new(raw)
+            .and_then(|value| value.encode())
+            .map_err(|_| ObjectIdentityError::InvalidEncoding)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, ObjectIdentityError> {
         let value = Value::decode(bytes).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
-        let Raw::Array(root) = value.raw() else { return Err(ObjectIdentityError::InvalidEncoding) };
+        let Raw::Array(root) = value.raw() else {
+            return Err(ObjectIdentityError::InvalidEncoding);
+        };
         if root.len() != 2 || raw_int(&root[0]) != Some(MANIFEST_VERSION) {
             return Err(ObjectIdentityError::InvalidEncoding);
         }
-        let Raw::Array(entries) = &root[1] else { return Err(ObjectIdentityError::InvalidEncoding) };
+        let Raw::Array(entries) = &root[1] else {
+            return Err(ObjectIdentityError::InvalidEncoding);
+        };
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
-            let Raw::Array(fields) = entry else { return Err(ObjectIdentityError::InvalidEncoding) };
-            if fields.len() != 4 { return Err(ObjectIdentityError::InvalidEncoding) }
-            let kind = ObjectKind::from_raw(&fields[0]).ok_or(ObjectIdentityError::InvalidEncoding)?;
-            let Raw::Text(qualified_name) = &fields[1] else { return Err(ObjectIdentityError::InvalidEncoding) };
-            let Raw::Bytes(id) = &fields[2] else { return Err(ObjectIdentityError::InvalidEncoding) };
-            let Raw::Bool(retired) = &fields[3] else { return Err(ObjectIdentityError::InvalidEncoding) };
-            let id: [u8; 16] = id.as_slice().try_into().map_err(|_| ObjectIdentityError::InvalidEncoding)?;
-            records.push(ObjectIdentity { kind, qualified_name: qualified_name.clone(), id, retired: *retired });
+            let Raw::Array(fields) = entry else {
+                return Err(ObjectIdentityError::InvalidEncoding);
+            };
+            if fields.len() != 4 {
+                return Err(ObjectIdentityError::InvalidEncoding);
+            }
+            let kind =
+                ObjectKind::from_raw(&fields[0]).ok_or(ObjectIdentityError::InvalidEncoding)?;
+            let Raw::Text(qualified_name) = &fields[1] else {
+                return Err(ObjectIdentityError::InvalidEncoding);
+            };
+            let Raw::Bytes(id) = &fields[2] else {
+                return Err(ObjectIdentityError::InvalidEncoding);
+            };
+            let Raw::Bool(retired) = &fields[3] else {
+                return Err(ObjectIdentityError::InvalidEncoding);
+            };
+            let id: [u8; 16] = id
+                .as_slice()
+                .try_into()
+                .map_err(|_| ObjectIdentityError::InvalidEncoding)?;
+            records.push(ObjectIdentity {
+                kind,
+                qualified_name: qualified_name.clone(),
+                id,
+                retired: *retired,
+            });
         }
         let manifest = Self { records };
         validate_records(&manifest.records).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
-        if manifest.encode()?.as_slice() != bytes { return Err(ObjectIdentityError::InvalidEncoding) }
+        if manifest.encode()?.as_slice() != bytes {
+            return Err(ObjectIdentityError::InvalidEncoding);
+        }
         Ok(manifest)
     }
 
     /// Writer-only reconciliation. Existing IDs survive source edits; removed
     /// names become permanently retired; new names receive random UUIDs.
-    pub fn reconcile(modules: &[ModuleInput], previous: Option<&Self>) -> Result<Self, ObjectIdentityError> {
-        let active = source_identity_keys(modules)?.into_iter().collect::<BTreeSet<_>>();
+    pub fn reconcile(
+        modules: &[ModuleInput],
+        previous: Option<&Self>,
+    ) -> Result<Self, ObjectIdentityError> {
+        let active = source_identity_keys(modules)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let mut records = previous.map_or_else(Vec::new, |manifest| manifest.records.clone());
         for record in &mut records {
             if !active.contains(&(record.kind, record.qualified_name.clone())) {
                 record.retired = true;
             }
         }
-        let mut used_ids = records.iter().map(|record| record.id).collect::<HashSet<_>>();
+        let mut used_ids = records
+            .iter()
+            .map(|record| record.id)
+            .collect::<HashSet<_>>();
         for (kind, qualified_name) in active {
-            if records.iter().any(|record| record.kind == kind && record.qualified_name == qualified_name && !record.retired) {
+            if records.iter().any(|record| {
+                record.kind == kind && record.qualified_name == qualified_name && !record.retired
+            }) {
                 continue;
             }
             let id = loop {
                 let candidate = *Uuid::new_v4().as_bytes();
 
-                if used_ids.insert(candidate) { break candidate; }
+                if used_ids.insert(candidate) {
+                    break candidate;
+                }
             };
-            records.push(ObjectIdentity { kind, qualified_name, id, retired: false });
+            records.push(ObjectIdentity {
+                kind,
+                qualified_name,
+                id,
+                retired: false,
+            });
         }
-        records.sort_by(|left, right| (left.kind, left.qualified_name.as_str()).cmp(&(right.kind, right.qualified_name.as_str())));
+        records.sort_by(|left, right| {
+            (left.kind, left.qualified_name.as_str())
+                .cmp(&(right.kind, right.qualified_name.as_str()))
+        });
         validate_records(&records)?;
         Ok(Self { records })
     }
-
 
     /// Reads and validates the source identity inventory from one exact commit.
     pub fn read_committed(
@@ -259,7 +354,11 @@ impl ObjectIdentityManifest {
         commit: &GitCommitRef,
     ) -> Result<Self, ObjectIdentityError> {
         let bytes = repository
-            .read_committed_file(commit, OBJECT_IDENTITY_MANIFEST_PATH, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .read_committed_file(
+                commit,
+                OBJECT_IDENTITY_MANIFEST_PATH,
+                MAX_OBJECT_IDENTITY_MANIFEST_BYTES,
+            )
             .map_err(|_| ObjectIdentityError::Io)?;
         Self::decode(&bytes)
     }
@@ -304,14 +403,23 @@ impl ObjectIdentityManifest {
         let bytes = self.encode()?;
         let temp = temporary_path(parent, &path);
         let result = (|| {
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&temp).map_err(|_| ObjectIdentityError::Io)?;
-            file.write_all(&bytes).map_err(|_| ObjectIdentityError::Io)?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+                .map_err(|_| ObjectIdentityError::Io)?;
+            file.write_all(&bytes)
+                .map_err(|_| ObjectIdentityError::Io)?;
             file.sync_all().map_err(|_| ObjectIdentityError::Io)?;
             fs::rename(&temp, &path).map_err(|_| ObjectIdentityError::Io)?;
-            fs::File::open(parent).and_then(|directory| directory.sync_all()).map_err(|_| ObjectIdentityError::Io)?;
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| ObjectIdentityError::Io)?;
             Ok(path.clone())
         })();
-        if result.is_err() { let _ = fs::remove_file(&temp); }
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
         result
     }
 }
@@ -326,7 +434,10 @@ fn build_source_descriptor(
         || admission.private_required
         || admission.keys.is_empty()
         || field_ids.len() != schema.fields.len()
-        || admission.required.iter().any(|name| !schema.fields.contains_key(name))
+        || admission
+            .required
+            .iter()
+            .any(|name| !schema.fields.contains_key(name))
     {
         return Err(SourceTableSchemaError::InvalidSourceSchema);
     }
@@ -340,10 +451,16 @@ fn build_source_descriptor(
         if !key_names.insert(name.as_str()) || schema.fields.get(name) != Some(key_type) {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
-        key_ids.push(uuid_raw(field_ids.get(name).ok_or(SourceTableSchemaError::MissingIdentity)?));
+        key_ids.push(uuid_raw(
+            field_ids
+                .get(name)
+                .ok_or(SourceTableSchemaError::MissingIdentity)?,
+        ));
     }
     if admission.automatic_key
-        && (admission.keys.len() != 1 || admission.keys[0].0 != "id" || admission.keys[0].1 != Type::Int)
+        && (admission.keys.len() != 1
+            || admission.keys[0].0 != "id"
+            || admission.keys[0].1 != Type::Int)
     {
         return Err(SourceTableSchemaError::InvalidSourceSchema);
     }
@@ -352,22 +469,30 @@ fn build_source_descriptor(
         if !admission.required.contains(name) && !(admission.automatic_key && name == "id") {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
-        let id = field_ids.get(name).ok_or(SourceTableSchemaError::MissingIdentity)?;
+        let id = field_ids
+            .get(name)
+            .ok_or(SourceTableSchemaError::MissingIdentity)?;
         let role = u64::from(!key_names.contains(name.as_str()));
-        encoded_fields.push((*id, Raw::Array(vec![
-            uuid_raw(id),
-            Raw::Text(name.clone()),
-            source_type_node(ty)?,
-            Raw::Int(role.into()),
-            Raw::Array(vec![Raw::Int(0.into())]),
-        ])));
+        encoded_fields.push((
+            *id,
+            Raw::Array(vec![
+                uuid_raw(id),
+                Raw::Text(name.clone()),
+                source_type_node(ty)?,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ]),
+        ));
     }
     encoded_fields.sort_by_key(|(id, _)| *id);
     let raw = Raw::Map(vec![
         (Raw::Int(0.into()), Raw::Int(1.into())),
         (Raw::Int(1.into()), uuid_raw(&table_id)),
         (Raw::Int(2.into()), Raw::Array(key_ids)),
-        (Raw::Int(3.into()), Raw::Array(encoded_fields.into_iter().map(|(_, field)| field).collect())),
+        (
+            Raw::Int(3.into()),
+            Raw::Array(encoded_fields.into_iter().map(|(_, field)| field).collect()),
+        ),
         (Raw::Int(4.into()), Raw::Array(Vec::new())),
     ]);
     SchemaDescriptor::new(raw).map_err(|_| SourceTableSchemaError::InvalidDescriptor)
@@ -393,17 +518,36 @@ fn source_type_node(ty: &Type) -> Result<Raw, SourceTableSchemaError> {
         return Ok(Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.into())]));
     }
     match ty {
-        Type::List(element) => Ok(Raw::Array(vec![Raw::Int(1.into()), source_type_node(element)?])),
-        Type::Optional(element) => Ok(Raw::Array(vec![Raw::Int(2.into()), source_type_node(element)?])),
+        Type::List(element) => Ok(Raw::Array(vec![
+            Raw::Int(1.into()),
+            source_type_node(element)?,
+        ])),
+        Type::Optional(element) => Ok(Raw::Array(vec![
+            Raw::Int(2.into()),
+            source_type_node(element)?,
+        ])),
         Type::Tuple(elements) => Ok(Raw::Array(vec![
             Raw::Int(3.into()),
-            Raw::Array(elements.iter().map(source_type_node).collect::<Result<Vec<_>, _>>()?),
+            Raw::Array(
+                elements
+                    .iter()
+                    .map(source_type_node)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
         ])),
         Type::Record(fields) => Ok(Raw::Array(vec![
             Raw::Int(4.into()),
-            Raw::Array(fields.iter().map(|(name, ty)| Ok(Raw::Array(vec![
-                Raw::Text(name.clone()), source_type_node(ty)?,
-            ]))).collect::<Result<Vec<_>, SourceTableSchemaError>>()?),
+            Raw::Array(
+                fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        Ok(Raw::Array(vec![
+                            Raw::Text(name.clone()),
+                            source_type_node(ty)?,
+                        ]))
+                    })
+                    .collect::<Result<Vec<_>, SourceTableSchemaError>>()?,
+            ),
         ])),
         Type::Named(name) => {
             let name = match name.as_str() {
@@ -420,18 +564,32 @@ fn source_type_node(ty: &Type) -> Result<Raw, SourceTableSchemaError> {
 }
 
 fn temporary_path(parent: &Path, manifest: &Path) -> PathBuf {
-    let name = manifest.file_name().and_then(|name| name.to_str()).unwrap_or("object-identities.cbor");
+    let name = manifest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("object-identities.cbor");
     parent.join(format!(".{name}.{}.tmp", Uuid::new_v4()))
 }
 
-fn source_identity_keys(modules: &[ModuleInput]) -> Result<Vec<(ObjectKind, String)>, ObjectIdentityError> {
+fn source_identity_keys(
+    modules: &[ModuleInput],
+) -> Result<Vec<(ObjectKind, String)>, ObjectIdentityError> {
     let mut keys = Vec::new();
     for module in modules {
-        let namespace = module_namespace(&module.logical_path).ok_or(ObjectIdentityError::InvalidSource)?;
+        let namespace =
+            module_namespace(&module.logical_path).ok_or(ObjectIdentityError::InvalidSource)?;
         let parsed = parse_module(&module.source);
-        if !parsed.is_ok() { return Err(ObjectIdentityError::InvalidSource); }
+        if !parsed.is_ok() {
+            return Err(ObjectIdentityError::InvalidSource);
+        }
         for item in &parsed.value.items {
-            if let Declaration::Table { name, keys: table_keys, members, .. } = &item.declaration {
+            if let Declaration::Table {
+                name,
+                keys: table_keys,
+                members,
+                ..
+            } = &item.declaration
+            {
                 let table = qualify(&namespace, name);
                 keys.push((ObjectKind::Table, table.clone()));
                 if table_keys.is_empty() {
@@ -454,7 +612,9 @@ fn source_identity_keys(modules: &[ModuleInput]) -> Result<Vec<(ObjectKind, Stri
         }
     }
     keys.sort();
-    if keys.windows(2).any(|pair| pair[0] == pair[1]) { return Err(ObjectIdentityError::IdentityCollision); }
+    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ObjectIdentityError::IdentityCollision);
+    }
     Ok(keys)
 }
 
@@ -465,9 +625,7 @@ fn module_namespace(path: &str) -> Option<String> {
     }
     let mut parts = path.split('/').collect::<Vec<_>>();
     let file = parts.pop()?;
-    if !crate::valid_component(file)
-        || parts.iter().any(|part| !crate::valid_component(part))
-    {
+    if !crate::valid_component(file) || parts.iter().any(|part| !crate::valid_component(part)) {
         return None;
     }
     if file != "main" {
@@ -477,11 +635,18 @@ fn module_namespace(path: &str) -> Option<String> {
 }
 
 fn qualify(namespace: &str, name: &str) -> String {
-    if namespace.is_empty() { name.to_owned() } else { format!("{namespace}.{name}") }
+    if namespace.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{namespace}.{name}")
+    }
 }
 
 fn raw_int(raw: &Raw) -> Option<u64> {
-    match raw { Raw::Int(value) => value.to_string().parse().ok(), _ => None }
+    match raw {
+        Raw::Int(value) => value.to_string().parse().ok(),
+        _ => None,
+    }
 }
 
 fn validate_records(records: &[ObjectIdentity]) -> Result<(), ObjectIdentityError> {
@@ -513,11 +678,23 @@ mod tests {
         let encoded = first.encode().unwrap();
         assert_eq!(ObjectIdentityManifest::decode(&encoded).unwrap(), first);
         let payload_id = *first.id(ObjectKind::Field, "Object.payload").unwrap();
-        let stable = ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), Some(&first)).unwrap();
-        assert_eq!(stable.id(ObjectKind::Field, "Object.payload"), Some(&payload_id));
+        let stable =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), Some(&first)).unwrap();
+        assert_eq!(
+            stable.id(ObjectKind::Field, "Object.payload"),
+            Some(&payload_id)
+        );
         let removed = ObjectIdentityManifest::reconcile(&[], Some(&stable)).unwrap();
         assert!(removed.id(ObjectKind::Field, "Object.payload").is_none());
-        assert!(removed.records().iter().any(|record| record.qualified_name() == "Object.payload" && record.is_retired()));
-        assert_eq!(ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(), removed);
+        assert!(
+            removed
+                .records()
+                .iter()
+                .any(|record| record.qualified_name() == "Object.payload" && record.is_retired())
+        );
+        assert_eq!(
+            ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(),
+            removed
+        );
     }
 }
