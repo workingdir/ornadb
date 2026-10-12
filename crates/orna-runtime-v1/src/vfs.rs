@@ -248,10 +248,12 @@ impl VfsRepositoryCache {
     }
 }
 
-/// A retained owner-issued immutable row-map snapshot.
+/// A retained owner-issued immutable row-map snapshot and any additional
+/// owner-issued resources needed to keep its generation readable.
 pub struct SnapshotPin<S> {
     snapshot: Arc<S>,
     projection: Arc<OnceLock<CacheProjection>>,
+    retention: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl<S> Clone for SnapshotPin<S> {
@@ -259,6 +261,7 @@ impl<S> Clone for SnapshotPin<S> {
         Self {
             snapshot: Arc::clone(&self.snapshot),
             projection: Arc::clone(&self.projection),
+            retention: self.retention.as_ref().map(Arc::clone),
         }
     }
 }
@@ -273,6 +276,23 @@ impl<S> SnapshotPin<S> {
         Self {
             projection: snapshot_projection_cell(&snapshot),
             snapshot,
+            retention: None,
+        }
+    }
+
+    /// Captures a row-map generation together with an owner-issued lease for
+    /// resources that must remain readable through that generation, such as
+    /// protected media references. Cloned pins and every VFS reader/cursor
+    /// derived from them share the lease; it is released after the last clone.
+    pub fn capture_with_retention<R>(snapshot: Arc<S>, retention: Arc<R>) -> Self
+    where
+        S: Any + Send + Sync + 'static,
+        R: Any + Send + Sync + 'static,
+    {
+        Self {
+            projection: snapshot_projection_cell(&snapshot),
+            snapshot,
+            retention: Some(retention),
         }
     }
 
@@ -284,6 +304,15 @@ impl<S> SnapshotPin<S> {
     /// Clones the pin for another handle that must remain on this version.
     pub fn clone_pin(&self) -> Self {
         self.clone()
+    }
+    /// Makes a provisional image pin over this row-map snapshot without
+    /// inheriting resource leases that belong only to the retired generation.
+    fn clone_without_retention(&self) -> Self {
+        Self {
+            snapshot: Arc::clone(&self.snapshot),
+            projection: Arc::clone(&self.projection),
+            retention: None,
+        }
     }
 
     pub fn projection(&self) -> Option<&CacheProjection> {
@@ -2908,7 +2937,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             let mut destination = self.state.lock().await;
             let mut draft_state = draft.state.lock().await;
             let accepted = Arc::new(VfsFileSnapshot::new(
-                draft_state.baseline.pin.clone_pin(),
+                draft_state.baseline.pin.clone_without_retention(),
                 Arc::clone(&candidate_bytes),
             ));
             let image = Arc::new(VfsFileSnapshot::with_projection(
@@ -4929,9 +4958,11 @@ mod tests {
             .await
             .unwrap();
         let cache = state.vfs_repository_cache();
+        let retention = Arc::new(());
+        let retained = Arc::downgrade(&retention);
         let target = cache
             .managed_file(Arc::new(VfsFileSnapshot::new(
-                SnapshotPin::capture(Arc::new(0_u64)),
+                SnapshotPin::capture_with_retention(Arc::new(0_u64), retention),
                 Arc::<[u8]>::from(PIXEL),
             )))
             .await
@@ -5268,6 +5299,10 @@ mod tests {
             old_bytes,
             "the already-open read handle remains pinned to its original image"
         );
+        drop(scratch);
+        assert!(retained.upgrade().is_some());
+        drop(old_handle);
+        assert!(retained.upgrade().is_none());
         let encoded_row = encoded_row.lock().unwrap().clone().unwrap();
         assert_eq!(encoded_row.first(), Some(&0x81));
         assert_eq!(&encoded_row[1..4], &[0xd9, 0xea, 0xcf]);
