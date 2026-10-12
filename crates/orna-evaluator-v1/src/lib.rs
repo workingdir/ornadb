@@ -1807,15 +1807,16 @@ pub fn invoke_named_with_effects(
     invoke_named_with_effects_and_budget(name, functions, arguments, limits, effects, &mut budget)
 }
 
-/// Invokes an admitted function without crossing the legacy canonical-value
-/// boundary. ContextValue inputs, source calls, host effects, and the result
-/// retain format-3 capability contexts across nested evaluation.
+/// Invokes an admitted function while consuming a caller-owned activation budget.
+/// ContextValue inputs, source calls, host effects, and the result retain
+/// format-3 capability contexts across nested evaluation.
 pub fn invoke_named_with_context_effects(
     name: &str,
     functions: &Functions,
     arguments: &BTreeMap<String, ContextValue>,
     limits: Limits,
     effects: &mut dyn ContextValueEffectHandler,
+    budget: &mut StepBudget,
 ) -> Result<ContextValue, EvaluationError> {
     validate_limits(limits)?;
     let format = arguments
@@ -1838,35 +1839,45 @@ pub fn invoke_named_with_context_effects(
         source_format: format,
         source_context: value_context.clone(),
     };
-    let mut context = Context {
-        limits,
-        steps: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: Some(&mut profiled_effects),
-        namespace: function_namespace(name),
-        transfer: None,
-        cancellation: None,
+    let (result, steps) = {
+        let mut context = Context {
+            limits,
+            steps: limits.max_steps.saturating_sub(budget.remaining()),
+            functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            restrict_function_names: false,
+            reject_unhandled_field_calls: false,
+            effects: Some(&mut profiled_effects),
+            namespace: function_namespace(name),
+            transfer: None,
+            cancellation: None,
+        };
+        let result = (|| {
+            context.items(functions.len())?;
+            let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+            let supplied = supplied_context_arguments(arguments, &mut context)?;
+            let captured = Scope::from_environment(&function.environment, &mut context)?;
+            invoke_pure(
+                &mut context,
+                &function.parameters,
+                &function.body,
+                captured,
+                supplied,
+                0,
+            )
+        })();
+        let steps = context.steps;
+        drop(context);
+        let result = result.and_then(|value| {
+            let (result_format, result_context) = profiled_effects.profile();
+            Context::contextual_value(value, result_format, result_context)
+        });
+        (result, steps)
     };
-    context.items(functions.len())?;
-    let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
-    let supplied = supplied_context_arguments(arguments, &mut context)?;
-    let captured = Scope::from_environment(&function.environment, &mut context)?;
-    let result = invoke_pure(
-        &mut context,
-        &function.parameters,
-        &function.body,
-        captured,
-        supplied,
-        0,
-    )?;
-    drop(context);
-    let (result_format, result_context) = profiled_effects.profile();
-    Context::contextual_value(result, result_format, result_context)
+    *budget = StepBudget::new(limits.max_steps.saturating_sub(steps));
+    result
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -14788,12 +14799,14 @@ mod tests {
         let arguments = BTreeMap::from([(String::from("value"), value)]);
         let mut effects = ContextProbe { observed: None };
 
+        let mut budget = StepBudget::new(Limits::default().max_steps);
         let result = invoke_named_with_context_effects(
             "entry",
             &functions,
             &arguments,
             Limits::default(),
             &mut effects,
+            &mut budget,
         )
         .expect("nested source calls preserve ContextValue effect arguments");
 
@@ -14860,12 +14873,14 @@ mod tests {
                 .expect("path is valid OVB-1"),
         )]);
 
+        let mut budget = StepBudget::new(Limits::default().max_steps);
         let result = invoke_named_with_context_effects(
             "entry",
             &functions,
             &arguments,
             Limits::default(),
             &mut ProfileChange,
+            &mut budget,
         )
         .expect("capture result profile is preserved");
 
@@ -14933,6 +14948,15 @@ mod tests {
                     _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
                 }
             }
+            fn handle_context_with_budget(
+                &mut self,
+                callee: &Expr,
+                arguments: &[ContextValue],
+                budget: &mut StepBudget,
+            ) -> Result<Option<ContextValue>, EvaluationError> {
+                budget.debit(1)?;
+                self.handle_context(callee, arguments)
+            }
         }
 
         let database = [0x21; 16];
@@ -14956,14 +14980,12 @@ mod tests {
                 orna_value_v1::NativeOid::from_bytes(&[0x26; 20]).unwrap(),
             )
             .expect("owner-scoped Blob reference");
-        let blob = orna_value_v1::Blob::from_reference_with_annotation(
-            reference,
-            "image/png",
-            None,
-        )
-        .expect("annotated owner-scoped Blob");
+        let blob = orna_value_v1::Blob::from_reference(reference)
+            .expect("owner-scoped Blob reference");
         let blob_value = ContextValue::from_blob(&blob, ValueFormat::Sov3)
-            .expect("encode protected Blob in SOV-3");
+            .expect("encode protected Blob in SOV-3")
+            .with_blob_annotation("image/png", Some("png"))
+            .expect("canonicalize authored PNG annotation in SOV-3");
         let parsed = orna_syntax_v1::parse_module(
             "fn entry(blob: Blob) = (sys.test.persist((sys.test.echo(\"ping\"), blob)), blob);",
         );
@@ -14987,12 +15009,15 @@ mod tests {
             persisted: None,
         };
 
+        let mut budget = StepBudget::new(Limits::default().max_steps);
+        let initial_budget = budget.remaining();
         let result = invoke_named_with_context_effects(
             "entry",
             &functions,
             &arguments,
             Limits::default(),
             &mut effects,
+            &mut budget,
         )
         .expect("nested effect and tuple retain the source owner context");
 
@@ -15000,6 +15025,7 @@ mod tests {
         assert_eq!(persisted.format(), ValueFormat::Sov3);
         assert!(persisted.context().is_some());
         assert_eq!(effects.calls, 2);
+        assert!(budget.remaining() < initial_budget);
         assert_eq!(result.format(), ValueFormat::Sov3);
         assert!(result.context().is_some());
         let Raw::Tag(60015, result_tuple) = result.raw() else {
