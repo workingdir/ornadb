@@ -518,6 +518,7 @@ struct DraftState<S> {
     candidate: Option<Vec<u8>>,
     revision: u64,
     last_rejection: Option<(u64, SafeDiagnostic)>,
+    last_accepted: Option<(u64, Arc<VfsFileSnapshot<S>>)>,
     retained_invalid: Option<RetainedRejection<S>>,
 }
 
@@ -1162,6 +1163,7 @@ impl<S> EditDraft<S> {
                 candidate: None,
                 revision: 0,
                 last_rejection: None,
+                last_accepted: None,
                 retained_invalid: None,
             }),
             max_file_bytes,
@@ -1270,6 +1272,13 @@ impl<S> EditDraft<S> {
     {
         let mut state = self.state.lock().await;
         let Some(bytes) = state.candidate.as_ref() else {
+            if let Some((revision, image)) = &state.last_accepted
+                && *revision == state.revision
+            {
+                return Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(
+                    Arc::clone(image),
+                )));
+            }
             return Ok(FsyncOutcome::Unchanged(SnapshotReadHandle::open(
                 Arc::clone(&state.baseline),
             )));
@@ -1294,6 +1303,7 @@ impl<S> EditDraft<S> {
                 let image = Arc::new(VfsFileSnapshot::new(pin, bytes));
                 state.baseline = Arc::clone(&image);
                 state.last_rejection = None;
+                state.last_accepted = Some((revision, Arc::clone(&image)));
                 Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(image)))
             }
             ActivationDecision::Rejected(diagnostic) => {
@@ -2567,6 +2577,15 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 diagnostic,
             });
         }
+        if let Some((accepted_revision, image)) = &draft_state.last_accepted
+            && *accepted_revision == revision
+        {
+            let generation = *self.cache_epoch.generation.lock().await;
+            return Ok(TemporaryRenameOutcome::Applied {
+                generation,
+                handle: SnapshotReadHandle::open(Arc::clone(image)),
+            });
+        }
         let Some(candidate) = draft_state.candidate.clone() else {
             return Err(VfsSaveError::NoCandidate);
         };
@@ -2636,6 +2655,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             draft_state.candidate = None;
             draft_state.last_rejection = None;
             draft_state.baseline = Arc::clone(&image);
+            draft_state.last_accepted = Some((revision, Arc::clone(&image)));
             destination.image = Arc::clone(&image);
             *cache_generation = next_generation;
             Ok(TemporaryRenameOutcome::Applied {
@@ -3279,6 +3299,24 @@ mod tests {
         assert_eq!(*new_handle.pin().snapshot(), 8);
         assert_eq!(*old_handle.pin().snapshot(), 7);
         assert_ne!(old_handle.read_at(0, 1), new_handle.read_at(0, 1));
+        let repeated_calls = AtomicUsize::new(0);
+        let repeated = draft
+            .fsync_with(|_| {
+                repeated_calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Ok::<_, ()>(ActivationDecision::Accepted(SnapshotPin::capture(
+                        Arc::new(9),
+                    )))
+                }
+            })
+            .await
+            .unwrap();
+        let FsyncOutcome::Accepted(repeated_handle) = repeated else {
+            panic!("repeated sync must return its accepted outcome");
+        };
+        assert_eq!(repeated_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(*repeated_handle.pin().snapshot(), 8);
+        assert_eq!(repeated_handle.read_at(0, 1), [0x58]);
 
         let calls = AtomicUsize::new(0);
         let draft = EditDraft::open(fixture_image(), 1 << 20);
@@ -3512,10 +3550,7 @@ mod tests {
         let TemporaryRenameOutcome::Stale { diagnostic } = stale_outcome else {
             panic!("a draft over a replaced image must be stale");
         };
-        let stale_diagnostic = SafeDiagnostic {
-            code: DiagnosticCode::ExecutionRejected,
-            class: DiagnosticClass::Transient,
-        };
+        let stale_diagnostic = stale_baseline_diagnostic();
         assert_eq!(diagnostic, stale_diagnostic);
         assert_eq!(row_store.transaction_count(), before_stale_commits);
         assert_eq!(row_store.accepted(), row_text);

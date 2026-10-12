@@ -1039,6 +1039,10 @@ pub(crate) fn partition_token_ranges(
     height: u8,
     node_overhead: usize,
 ) -> Result<Vec<std::ops::Range<usize>>, RowStoreError> {
+    if height > MAX_PAGE_HEIGHT {
+        return Err(RowStoreError::PageHeightExceeded(height));
+    }
+
     if node_overhead >= NODE_DATA_LIMIT {
         return Err(RowStoreError::EntryTooLarge(node_overhead));
     }
@@ -1050,7 +1054,11 @@ pub(crate) fn partition_token_ranges(
         if token.refs > MAX_REFS {
             return Err(RowStoreError::PageFanoutExceeded(token.refs));
         }
-        if token.size + node_overhead > NODE_DATA_LIMIT {
+        if token
+            .size
+            .checked_add(node_overhead)
+            .map_or(true, |size| size > NODE_DATA_LIMIT)
+        {
             return Err(RowStoreError::EntryTooLarge(token.size));
         }
         let count = index - start;
@@ -1589,5 +1597,34 @@ mod tests {
             .expect("matching boundary")
             .expect("original row remains");
         assert_eq!(row.value().encoded_fields(), Some(&[0x81, 0x01][..]));
+    }
+    #[test]
+    fn partition_token_ranges_rejects_heights_above_format_bound() {
+        assert_eq!(
+            partition_token_ranges(&[], MAX_PAGE_HEIGHT, 0).expect("height 64 is allowed"),
+            Vec::<std::ops::Range<usize>>::new()
+        );
+        for height in [MAX_PAGE_HEIGHT + 1, u8::MAX] {
+            assert!(matches!(
+                partition_token_ranges(&[], height, 0),
+                Err(RowStoreError::PageHeightExceeded(actual)) if actual == height
+            ));
+        }
+    }
+    #[test]
+    fn partition_token_ranges_enforces_node_size_boundary() {
+        let at_limit = BoundaryToken::new(vec![0], NODE_DATA_LIMIT - 1, 0);
+        assert_eq!(
+            partition_token_ranges(&[at_limit], 0, 1).expect("exact node limit is valid"),
+            vec![0..1]
+        );
+
+        for size in [NODE_DATA_LIMIT, usize::MAX] {
+            let token = BoundaryToken::new(vec![0], size, 0);
+            assert!(matches!(
+                partition_token_ranges(&[token], 0, 1),
+                Err(RowStoreError::EntryTooLarge(actual)) if actual == size
+            ));
+        }
     }
 }
