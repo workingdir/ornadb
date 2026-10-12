@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use orna_sys_v1::{CaptureFileError, CaptureFileStream, FilesystemProvider};
-use orna_value_v1::{encode_ovb2_reader_to_writer, MimeRegistry};
+use orna_value_v1::{MimeRegistry, encode_ovb2_reader_to_writer};
 
 use super::Diagnostic;
 
@@ -363,15 +363,17 @@ mod tests {
             })
         );
         assert!(parse_options(&words(&["song.wav", "--type", "audio/wav"])).is_err());
-        assert!(parse_options(&words(&[
-            "song.wav",
-            "--type",
-            "audio/wav",
-            "--type",
-            "image/png",
-            "--output",
-            "out"
-        ]))
-        .is_err());
+        assert!(
+            parse_options(&words(&[
+                "song.wav",
+                "--type",
+                "audio/wav",
+                "--type",
+                "image/png",
+                "--output",
+                "out"
+            ]))
+            .is_err()
+        );
     }
 }
