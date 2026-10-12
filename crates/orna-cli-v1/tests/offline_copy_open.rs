@@ -173,6 +173,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         "the restored copy reads the same committed rows offline"
     );
 
+<<<<<<< HEAD
     let range = KeyRange::new(None, None, 16).unwrap();
     // Obtain an owner-issued pin for the archive member. It carries both the
     // exact commit identity and the repository-bound format context.
@@ -284,4 +285,48 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         .map(|(_, payload)| payload.len() as u64)
         .sum::<u64>();
     assert_eq!(scope.payload_bytes_read(), expected_bytes);
+=======
+    // The public complete-copy reader selects the recorded snapshot, loads its
+    // admitted native row map, and returns stored metadata without hydrating media.
+    let range = KeyRange::new(None, None, 16).unwrap();
+    let metadata = manifest
+        .project_member_blob_metadata(&copy, &manifest.snapshot, relation_id, &range, 0)
+        .expect("project metadata through the restored snapshot's row map");
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(&metadata[0].0, source_rows[0].key());
+    assert_eq!(metadata[0].1.length(), raw_payload.len() as u64);
+    let expected_hash: [u8; 32] = Sha256::digest(&raw_payload).into();
+    assert_eq!(metadata[0].1.sha256(), expected_hash);
+    assert!(!metadata[0].1.is_hydrated());
+    let format = copy
+        .open_format_context()
+        .expect("open the restored snapshot");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the restored relation row map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the restored native graph");
+    let scope = graph.open_read_scope().expect("open a payload read scope");
+    let row = graph
+        .lookup_row(&metadata[0].0, &scope)
+        .expect("read the restored row")
+        .expect("the restored row exists");
+    let descriptor = row
+        .value()
+        .dependencies()
+        .into_iter()
+        .find(|dependency| dependency.kind() == NativeObjectKind::Tree)
+        .expect("the row carries its Blob descriptor")
+        .oid()
+        .clone();
+    let reference = graph
+        .admit_blob_reference(&row, &descriptor, &scope)
+        .expect("admit the descriptor through the restored row");
+    let restored_payload = graph
+        .read_blob_range(&reference, 0..metadata[0].1.length(), &scope)
+        .expect("read the archived payload without a remote");
+    assert_eq!(restored_payload.bytes(), raw_payload.as_slice());
+    assert_eq!(scope.payload_bytes_read(), metadata[0].1.length());
+>>>>>>> 1b887fdff (feat(repository): consume offline snapshot row roots (#8225))
 }
