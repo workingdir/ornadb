@@ -2025,15 +2025,14 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         text.contains("media payload bytes read: 0"),
         "the human summary must report the payload it avoided: {text}"
     );
-    assert!(
-        text.contains("plan: annotation predicate")
-            && text.contains("coordinates kind,suffix,length")
-            && text.contains("decode-required coordinates duration,dimensions"),
-        "the human plan must name the coordinates it used: {text}"
-    );
-    assert!(
-        text.contains("matched 1"),
-        "the plan states the match count: {text}"
+    let plan_line = text
+        .lines()
+        .find(|line| line.starts_with("plan:"))
+        .expect("the human listing includes a query plan");
+    assert_eq!(
+        plan_line,
+        "plan: annotation predicate; coordinates kind,suffix,length; decode-required coordinates duration,dimensions; candidates 3 matched 1; subject all fields",
+        "the human plan is a single-line report of the evaluated predicate",
     );
 
     // A flag that names no coordinate the annotation binds is refused rather
