@@ -3044,6 +3044,7 @@ mod tests {
         TableObjectId,
     };
     use orna_repository_v1::{ProtectedContentTransfer, Repository, RuntimeGeneration};
+    use orna_value_v1::{Raw, SchemaDescriptor};
     use std::sync::{
         Mutex as TestMutex,
         atomic::{AtomicUsize, Ordering},
@@ -3175,26 +3176,62 @@ mod tests {
         let database_uuid = "00000000-0000-4000-8000-000000000001";
         let database =
             format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-        let schema_source = b"capture transaction test schema";
+        let source = b"capture transaction test schema";
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
+        let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
+            Raw::Array(vec![
+                uuid(id),
+                Raw::Text(name.to_owned()),
+                ty,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        let schema_bytes = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid(relation_id)),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
+            (
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    field(
+                        [0x11; 16],
+                        "id",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Bytes".into())]),
+                        0,
+                    ),
+                    field(
+                        [0x22; 16],
+                        "content",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".into())]),
+                        1,
+                    ),
+                ]),
+            ),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap();
         std::fs::create_dir_all(root.join(".orna/store")).unwrap();
         std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
         std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
-        std::fs::write(root.join("main.orna"), schema_source).unwrap();
+        std::fs::write(root.join("main.orna"), source).unwrap();
         test_git(root, &["add", "--all"]);
         test_git(root, &["commit", "--quiet", "-m", "format3 Blob fixture"]);
 
-        let schema_digest: [u8; 32] = Sha256::digest(schema_source).into();
-        let chunk_oid = test_git_object(root, "blob", schema_source);
+        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let chunk_oid = test_git_object(root, "blob", &schema_bytes);
         let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
-        append_fixture_cbor_head(&mut byte_index, 0, schema_source.len());
+        append_fixture_cbor_head(&mut byte_index, 0, schema_bytes.len());
         byte_index.extend_from_slice(&[0x81, 0x83]);
-        append_fixture_cbor_head(&mut byte_index, 0, schema_source.len());
+        append_fixture_cbor_head(&mut byte_index, 0, schema_bytes.len());
         append_fixture_cbor_bytes(&mut byte_index, &fixture_oid_bytes(&chunk_oid));
         append_fixture_cbor_bytes(&mut byte_index, &schema_digest);
         let byte_index_oid = test_native_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
         let mut schema = vec![0x85, 0x01, 0x06];
-        append_fixture_cbor_head(&mut schema, 0, schema_source.len());
+        append_fixture_cbor_head(&mut schema, 0, schema_bytes.len());
         append_fixture_cbor_bytes(&mut schema, &schema_digest);
         append_fixture_cbor_bytes(&mut schema, &fixture_oid_bytes(&byte_index_oid));
         let schema_oid = test_native_node(root, &schema, &[(byte_index_oid.as_str(), "tree")]);
@@ -3233,7 +3270,7 @@ mod tests {
         let store_root_oid =
             test_native_node(root, &store_root, &[(relation_map_oid.as_str(), "tree")]);
         let database_oid = test_git_object(root, "blob", database.as_bytes());
-        let source_oid = test_git_object(root, "blob", schema_source);
+        let source_oid = test_git_object(root, "blob", source);
         let orna_tree = test_git_tree(
             root,
             &format!(
