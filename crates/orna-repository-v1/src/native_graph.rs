@@ -1174,7 +1174,10 @@ impl NativeGraphContext {
             .canonical_bytes()
             .map_err(|_| GraphError::NonCanonicalData)?;
         let canonical_fields = match row.value() {
-            crate::row_store::RowValue::Inline { encoded, .. } => encoded.clone(),
+            crate::row_store::RowValue::Inline { encoded, .. } => {
+                scope.charge_structured_metadata_read(encoded.len() as u64)?;
+                encoded.clone()
+            }
             crate::row_store::RowValue::Overflow(reference) => {
                 let root = reference
                     .native_root()
@@ -1583,6 +1586,7 @@ impl NativeGraphContext {
                 {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
+                scope.charge_structured_metadata_read(chunk.len() as u64)?;
                 output
                     .try_reserve(chunk.len())
                     .map_err(|_| GraphError::ReadQuotaExceeded)?;
@@ -1903,6 +1907,7 @@ impl NativeGraphContext {
             owner_id,
             cancelled,
             bytes_used: Arc::new(AtomicU64::new(0)),
+            structured_metadata_bytes_read: Arc::new(AtomicU64::new(0)),
             payload_bytes_written: Arc::new(AtomicU64::new(0)),
             objects_used: Arc::new(AtomicU64::new(0)),
             metadata_used: Arc::new(AtomicU64::new(0)),
@@ -2025,11 +2030,7 @@ impl NativeGraphContext {
     ) -> Result<(), GraphError> {
         scope.authorize(self)?;
         let version = row.version();
-        if version.database_id() != &self.database_id
-            || version.relation_id() != self.row_snapshot.version().relation_id()
-            || version.store_root() != &self.store_root
-            || version.schema().schema_digest() != &self.schema_digest
-        {
+        if version != self.row_snapshot.version() {
             return Err(GraphError::ContextMismatch);
         }
         if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
@@ -3444,6 +3445,7 @@ pub struct RepositoryReadScope {
     owner_id: [u8; 16],
     cancelled: Arc<AtomicBool>,
     bytes_used: Arc<AtomicU64>,
+    structured_metadata_bytes_read: Arc<AtomicU64>,
     payload_bytes_written: Arc<AtomicU64>,
     objects_used: Arc<AtomicU64>,
     metadata_used: Arc<AtomicU64>,
@@ -3517,6 +3519,24 @@ impl RepositoryReadScope {
     /// metadata-only query reports zero while still having read the graph.
     pub fn payload_bytes_read(&self) -> u64 {
         self.bytes_used.load(AtomicOrdering::Acquire)
+    }
+    /// Cumulative bytes read from canonical inline/overflow ORP field tuples
+    /// and full structured descriptors. These are row/schema metadata, not
+    /// OVB-2 media payload.
+    pub fn structured_metadata_bytes_read(&self) -> u64 {
+        self.structured_metadata_bytes_read
+            .load(AtomicOrdering::Acquire)
+    }
+
+    fn charge_structured_metadata_read(&self, bytes: u64) -> Result<(), GraphError> {
+        self.structured_metadata_bytes_read
+            .fetch_update(
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+                |used| used.checked_add(bytes),
+            )
+            .map(|_| ())
+            .map_err(|_| GraphError::ReadQuotaExceeded)
     }
 
     /// Cumulative native Git objects this scope has charged to its owner,
@@ -8743,6 +8763,77 @@ mod persisted_orp_tests {
             full_scope.objects_read()
         );
         assert_eq!(bounded_scope.payload_bytes_read(), 0);
+    }
+
+    #[test]
+    fn foreign_root_row_is_rejected_before_graph_reads() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let foreign_root =
+            NativeObjectId::new(graph.algorithm, &[0x55; 20]).expect("foreign root OID");
+        let foreign_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            foreign_root.clone(),
+            admitted_version.schema().clone(),
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent foreign-root version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &foreign_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.resolve_row_node(&row, &foreign_root, &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
+    }
+
+    #[test]
+    fn schema_generation_mismatch_is_rejected_before_native_lookup() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let stale_schema = crate::row_store::SchemaGeneration::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.schema().schema_oid().clone(),
+            *admitted_version.schema().schema_digest(),
+            admitted_version
+                .schema()
+                .generation()
+                .checked_add(1)
+                .expect("fixture schema generation has room"),
+        );
+        let stale_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.store_root().clone(),
+            stale_schema,
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent stale schema version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &stale_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.resolve_row_node(&row, admitted_version.primary_root(), &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
     }
 
     #[test]
