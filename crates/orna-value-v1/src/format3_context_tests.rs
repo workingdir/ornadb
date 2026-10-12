@@ -46,6 +46,25 @@ fn test_context_with_quota(resolver: Arc<dyn BlobResolver>, quota: Format3Quota)
     .unwrap()
 }
 
+fn test_context_with_store_root(
+    resolver: Arc<dyn BlobResolver>,
+    store_root: NativeOid,
+) -> Format3Context {
+    let database = [1; 16];
+    Format3Context::from_persisted(
+        database,
+        Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+        GitHash::Sha1,
+        NativeOid::from_bytes(&[9; 20]).unwrap(),
+        store_root,
+        AvailabilityState::Available,
+        OwnerLifetime::new([3; 16]),
+        Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+        resolver,
+    )
+    .unwrap()
+}
+
 #[test]
 fn published_blob_vectors_use_explicit_profiles() {
     let ovb2 = Blob::from_bytes_with_annotation(b"abc".to_vec(), "text/plain;charset=utf-8", None)
@@ -773,6 +792,79 @@ fn identical_reference_bindings_short_circuit_only_within_one_context() {
         Blob::from_reference(foreign_context.reference(identity, descriptor_oid).unwrap()).unwrap();
     assert!(left.same_content(&foreign).unwrap());
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn context_backed_resolver_rejects_foreign_store_root_bindings() {
+    let bytes = b"protected payload";
+    let identity = ContentIdentity::from_bytes(bytes);
+    let descriptor_oid = NativeOid::from_bytes(&[0x42; 20]).unwrap();
+    let store_root = NativeOid::from_bytes(&[0x43; 20]).unwrap();
+    let resolver = Arc::new(ContextBoundResolver {
+        store_root: store_root.clone(),
+        descriptor_oid: descriptor_oid.clone(),
+        identity,
+        bytes: bytes.to_vec(),
+        reads: AtomicUsize::new(0),
+    });
+
+    let context = test_context_with_store_root(resolver.clone(), store_root);
+    let reference = context.reference(identity, descriptor_oid.clone()).unwrap();
+    let blob = Blob::from_reference(reference.clone()).unwrap();
+    assert_eq!(blob.read_to_end().unwrap(), bytes);
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
+
+    let uncommitted_descriptor = context
+        .reference(identity, NativeOid::from_bytes(&[0x45; 20]).unwrap())
+        .unwrap();
+    assert_eq!(
+        resolver.read_range(&uncommitted_descriptor, 0, identity.length()),
+        Err(Error::InvalidContext)
+    );
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
+
+    let foreign_context = test_context_with_store_root(
+        resolver.clone(),
+        NativeOid::from_bytes(&[0x44; 20]).unwrap(),
+    );
+    let foreign_reference = foreign_context.reference(identity, descriptor_oid).unwrap();
+    assert_eq!(
+        resolver.read_range(&foreign_reference, 0, identity.length()),
+        Err(Error::InvalidContext)
+    );
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
+}
+
+struct ContextBoundResolver {
+    store_root: NativeOid,
+    descriptor_oid: NativeOid,
+    identity: ContentIdentity,
+    bytes: Vec<u8>,
+    reads: AtomicUsize,
+}
+
+impl BlobResolver for ContextBoundResolver {
+    fn read_range(
+        &self,
+        reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>> {
+        let context = reference.context();
+        if context.store_root() != &self.store_root
+            || reference.descriptor_oid() != &self.descriptor_oid
+            || reference.identity() != self.identity
+        {
+            return Err(Error::InvalidContext);
+        }
+
+        let start = usize::try_from(offset).map_err(|_| Error::InvalidRange)?;
+        let length = usize::try_from(length).map_err(|_| Error::InvalidRange)?;
+        let end = start.checked_add(length).ok_or(Error::InvalidRange)?;
+        let bytes = self.bytes.get(start..end).ok_or(Error::InvalidRange)?;
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(bytes.to_vec())
+    }
 }
 
 struct CountingResolver {
