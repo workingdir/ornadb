@@ -130,10 +130,16 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     }
     drop(bindings);
     drop(state);
-    // The source advertises an unavailable remote; restore must carry no remote
-    // and all row/blob reads must succeed after the source repository is gone.
+    // Remove the original media directory and advertise a remote beneath it;
+    // restored reads must work with both sources unavailable.
+    let original_media_root = source.path().to_path_buf();
     let unavailable_remote = source.path().join("unavailable-origin");
     let unavailable_remote_url = format!("file://{}", unavailable_remote.display());
+    drop(source);
+    assert!(
+        !original_media_root.exists(),
+        "the original media directory is unavailable"
+    );
     git_output(
         directory.path(),
         &["remote", "add", "origin", &unavailable_remote_url],
@@ -176,12 +182,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         "the restored copy reads the same committed rows offline"
     );
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-
     let range = KeyRange::new(None, None, 16).unwrap();
-    // Obtain an owner-issued pin for the archive member. It carries both the
-    // exact commit identity and the repository-bound format context.
     let pin = manifest
         .pin_member(&copy, &manifest.snapshot)
         .expect("pin the selected copied member");
@@ -197,14 +198,11 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     let earlier_row_map = earlier_format
         .load_row_map(relation_id)
         .expect("load the earlier snapshot's relation descriptor");
-    // A row map from another snapshot cannot be paired with this member pin.
     assert!(matches!(
         pin.format_context().open_native_graph(&earlier_row_map),
         Err(FormatContextError::RowMapMismatch)
     ));
 
-    // Unlisted commits and repositories without the exact archived commit
-    // cannot issue a member pin.
     let unrelated = TempDir::new().unwrap();
     assert!(matches!(
         manifest.pin_member(&copy, "unlisted"),
@@ -230,66 +228,9 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         ))
     ));
 
-    let graph = pin
-        .format_context()
-        .open_native_graph(&row_map)
-        .expect("open the selected member's authenticated graph");
-    let scope = graph.open_read_scope().expect("open a payload read scope");
-    for (key, expected_payload) in &expected_payloads {
-        let row = graph
-            .lookup_row(key, &scope)
-            .expect("read the restored row")
-            .expect("the restored row exists");
-        let blob_descriptors = row
-            .value()
-            .dependencies()
-            .into_iter()
-            .filter(|dependency| dependency.kind() == NativeObjectKind::Tree)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            blob_descriptors.len(),
-            1,
-            "each fixture row has exactly one payload Blob",
-        );
-        let descriptor = blob_descriptors[0].oid().clone();
-        let stored_blob = graph
-            .read_stored_blob_value(&row, &descriptor, &scope)
-            .expect("resolve the Blob value through the restored row");
-        let identity = stored_blob.content_identity();
-        let expected_hash: [u8; 32] = Sha256::digest(expected_payload).into();
-        assert_eq!(identity.length(), expected_payload.len() as u64);
-        assert_eq!(identity.sha256(), expected_hash);
-        assert_eq!(scope.payload_bytes_read(), 0);
-
-        let restored_payload = graph
-            .read_blob_range(stored_blob.reference(), 0..identity.length(), &scope)
-            .expect("read the archived payload without a remote");
-        assert_eq!(restored_payload.bytes(), expected_payload.as_slice());
-        let exported_hash: [u8; 32] = Sha256::digest(restored_payload.bytes()).into();
-        assert_eq!(exported_hash, expected_hash);
-    }
-    let expected_bytes = expected_payloads
-        .iter()
-        .map(|(_, payload)| payload.len() as u64)
-        .sum::<u64>();
-    assert_eq!(scope.payload_bytes_read(), expected_bytes);
-=======
-    // The public complete-copy reader selects the recorded snapshot, loads its
-    // admitted native row map, and returns stored metadata without hydrating media.
-=======
-    // Query only through an authenticated descriptor issued from the selected
-    // committed member. The metadata projection reads no media payload bytes.
->>>>>>> 11e03396a (feat(repository): read selected offline copy rows (#8225))
-    let range = KeyRange::new(None, None, 16).unwrap();
-    let (_, selected_format) = copy
-        .open_pinned_format_context_with_commit(&manifest.snapshot)
-        .expect("pin the selected copied member");
-    let row_map = selected_format
-        .load_row_map(relation_id)
-        .expect("load the selected member's committed relation descriptor");
     let metadata = manifest
-        .project_member_blob_metadata(&copy, &manifest.snapshot, &row_map, &range, 0)
-        .expect("project metadata through the authenticated relation descriptor");
+        .project_member_blob_metadata(&pin, &row_map, &range, 0)
+        .expect("project metadata through the selected-member pin");
     assert_eq!(metadata.payload_bytes_read, 0);
     assert_eq!(metadata.rows.len(), expected_payloads.len());
     for (key, expected_payload) in &expected_payloads {
@@ -304,67 +245,50 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         assert!(!stored.is_hydrated());
     }
 
-    // The separate raw read traverses the same restored snapshot. Each payload
-    // is compared with its source bytes and the hash returned by metadata.
-    let graph = selected_format
+    let graph = pin
+        .format_context()
         .open_native_graph(&row_map)
         .expect("open the selected member's authenticated graph");
     let scope = graph.open_read_scope().expect("open a payload read scope");
-<<<<<<< HEAD
-    let row = graph
-        .lookup_row(&metadata[0].0, &scope)
-        .expect("read the restored row")
-        .expect("the restored row exists");
-    let descriptor = row
-        .value()
-        .dependencies()
-        .into_iter()
-        .find(|dependency| dependency.kind() == NativeObjectKind::Tree)
-        .expect("the row carries its Blob descriptor")
-        .oid()
-        .clone();
-    let reference = graph
-        .admit_blob_reference(&row, &descriptor, &scope)
-        .expect("admit the descriptor through the restored row");
-    let restored_payload = graph
-        .read_blob_range(&reference, 0..metadata[0].1.length(), &scope)
-        .expect("read the archived payload without a remote");
-    assert_eq!(restored_payload.bytes(), raw_payload.as_slice());
-    assert_eq!(scope.payload_bytes_read(), metadata[0].1.length());
->>>>>>> 1b887fdff (feat(repository): consume offline snapshot row roots (#8225))
-=======
     for (key, expected_payload) in &expected_payloads {
         let row = graph
             .lookup_row(key, &scope)
             .expect("read the restored row")
             .expect("the restored row exists");
-        let descriptor = row
+        let descriptors = row
             .value()
             .dependencies()
             .into_iter()
-            .find(|dependency| dependency.kind() == NativeObjectKind::Tree)
-            .expect("the row carries its Blob descriptor")
-            .oid()
-            .clone();
-        let reference = graph
-            .admit_blob_reference(&row, &descriptor, &scope)
-            .expect("admit the descriptor through the restored row");
+            .filter(|dependency| dependency.kind() == NativeObjectKind::Tree)
+            .collect::<Vec<_>>();
+        assert_eq!(descriptors.len(), 1, "each fixture row has one payload Blob");
+        let descriptor = descriptors[0].oid().clone();
+        let stored_blob = graph
+            .read_stored_blob_value(&row, &descriptor, &scope)
+            .expect("resolve the Blob value through the restored row");
+        let identity = stored_blob.content_identity();
+        let expected_hash: [u8; 32] = Sha256::digest(expected_payload).into();
+        assert_eq!(identity.length(), expected_payload.len() as u64);
+        assert_eq!(identity.sha256(), expected_hash);
+        assert_eq!(scope.payload_bytes_read(), 0);
+
         let restored_payload = graph
-            .read_blob_range(&reference, 0..expected_payload.len() as u64, &scope)
+            .read_blob_range(&stored_blob.reference(), 0..identity.length(), &scope)
             .expect("read the archived payload without a remote");
-        let (_, stored) = metadata
+        assert_eq!(restored_payload.bytes(), expected_payload.as_slice());
+        let exported_hash: [u8; 32] = Sha256::digest(restored_payload.bytes()).into();
+        assert_eq!(exported_hash, expected_hash);
+        let (_, metadata_blob) = metadata
             .rows
             .iter()
             .find(|(row_key, _)| row_key == key)
             .expect("metadata includes the selected row");
-        assert_eq!(restored_payload.bytes(), expected_payload.as_slice());
-        let exported_hash: [u8; 32] = Sha256::digest(restored_payload.bytes()).into();
-        assert_eq!(exported_hash, stored.sha256());
+        assert_eq!(exported_hash, metadata_blob.sha256());
     }
     let expected_bytes = expected_payloads
         .iter()
         .map(|(_, payload)| payload.len() as u64)
         .sum::<u64>();
     assert_eq!(scope.payload_bytes_read(), expected_bytes);
->>>>>>> 11e03396a (feat(repository): read selected offline copy rows (#8225))
+
 }
