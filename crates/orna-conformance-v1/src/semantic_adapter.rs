@@ -3801,7 +3801,7 @@ impl DurableTransactionalEvaluator {
         let index = repository
             .index_generation()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let prepared = RuntimePublicationCoordinator::prepare_from_runtime_allow_noop(
+        let prepared = RuntimePublicationCoordinator::prepare_allow_noop(
             repository, runtime, &head, index, &freeze, path_for, message,
         )
         .await
