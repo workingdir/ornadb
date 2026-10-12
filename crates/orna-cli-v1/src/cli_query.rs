@@ -244,14 +244,6 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let row_map = format
         .load_row_map(*table.relation_id())
         .map_err(|error| query_error("Row map could not be loaded", format!("{error:?}")))?;
-    let binding = format
-        .resolve_committed_table_by_relation_id(relation)
-        .map_err(|error| {
-            query_error(
-                "Committed table descriptor could not be resolved",
-                format!("{error:?}"),
-            )
-        })?;
     let graph = format
         .open_native_graph(&row_map)
         .map_err(|error| query_error("Native graph could not be opened", format!("{error:?}")))?;
@@ -304,7 +296,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let mut listings = Vec::new();
     for row in &rows {
         let admitted = graph
-            .decode_admitted_row_fields(row, &binding, &scope)
+            .decode_admitted_row_fields(row, &table, &scope)
             .map_err(|error| {
                 query_error(
                     "Admitted row fields could not be decoded",
