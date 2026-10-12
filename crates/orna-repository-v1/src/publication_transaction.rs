@@ -7,7 +7,9 @@
 use std::future::Future;
 
 use crate::{
-    GraphError, NativeGraphContext, OrpGraphCandidate, ProtectedContentPin, row_store::TypedKey,
+    CoordinationLock, GraphError, IndexGeneration, NativeGraphContext, OrpGraphCandidate,
+    ProtectedContentPin, PublicationJournal, PublicationJournalStage, Repository, RepositoryError,
+    row_store::TypedKey,
 };
 
 /// One typed insert of a Blob reference under an ORP logical key.
@@ -102,4 +104,124 @@ where
         }
     };
     Ok((prepared.into_candidate(), receipt))
+}
+
+/// Holds the repository coordination lock while a caller validates the
+/// persisted runtime receipt for a descendant publication. Completion does
+/// not modify the selected ref, index, or worktree.
+struct DescendantPublicationRecovery {
+    repository: Repository,
+    journal: PublicationJournal,
+    _coordination_lock: CoordinationLock,
+}
+
+impl Repository {
+    fn begin_descendant_publication_recovery(
+        &self,
+        runtime_intent_id: [u8; 16],
+        journal: &PublicationJournal,
+    ) -> Result<DescendantPublicationRecovery, RepositoryError> {
+        if journal.compact_manifest().is_some()
+            || !matches!(
+                journal.stage(),
+                PublicationJournalStage::WorktreeReconciled
+                    | PublicationJournalStage::RuntimeCompleted
+                    | PublicationJournalStage::Complete
+            )
+            || journal.runtime_intent_id() != Some(runtime_intent_id)
+        {
+            return Err(RepositoryError::RuntimeCompletionRequired);
+        }
+        let coordination_lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_checkout_recovery_locked()?;
+        self.ensure_no_git_operation_in_progress()?;
+        if self.read_publication_journal_locked()?.as_ref() != Some(journal) {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        self.require_publication_candidate_ancestor(journal)?;
+        Ok(DescendantPublicationRecovery {
+            repository: self.clone(),
+            journal: journal.clone(),
+            _coordination_lock: coordination_lock,
+        })
+    }
+
+    fn require_publication_candidate_ancestor(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        let _candidate = self.candidate_from_journal(journal)?;
+        let descendant = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        if &descendant == journal.new_head() {
+            return Err(RepositoryError::StaleHead);
+        }
+        let mut ancestry = self.command();
+        ancestry.args([
+            "merge-base",
+            "--is-ancestor",
+            journal.new_head().as_str(),
+            descendant.as_str(),
+        ]);
+        let ancestry = ancestry
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !ancestry.status.success() {
+            return match ancestry.status.code() {
+                Some(1) => Err(RepositoryError::StaleHead),
+                _ => Err(RepositoryError::GitOperationFailed),
+            };
+        }
+        Ok(())
+    }
+
+    /// Validates a caller-owned persisted runtime receipt while publication
+    /// coordination is fenced, then finalizes only the journal boundary.
+    /// A receipt failure leaves the persisted journal unchanged.
+    pub async fn complete_descendant_publication<E, F, Fut>(
+        &self,
+        runtime_intent_id: [u8; 16],
+        journal: &PublicationJournal,
+        complete_receipt: F,
+    ) -> Result<Result<IndexGeneration, E>, RepositoryError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), E>>,
+    {
+        let recovery = self.begin_descendant_publication_recovery(runtime_intent_id, journal)?;
+        if let Err(error) = complete_receipt().await {
+            return Ok(Err(error));
+        }
+        recovery.finish().map(Ok)
+    }
+}
+
+impl DescendantPublicationRecovery {
+    /// Finalizes the already receipt-validated publication without rebuilding
+    /// a candidate or touching the descendant's source workset.
+    fn finish(mut self) -> Result<IndexGeneration, RepositoryError> {
+        let repository = &self.repository;
+        let journal = &mut self.journal;
+        repository.require_no_pending_checkout_recovery_locked()?;
+        repository.ensure_no_git_operation_in_progress()?;
+        if repository.read_publication_journal_locked()?.as_ref() != Some(journal) {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        repository.require_publication_candidate_ancestor(journal)?;
+        match journal.stage() {
+            PublicationJournalStage::WorktreeReconciled => {
+                journal.advance(PublicationJournalStage::RuntimeCompleted)?;
+                repository.write_publication_journal_locked(journal)?;
+            }
+            PublicationJournalStage::RuntimeCompleted => {}
+            PublicationJournalStage::Complete => {
+                repository.clear_publication_journal_locked()?;
+                return repository.index_generation();
+            }
+            _ => return Err(RepositoryError::RuntimeCompletionRequired),
+        }
+        journal.advance(PublicationJournalStage::Complete)?;
+        repository.write_publication_journal_locked(journal)?;
+        repository.clear_publication_journal_locked()?;
+        repository.index_generation()
+    }
 }

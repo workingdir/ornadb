@@ -1837,6 +1837,23 @@ impl RuntimePublicationCoordinator {
             orna_repository_v1::PublicationJournalStage::RuntimeCompleted
                 | orna_repository_v1::PublicationJournalStage::Complete
         ) {
+            if repository
+                .head()
+                .map_err(map_publication_repository_error)?
+                .as_ref()
+                != Some(journal.new_head())
+            {
+                return repository
+                    .complete_descendant_publication(intent_id, &journal, || async {
+                        runtime
+                            .complete_publication(&freeze, &commit)
+                            .await
+                            .map_err(|_| Error::RuntimeUnavailable)
+                    })
+                    .await
+                    .map_err(map_publication_repository_error)?
+                    .map(Some);
+            }
             runtime
                 .complete_publication(&freeze, &commit)
                 .await
@@ -1851,7 +1868,7 @@ impl RuntimePublicationCoordinator {
             Err(RepositoryError::PublicationPending) => {
                 return Err(Error::PublicationPending);
             }
-            Err(RepositoryError::RuntimeCompletionRequired) => {}
+            Err(RepositoryError::RuntimeCompletionRequired | RepositoryError::StaleHead) => {}
             Err(error) => return Err(map_publication_repository_error(error)),
         }
 
@@ -1870,7 +1887,16 @@ impl RuntimePublicationCoordinator {
             .as_ref()
             != Some(journal.new_head())
         {
-            return Err(Error::RefConflict);
+            return repository
+                .complete_descendant_publication(intent_id, &journal, || async {
+                    runtime
+                        .complete_publication(&freeze, &commit)
+                        .await
+                        .map_err(|_| Error::RuntimeUnavailable)
+                })
+                .await
+                .map_err(map_publication_repository_error)?
+                .map(Some);
         }
         runtime
             .complete_publication(&freeze, &commit)
