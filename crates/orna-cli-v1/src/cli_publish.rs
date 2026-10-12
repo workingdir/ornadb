@@ -77,6 +77,22 @@ fn row_path(mutation: &TableMutation) -> Result<LoosePath, orna_storage_v1::Erro
     LoosePath::for_key(mutation.table(), &[key.to_owned()])
 }
 
+/// Rejects mutations that cannot be represented as published source rows
+/// before the candidate builder reads or changes repository publication state.
+fn validate_candidate_source_rows(mutations: &[TableMutation]) -> Result<(), Diagnostic> {
+    for mutation in mutations {
+        row_path(mutation).map_err(|error| {
+            publish_error(
+                "source row could not be admitted for publication",
+                format!(
+                    "{error:?}; pending runtime mutations and authored files were retained; no candidate was prepared"
+                ),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Names an already-committed snapshot as the publication result for a frozen
 /// range with no visible change. The commit is the current `HEAD`, so the
 /// completion receipt never claims an object the range did not produce.
@@ -200,6 +216,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     format!("{error:?}"),
                 )
             })?;
+        validate_candidate_source_rows(&frozen)?;
         // The frozen range is the only content this call may commit: the
         // candidate is built from the captured base plus exactly these rows.
         let counts = table_row_counts(&frozen);
