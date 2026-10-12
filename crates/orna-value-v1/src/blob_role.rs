@@ -168,7 +168,11 @@ mod tests {
         for name in ["hero", "clip", "voice", "notes", "config", "report", "blob"] {
             let (media_type, suffix, expected) = asset(&bindings, name);
             let value = annotated_value(&media_type, &suffix);
+            let encoded = value.encode().expect("encode fixture OVB-2");
+            let value =
+                ContextValue::decode(&encoded, ValueFormat::Ovb2).expect("decode fixture OVB-2");
             let blob = value.blob().expect("decode OVB-2 Blob");
+            assert_eq!(blob.read_to_end().unwrap(), b"payload");
             assert_eq!(blob.role(), expected, "role for {media_type}");
             assert!(
                 value.blob_as(expected).is_ok(),
