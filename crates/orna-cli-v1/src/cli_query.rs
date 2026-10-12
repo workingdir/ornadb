@@ -1,4 +1,4 @@
-//! `orna query <relation-hex> [--key KEY|0xBYTES] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--limit N] [--format human|json]`
+//! `orna query <relation-hex> [--key TEXT] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--limit N] [--format human|json]`
 //! lists the payload-free Blob metadata of committed format-3 rows, optionally
 //! narrowed by an annotation predicate (`--kind`, `--not-kind`, `--suffix`,
 //! `--min-length`, `--max-length`).
@@ -19,7 +19,6 @@
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
-use crate::cli_row_key::key_candidates;
 use orna_repository_v1::{KeyRange, Repository, TypedKey};
 use orna_value_v1::BlobMetadataFilter;
 
@@ -47,6 +46,16 @@ struct QueryOptions<'a> {
     limit: usize,
     format: QueryFormat,
     predicate: BlobMetadataFilter,
+    constraints: PredicateConstraints<'a>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct PredicateConstraints<'a> {
+    kind: Option<&'a str>,
+    not_kind: Vec<&'a str>,
+    suffix: Option<&'a str>,
+    min_length: Option<u64>,
+    max_length: Option<u64>,
 }
 
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
@@ -59,13 +68,14 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut limit = DEFAULT_QUERY_LIMIT;
     let mut format = QueryFormat::Human;
     let mut predicate = BlobMetadataFilter::new();
+    let mut constraints = PredicateConstraints::default();
     let mut words = arguments.iter().map(String::as_str);
     while let Some(word) = words.next() {
         match word {
             "--key" => {
                 let value = words
                     .next()
-                    .ok_or_else(|| query_error("--key needs a value", "usage: --key KEY"))?;
+                    .ok_or_else(|| query_error("--key needs a value", "usage: --key TEXT"))?;
                 key = Some(value);
             }
             "--from" => {
@@ -117,34 +127,41 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                     query_error("--kind needs a value", "usage: --kind MIME")
                 })?;
                 predicate = predicate.with_media_type(value);
+                constraints.kind = Some(value);
             }
             "--not-kind" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--not-kind needs a value", "usage: --not-kind MIME")
                 })?;
                 predicate = predicate.without_media_type(value);
+                constraints.not_kind.push(value);
             }
             "--suffix" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--suffix needs a value", "usage: --suffix HINT")
                 })?;
                 predicate = predicate.with_suffix(value);
+                constraints.suffix = Some(value);
             }
             "--min-length" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--min-length needs a value", "usage: --min-length BYTES")
                 })?;
-                predicate = predicate.with_min_length(value.parse::<u64>().map_err(|_| {
+                let length = value.parse::<u64>().map_err(|_| {
                     query_error("--min-length is not a byte count", format!("got {value:?}"))
-                })?);
+                })?;
+                predicate = predicate.with_min_length(length);
+                constraints.min_length = Some(length);
             }
             "--max-length" => {
                 let value = words.next().ok_or_else(|| {
                     query_error("--max-length needs a value", "usage: --max-length BYTES")
                 })?;
-                predicate = predicate.with_max_length(value.parse::<u64>().map_err(|_| {
+                let length = value.parse::<u64>().map_err(|_| {
                     query_error("--max-length is not a byte count", format!("got {value:?}"))
-                })?);
+                })?;
+                predicate = predicate.with_max_length(length);
+                constraints.max_length = Some(length);
             }
             "--limit" => {
                 let value = words.next().ok_or_else(|| {
@@ -194,7 +211,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
+            "usage: orna query <relation-hex> [--key TEXT] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
         ));
     };
     Ok(QueryOptions {
@@ -207,13 +224,14 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
         limit,
         format,
         predicate,
+        constraints,
     })
 }
 
 /// Parses a typed index bound without applying the point-key spelling fallback.
 fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
     if let Some(text) = value.strip_prefix("text:") {
-        return Ok(TypedKey::Text(text.to_owned()));
+        return validate_range_key(TypedKey::Text(text.to_owned()));
     }
     if let Some(hex) = value.strip_prefix("bytes:") {
         if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -230,12 +248,18 @@ fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
                     .expect("hexadecimal digits were checked above")
             })
             .collect();
-        return Ok(TypedKey::Bytes(bytes));
+        return validate_range_key(TypedKey::Bytes(bytes));
     }
     Err(query_error(
         "Range key is not typed",
         format!("got {value:?}; use text:KEY or bytes:HEX"),
     ))
+}
+
+fn validate_range_key(key: TypedKey) -> Result<TypedKey, Diagnostic> {
+    key.canonical_bytes()
+        .map_err(|error| query_error("Range key is invalid", format!("{error:?}")))?;
+    Ok(key)
 }
 
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
@@ -324,25 +348,15 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let scope = graph
         .open_read_scope()
         .map_err(|error| query_error("Read scope could not be opened", format!("{error:?}")))?;
-    // `--key` asks for exactly one row. A row committed from imported media is
-    // keyed by the raw bytes a caller passed, and a row written by hand may be
-    // keyed by canonical text, so the spelling printed by the listing is tried
-    // as text and then as those same bytes. Both are bounded point reads of
-    // the committed row map, and the row that answers is a real committed row
-    // rather than a reinterpretation of the query.
+    // `--key` names one canonical text key. Typed byte keys use the explicit
+    // `--from bytes:HEX` / `--until bytes:HEX` range forms; query never retries
+    // a text spelling as a different key type.
     let rows = match options.key {
-        Some(key) => {
-            let mut found = None;
-            for candidate in key_candidates(key)? {
-                found = graph
-                    .lookup_row(&candidate, &scope)
-                    .map_err(|error| query_error("Row lookup failed", format!("{error:?}")))?;
-                if found.is_some() {
-                    break;
-                }
-            }
-            found.into_iter().collect::<Vec<_>>()
-        }
+        Some(key) => graph
+            .lookup_row(&TypedKey::Text(key.to_owned()), &scope)
+            .map_err(|error| query_error("Row lookup failed", format!("{error:?}")))?
+            .into_iter()
+            .collect::<Vec<_>>(),
         None => {
             // Read enough admitted rows to apply metadata predicates before
             // the presentation limit. The indexed row walk remains bounded.
@@ -403,7 +417,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
     let matched = listings.len();
     listings.truncate(options.limit);
-    let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
+    let plan = PredicatePlan::new(&options.predicate, &options.constraints, &subject, candidates, matched);
     match options.format {
         QueryFormat::Human => {
             for (key, field, metadata) in &listings {
@@ -476,6 +490,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
 /// payload figure is the read seam's own count for this process.
 struct PredicatePlan<'a> {
     predicate: &'a BlobMetadataFilter,
+    constraints: &'a PredicateConstraints<'a>,
     subject: &'a str,
     candidates: usize,
     matched: usize,
@@ -484,12 +499,14 @@ struct PredicatePlan<'a> {
 impl<'a> PredicatePlan<'a> {
     const fn new(
         predicate: &'a BlobMetadataFilter,
+        constraints: &'a PredicateConstraints<'a>,
         subject: &'a str,
         candidates: usize,
         matched: usize,
     ) -> Self {
         Self {
             predicate,
+            constraints,
             subject,
             candidates,
             matched,
@@ -510,14 +527,14 @@ impl<'a> PredicatePlan<'a> {
 
     fn human_line(&self) -> String {
         format!(
-            "plan: annotation predicate over {}; coordinates {}; decoded-payload coordinates {}; \
-             candidates {} matched {}; subject {}",
+            "plan: annotation predicate; subject {}; coordinates {}; constraints {}; \
+             decode-required coordinates {}; candidates {} matched {}; payload-fetch none",
             self.subject,
             self.coordinates().join(","),
+            self.constraints.human_line(),
             Self::decode_required_coordinates().join(","),
             self.candidates,
             self.matched,
-            self.subject,
         )
     }
 
@@ -526,11 +543,52 @@ impl<'a> PredicatePlan<'a> {
             "kind": "annotation-predicate",
             "subject": self.subject,
             "coordinates": self.coordinates(),
+            "constraints": {
+                "kind": self.constraints.kind,
+                "not_kind": self.constraints.not_kind,
+                "suffix": self.constraints.suffix,
+                "min_length": self.constraints.min_length,
+                "max_length": self.constraints.max_length,
+            },
             "decode_required_coordinates": Self::decode_required_coordinates(),
             "candidates": self.candidates,
             "matched": self.matched,
             "payload_fetch": "none",
         })
+    }
+}
+
+impl PredicateConstraints<'_> {
+    fn append(output: &mut String, label: &str, value: impl std::fmt::Debug) {
+        use std::fmt::Write as _;
+
+        if !output.is_empty() {
+            output.push_str(", ");
+        }
+        write!(output, "{label}={value:?}").expect("String formatting cannot fail");
+    }
+
+    fn human_line(&self) -> String {
+        let mut output = String::new();
+        if let Some(kind) = self.kind {
+            Self::append(&mut output, "kind", kind);
+        }
+        for kind in &self.not_kind {
+            Self::append(&mut output, "not-kind", kind);
+        }
+        if let Some(suffix) = self.suffix {
+            Self::append(&mut output, "suffix", suffix);
+        }
+        if let Some(length) = self.min_length {
+            Self::append(&mut output, "min-length", length);
+        }
+        if let Some(length) = self.max_length {
+            Self::append(&mut output, "max-length", length);
+        }
+        if output.is_empty() {
+            output.push_str("none");
+        }
+        output
     }
 }
 
