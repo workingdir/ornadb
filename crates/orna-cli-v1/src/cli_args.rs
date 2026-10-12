@@ -94,6 +94,7 @@ pub(super) enum Command {
     Export(Vec<String>),
     Publish(Vec<String>),
     Migrate(Vec<String>),
+    Annotate(Vec<String>),
     Check,
     Explain(String),
     Invoke(String),
@@ -462,6 +463,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 mountpoint: PathBuf::from(mountpoint),
             }
         }
+        Some("annotate") => Command::Annotate(words.by_ref().map(str::to_owned).collect()),
         Some("import") => Command::Import(words.by_ref().map(str::to_owned).collect()),
         Some("export") => Command::Export(words.by_ref().map(str::to_owned).collect()),
         Some("publish") => Command::Publish(words.by_ref().map(str::to_owned).collect()),
