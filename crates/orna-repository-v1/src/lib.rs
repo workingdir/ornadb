@@ -232,13 +232,15 @@ impl ManagedFileChange {
 
 /// Ordered row-index operations for one authenticated table in a format-3 publication.
 ///
-/// The declaration name and table object identity bind the operations to the
-/// committed schema at the candidate's captured snapshot. The supplied digest
-/// is checked against that authenticated binding before any index maintenance.
+/// The declaration, relation identity, schema descriptor and snapshot coordinate
+/// come from the project-owned resolved-schema artifact. The candidate rebinds
+/// that expectation to its captured snapshot before validating any row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationRowMutation {
     declaration_name: String,
     table_object_id: [u8; 16],
+    expected_snapshot_id: [u8; 32],
+    expected_schema: orna_value_v1::SchemaDescriptor,
     source_schema_digest: [u8; 32],
     operations: Vec<RowIndexMutation>,
 }
@@ -247,12 +249,16 @@ impl RelationRowMutation {
     pub fn new(
         declaration_name: String,
         table_object_id: [u8; 16],
+        expected_snapshot_id: [u8; 32],
+        expected_schema: orna_value_v1::SchemaDescriptor,
         source_schema_digest: [u8; 32],
         operations: Vec<RowIndexMutation>,
     ) -> Self {
         Self {
             declaration_name,
             table_object_id,
+            expected_snapshot_id,
+            expected_schema,
             source_schema_digest,
             operations,
         }
@@ -266,6 +272,14 @@ impl RelationRowMutation {
         &self.table_object_id
     }
 
+    pub const fn expected_snapshot_id(&self) -> &[u8; 32] {
+        &self.expected_snapshot_id
+    }
+
+    pub fn expected_schema(&self) -> &orna_value_v1::SchemaDescriptor {
+        &self.expected_schema
+    }
+
     pub const fn source_schema_digest(&self) -> &[u8; 32] {
         &self.source_schema_digest
     }
@@ -274,6 +288,7 @@ impl RelationRowMutation {
         &self.operations
     }
 }
+
 
 /// The Git objects for a candidate publication.  The candidate is private:
 /// building it never changes the ordinary index, worktree, or ref namespace.
@@ -2682,7 +2697,12 @@ impl Repository {
         let mut bound_relations = BTreeSet::new();
         for mutation in mutations {
             let binding = format
-                .bind_committed_table(mutation.declaration_name(), mutation.table_object_id)
+                .bind_committed_table(
+                    mutation.declaration_name(),
+                    mutation.table_object_id,
+                    &mutation.expected_snapshot_id,
+                    &mutation.expected_schema,
+                )
                 .map_err(RepositoryError::FormatContext)?;
             if binding.schema_digest() != &mutation.source_schema_digest {
                 return Err(RepositoryError::FormatContext(
