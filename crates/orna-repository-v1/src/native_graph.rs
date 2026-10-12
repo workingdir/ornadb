@@ -5465,6 +5465,7 @@ pub(crate) fn load_format3_row_map(
     authority.update(row_count.to_be_bytes());
     crate::row_store::RowMapSnapshot::issue_lazy(version, authority.finalize().into())
         .map_err(|_| GraphError::ContextMismatch)
+}
 
 
 fn schema_relation_id(schema: &SchemaDescriptor) -> Result<[u8; 16], GraphError> {
