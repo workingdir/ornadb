@@ -324,12 +324,21 @@ mod tests {
         use std::time::{Duration, SystemTime};
 
         let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("source.bin");
-        std::fs::write(&path, b"before").unwrap();
+        let fixture = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/media/tone.wav"
+        ))
+        .unwrap();
+        let path = directory.path().join("tone.wav");
+        std::fs::write(&path, &fixture).unwrap();
 
         let mut source = open_source(&path).unwrap();
         io::copy(&mut source, &mut io::sink()).unwrap();
-        std::fs::write(&path, b"update").unwrap();
+        let mut changed = fixture.clone();
+        let last_byte = changed.len() - 1;
+        changed[last_byte] ^= 1;
+        assert_eq!(changed.len(), fixture.len());
+        std::fs::write(&path, &changed).unwrap();
         std::fs::File::open(&path)
             .unwrap()
             .set_times(
@@ -337,7 +346,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(source.captured_bytes(), b"before");
+        assert_eq!(source.captured_bytes(), fixture.as_slice());
         assert_eq!(
             source.verify_unchanged(),
             Err(CaptureFileError::SourceChanged)

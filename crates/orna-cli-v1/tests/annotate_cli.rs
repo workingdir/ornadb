@@ -112,3 +112,58 @@ fn rejects_incompatible_suffix_without_creating_output() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("media annotation is invalid"));
     assert!(!output_path.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn rejects_fifo_without_writer_promptly_and_preserves_existing_output() {
+    use std::time::{Duration, Instant};
+
+    let directory = TempDir::new().unwrap();
+    let source = directory.path().join("source.fifo");
+    let status = Command::new("mkfifo").arg(&source).status().unwrap();
+    assert!(status.success(), "mkfifo failed: {status}");
+
+    let output_path = directory.path().join("annotated.ovb2");
+    std::fs::write(&output_path, b"existing destination").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .current_dir(directory.path())
+        .args([
+            "annotate",
+            source.to_str().unwrap(),
+            "--type",
+            "audio/wav",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let result = child.wait_with_output().unwrap();
+            assert_eq!(result.status, status);
+            assert_ne!(status.code(), Some(0));
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("not a regular file"),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("annotate blocked opening a FIFO with no writer");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        b"existing destination"
+    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+}
