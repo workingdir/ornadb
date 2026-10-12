@@ -1,7 +1,5 @@
 use std::{
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -9,10 +7,10 @@ use std::{
 };
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::Repository;
+use orna_project_v1::ProjectLoader;
 use orna_runtime_v1::{
     FaultInjector, FaultPoint, RequestIdentity, RequestState, RuntimeError, RuntimeIdentity,
-    RuntimeState, TableMutation, TerminalOutcome,
+    RuntimeState, TableMutation, TableObjectId, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{
@@ -20,12 +18,21 @@ use orna_value_v1::{
     Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
     ValueFormat,
 };
-use sha2::{Digest, Sha256};
-use tempfile::TempDir;
 
 #[tokio::test]
 async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let (directory, repository, relation_id) = empty_format3_repository();
+    let commit = repository.head().unwrap().unwrap();
+    let source_table = ProjectLoader::default()
+        .resolve_committed_source_table_schema(
+            &repository,
+            &commit,
+            TableObjectId::new(relation_id),
+        )
+        .unwrap();
+    assert_eq!(source_table.binding().module_name(), Some(""));
+    assert_eq!(source_table.binding().source_path(), Some("main.orna"));
+    assert_eq!(source_table.binding().declaration_name(), Some("media"));
     let root = directory.path();
     let payload = b"{\"source\":\"cli\"}";
     std::fs::write(root.join("note.wav"), payload).unwrap();
@@ -59,7 +66,9 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap();
     let context = state.begin_activation().await.unwrap();
 
-    let capability = repository.capture_capability(relation_id).unwrap();
+    let capability = repository
+        .capture_capability(*source_table.binding().table_object_id())
+        .unwrap();
 
     let mut filesystem = FilesystemProvider::with_limits(65_536, 16).unwrap();
     filesystem.allow_root(root).unwrap();
