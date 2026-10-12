@@ -8,10 +8,10 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
-    io::Write as IoWrite,
+    io::{Read as IoRead, Write as IoWrite},
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering},
+        Arc,
     },
 };
 
@@ -1321,38 +1321,7 @@ impl Blob {
     }
 
     fn ovb2_parts(&self) -> Result<(Vec<u8>, Vec<u8>, u64)> {
-        let mut prefix = Vec::with_capacity(16);
-        head(&mut prefix, 6, OVB2_BLOB_TAG);
-        head(&mut prefix, 4, 3);
-        head(&mut prefix, 2, self.length());
-
-        let media_type = self.media_type().as_bytes();
-        let mut suffix = Vec::new();
-        head(
-            &mut suffix,
-            3,
-            u64::try_from(media_type.len()).map_err(|_| Error::Limit)?,
-        );
-        suffix.extend_from_slice(media_type);
-        match self.suffix() {
-            Some(value) => {
-                head(
-                    &mut suffix,
-                    3,
-                    u64::try_from(value.len()).map_err(|_| Error::Limit)?,
-                );
-                suffix.extend_from_slice(value.as_bytes());
-            }
-            None => suffix.push(0xf6),
-        }
-
-        let prefix_len = u64::try_from(prefix.len()).map_err(|_| Error::Limit)?;
-        let suffix_len = u64::try_from(suffix.len()).map_err(|_| Error::Limit)?;
-        let encoded_len = prefix_len
-            .checked_add(self.length())
-            .and_then(|length| length.checked_add(suffix_len))
-            .ok_or(Error::Limit)?;
-        Ok((prefix, suffix, encoded_len))
+        ovb2_parts_for(self.length(), &self.annotation)
     }
 
     fn preflight_ovb2(&self, encoded_len: u64, max_encoded_bytes: u64) -> Result<()> {
@@ -1418,6 +1387,94 @@ impl Blob {
     }
 }
 
+fn ovb2_parts_for(length: u64, annotation: &MediaAnnotation) -> Result<(Vec<u8>, Vec<u8>, u64)> {
+    if length >= MAX_BLOB_LENGTH {
+        return Err(Error::Limit);
+    }
+    let mut prefix = Vec::with_capacity(16);
+    head(&mut prefix, 6, OVB2_BLOB_TAG);
+    head(&mut prefix, 4, 3);
+    head(&mut prefix, 2, length);
+
+    let media_type = annotation.media_type().as_bytes();
+    let mut suffix = Vec::new();
+    head(
+        &mut suffix,
+        3,
+        u64::try_from(media_type.len()).map_err(|_| Error::Limit)?,
+    );
+    suffix.extend_from_slice(media_type);
+    match annotation.suffix() {
+        Some(value) => {
+            head(
+                &mut suffix,
+                3,
+                u64::try_from(value.len()).map_err(|_| Error::Limit)?,
+            );
+            suffix.extend_from_slice(value.as_bytes());
+        }
+        None => suffix.push(0xf6),
+    }
+
+    let prefix_len = u64::try_from(prefix.len()).map_err(|_| Error::Limit)?;
+    let suffix_len = u64::try_from(suffix.len()).map_err(|_| Error::Limit)?;
+    let encoded_len = prefix_len
+        .checked_add(length)
+        .and_then(|length| length.checked_add(suffix_len))
+        .ok_or(Error::Limit)?;
+    Ok((prefix, suffix, encoded_len))
+}
+
+/// Streams exact-length raw bytes as an annotated OVB-2 Blob without building
+/// the payload in memory. The complete encoded size is checked before reading
+/// or writing. The sink may contain a partial value on I/O failure and must be
+/// discarded unless this function succeeds.
+pub fn encode_ovb2_reader_to_writer<R: IoRead, W: IoWrite>(
+    reader: &mut R,
+    length: u64,
+    annotation: &MediaAnnotation,
+    writer: &mut W,
+    max_encoded_bytes: u64,
+) -> Result<u64> {
+    let (prefix, suffix, encoded_len) = ovb2_parts_for(length, annotation)?;
+    if encoded_len > max_encoded_bytes {
+        return Err(Error::QuotaExceeded);
+    }
+
+    writer.write_all(&prefix).map_err(|_| Error::SinkFailed)?;
+    let mut remaining = length;
+    let mut buffer = [0_u8; 64 * 1024];
+    while remaining != 0 {
+        let chunk_length =
+            usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| Error::Limit)?;
+        let mut filled = 0;
+        while filled < chunk_length {
+            match reader.read(&mut buffer[filled..chunk_length]) {
+                Ok(0) => return Err(Error::ContentUnavailable),
+                Ok(count) => filled += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(Error::ContentUnavailable),
+            }
+        }
+        writer
+            .write_all(&buffer[..chunk_length])
+            .map_err(|_| Error::SinkFailed)?;
+        remaining -= chunk_length as u64;
+    }
+
+    let mut extra = [0_u8; 1];
+    loop {
+        match reader.read(&mut extra) {
+            Ok(0) => break,
+            Ok(_) => return Err(Error::InvalidRange),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(Error::ContentUnavailable),
+        }
+    }
+    writer.write_all(&suffix).map_err(|_| Error::SinkFailed)?;
+    Ok(encoded_len)
+}
+
 /// Encodes an annotated Blob as OVB-2 into a Vec with a caller supplied byte
 /// ceiling. The exact output size is checked before allocation or content
 /// resolution; allocation is reserved fallibly before bytes are written.
@@ -1434,7 +1491,7 @@ pub fn encode_ovb2_bounded(blob: &Blob, max_encoded_bytes: u64) -> Result<Vec<u8
 fn same_content_source(left: &BlobContent, right: &BlobContent) -> bool {
     match (left, right) {
         (BlobContent::Inline(left), BlobContent::Inline(right)) => Arc::ptr_eq(left, right),
-        (BlobContent::Reference(left), BlobContent::Reference(right)) => Arc::ptr_eq(left, right),
+        (BlobContent::Reference(left), BlobContent::Reference(right)) => left == right,
         (BlobContent::Commitment, BlobContent::Commitment) => false,
         _ => false,
     }
