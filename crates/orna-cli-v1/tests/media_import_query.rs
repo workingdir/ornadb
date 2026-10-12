@@ -694,6 +694,15 @@ async fn import_media(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
+    if key == "note" {
+        let encoded = binding.encoded_value();
+        assert!(
+            encoded
+                .windows(b"audio/mp4".len())
+                .any(|part| part == b"audio/mp4")
+        );
+        assert!(encoded.windows(b"m4b".len()).any(|part| part == b"m4b"));
+    }
     let key_text = key;
     let (id, key, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
     let mutation = if insert_only {
@@ -1893,7 +1902,7 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     assert_eq!(all["blobs"].as_u64(), Some(3), "three committed rows: {all}");
     assert_eq!(all["media_payload_bytes_read"], 0);
 
-    // `--kind` selects on the canonical media type the annotation binds.
+    // `--kind` selects the canonical media type the authored annotation binds.
     let wavs = query_json(directory.path(), &[&relation, "--kind", "audio/wav"]);
     let keys: Vec<&str> = wavs["listings"]
         .as_array()
@@ -1901,7 +1910,13 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         .iter()
         .map(|listing| listing["key"].as_str().unwrap())
         .collect();
-    assert_eq!(keys, vec!["note", "song"], "both WAV rows and no PNG: {wavs}");
+    assert_eq!(keys, vec!["song"], "the unannotated WAV row: {wavs}");
+    let authored = query_json(directory.path(), &[&relation, "--kind", "audio/mp4"]);
+    assert_eq!(
+        authored["listings"][0]["key"], "note",
+        "authored MIME annotation survives row conversion: {authored}"
+    );
+    assert_eq!(authored["listings"][0]["suffix"], "m4b");
     assert_eq!(
         wavs["media_payload_bytes_read"], 0,
         "the kind predicate fetched media bytes"
@@ -1924,20 +1939,20 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         serde_json::json!(["duration", "dimensions"])
     );
     assert_eq!(plan["candidates"].as_u64(), Some(3), "all rows: {plan}");
-    assert_eq!(plan["matched"].as_u64(), Some(2), "two WAVs: {plan}");
+    assert_eq!(plan["matched"].as_u64(), Some(1), "one WAV: {plan}");
     assert_eq!(plan["payload_fetch"], "none");
 
-    // `--suffix` discriminates the two WAVs by their authored annotation, and
-    // an unauthored hint selects nothing rather than falling back to kind.
-    let annotated_only = query_json(directory.path(), &[&relation, "--suffix", "note"]);
+    // `--suffix` reads the authored supported hint; an absent hint matches
+    // nothing rather than falling back to kind.
+    let annotated_only = query_json(directory.path(), &[&relation, "--suffix", "m4b"]);
     let annotated_keys: Vec<&str> = annotated_only["listings"]
         .as_array()
         .unwrap()
         .iter()
         .map(|listing| listing["key"].as_str().unwrap())
         .collect();
-    assert_eq!(annotated_keys, vec!["note"], "only the annotated row");
-    assert_eq!(annotated_only["listings"][0]["suffix"], "note");
+    assert_eq!(annotated_keys, vec!["note"], "only the authored row");
+    assert_eq!(annotated_only["listings"][0]["suffix"], "m4b");
     assert_eq!(annotated_only["media_payload_bytes_read"], 0);
 
     let absent_suffix = query_json(directory.path(), &[&relation, "--suffix", "absent"]);
@@ -1986,7 +2001,7 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     // row satisfies is an empty result rather than an unfiltered one.
     let narrow = query_json(
         directory.path(),
-        &[&relation, "--kind", "audio/wav", "--suffix", "note"],
+        &[&relation, "--kind", "audio/mp4", "--suffix", "m4b"],
     );
     assert_eq!(narrow["blobs"].as_u64(), Some(1), "one row: {narrow}");
     let contradictory = query_json(
@@ -2016,7 +2031,10 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
             && text.contains("decode-required coordinates duration,dimensions"),
         "the human plan must name the coordinates it used: {text}"
     );
-    assert!(text.contains("matched 2"), "the plan states the match count: {text}");
+    assert!(
+        text.contains("matched 1"),
+        "the plan states the match count: {text}"
+    );
 
     // A flag that names no coordinate the annotation binds is refused rather
     // than silently ignored.
