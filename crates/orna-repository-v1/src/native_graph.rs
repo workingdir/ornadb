@@ -21,7 +21,7 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor, Value};
+use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor};
 use sha2::{Digest, Sha256};
 
 pub const REPOSITORY_FORMAT: u8 = 3;
