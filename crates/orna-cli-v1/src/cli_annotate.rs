@@ -112,7 +112,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
         source_length,
         &annotation,
         &mut output,
-        u64::MAX,
+        MAX_SOURCE_BYTES,
     );
     if let Err(error) = encoded {
         if let Err(source_change) = source.verify_unchanged() {
