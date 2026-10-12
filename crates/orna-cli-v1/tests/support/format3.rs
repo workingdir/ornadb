@@ -10,11 +10,18 @@ use std::{
 
 use orna_conformance_v1::DurableTransactionalEvaluator;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::Repository;
+use orna_repository_v1::{Repository, TypedKey};
 use orna_runtime_v1::RuntimeState;
 use orna_storage_v1::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+
+use std::sync::Arc;
+
+use orna_value_v1::{
+    AvailabilityState, BlobResolver, ContentReference, Error as ValueError, Format3Context,
+    Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
+};
 
 use orna_project_v1::ObjectIdentityManifest;
 use orna_semantic_v1::{ModuleInput, analyze};
@@ -76,10 +83,47 @@ pub fn capture_failure(
 }
 
 pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
-    format3_repository("pub table media(id: Str) { content: Blob, }\n")
+    format3_repository(include_str!("../fixtures/media/empty-media-main.orna"))
+}
+
+/// Creates an Object project, its canonical identity manifest, source rows, and
+/// matching native descriptor roots in one committed repository.
+pub fn object_format3_repository(
+    media_root: &Path,
+) -> (TempDir, Repository, [u8; 16], Format3Context) {
+    let (directory, repository, relation_id, schema_root, store_root) = format3_repository_parts(
+        include_str!("../fixtures/media/offline-query-main.orna"),
+        "Object",
+    );
+    let root = directory.path();
+    let media_root = format!("{:?}", media_root.to_string_lossy().as_ref());
+    for (name, fixture) in [
+        ("song", include_str!("../fixtures/media/source-song.orna")),
+        ("image", include_str!("../fixtures/media/source-image.orna")),
+    ] {
+        let source = fixture.replace("__MEDIA_ROOT__", &media_root);
+        let path = root.join("Object").join(format!("{name}.orna"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+    }
+    git(root, &["add", "--all"]);
+    git(root, &["commit", "--quiet", "-m", "add source Object rows"]);
+    let commit = repository.head().unwrap().unwrap();
+    let context =
+        persisted_format3_context(&repository, commit.as_str(), &schema_root, &store_root);
+    (directory, repository, relation_id, context)
 }
 
 pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16]) {
+    let (directory, repository, relation_id, _, _) =
+        format3_repository_parts(media_source, "media");
+    (directory, repository, relation_id)
+}
+
+fn format3_repository_parts(
+    media_source: &str,
+    declaration_name: &str,
+) -> (TempDir, Repository, [u8; 16], String, String) {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
     git(root, &["init", "--quiet"]);
@@ -96,7 +140,7 @@ pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16])
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
     let manifest_bytes = identities.encode().unwrap();
     let table = identities
-        .source_table_schema(&analysis, "", "main.orna", "media")
+        .source_table_schema(&analysis, "", "main.orna", declaration_name)
         .unwrap();
     let relation_id = *table.table_object_id();
     let schema_source = table.descriptor().encode().unwrap();
@@ -144,7 +188,12 @@ pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16])
     relation_map.extend_from_slice(&relation_domain);
     relation_map.push(0x81);
     relation_map.push(0x82);
-    append_cbor_bytes(&mut relation_map, &relation_id);
+    append_cbor_bytes(
+        &mut relation_map,
+        &TypedKey::Bytes(relation_id.to_vec())
+            .canonical_bytes()
+            .expect("the relation ID has a canonical typed key"),
+    );
     relation_map.push(0x84);
     append_cbor_bytes(&mut relation_map, &git_oid_bytes(&schema_oid));
     append_cbor_bytes(&mut relation_map, &git_oid_bytes(&row_root_oid));
@@ -202,7 +251,57 @@ pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16])
     git(root, &["update-ref", &head_ref, &commit]);
 
     let repository = Repository::discover(root).unwrap();
-    (directory, repository, relation_id)
+    (
+        directory,
+        repository,
+        relation_id,
+        schema_oid,
+        store_root_oid,
+    )
+}
+
+struct UnreadableFixtureResolver;
+
+impl BlobResolver for UnreadableFixtureResolver {
+    fn read_range(
+        &self,
+        _reference: &ContentReference,
+        _offset: u64,
+        _length: u64,
+    ) -> orna_value_v1::Result<Vec<u8>> {
+        Err(ValueError::ContentUnavailable)
+    }
+}
+
+fn persisted_format3_context(
+    repository: &Repository,
+    commit: &str,
+    schema_root: &str,
+    store_root: &str,
+) -> Format3Context {
+    let database_id = *repository
+        .open_format_context()
+        .unwrap()
+        .require_database_id()
+        .unwrap()
+        .as_bytes();
+    let algorithm = GitHash::Sha1;
+    Format3Context::from_persisted(
+        database_id,
+        Snapshot::Commit {
+            database: database_id,
+            algorithm,
+            oid: git_oid_bytes(commit),
+        },
+        algorithm,
+        NativeOid::from_bytes(&git_oid_bytes(schema_root)).unwrap(),
+        NativeOid::from_bytes(&git_oid_bytes(store_root)).unwrap(),
+        AvailabilityState::Available,
+        OwnerLifetime::new([0x66; 16]),
+        Format3Quota::new(16, 1 << 20).unwrap(),
+        Arc::new(UnreadableFixtureResolver),
+    )
+    .unwrap()
 }
 
 pub fn git(path: &Path, args: &[&str]) {
