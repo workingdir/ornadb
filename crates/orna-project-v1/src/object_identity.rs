@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use orna_repository_v1::{Repository, Uuid};
+use orna_repository_v1::{GitCommitRef, Repository, Uuid};
 use orna_semantic_v1::{Analysis, ModuleInput, SymbolKind, TableAdmission, TableSchema, Type};
 use orna_syntax_v1::{Declaration, Pattern, TableMember, parse_module};
 use orna_value_v1::{Raw, SchemaDescriptor, Value};
@@ -18,6 +18,7 @@ use orna_value_v1::{Raw, SchemaDescriptor, Value};
 
 /// Repository-relative committed location of the object identity inventory.
 pub const OBJECT_IDENTITY_MANIFEST_PATH: &str = ".orna/object-identities.cbor";
+const MAX_OBJECT_IDENTITY_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const MANIFEST_VERSION: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -131,19 +132,39 @@ impl ObjectIdentityManifest {
         let admission = schema.admission.as_ref().ok_or(SourceTableSchemaError::MissingAdmission)?;
         let qualified_table = qualify(module_name, declaration_name);
         let table_object_id = *self.id(ObjectKind::Table, &qualified_table).ok_or(SourceTableSchemaError::MissingIdentity)?;
-        let field_object_ids = schema.fields.keys().map(|name| {
-            let qualified_field = format!("{qualified_table}.{name}");
-            self.id(ObjectKind::Field, &qualified_field).copied()
-                .map(|id| (name.clone(), id)).ok_or(SourceTableSchemaError::MissingIdentity)
-        }).collect::<Result<BTreeMap<_, _>, _>>()?;
-        let expected_names = std::iter::once(qualified_table.clone())
-            .chain(field_object_ids.keys().map(|name| format!("{qualified_table}.{name}")))
+        let field_object_ids = schema
+            .fields
+            .keys()
+            .map(|name| {
+                let qualified_field = format!("{qualified_table}.{name}");
+                self.id(ObjectKind::Field, &qualified_field)
+                    .copied()
+                    .map(|id| (name.clone(), id))
+                    .ok_or(SourceTableSchemaError::MissingIdentity)
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let expected_identities = std::iter::once((ObjectKind::Table, qualified_table.clone()))
+            .chain(field_object_ids.keys().map(|name| {
+                (ObjectKind::Field, format!("{qualified_table}.{name}"))
+            }))
             .collect::<BTreeSet<_>>();
-        let active_names = self.records.iter().filter(|record| {
-            !record.retired && (record.qualified_name == qualified_table
-                || record.qualified_name.starts_with(&format!("{qualified_table}.")))
-        }).map(|record| record.qualified_name.clone()).collect::<BTreeSet<_>>();
-        if active_names != expected_names {
+        let field_prefix = format!("{qualified_table}.");
+        let active_identities = self
+            .records
+            .iter()
+            .filter(|record| {
+                !record.retired
+                    && ((record.kind == ObjectKind::Table
+                        && record.qualified_name == qualified_table)
+                        || (record.kind == ObjectKind::Field
+                            && record
+                                .qualified_name
+                                .strip_prefix(&field_prefix)
+                                .is_some_and(|name| !name.is_empty() && !name.contains('.'))))
+            })
+            .map(|record| (record.kind, record.qualified_name.clone()))
+            .collect::<BTreeSet<_>>();
+        if active_identities != expected_identities {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
         let descriptor = build_source_descriptor(table_object_id, &field_object_ids, schema, admission)?;
@@ -231,6 +252,17 @@ impl ObjectIdentityManifest {
         Ok(Self { records })
     }
 
+
+    /// Reads and validates the source identity inventory from one exact commit.
+    pub fn read_committed(
+        repository: &Repository,
+        commit: &GitCommitRef,
+    ) -> Result<Self, ObjectIdentityError> {
+        let bytes = repository
+            .read_committed_file(commit, OBJECT_IDENTITY_MANIFEST_PATH, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .map_err(|_| ObjectIdentityError::Io)?;
+        Self::decode(&bytes)
+    }
     /// Reads the manifest from the current worktree without allocating IDs.
     pub fn read_worktree(repository: &Repository) -> Result<Option<Self>, ObjectIdentityError> {
         let root = repository.worktree();
@@ -428,11 +460,19 @@ fn source_identity_keys(modules: &[ModuleInput]) -> Result<Vec<(ObjectKind, Stri
 
 fn module_namespace(path: &str) -> Option<String> {
     let path = path.strip_suffix(".orna")?;
-    if path.starts_with('/') || path.contains('\\') || path.contains('\0') { return None; }
+    if path.starts_with('/') || path.contains('\\') || path.contains('\0') {
+        return None;
+    }
     let mut parts = path.split('/').collect::<Vec<_>>();
     let file = parts.pop()?;
-    if file != "main" { parts.push(file); }
-    if parts.iter().any(|part| part.is_empty() || matches!(*part, "." | "..") || part.contains('.')) { return None; }
+    if !crate::valid_component(file)
+        || parts.iter().any(|part| !crate::valid_component(part))
+    {
+        return None;
+    }
+    if file != "main" {
+        parts.push(file);
+    }
     Some(parts.join("."))
 }
 
