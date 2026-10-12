@@ -4044,10 +4044,16 @@ mod graph_bridge_tests {
             "the committed OGS-1 store root advanced"
         );
         let later_scope = later_graph.open_read_scope().expect("later read scope");
+        let before_foreign_row_rejection = later_scope.objects_read_for_test();
         assert!(matches!(
             later_graph.resolve_row_node(&row, &descriptor_oid, &later_scope),
             Err(crate::native_graph::GraphError::ContextMismatch)
         ));
+        assert_eq!(
+            later_scope.objects_read_for_test(),
+            before_foreign_row_rejection,
+            "reject a foreign-root row before looking it up"
+        );
     }
 
     #[test]
