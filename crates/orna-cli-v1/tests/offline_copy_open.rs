@@ -127,10 +127,16 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     );
     drop(bindings);
     drop(state);
-    // The source advertises an unavailable remote; restore must carry no remote
-    // and all row/blob reads must succeed after the source repository is gone.
+    // Remove the original media directory and advertise a remote beneath it;
+    // restored reads must work with both sources unavailable.
+    let original_media_root = source.path().to_path_buf();
     let unavailable_remote = source.path().join("unavailable-origin");
     let unavailable_remote_url = format!("file://{}", unavailable_remote.display());
+    drop(source);
+    assert!(
+        !original_media_root.exists(),
+        "the original media directory is unavailable"
+    );
     git_output(
         directory.path(),
         &["remote", "add", "origin", &unavailable_remote_url],
@@ -227,8 +233,8 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         .format_context()
         .open_native_graph(&row_map)
         .expect("open the selected member's authenticated graph");
-    let scope = graph.open_read_scope().expect("open a payload read scope");
     for (key, expected_payload) in &expected_payloads {
+        let scope = graph.open_read_scope().expect("open a payload read scope");
         let row = graph
             .lookup_row(key, &scope)
             .expect("read the restored row")
@@ -260,10 +266,6 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         assert_eq!(restored_payload.bytes(), expected_payload.as_slice());
         let exported_hash: [u8; 32] = Sha256::digest(restored_payload.bytes()).into();
         assert_eq!(exported_hash, expected_hash);
+        assert_eq!(scope.payload_bytes_read(), expected_payload.len() as u64);
     }
-    let expected_bytes = expected_payloads
-        .iter()
-        .map(|(_, payload)| payload.len() as u64)
-        .sum::<u64>();
-    assert_eq!(scope.payload_bytes_read(), expected_bytes);
 }
