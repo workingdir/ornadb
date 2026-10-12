@@ -4389,7 +4389,6 @@ impl RuntimeState {
             None,
         )
         .await
-
     }
     async fn open_path_with_graph_repository_id(
         path: &Path,
@@ -4446,9 +4445,12 @@ impl RuntimeState {
         state.migrate_stream_observation_checkpoint_reuse().await?;
         state.migrate_catalogue_identity_schema().await?;
         let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
+        // Receipt recovery opens runtime while the repository journal can still
+        // be pending. Owner cleanup defers in that state and retains the full
+        // departed-owner chain until publication becomes terminal.
         if let Some(owner_lock) = &state.runtime_owner_lock {
             owner_lock
-                .reclaim_previous_owner_pins(&accepted_pending)
+                .reclaim_departed_owner_pins(&accepted_pending)
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
         }
         Ok(state)
@@ -13140,7 +13142,7 @@ impl RuntimeState {
 
     async fn validate_recovery_with_pin_manifest(
         &self,
-    ) -> Result<BTreeMap<[u8; 16], NativeOid>, RuntimeError> {
+    ) -> Result<BTreeMap<[u8; 16], BTreeMap<[u8; 16], NativeOid>>, RuntimeError> {
         let capture = self.capture().await?;
         let generation = capture
             .generation()
@@ -13223,8 +13225,9 @@ impl RuntimeState {
     async fn validate_accepted_content_pin_recovery(
         &self,
         current_generation: u64,
-    ) -> Result<BTreeMap<[u8; 16], NativeOid>, RuntimeError> {
-        let mut accepted_pending = BTreeMap::new();
+    ) -> Result<BTreeMap<[u8; 16], BTreeMap<[u8; 16], NativeOid>>, RuntimeError> {
+        let mut accepted_pending = BTreeMap::<[u8; 16], BTreeMap<[u8; 16], NativeOid>>::new();
+        let mut accepted_pin_ids = BTreeSet::new();
         let mut entries_by_generation: BTreeMap<i64, Vec<AcceptedContentPinManifestEntry>> =
             BTreeMap::new();
         let mut rows = self
@@ -13318,7 +13321,15 @@ impl RuntimeState {
                     owner_epoch,
                     checkpoint_generation,
                 });
-            if accepted_pending.insert(pin_id, accepted_oid).is_some() {
+            if !accepted_pin_ids.insert(pin_id) {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
+            if accepted_pending
+                .entry(owner_id)
+                .or_default()
+                .insert(pin_id, accepted_oid)
+                .is_some()
+            {
                 return Err(RuntimeError::RecoveryInvalid);
             }
         }
