@@ -20,6 +20,8 @@ use std::{
     },
 };
 
+use fs2::FileExt;
+
 use orna_value_v1::{BlobMetadata, MediaAnnotation, SchemaDescriptor};
 use sha2::{Digest, Sha256};
 
