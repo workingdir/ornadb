@@ -185,7 +185,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // below come from the commit it named, so a branch that advances during
     // the read never changes the answer, and the workspace `HEAD` is never
     // consulted instead.
-    let format = match options.at {
+    let (commit, format) = match options.at {
         Some(selector) => {
             // `rev-parse` accepts a bare name that two namespaces both define
             // and only warns about the choice, so a name that identifies more
@@ -218,29 +218,36 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                         format!("{selector:?}: {error:?}"),
                     )
                 })?;
-            // A format-1/2 pin is a read-only compatibility input: it carries
-            // no native `.orna/store`, so it has no row map to read. Say so
-            // instead of reporting the format-3 store seam's generic failure.
             if format.is_read_only() {
                 return Err(query_error(
                     "Snapshot is a legacy format-1/2 input",
                     "--at names a read-only compatibility snapshot with no native row store; name a format-3 commit",
                 ));
             }
-            format
+            (commit, format)
         }
-        None => repository.open_format_context().map_err(|error| {
-            query_error("Format context could not be opened", format!("{error:?}"))
-        })?,
+        None => {
+            let commit = repository.resolve_snapshot("HEAD").map_err(|error| {
+                query_error("Snapshot could not be resolved", format!("HEAD: {error:?}"))
+            })?;
+            let format = repository
+                .open_pinned_format_context(commit.as_str())
+                .map_err(|error| {
+                    query_error("Format context could not be opened", format!("{error:?}"))
+                })?;
+            (commit, format)
+        }
     };
-    let table = format
-        .resolve_committed_table_by_relation_id(relation)
+    let resolved = orna_project_v1::ProjectLoader::default()
+        .resolve_committed_source_table_schema(
+            &repository,
+            &commit,
+            orna_application_v1::TableObjectId::new(relation),
+        )
         .map_err(|error| {
-            query_error(
-                "Table descriptor could not be resolved",
-                format!("{error:?}"),
-            )
+            query_error("Committed table source could not be resolved", format!("{error:?}"))
         })?;
+    let table = resolved.binding();
     let row_map = format
         .load_row_map(*table.relation_id())
         .map_err(|error| query_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -296,7 +303,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let mut listings = Vec::new();
     for row in &rows {
         let admitted = graph
-            .decode_admitted_row_fields(row, &table, &scope)
+            .decode_admitted_row_fields(row, table, &scope)
             .map_err(|error| {
                 query_error(
                     "Admitted row fields could not be decoded",
