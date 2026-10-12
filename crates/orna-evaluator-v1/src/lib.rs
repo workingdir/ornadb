@@ -6461,7 +6461,7 @@ impl Context<'_, '_> {
                         Value::from_context_value(row, self, depth + 1)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                (rows, page.next)
+                Ok((rows, page.next))
             }
         }?;
         if let (Some(after), Some(next)) = (after, next.as_deref())
@@ -15281,7 +15281,7 @@ mod tests {
             &mut effects,
             &mut budget,
         )
-        .expect("source consumer receives the effect's owner-bound Blob");
+        .unwrap_or_else(|error| panic!("source consumer failed: {}", error.code()));
 
         assert_eq!(result.format(), ValueFormat::Rov3);
         assert_eq!(result.context().unwrap().database_uuid(), [0x41; 16]);
