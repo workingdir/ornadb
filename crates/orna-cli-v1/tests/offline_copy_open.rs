@@ -10,8 +10,11 @@ use std::path::Path;
 
 use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_repository_v1::{
-    AdmittedRow, KeyRange, NativeObjectKind, Repository, TypedKey,
-    complete_copy::{export_complete_copy, materialize_complete_copy, restore_complete_copy},
+    AdmittedRow, FormatContextError, KeyRange, NativeObjectKind, Repository, TypedKey,
+    complete_copy::{
+        CompleteCopyReadError, export_complete_copy, materialize_complete_copy,
+        restore_complete_copy,
+    },
 };
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
@@ -111,14 +114,6 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     .await;
 
     let source_rows = committed_rows(&repository, relation_id);
-    assert_eq!(
-        source_rows.len(),
-        2,
-        "the source commits song and image rows"
-    );
-    for (key, _) in &expected_payloads {
-        assert!(source_rows.iter().any(|row| row.key() == key));
-    }
     drop(bindings);
     drop(state);
     // The source advertises an unavailable remote; restore must carry no remote
@@ -167,18 +162,63 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         "the restored copy reads the same committed rows offline"
     );
 
-    // Query only through an authenticated descriptor issued from the selected
-    // committed member. The metadata projection reads no media payload bytes.
     let range = KeyRange::new(None, None, 16).unwrap();
-    let (_, selected_format) = copy
-        .open_pinned_format_context_with_commit(&manifest.snapshot)
+    // Obtain an owner-issued pin for the archive member. It carries both the
+    // exact commit identity and the repository-bound format context.
+    let pin = manifest
+        .pin_member(&copy, &manifest.snapshot)
         .expect("pin the selected copied member");
-    let row_map = selected_format
+    assert_eq!(pin.commit().as_str(), manifest.snapshot.as_str());
+    let row_map = pin
+        .format_context()
         .load_row_map(relation_id)
         .expect("load the selected member's committed relation descriptor");
+
+    // A committed relation descriptor from another snapshot cannot be paired
+    // with this pin, even when it names the same relation.
+    let (_, earlier_format) = copy
+        .open_pinned_format_context_with_commit("HEAD^")
+        .expect("pin the earlier snapshot");
+    let earlier_row_map = earlier_format
+        .load_row_map(relation_id)
+        .expect("load the earlier snapshot's relation descriptor");
+    assert!(matches!(
+        manifest.project_member_blob_metadata(&pin, &earlier_row_map, &range, 0),
+        Err(CompleteCopyReadError::FormatContext(
+            FormatContextError::RowMapMismatch
+        ))
+    ));
+
+    // Unlisted commits and repositories without the exact archived commit
+    // cannot issue a member pin.
+    let unrelated = TempDir::new().unwrap();
+    assert!(matches!(
+        manifest.pin_member(&copy, "unlisted"),
+        Err(CompleteCopyReadError::MemberNotInCopy { .. })
+    ));
+    git(unrelated.path(), &["init", "--quiet"]);
+    git(
+        unrelated.path(),
+        &["config", "user.email", "offline-copy@example.invalid"],
+    );
+    git(
+        unrelated.path(),
+        &["config", "user.name", "Offline Copy Test"],
+    );
+    std::fs::write(unrelated.path().join("unrelated"), b"not the copied member").unwrap();
+    git(unrelated.path(), &["add", "unrelated"]);
+    git(unrelated.path(), &["commit", "--quiet", "-m", "unrelated"]);
+    let unrelated_repository = Repository::discover(unrelated.path()).unwrap();
+    assert!(matches!(
+        manifest.pin_member(&unrelated_repository, &manifest.snapshot),
+        Err(CompleteCopyReadError::FormatContext(
+            FormatContextError::SnapshotUnavailable
+        ))
+    ));
+
     let metadata = manifest
-        .project_member_blob_metadata(&copy, &manifest.snapshot, &row_map, &range, 0)
-        .expect("project metadata through the authenticated relation descriptor");
+        .project_member_blob_metadata(&pin, &row_map, &range, 0)
+        .expect("project metadata through the selected-member pin");
     assert_eq!(metadata.payload_bytes_read, 0);
     assert_eq!(metadata.rows.len(), expected_payloads.len());
     for (key, expected_payload) in &expected_payloads {
