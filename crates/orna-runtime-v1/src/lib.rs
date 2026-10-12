@@ -36,7 +36,7 @@ use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
 use orna_repository_v1::{
     CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, ContentIdentity,
     CwdGeneration, GitCommitRef, GitHashAlgorithm, NativeOid, OrpBlobBinding, ProtectedContentPin,
-    ProtectedContentTransfer, Repository,
+    ProtectedContentTransfer, Repository, RuntimeOwnerLock,
 };
 use orna_stream_v1::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
@@ -2479,6 +2479,7 @@ pub enum TableActivationError {
 pub struct RuntimeState {
     connection: Connection,
     graph_repository_id: Option<[u8; 32]>,
+    runtime_owner_lock: Option<RuntimeOwnerLock>,
     compact_receipt_signing_key: SigningKey,
     system_dispatch: &'static orna_sys_v1::SystemDispatchTable,
     system_provider_roles: orna_sys_v1::ProviderRoleRegistry,
@@ -4354,6 +4355,9 @@ impl RuntimeState {
             .runtime_paths()
             .ensure_exists()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let runtime_owner_lock = repository
+            .acquire_runtime_owner_lock(*Uuid::new_v4().as_bytes())
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
         let graph_repository_id = current_graph_repository_id(repository, identity.database_id)?;
         Self::open_path_with_graph_repository_id(
             &repository.runtime_paths().state_db(),
@@ -4365,6 +4369,7 @@ impl RuntimeState {
                     .runtime_paths()
                     .compact_runtime_receipt_public_key(),
             ),
+            Some(runtime_owner_lock),
         )
         .await
     }
@@ -4381,16 +4386,18 @@ impl RuntimeState {
             initial_digest,
             None,
             public_key_path,
+            None,
         )
         .await
-    }
 
+    }
     async fn open_path_with_graph_repository_id(
         path: &Path,
         identity: RuntimeIdentity,
         initial_digest: [u8; 32],
         graph_repository_id: Option<[u8; 32]>,
         public_key_path: Option<PathBuf>,
+        runtime_owner_lock: Option<RuntimeOwnerLock>,
     ) -> Result<Self, RuntimeError> {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
@@ -4428,6 +4435,7 @@ impl RuntimeState {
             system_dispatch,
             system_provider_roles,
             vfs_repository_cache: vfs::VfsRepositoryCache::new(),
+            runtime_owner_lock,
         };
         state.migrate_observation_projection_schema().await?;
         state.migrate_stream_observation_failure_identity().await?;
@@ -4437,7 +4445,12 @@ impl RuntimeState {
         state.migrate_nullable_stream_partitions().await?;
         state.migrate_stream_observation_checkpoint_reuse().await?;
         state.migrate_catalogue_identity_schema().await?;
-        state.validate_recovery().await?;
+        let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
+        if let Some(owner_lock) = &state.runtime_owner_lock {
+            owner_lock
+                .reclaim_previous_owner_pins(&accepted_pending)
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
         Ok(state)
     }
 
@@ -13021,6 +13034,18 @@ impl RuntimeState {
     }
 
     pub async fn validate_recovery(&self) -> Result<(), RuntimeError> {
+        self.validate_recovery_with_pin_manifest()
+            .await
+            .map(|_| ())
+    }
+
+    async fn validate_recovery_with_pin_manifest(
+        &self,
+    ) -> Result<BTreeMap<[u8; 16], NativeOid>, RuntimeError> {
+        let accepted_owner = self
+            .runtime_owner_lock
+            .as_ref()
+            .and_then(RuntimeOwnerLock::previous_owner);
         let capture = self.capture().await?;
         let generation = capture
             .generation()
@@ -13066,7 +13091,8 @@ impl RuntimeState {
             _ => return Err(RuntimeError::RecoveryInvalid),
         }
         self.validate_checkpoint_anchors().await?;
-        self.validate_accepted_content_pin_recovery(generation)
+        let accepted_pending = self
+            .validate_accepted_content_pin_recovery(generation, accepted_owner)
             .await?;
         self.validate_stream_checkpoint_history(&capture, generation)
             .await?;
@@ -13096,13 +13122,15 @@ impl RuntimeState {
             let evidence = decode_request_execution_evidence(&row, 5)?;
             validate_request_execution_evidence(&status, evidence)?;
         }
-        Ok(())
+        Ok(accepted_pending)
     }
 
     async fn validate_accepted_content_pin_recovery(
         &self,
         current_generation: u64,
-    ) -> Result<(), RuntimeError> {
+        accepted_owner: Option<[u8; 16]>,
+    ) -> Result<BTreeMap<[u8; 16], NativeOid>, RuntimeError> {
+        let mut accepted_pending = BTreeMap::new();
         let mut entries_by_generation: BTreeMap<i64, Vec<AcceptedContentPinManifestEntry>> =
             BTreeMap::new();
         let mut rows = self
@@ -13174,6 +13202,19 @@ impl RuntimeState {
             {
                 return Err(RuntimeError::RecoveryInvalid);
             }
+            let accepted_oid = if accepted_owner == Some(owner_id) {
+                let algorithm = match descriptor_oid_algorithm {
+                    1 => GitHashAlgorithm::Sha1,
+                    2 => GitHashAlgorithm::Sha256,
+                    _ => return Err(RuntimeError::RecoveryInvalid),
+                };
+                Some(
+                    NativeOid::new(algorithm, &descriptor_oid)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )
+            } else {
+                None
+            };
             entries_by_generation
                 .entry(checkpoint_generation)
                 .or_default()
@@ -13189,6 +13230,11 @@ impl RuntimeState {
                     owner_epoch,
                     checkpoint_generation,
                 });
+            if let Some(oid) = accepted_oid
+                && accepted_pending.insert(pin_id, oid).is_some()
+            {
+                return Err(RuntimeError::RecoveryInvalid);
+            }
         }
 
         let mut checkpoints = self
@@ -13223,7 +13269,7 @@ impl RuntimeState {
         if !entries_by_generation.is_empty() {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        Ok(())
+        Ok(accepted_pending)
     }
 
     async fn validate_request_admissions(
