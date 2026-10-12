@@ -25,6 +25,7 @@ const MANIFEST_VERSION: u64 = 1;
 pub enum ObjectKind {
     Table = 1,
     Field = 2,
+    Unit = 3,
 }
 
 impl ObjectKind {
@@ -32,6 +33,7 @@ impl ObjectKind {
         match raw {
             Raw::Int(value) if value.to_string() == "1" => Some(Self::Table),
             Raw::Int(value) if value.to_string() == "2" => Some(Self::Field),
+            Raw::Int(value) if value.to_string() == "3" => Some(Self::Unit),
             _ => None,
         }
     }
@@ -611,31 +613,36 @@ fn source_identity_keys(
             return Err(ObjectIdentityError::InvalidSource);
         }
         for item in &parsed.value.items {
-            if let Declaration::Table {
-                name,
-                keys: table_keys,
-                members,
-                ..
-            } = &item.declaration
-            {
-                let table = qualify(&namespace, name);
-                keys.push((ObjectKind::Table, table.clone()));
-                if table_keys.is_empty() {
-                    keys.push((ObjectKind::Field, format!("{table}.id")));
-                } else {
-                    for key in table_keys {
-                        if let Pattern::Name(name, _) = &key.pattern {
+            match &item.declaration {
+                Declaration::Unit { name, .. } => {
+                    keys.push((ObjectKind::Unit, qualify(&namespace, name)));
+                }
+                Declaration::Table {
+                    name,
+                    keys: table_keys,
+                    members,
+                    ..
+                } => {
+                    let table = qualify(&namespace, name);
+                    keys.push((ObjectKind::Table, table.clone()));
+                    if table_keys.is_empty() {
+                        keys.push((ObjectKind::Field, format!("{table}.id")));
+                    } else {
+                        for key in table_keys {
+                            if let Pattern::Name(name, _) = &key.pattern {
+                                keys.push((ObjectKind::Field, format!("{table}.{name}")));
+                            } else {
+                                return Err(ObjectIdentityError::InvalidSource);
+                            }
+                        }
+                    }
+                    for member in members {
+                        if let TableMember::Field { name, .. } = member {
                             keys.push((ObjectKind::Field, format!("{table}.{name}")));
-                        } else {
-                            return Err(ObjectIdentityError::InvalidSource);
                         }
                     }
                 }
-                for member in members {
-                    if let TableMember::Field { name, .. } = member {
-                        keys.push((ObjectKind::Field, format!("{table}.{name}")));
-                    }
-                }
+                _ => {}
             }
         }
     }
@@ -700,26 +707,28 @@ mod tests {
     fn manifest_reconciliation_persists_ids_and_retires_removed_declarations() {
         let source = ModuleInput::new(
             "main.orna",
-            "pub table Object(id: Str) { payload: Blob, size: Float, }",
+            include_str!("../tests/fixtures/vfs-blob-mib.orna"),
         );
         let first = ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), None).unwrap();
         let encoded = first.encode().unwrap();
         assert_eq!(ObjectIdentityManifest::decode(&encoded).unwrap(), first);
-        let payload_id = *first.id(ObjectKind::Field, "Object.payload").unwrap();
+        let payload_id = *first.id(ObjectKind::Field, "Media.payload").unwrap();
+        let unit_id = *first.id(ObjectKind::Unit, "MiB").unwrap();
         let stable =
             ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), Some(&first)).unwrap();
         assert_eq!(
-            stable.id(ObjectKind::Field, "Object.payload"),
+            stable.id(ObjectKind::Field, "Media.payload"),
             Some(&payload_id)
         );
+        assert_eq!(stable.id(ObjectKind::Unit, "MiB"), Some(&unit_id));
         let removed = ObjectIdentityManifest::reconcile(&[], Some(&stable)).unwrap();
-        assert!(removed.id(ObjectKind::Field, "Object.payload").is_none());
-        assert!(
-            removed
-                .records()
-                .iter()
-                .any(|record| record.qualified_name() == "Object.payload" && record.is_retired())
-        );
+        assert!(removed.id(ObjectKind::Field, "Media.payload").is_none());
+        assert!(removed.id(ObjectKind::Unit, "MiB").is_none());
+        assert!(removed.records().iter().any(|record| {
+            record.kind() == ObjectKind::Unit
+                && record.qualified_name() == "MiB"
+                && record.is_retired()
+        }));
         assert_eq!(
             ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(),
             removed

@@ -1,0 +1,7 @@
+pub dim Information;
+pub unit MiB : Information base;
+
+pub table Media(id: Str) {
+    payload: Blob,
+    size: Float<MiB>,
+}
