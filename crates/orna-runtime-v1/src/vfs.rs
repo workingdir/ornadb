@@ -2459,14 +2459,8 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
     }
 
     /// The admitted relation row this save is replacing, as read inside the
-    /// admission's own committed capture.
-    ///
-    /// A save that committed durably and then lost its acknowledgement (a
-    /// crash between the writer transaction's commit and the caller observing
-    /// the result) leaves exactly this row behind. The caller compares it with
-    /// the candidate before committing, so replaying such a save reports the
-    /// accepted outcome instead of committing the same mutation a second time
-    /// (VFS-008, VFS-021).
+    /// admission's own committed capture. It is checked against the captured
+    /// baseline before the replacement can be committed.
     pub fn admitted_row(&self) -> Result<Option<&[u8]>, RuntimeQueryError> {
         self.snapshot
             .query_exact(self.save.table.table(), &self.save.key)
@@ -2775,19 +2769,15 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         admission
             .validate_replacement(candidate.replacement())
             .map_err(VfsSaveError::Activation)?;
-        // A save that committed durably and then lost its acknowledgement (the
-        // process died between the writer transaction's commit and this caller
-        // observing the result) already holds exactly this candidate. Acting on
-        // that state is idempotent: the accepted image is published again
-        // without appending a second mutation or advancing the durable
-        // generation twice (VFS-008, VFS-021).
+        // A repeated accepted rename is served from `scratch_state.applied`
+        // above. Matching replacement bytes alone cannot prove that another
+        // writer committed this save; baseline mismatches therefore fail closed.
         let admitted_row = admission
             .admitted_row()
             .map_err(VfsSaveError::AdmissionLookup)?;
-        let already_durable = admitted_row == candidate.replacement().value();
         if admission
             .expected_baseline_matches(admitted_row)
-            .is_some_and(|matches| !matches && !already_durable)
+            .is_some_and(|matches| !matches)
         {
             let diagnostic = stale_baseline_diagnostic();
             draft_state.retain_retryable_conflict(revision, diagnostic);
@@ -2796,18 +2786,16 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 diagnostic,
             });
         }
-        if !already_durable {
-            match admission.commit(candidate).await {
-                Err(TableActivationError::ValidationFailed(diagnostic)) => {
-                    draft_state.retain_rejection(revision, diagnostic);
-                    return Err(VfsSaveError::Rejected {
-                        generation: *cache_generation,
-                        diagnostic,
-                    });
-                }
-                Err(error) => return Err(VfsSaveError::Activation(error)),
-                Ok(_capture) => {}
+        match admission.commit(candidate).await {
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                draft_state.retain_rejection(revision, diagnostic);
+                return Err(VfsSaveError::Rejected {
+                    generation: *cache_generation,
+                    diagnostic,
+                });
             }
+            Err(error) => return Err(VfsSaveError::Activation(error)),
+            Ok(_capture) => {}
         }
         {
             // Mirror the temp-rename route: the accepted handle carries the
@@ -4392,6 +4380,59 @@ mod tests {
             replay,
             TemporaryRenameOutcome::Applied { generation: 1, .. }
         ));
+        assert_eq!(state.pending().await.unwrap().len(), 1);
+
+        // A different writer may commit byte-identical row content. That is
+        // not evidence this temp save was already accepted: its captured
+        // baseline is still stale, and the scratch remains retryable.
+        let identical_scratch = target.begin_temporary_replacement(1 << 20).await;
+        identical_scratch
+            .write_at(0, &accepted_for_admit)
+            .await
+            .unwrap();
+        let identical_identity = identity.clone();
+        let identical_bytes = accepted_for_admit.clone();
+        let cwd_for_identical = cwd_generation.clone();
+        let identical = target
+            .commit_durable_temporary_rename(
+                &identical_scratch,
+                &state,
+                VfsDurableSave::new(
+                    [4; 16],
+                    cwd_generation.clone(),
+                    identity.clone(),
+                    key.clone(),
+                )
+                .with_expected_baseline_row(None),
+                move |coordinates, bytes| async move {
+                    let replacement = VfsTableRowReplacement::new(
+                        [12; 16],
+                        identical_identity.clone(),
+                        coordinates.key().to_vec(),
+                        Some(bytes.to_vec()),
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    Ok(VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(DurableRenameValidator {
+                            table: identical_identity.table().to_owned(),
+                            object_id: identical_identity.object_id(),
+                            accepted: identical_bytes,
+                            cwd_generation: cwd_for_identical,
+                        }),
+                    ))
+                },
+                &crate::NoFault,
+            )
+            .await;
+        let Err(VfsSaveError::Stale { diagnostic, .. }) = identical else {
+            panic!("byte-identical content cannot acknowledge a stale temp save");
+        };
+        assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
+        assert_eq!(
+            identical_scratch.candidate_bytes().await.as_ref(),
+            accepted_for_admit
+        );
         assert_eq!(state.pending().await.unwrap().len(), 1);
 
         let stale_scratch = target.begin_temporary_replacement(1 << 20).await;
