@@ -85,7 +85,9 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     let database_uuid = "00000000-0000-4000-8000-000000000001";
     let database =
         format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-    let schema_source = b"pub table media(id: Str) {\n    content: Blob,\n}\n";
+    let schema_source = include_bytes!(
+        "../../../orna-conformance-v1/tests/fixtures/reference/examples/valid/blob-vs-information.orna"
+    );
     std::fs::create_dir_all(root.join(".orna/store")).unwrap();
     std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
     std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
