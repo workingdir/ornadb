@@ -123,9 +123,9 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 at = Some(value);
             }
             "--kind" => {
-                let value = words.next().ok_or_else(|| {
-                    query_error("--kind needs a value", "usage: --kind MIME")
-                })?;
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--kind needs a value", "usage: --kind MIME"))?;
                 predicate = predicate.with_media_type(value);
                 constraints.kind = Some(value);
             }
@@ -137,9 +137,9 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 constraints.not_kind.push(value);
             }
             "--suffix" => {
-                let value = words.next().ok_or_else(|| {
-                    query_error("--suffix needs a value", "usage: --suffix HINT")
-                })?;
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--suffix needs a value", "usage: --suffix HINT"))?;
                 predicate = predicate.with_suffix(value);
                 constraints.suffix = Some(value);
             }
@@ -228,7 +228,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     })
 }
 
-/// Parses a typed index bound without applying the point-key spelling fallback.
+/// Parses an explicitly typed index bound.
 fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
     if let Some(text) = value.strip_prefix("text:") {
         return validate_range_key(TypedKey::Text(text.to_owned()));
@@ -365,11 +365,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             } else {
                 options.limit
             };
-            let range = KeyRange::new(
-                options.from.clone(),
-                options.until.clone(),
-                candidate_limit,
-            )
+            let range = KeyRange::new(options.from.clone(), options.until.clone(), candidate_limit)
                 .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
             graph
                 .range_rows(&range, &scope)
@@ -410,14 +406,19 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // candidate that does not match is dropped rather than reported, and the
     // plan below states which coordinates answered it.
     let candidates = listings.len();
-    let subject = options.field.map_or_else(
-        || "all fields".to_owned(),
-        |field| format!("field {field}"),
-    );
+    let subject = options
+        .field
+        .map_or_else(|| "all fields".to_owned(), |field| format!("field {field}"));
     listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
     let matched = listings.len();
     listings.truncate(options.limit);
-    let plan = PredicatePlan::new(&options.predicate, &options.constraints, &subject, candidates, matched);
+    let plan = PredicatePlan::new(
+        &options.predicate,
+        &options.constraints,
+        &subject,
+        candidates,
+        matched,
+    );
     match options.format {
         QueryFormat::Human => {
             for (key, field, metadata) in &listings {
@@ -605,11 +606,7 @@ fn render_key(key: &TypedKey) -> String {
         TypedKey::Bool(value) => value.to_string(),
         TypedKey::Null => "-".to_owned(),
         TypedKey::Bytes(bytes) => render_bytes(bytes),
-        TypedKey::Tuple(values) => values
-            .iter()
-            .map(render_key)
-            .collect::<Vec<_>>()
-            .join(","),
+        TypedKey::Tuple(values) => values.iter().map(render_key).collect::<Vec<_>>().join(","),
     }
 }
 
@@ -621,10 +618,6 @@ fn render_bytes(bytes: &[u8]) -> String {
         _ => format!("0x{}", hex(bytes)),
     }
 }
-
-/// The canonical keys one `--key` spelling names, in the order a lookup tries
-/// them: the text spelling, then the same spelling's own bytes, then the bytes
-/// a `0x` hex spelling names.
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -663,9 +656,7 @@ fn query_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_options, parse_relation_id, render_key, QueryFormat, DEFAULT_QUERY_LIMIT,
-    };
+    use super::{parse_options, parse_relation_id, render_key, QueryFormat, DEFAULT_QUERY_LIMIT};
     use crate::Exit;
     use orna_repository_v1::TypedKey;
 
@@ -725,7 +716,6 @@ mod tests {
         assert_eq!(parsed.key, Some("song"));
         assert_eq!(parsed.field, Some(0));
     }
-
 
     #[test]
     fn rendered_keys_follow_the_spelling_the_row_carries() {
