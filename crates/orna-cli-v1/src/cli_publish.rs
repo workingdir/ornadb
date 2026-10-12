@@ -101,7 +101,7 @@ fn validate_candidate_source_rows(
     for mutation in mutations {
         let table_id = mutation.table_object_id().ok_or_else(|| {
             publish_error(
-                "source row has no committed table identity",
+                "source row could not be admitted for publication",
                 "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
             )
         })?;
