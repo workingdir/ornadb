@@ -4,11 +4,12 @@ A developing CLI for the current Orna 1.0 source language.
 
 ## Command surface
 
-This binary currently accepts `init`, `status`, `fetch`, `diff`, `check`,
-`invoke`, `explain`, `repl`, and `run`, plus help and version options. The
-available command groups and option forms are listed by `orna --help`; that
-list describes this bounded implementation, not the complete Orna 1.0
-command set.
+This binary currently accepts `init`, `status`, `fetch`, `push`, `serve`,
+`mount`, `unmount`, `diff`, `log`, `annotate`, `import`, `export`, `migrate copy`,
+`publish`, `semantic-legend`, `history`, `query`, `check`, `invoke`, `explain`,
+`repl`, and `run`, plus help and version options. The available command groups and
+option forms are listed by `orna --help`; that list describes this bounded
+implementation, not the complete Orna 1.0 command set.
 
 The frozen CLI reference also names `serve`, `fmt`, `verify`, and `prune`, as
 well as Git-compatible operations that this binary does not yet implement.
@@ -38,6 +39,20 @@ identity. Partial, malformed, or unsupported metadata is reported rather than
 overwritten. Git's configured defaults determine the initial branch.
 Use a positional directory for initialization, not `--db`.
 Creating a new database is currently supported on Linux.
+
+`migrate copy` prepares or recovers a journalled migration candidate in a
+separate directory from a local format-1 or format-2 worktree. For example:
+
+```text
+orna --db ./legacy migrate copy ./migrated --annotation-defaults 0 --no-persistent-consumers
+```
+
+`--annotation-defaults N` must be the count derived from decoded legacy
+annotation metadata. `--no-persistent-consumers` is an explicit declaration
+that no persistent consumer continuity needs to be carried. The source
+repository, including its commit and dirty workspace, remains unchanged. This
+command prepares a journalled candidate only; it does not convert legacy rows
+into a format-3 store or activate a writable format-3 repository.
 
 `check` loads and checks reachable source modules from a local Git worktree.
 `invoke TARGET` executes a reachable zero-argument pure function. The optional
