@@ -1265,14 +1265,11 @@ pub fn lower_protected_blob_mutations_for_publication(
                 .lookup_row(&key, &scope)
                 .map_err(|_| Error::RepositoryUnavailable)?;
             match mutation.value() {
-                Some(encoded_blob) => {
-                    orna_value_v1::decode_rov3_blob_metadata(encoded_blob)
+                Some(encoded_fields) => {
+                    // Preserve the complete source-admitted role-1 tuple; the
+                    // bound schema is validated again at the repository boundary.
+                    let value = RowValue::decode_canonical_fields(encoded_fields.to_vec())
                         .map_err(|_| Error::InvalidRow)?;
-                    let mut fields = Vec::with_capacity(encoded_blob.len() + 1);
-                    fields.push(0x81);
-                    fields.extend_from_slice(encoded_blob);
-                    let value =
-                        RowValue::decode_canonical_fields(fields).map_err(|_| Error::InvalidRow)?;
                     if existing
                         .as_ref()
                         .is_some_and(|row| row.value().encoded_fields() == value.encoded_fields())
