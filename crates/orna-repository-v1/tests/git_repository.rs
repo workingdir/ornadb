@@ -8830,7 +8830,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
         );
         assert_eq!(
             git(copy.destination(), &["diff", "--name-only"]),
-            "ordinary.txt"
+            "deps/lib\nordinary.txt"
         );
         assert!(!copy.destination().join("removed.txt").exists());
         let migrated_module = copy.destination().join("deps/lib");
@@ -8946,7 +8946,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
                 Some(b"format3-partition".as_slice())
             ))
         );
-        assert_eq!(copy.dependency_entries(), 0);
+        assert_eq!(copy.dependency_entries(), 1);
         let tree_identity = copy.source_tree_identity();
         assert!(tree_identity.iter().any(|byte| *byte != 0));
         assert!(copy.source_index_generation().tree().is_some());
