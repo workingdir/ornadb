@@ -138,6 +138,7 @@ e279a7bfc9c04cf067704ccc6adfdda5b4bf8a958d7f9f1db63065377a7c18ce  crates/orna-cl
 79a0a004fac1dbbab00c544a883c81f7e8f66b77c5dd2d0e96d204cb2c2a15ae  crates/orna-cli-v1/tests/fixtures/init/version-2.orna
 6ec32696932b34a8d30ebe7bdcda8885e2c07ec8f67fb52655d7ab80aa29d1f7  crates/orna-cli-v1/tests/fixtures/lib002-core-only.orna
 5dc2bc9624d60a07f38ba830bf28851c87dd5da9279d2d3432b40eb1293b5bc4  crates/orna-cli-v1/tests/fixtures/media/edit-cycle-bundle-files.txt
+87f1e75d48c9f4d0e1ffbdb5df55e69daf95c1bbbb53a8a43f0d55fd256595b3  crates/orna-cli-v1/tests/fixtures/media/empty-media-main.orna
 5dc2bc9624d60a07f38ba830bf28851c87dd5da9279d2d3432b40eb1293b5bc4  crates/orna-cli-v1/tests/fixtures/media/export-bundle-files.txt
 038d9e7fbf912679d14e68b0087e1ca71047e016c50c4b272ae4bce38d5dedcb  crates/orna-cli-v1/tests/fixtures/media/import-image-json.orna
 038d9e7fbf912679d14e68b0087e1ca71047e016c50c4b272ae4bce38d5dedcb  crates/orna-cli-v1/tests/fixtures/media/import-image-since-boundary.orna
@@ -162,10 +163,14 @@ f76b191a28cf912477ad92ee7988635953950c18da77825e978b32851191534b  crates/orna-cl
 2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-cli-v1/tests/fixtures/media/import-song.orna
 410747f3537e97950eab436d90a83d96e8c0ce1567efa5c1745044c3e29d75cd  crates/orna-cli-v1/tests/fixtures/media/manifest.sha256
 038d9e7fbf912679d14e68b0087e1ca71047e016c50c4b272ae4bce38d5dedcb  crates/orna-cli-v1/tests/fixtures/media/offline-edit-image.orna
+32e3aced7464bc7714dedd28632d227104d85903b45e5d1fd4a424cad53a5ce0  crates/orna-cli-v1/tests/fixtures/media/offline-query-main.orna
+afe832e833deefae760f4150435628df172b32eefc043cd161bf7f90b4f89486  crates/orna-cli-v1/tests/fixtures/media/overflow.orna
 137630611e28a270c44bfa2947877bb3f739af22a4e3f6e6b28a2f2df342a528  crates/orna-cli-v1/tests/fixtures/media/pixel.png
 b3bf823c9f23f783af4ea63edefdd1cc9f5c7fce7b5fe1384507d728c584569c  crates/orna-cli-v1/tests/fixtures/media/pixel2.png
 038d9e7fbf912679d14e68b0087e1ca71047e016c50c4b272ae4bce38d5dedcb  crates/orna-cli-v1/tests/fixtures/media/reimport-image-capture.orna
 a8a7352ee31e6c22c0a1de063a98a175f58b997ada0b5340d44abed861d4a7c9  crates/orna-cli-v1/tests/fixtures/media/replace-image-capture.orna
+4946be7a074f4fdccecd4947a174d18eaed8a042cdc08576ec134433c59860d5  crates/orna-cli-v1/tests/fixtures/media/source-image.orna
+8b88b9f5a71037ce919d09923498510d6cc3b44bd346ae555e57432902df8c85  crates/orna-cli-v1/tests/fixtures/media/source-song.orna
 c3a9237224f5d1f5d26acb76c80c9618dcd53b2f4ff295f0c4c0c2a7f553d891  crates/orna-cli-v1/tests/fixtures/media/tone.wav
 48b66dcabe2299760274ccdac406845c211f98fcee42fe4af7327e8b02a462dc  crates/orna-cli-v1/tests/fixtures/mount/legacy-main.orna
 026c08136f7e4fcd673e59522652df2363b1b437b051d38e82bcd69ba00e4500  crates/orna-cli-v1/tests/fixtures/project-core-main.orna
