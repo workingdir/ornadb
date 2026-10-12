@@ -27,7 +27,7 @@ fn initialize_legacy_source(root: &Path) {
     git_output(root, &["config", "commit.gpgsign", "false"]);
     fs::write(
         root.join("main.orna"),
-        include_str!("fixtures/git-repository-main.orna"),
+        include_str!("fixtures/project-core-main.orna"),
     )
     .unwrap();
     fs::create_dir_all(root.join(".orna")).unwrap();
