@@ -367,8 +367,8 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             };
             let range = KeyRange::new(options.from.clone(), options.until.clone(), candidate_limit)
                 .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
-            graph
-                .range_rows(&range, &scope)
+            row_map
+                .range_with_graph_context(&graph, &scope, &range)
                 .map_err(|error| query_error("Row range could not be read", format!("{error:?}")))?
         }
     };
