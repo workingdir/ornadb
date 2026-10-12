@@ -122,11 +122,23 @@ pub struct LoadedProject {
     standard_runtime_modules: BTreeSet<String>,
     standard_imports: bool,
     standard_modules: BTreeSet<String>,
+    source_commit: Option<GitCommitRef>,
 }
 
 impl LoadedProject {
     pub fn modules(&self) -> &[ModuleInput] {
         &self.modules
+    }
+
+    /// The verified commit from which these source units were read, when
+    /// loaded through a committed-snapshot or private-candidate entrypoint.
+    pub fn source_commit(&self) -> Option<&GitCommitRef> {
+        self.source_commit.as_ref()
+    }
+
+    /// Canonical repository snapshot identity for the exact source commit.
+    pub fn source_snapshot_id(&self) -> Option<[u8; 32]> {
+        self.source_commit.as_ref().map(GitCommitRef::snapshot_id)
     }
 
     pub fn identities(&self) -> &[ModuleIdentity] {
@@ -262,7 +274,7 @@ impl ProjectLoader {
         {
             return Err(ProjectLoadError::StandardSnapshotMismatch);
         }
-        load_reachable_project(
+        let mut project = load_reachable_project(
             self.limits,
             standard_profile,
             |logical_path, total_bytes| {
@@ -286,7 +298,9 @@ impl ProjectLoader {
                     self.limits,
                 )
             },
-        )
+        )?;
+        project.source_commit = Some(commit.clone());
+        Ok(project)
     }
 
     /// Loads the root module and reachable imports from the immutable tree of
@@ -321,7 +335,7 @@ impl ProjectLoader {
         {
             return Err(ProjectLoadError::StandardSnapshotMismatch);
         }
-        load_reachable_project(
+        let mut project = load_reachable_project(
             self.limits,
             standard_profile,
             |logical_path, total_bytes| {
@@ -345,7 +359,9 @@ impl ProjectLoader {
                     self.limits,
                 )
             },
-        )
+        )?;
+        project.source_commit = Some(candidate.commit().clone());
+        Ok(project)
     }
 
     /// Resolves `std` only through the gitlink captured in the owning
@@ -553,6 +569,7 @@ fn load_reachable_project(
         standard_runtime_modules: BTreeSet::new(),
         standard_imports,
         standard_modules,
+        source_commit: None,
     })
 }
 
