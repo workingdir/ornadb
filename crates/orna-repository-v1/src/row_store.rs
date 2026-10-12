@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use orna_value_v1::{BlobMetadata, MimeRegistry};
 
 use crate::native_graph::{
-    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeObjectId,
-    NativeObjectKind, MAX_REFS, NODE_DATA_LIMIT,
+    CborValue, GraphError, MAX_REFS, NODE_DATA_LIMIT, NativeObjectId, NativeObjectKind,
+    decode_canonical_cbor, row_fields_dependencies,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
@@ -758,7 +758,9 @@ impl RowValue {
         })
     }
 
-    pub(crate) fn decode_canonical_fields(encoded: Vec<u8>) -> Result<Self, RowStoreError> {
+    /// Validates an encoded canonical CBOR field tuple and derives the exact
+    /// native dependencies required by its stored references.
+    pub fn decode_canonical_fields(encoded: Vec<u8>) -> Result<Self, RowStoreError> {
         if !matches!(decode_canonical_cbor(&encoded), Ok(CborValue::Array(_))) {
             return Err(RowStoreError::InvalidCanonicalRowValue);
         }

@@ -73,7 +73,7 @@ pub use publication_transaction::{
 };
 pub use row_store::{
     AdmittedRow, KeyRange, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity, RowMapSnapshot,
-    TypedKey,
+    RowValue, TypedKey,
 };
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
@@ -231,24 +231,34 @@ impl ManagedFileChange {
 
 /// Ordered row-index operations for one relation in a format-3 publication.
 ///
-/// The relation identity is resolved through the captured committed store;
-/// callers cannot provide or substitute native row-map roots.
+/// The relation identity and source digest come from admitted compiler output;
+/// the repository matches both against the captured committed row map.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationRowMutation {
     relation_id: [u8; 16],
+    source_schema_digest: [u8; 32],
     operations: Vec<RowIndexMutation>,
 }
 
 impl RelationRowMutation {
-    pub fn new(relation_id: [u8; 16], operations: Vec<RowIndexMutation>) -> Self {
+    pub fn new(
+        relation_id: [u8; 16],
+        source_schema_digest: [u8; 32],
+        operations: Vec<RowIndexMutation>,
+    ) -> Self {
         Self {
             relation_id,
+            source_schema_digest,
             operations,
         }
     }
 
     pub const fn relation_id(&self) -> &[u8; 16] {
         &self.relation_id
+    }
+
+    pub const fn source_schema_digest(&self) -> &[u8; 32] {
+        &self.source_schema_digest
     }
 
     pub fn operations(&self) -> &[RowIndexMutation] {
@@ -2482,6 +2492,26 @@ impl Repository {
         store_root: &NativeOid,
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
+        self.build_frozen_publication_candidate_with_changes(
+            expected_head,
+            graph,
+            store_root,
+            &[],
+            message,
+        )
+    }
+
+    /// Builds a private format-3 candidate from the captured commit, exact
+    /// managed-row projection changes, and a verified successor store root.
+    /// The ordinary index, worktree, and branch remain untouched.
+    pub fn build_frozen_publication_candidate_with_changes(
+        &self,
+        expected_head: &GitCommitRef,
+        graph: &NativeGraphContext,
+        store_root: &NativeOid,
+        changes: &[ManagedFileChange],
+        message: &str,
+    ) -> Result<PrivateCommit, RepositoryError> {
         if message.is_empty() || message.contains('\0') {
             return Err(RepositoryError::NoManagedPaths);
         }
@@ -2491,15 +2521,19 @@ impl Repository {
         if &actual != expected_head {
             return Err(RepositoryError::StaleHead);
         }
-        // A candidate is only built for a batch admitted by this graph
-        // context, so a mismatched identity is refused before any object is
-        // written.
         if store_root.algorithm() != graph.algorithm() {
             return Err(RepositoryError::Graph(GraphError::InvalidOidWidth {
                 expected: graph.algorithm().width(),
                 actual: store_root.as_bytes().len(),
             }));
         }
+        let mut paths = HashSet::new();
+        for change in changes {
+            if !paths.insert(change.path.clone()) || change.path.as_path().to_str().is_none() {
+                return Err(RepositoryError::UnsafeManagedPath);
+            }
+        }
+        self.reject_final_loose_path_collisions(expected_head, changes)?;
 
         self.runtime.ensure_exists()?;
         fs::create_dir_all(self.runtime.locks())
@@ -2523,8 +2557,35 @@ impl Repository {
                 .args(["read-tree", expected_head.as_str()]);
             self.run(read_tree)?;
 
-            // The store root must be a real decodable OGS-1 tree, so a raw
-            // object ID cannot be planted at the store position.
+            for change in changes {
+                if let Some(bytes) = change.bytes() {
+                    let object = self.hash_object(bytes)?;
+                    let cacheinfo = format!(
+                        "100644,{object},{}",
+                        change
+                            .path
+                            .as_path()
+                            .to_str()
+                            .ok_or(RepositoryError::UnsafeManagedPath)?
+                    );
+                    let mut update = self.command();
+                    update.env("GIT_INDEX_FILE", &index).args([
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &cacheinfo,
+                    ]);
+                    self.run(update)?;
+                } else {
+                    let mut update = self.command();
+                    update
+                        .env("GIT_INDEX_FILE", &index)
+                        .args(["update-index", "--force-remove", "--"])
+                        .arg(change.path.as_path());
+                    self.run(update)?;
+                }
+            }
+
             graph
                 .pin_store_subtree_in_index(&index, store_root)
                 .map_err(RepositoryError::Graph)?;
@@ -2569,10 +2630,25 @@ impl Repository {
         mutations: &[RelationRowMutation],
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
+        self.build_private_row_publication_candidate_with_changes(
+            expected_head,
+            mutations,
+            &[],
+            message,
+        )
+    }
+
+    /// Builds a row-map candidate while retaining the batch's ordinary managed
+    /// projection changes in the same private commit.
+    pub fn build_private_row_publication_candidate_with_changes(
+        &self,
+        expected_head: &GitCommitRef,
+        mutations: &[RelationRowMutation],
+        changes: &[ManagedFileChange],
+        message: &str,
+    ) -> Result<PrivateCommit, RepositoryError> {
         if mutations.is_empty()
-            || mutations
-                .iter()
-                .any(|mutation| mutation.operations.is_empty())
+            || mutations.iter().any(|mutation| mutation.operations.is_empty())
             || mutations
                 .iter()
                 .map(|mutation| mutation.relation_id)
@@ -2581,9 +2657,6 @@ impl Repository {
                 != mutations.len()
         {
             return Err(RepositoryError::NoManagedPaths);
-        }
-        if self.head()?.as_ref() != Some(expected_head) {
-            return Err(RepositoryError::StaleHead);
         }
         let snapshot = self
             .pin_snapshot(expected_head.as_str())
@@ -2600,6 +2673,11 @@ impl Repository {
             let row_map = format
                 .load_row_map(mutation.relation_id)
                 .map_err(RepositoryError::FormatContext)?;
+            if row_map.version().schema().schema_digest() != &mutation.source_schema_digest {
+                return Err(RepositoryError::FormatContext(
+                    FormatContextError::RowMapMismatch,
+                ));
+            }
             let graph = format
                 .open_native_graph(&row_map)
                 .map_err(RepositoryError::FormatContext)?;
@@ -2623,7 +2701,13 @@ impl Repository {
         let store_root = graph
             .maintain_relations_rows(&relation_candidates, scope)
             .map_err(RepositoryError::Graph)?;
-        self.build_frozen_publication_candidate(expected_head, graph, &store_root, message)
+        self.build_frozen_publication_candidate_with_changes(
+            expected_head,
+            graph,
+            &store_root,
+            changes,
+            message,
+        )
     }
 
     /// Advances the symbolic current branch to a previously built private
