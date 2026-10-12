@@ -1174,7 +1174,10 @@ impl NativeGraphContext {
             .canonical_bytes()
             .map_err(|_| GraphError::NonCanonicalData)?;
         let canonical_fields = match row.value() {
-            crate::row_store::RowValue::Inline { encoded, .. } => encoded.clone(),
+            crate::row_store::RowValue::Inline { encoded, .. } => {
+                scope.charge_structured_metadata_read(encoded.len() as u64)?;
+                encoded.clone()
+            }
             crate::row_store::RowValue::Overflow(reference) => {
                 let root = reference
                     .native_root()
@@ -1583,6 +1586,7 @@ impl NativeGraphContext {
                 {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
+                scope.charge_structured_metadata_read(chunk.len() as u64)?;
                 output
                     .try_reserve(chunk.len())
                     .map_err(|_| GraphError::ReadQuotaExceeded)?;
@@ -1903,6 +1907,7 @@ impl NativeGraphContext {
             owner_id,
             cancelled,
             bytes_used: Arc::new(AtomicU64::new(0)),
+            structured_metadata_bytes_read: Arc::new(AtomicU64::new(0)),
             payload_bytes_written: Arc::new(AtomicU64::new(0)),
             objects_used: Arc::new(AtomicU64::new(0)),
             metadata_used: Arc::new(AtomicU64::new(0)),
@@ -3444,6 +3449,7 @@ pub struct RepositoryReadScope {
     owner_id: [u8; 16],
     cancelled: Arc<AtomicBool>,
     bytes_used: Arc<AtomicU64>,
+    structured_metadata_bytes_read: Arc<AtomicU64>,
     payload_bytes_written: Arc<AtomicU64>,
     objects_used: Arc<AtomicU64>,
     metadata_used: Arc<AtomicU64>,
@@ -3517,6 +3523,24 @@ impl RepositoryReadScope {
     /// metadata-only query reports zero while still having read the graph.
     pub fn payload_bytes_read(&self) -> u64 {
         self.bytes_used.load(AtomicOrdering::Acquire)
+    }
+    /// Cumulative bytes read from canonical inline/overflow ORP field tuples
+    /// and full structured descriptors. These are row/schema metadata, not
+    /// OVB-2 media payload.
+    pub fn structured_metadata_bytes_read(&self) -> u64 {
+        self.structured_metadata_bytes_read
+            .load(AtomicOrdering::Acquire)
+    }
+
+    fn charge_structured_metadata_read(&self, bytes: u64) -> Result<(), GraphError> {
+        self.structured_metadata_bytes_read
+            .fetch_update(
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+                |used| used.checked_add(bytes),
+            )
+            .map(|_| ())
+            .map_err(|_| GraphError::ReadQuotaExceeded)
     }
 
     /// Cumulative native Git objects this scope has charged to its owner,
