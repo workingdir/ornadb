@@ -2995,11 +2995,19 @@ impl Value {
             depth: usize,
         ) -> Result<Value, EvaluationError> {
             match raw {
-                Raw::Tag(OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG, _) => {
+                Raw::Tag(OVB2_BLOB_TAG, _) => {
+                    context.depth(depth)?;
+                    Ok(Value::AnnotatedBlob(raw.clone()))
+                }
+                Raw::Tag(ROV3_BLOB_TAG | SOV3_BLOB_TAG, _) => {
                     context.depth(depth)?;
                     let blob = match (profile.format(), profile.context()) {
                         (ValueFormat::Rov3 | ValueFormat::Sov3, Some(value_context)) => {
-                            ContextValue::new_in_context(value_context, profile.format(), raw.clone())
+                            ContextValue::new_in_context(
+                                value_context,
+                                profile.format(),
+                                raw.clone(),
+                            )
                         }
                         (ValueFormat::Rov3 | ValueFormat::Sov3, None) => {
                             return Err(error("ORNA-EVAL-VALUE"));
@@ -14449,6 +14457,37 @@ mod tests {
             assert_eq!(annotated_blob.suffix(), Some("m4b"));
             assert!(!annotated_blob.is_hydrated());
         }
+        let ovb2_blob = orna_value_v1::Blob::from_bytes_with_annotation(
+            b"payload".to_vec(),
+            "audio/mpeg",
+            None,
+        )
+        .expect("create OVB-2 Blob");
+        let top_level = ContextValue::from_blob(&ovb2_blob, ValueFormat::Ovb2)
+            .expect("encode top-level OVB-2 Blob");
+        let nested = ContextValue::new(
+            ValueFormat::Ovb2,
+            Raw::Map(vec![(Raw::Text("blob".into()), top_level.raw().clone())]),
+        )
+        .expect("encode OVB-2 record with nested Blob");
+        let equality = parse_expression("record.blob == blob");
+        assert!(equality.is_ok(), "{:?}", equality.diagnostics);
+        let functions = Functions::new();
+        let mut context = test_context(&functions);
+        let mut scope = Scope::from_context_environment(
+            &BTreeMap::from([
+                (String::from("blob"), top_level),
+                (String::from("record"), nested),
+            ]),
+            &mut context,
+        )
+        .expect("decode OVB-2 equality environment");
+        assert_eq!(
+            context
+                .evaluate(&equality.value, &mut scope, 0)
+                .expect("evaluate nested Blob equality"),
+            Value::Bool(true),
+        );
     }
 
     fn evaluate_relation_collection_fixture(
