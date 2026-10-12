@@ -80,13 +80,20 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     .unwrap_or_else(|error| panic!("authored capture annotation failed: {}", error.code()));
 
     assert_eq!(value.format(), ValueFormat::Ovb2);
+    assert!(
+        value.context().is_none(),
+        "portable OVB-2 results carry no owner context"
+    );
     let blob = value.blob().unwrap();
     assert_eq!(blob.read_to_end().unwrap(), payload);
     assert_eq!(blob.media_type(), "audio/mp4");
     assert_eq!(blob.suffix(), Some("m4b"));
 
     let round_trip = ContextValue::decode(&value.encode().unwrap(), ValueFormat::Ovb2).unwrap();
+    assert_eq!(round_trip.format(), ValueFormat::Ovb2);
+    assert!(round_trip.context().is_none());
     let round_trip_blob = round_trip.blob().unwrap();
+    assert_eq!(round_trip_blob.content_identity(), blob.content_identity());
     assert_eq!(round_trip_blob.read_to_end().unwrap(), payload);
     assert_eq!(round_trip_blob.media_type(), "audio/mp4");
     assert_eq!(round_trip_blob.suffix(), Some("m4b"));
