@@ -4895,16 +4895,50 @@ mod tests {
             .await
             .unwrap();
         let cache = state.vfs_repository_cache();
-        let row_fixture = include_bytes!("../tests/fixtures/vfs-row-music-london.orna");
         let target = cache
             .managed_file(Arc::new(VfsFileSnapshot::new(
                 SnapshotPin::capture(Arc::new(0_u64)),
-                Arc::<[u8]>::from(row_fixture.as_slice()),
+                Arc::<[u8]>::from(PIXEL),
             )))
             .await
             .unwrap();
+        let old_handle = target.open_read().await;
+        let old_bytes = old_handle.read_at(0, old_handle.len() as usize);
         let scratch = target.begin_temporary_replacement(1 << 20).await;
+        scratch.write_at(8, &[0xa5, 0x5a]).await.unwrap();
+        let mut sparse_hole = vec![0; 10];
+        sparse_hole[8..10].copy_from_slice(&[0xa5, 0x5a]);
+        assert_eq!(
+            scratch.candidate_bytes().await.as_ref(),
+            sparse_hole.as_slice()
+        );
+        scratch.truncate(16).await.unwrap();
+        sparse_hole.resize(16, 0);
+        assert_eq!(
+            scratch.candidate_bytes().await.as_ref(),
+            sparse_hole.as_slice()
+        );
+        scratch.truncate(5).await.unwrap();
+        assert_eq!(scratch.candidate_bytes().await.as_ref(), &[0; 5]);
+        scratch.truncate(0).await.unwrap();
+        let mut replacement_bytes = PIXEL.to_vec();
+        replacement_bytes.resize(PIXEL.len() + 4, 0);
         scratch.write_at(0, PIXEL).await.unwrap();
+        scratch
+            .truncate(replacement_bytes.len() as u64)
+            .await
+            .unwrap();
+        assert_eq!(
+            scratch.candidate_bytes().await.as_ref(),
+            replacement_bytes.as_slice()
+        );
+        scratch
+            .fsync_scratch_with(|_, bytes| async move {
+                assert_eq!(bytes.as_ref(), replacement_bytes.as_slice());
+                Ok::<_, ()>(())
+            })
+            .await
+            .unwrap();
         let owner_id = [0x63; 16];
         let table = RuntimeTableIdentity::new("media", TableObjectId::new(relation_id)).unwrap();
         let key = b"image".to_vec();
@@ -4914,8 +4948,19 @@ mod tests {
             &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
             None,
         );
+        assert_eq!(
+            target.open_read().await.read_at(0, old_bytes.len()),
+            old_bytes,
+            "scratch flush leaves new opens on the accepted image"
+        );
+        assert_eq!(
+            state.committed_table_row("media", &key).await.unwrap(),
+            None,
+            "scratch flush does not admit a row mutation"
+        );
+        assert!(state.pending().await.unwrap().is_empty());
 
-        let mut wrong_bytes = PIXEL.to_vec();
+        let mut wrong_bytes = replacement_bytes.clone();
         wrong_bytes[0] ^= 1;
         let mismatch = cache
             .commit_durable_blob_rename(
@@ -4925,8 +4970,11 @@ mod tests {
                 VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
                     .with_expected_baseline_row(None),
                 &capture,
-                ContentIdentity::new(PIXEL.len() as u64, Sha256::digest(&wrong_bytes).into())
-                    .unwrap(),
+                ContentIdentity::new(
+                    replacement_bytes.len() as u64,
+                    Sha256::digest(&wrong_bytes).into(),
+                )
+                .unwrap(),
                 "image/png",
                 Some("png"),
                 |_, _, _| async { panic!("identity mismatch must stop before row admission") },
@@ -4939,7 +4987,10 @@ mod tests {
                 VfsBlobReplacementError::IdentityMismatch { .. }
             ))
         ));
-        assert_eq!(scratch.candidate_bytes().await.as_ref(), PIXEL);
+        assert_eq!(
+            scratch.candidate_bytes().await.as_ref(),
+            replacement_bytes.as_slice()
+        );
         assert_eq!(
             state.committed_table_row("media", &key).await.unwrap(),
             None
@@ -4957,10 +5008,21 @@ mod tests {
         // A changed candidate sequence makes corrected bytes retryable after
         // the identity rejection was recorded for the previous sequence.
         scratch.write_at(0, &wrong_bytes).await.unwrap();
-        scratch.write_at(0, PIXEL).await.unwrap();
+        scratch.write_at(0, &replacement_bytes).await.unwrap();
+        let replacement_for_flush = replacement_bytes.clone();
+        scratch
+            .fsync_scratch_with(move |_, bytes| async move {
+                assert_eq!(bytes.as_ref(), replacement_for_flush.as_slice());
+                Ok::<_, ()>(())
+            })
+            .await
+            .unwrap();
 
-        let expected_identity =
-            ContentIdentity::new(PIXEL.len() as u64, Sha256::digest(PIXEL).into()).unwrap();
+        let expected_identity = ContentIdentity::new(
+            replacement_bytes.len() as u64,
+            Sha256::digest(&replacement_bytes).into(),
+        )
+        .unwrap();
         let stale_table = table.clone();
         let stale_table_name = stale_table.table().to_owned();
         let stale_object_id = stale_table.object_id();
@@ -5037,6 +5099,7 @@ mod tests {
             VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
                 .with_expected_baseline_row(None);
         let save_key = key.clone();
+        let replacement_for_admit = replacement_bytes.clone();
         let saved = cache
             .commit_durable_blob_rename(
                 &target,
@@ -5051,13 +5114,13 @@ mod tests {
                 move |coordinates, _, encoded_blob| async move {
                     assert_eq!(cache_for_admit.generation().await, 0);
                     assert_eq!(
-                        target_for_admit
-                            .open_read()
-                            .await
-                            .read_at(0, row_fixture.len()),
-                        row_fixture
+                        target_for_admit.open_read().await.read_at(0, PIXEL.len()),
+                        PIXEL
                     );
-                    assert_eq!(scratch_for_admit.candidate_bytes().await.as_ref(), PIXEL);
+                    assert_eq!(
+                        scratch_for_admit.candidate_bytes().await.as_ref(),
+                        replacement_for_admit.as_slice()
+                    );
                     assert_eq!(
                         state_for_admit
                             .committed_table_row("media", &save_key)
@@ -5122,7 +5185,15 @@ mod tests {
             saved,
             TemporaryRenameOutcome::Applied { generation: 1, .. }
         ));
-        assert_eq!(target.open_read().await.read_at(0, PIXEL.len()), PIXEL);
+        assert_eq!(
+            target.open_read().await.read_at(0, replacement_bytes.len()),
+            replacement_bytes
+        );
+        assert_eq!(
+            old_handle.read_at(0, old_bytes.len()),
+            old_bytes,
+            "the already-open read handle remains pinned to its original image"
+        );
         let encoded_row = encoded_row.lock().unwrap().clone().unwrap();
         assert_eq!(encoded_row.first(), Some(&0x81));
         assert_eq!(&encoded_row[1..4], &[0xd9, 0xea, 0xcf]);
