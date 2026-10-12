@@ -1529,7 +1529,9 @@ mod tests {
                 0
             );
 
-            assert_eq!(blob.read_to_end().unwrap(), payload);
+            // Format-3 stores the Blob descriptor; explicit reads use the
+            // original authorized capture reference.
+            assert_eq!(source_blob.read_to_end().unwrap(), payload);
             assert_eq!(
                 resolver
                     .bytes_read
