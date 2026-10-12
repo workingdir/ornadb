@@ -605,7 +605,13 @@ fn export_fails_locally_for_a_missing_promisor_object() {
     std::fs::create_dir(&archive).unwrap();
     let exported = run(
         &partial,
-        &["export", archive.to_str().unwrap(), "--at", "HEAD"],
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--at",
+            "HEAD",
+            "--debug",
+        ],
     );
     assert_ne!(
         exported.status.code(),
