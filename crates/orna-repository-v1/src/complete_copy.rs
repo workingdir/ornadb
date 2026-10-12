@@ -191,6 +191,49 @@ impl CompleteCopyManifest {
             .find(|member| member.commit.eq_ignore_ascii_case(commit))
     }
 
+    /// Projects one bounded row interval from a selected member of a restored copy.
+    ///
+    /// The relation id is supplied by the caller because the repository API does
+    /// not enumerate relation ids. The member commit is resolved from this
+    /// manifest, then pinned once; the native graph reads only that snapshot's
+    /// admitted row map. It returns stored Blob metadata without reading Blob
+    /// payload bytes; descriptor validation follows the native graph contract.
+    pub fn project_member_blob_metadata(
+        &self,
+        repository: &Repository,
+        member_commit: &str,
+        relation_id: [u8; 16],
+        range: &crate::KeyRange,
+        field: usize,
+    ) -> Result<Vec<(crate::TypedKey, crate::BlobMetadata)>, CompleteCopyReadError> {
+        let member =
+            self.member(member_commit)
+                .ok_or_else(|| CompleteCopyReadError::MemberNotInCopy {
+                    commit: member_commit.to_owned(),
+                })?;
+        let (commit, format) = repository
+            .open_pinned_format_context_with_commit(&member.commit)
+            .map_err(CompleteCopyReadError::FormatContext)?;
+        if !commit.as_str().eq_ignore_ascii_case(&member.commit) {
+            return Err(CompleteCopyReadError::SnapshotMismatch {
+                expected: member.commit.clone(),
+                actual: commit.as_str().to_owned(),
+            });
+        }
+        let row_map = format
+            .load_row_map(relation_id)
+            .map_err(CompleteCopyReadError::FormatContext)?;
+        let graph = format
+            .open_native_graph(&row_map)
+            .map_err(CompleteCopyReadError::FormatContext)?;
+        let scope = graph
+            .open_read_scope()
+            .map_err(CompleteCopyReadError::NativeGraph)?;
+        graph
+            .project_blob_metadata_range(range, field, &scope)
+            .map_err(CompleteCopyReadError::NativeGraph)
+    }
+
     /// Decodes one manifest document.
     fn decode(manifest: &str) -> Result<Self, CompleteCopyError> {
         let mut lines = manifest.lines();
@@ -470,6 +513,46 @@ impl std::error::Error for CompleteCopyError {
 impl From<std::io::Error> for CompleteCopyError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+/// Why a bounded read from a restored complete-copy member failed.
+#[derive(Debug)]
+pub enum CompleteCopyReadError {
+    MemberNotInCopy { commit: String },
+    SnapshotMismatch { expected: String, actual: String },
+    FormatContext(crate::FormatContextError),
+    NativeGraph(crate::GraphError),
+}
+
+impl fmt::Display for CompleteCopyReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MemberNotInCopy { commit } => {
+                write!(
+                    formatter,
+                    "snapshot {commit} is not a member of this complete copy"
+                )
+            }
+            Self::SnapshotMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "pinned snapshot {actual} does not match member {expected}"
+                )
+            }
+            Self::FormatContext(error) => write!(formatter, "pinned format read failed: {error}"),
+            Self::NativeGraph(error) => write!(formatter, "native row read failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CompleteCopyReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FormatContext(error) => Some(error),
+            Self::NativeGraph(error) => Some(error),
+            Self::MemberNotInCopy { .. } | Self::SnapshotMismatch { .. } => None,
+        }
     }
 }
 
