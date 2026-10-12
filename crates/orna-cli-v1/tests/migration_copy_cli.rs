@@ -72,6 +72,64 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     let source = parent.path().join("source");
     fs::create_dir(&source).unwrap();
     initialize_legacy_source(&source);
+    fs::write(
+        source.join("tracked-deletion.txt"),
+        b"committed then deleted\n",
+    )
+    .unwrap();
+    git_output(&source, &["add", "tracked-deletion.txt"]);
+    git_output(&source, &["commit", "-m", "record deletion target"]);
+
+    let dependency_source = parent.path().join("dependency-source");
+    fs::create_dir(&dependency_source).unwrap();
+    git_output(&dependency_source, &["init", "-b", "main"]);
+    git_output(&dependency_source, &["config", "user.name", "dependency"]);
+    git_output(
+        &dependency_source,
+        &["config", "user.email", "dependency@orna.invalid"],
+    );
+    fs::write(
+        dependency_source.join("tracked.txt"),
+        b"dependency committed\n",
+    )
+    .unwrap();
+    git_output(&dependency_source, &["add", "tracked.txt"]);
+    git_output(&dependency_source, &["commit", "-m", "dependency source"]);
+    let submodule_add = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(&source)
+        .args([
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+        ])
+        .arg(&dependency_source)
+        .arg("dependencies/example")
+        .output()
+        .unwrap();
+    assert!(
+        submodule_add.status.success(),
+        "git submodule add: {}",
+        String::from_utf8_lossy(&submodule_add.stderr)
+    );
+    git_output(&source, &["commit", "-m", "record dependency"]);
+    git_output(&source, &["rm", "--", "tracked-deletion.txt"]);
+
+    let source_submodule = source.join("dependencies/example");
+    fs::write(source_submodule.join("tracked.txt"), b"staged dependency\n").unwrap();
+    git_output(&source_submodule, &["add", "tracked.txt"]);
+    fs::write(
+        source_submodule.join("tracked.txt"),
+        b"unstaged dependency\n",
+    )
+    .unwrap();
+    fs::write(
+        source_submodule.join("local.txt"),
+        b"untracked dependency\n",
+    )
+    .unwrap();
     let destination = parent.path().join("migrated");
     let git_trace = parent.path().join("git-trace.log");
     let source_head = String::from_utf8(git_output(&source, &["rev-parse", "HEAD"]))
@@ -82,6 +140,7 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
         &source,
         &["status", "--porcelain=v2", "--untracked-files=all"],
     );
+    let source_index_tree = git_output(&source, &["write-tree"]);
 
     let first = run_copy(&source, &destination, "0", &git_trace);
     assert!(
@@ -95,6 +154,40 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     assert!(first_output.starts_with(
         "prepared or recovered format-3 migration copy: source_format=1 source_commit="
     ));
+    assert_eq!(git_output(&destination, &["write-tree"]), source_index_tree);
+    assert!(
+        git_output(
+            &destination,
+            &["ls-files", "--stage", "--", "tracked-deletion.txt"]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        git_output(
+            &destination,
+            &[
+                "diff",
+                "--cached",
+                "--name-status",
+                "--",
+                "tracked-deletion.txt"
+            ],
+        ),
+        b"D\ttracked-deletion.txt\n"
+    );
+    let copied_submodule = destination.join("dependencies/example");
+    assert_eq!(
+        git_output(&copied_submodule, &["show", ":tracked.txt"]),
+        b"staged dependency\n"
+    );
+    assert_eq!(
+        fs::read(copied_submodule.join("tracked.txt")).unwrap(),
+        b"unstaged dependency\n"
+    );
+    assert_eq!(
+        fs::read(copied_submodule.join("local.txt")).unwrap(),
+        b"untracked dependency\n"
+    );
 
     let candidate = String::from_utf8(git_output(
         &destination,
@@ -126,6 +219,62 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     );
     assert_eq!(retry.stdout, first_output.as_bytes());
     assert!(retry.stderr.is_empty());
+    fs::write(
+        source.join("new-source.txt"),
+        b"changed after preparation\n",
+    )
+    .unwrap();
+    let changed_source = run_copy(&source, &destination, "0", &git_trace);
+    assert_eq!(changed_source.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&changed_source.stderr).contains("E2100"));
+    assert_eq!(
+        String::from_utf8(git_output(
+            &destination,
+            &[
+                "for-each-ref",
+                "--format=%(objectname)",
+                "refs/orna/migration-candidates/"
+            ],
+        ))
+        .unwrap()
+        .trim(),
+        candidate,
+        "rejecting a changed source leaves the candidate intact"
+    );
+    fs::remove_file(source.join("new-source.txt")).unwrap();
+
+    git_output(&source, &["reset", "--", "tracked-deletion.txt"]);
+    let changed_source_index = run_copy(&source, &destination, "0", &git_trace);
+    assert_eq!(changed_source_index.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&changed_source_index.stderr).contains("E2100"));
+    git_output(&source, &["rm", "--", "tracked-deletion.txt"]);
+
+    git_output(&copied_submodule, &["reset", "--", "tracked.txt"]);
+    assert_eq!(
+        git_output(&copied_submodule, &["show", ":tracked.txt"]),
+        b"dependency committed\n"
+    );
+    let altered_candidate = run_copy(&source, &destination, "0", &git_trace);
+    assert_eq!(altered_candidate.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&altered_candidate.stderr).contains("E2100"));
+    assert_eq!(
+        git_output(&copied_submodule, &["show", ":tracked.txt"]),
+        b"dependency committed\n",
+        "rejecting an altered candidate leaves its submodule index untouched"
+    );
+    assert_eq!(
+        String::from_utf8(git_output(
+            &destination,
+            &[
+                "for-each-ref",
+                "--format=%(objectname)",
+                "refs/orna/migration-candidates/"
+            ],
+        ))
+        .unwrap()
+        .trim(),
+        candidate
+    );
 
     let conflict = run_copy(&source, &destination, "1", &git_trace);
     assert_eq!(conflict.status.code(), Some(1));
