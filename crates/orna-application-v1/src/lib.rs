@@ -336,6 +336,18 @@ impl ApplicationAuthority {
         application: &AdmittedApplication,
         arguments: &Environment,
     ) -> Result<StagedActivation, ApplicationError> {
+        self.evaluate_staged_with_source_rows(application, arguments, Vec::new())
+    }
+
+    /// Evaluates admitted source while consuming project-admitted loose rows
+    /// into the same source mutation handler. Their resolved schemas and
+    /// field-bound protected pins remain attached to the staged activation.
+    pub fn evaluate_staged_with_source_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        source_rows: Vec<AdmittedSourceRow>,
+    ) -> Result<StagedActivation, ApplicationError> {
         let tables = application_table_schemas(application);
         let table_object_ids = application_table_object_ids(application);
         let mut handler =
@@ -345,6 +357,9 @@ impl ApplicationAuthority {
                     application.functions.clone(),
                     application.limits,
                 );
+        for row in source_rows {
+            handler.record_admitted_source_row(row)?;
+        }
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -355,14 +370,7 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        let mutations = handler.into_mutations()?;
-        Ok(StagedActivation {
-            value,
-            mutations,
-            snapshot_generation: None,
-            source_row_schemas: Vec::new(),
-            protected_field_pins: Vec::new(),
-        })
+        handler.into_staged_activation(value, None)
     }
 
     /// Evaluates table mutations against one activation-pinned table snapshot.
@@ -398,14 +406,10 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        let mutations = handler.into_mutations()?;
-        Ok(StagedActivation {
+        handler.into_staged_activation(
             value,
-            mutations,
-            snapshot_generation: Some(snapshot.context().capture().generation_digest()),
-            source_row_schemas: Vec::new(),
-            protected_field_pins: Vec::new(),
-        })
+            Some(snapshot.context().capture().generation_digest()),
+        )
     }
 
     /// Evaluates admitted source with a preloaded durable publication snapshot
@@ -440,14 +444,7 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        let mutations = handler.into_mutations()?;
-        Ok(StagedActivation {
-            value,
-            mutations,
-            snapshot_generation: None,
-            source_row_schemas: Vec::new(),
-            protected_field_pins: Vec::new(),
-        })
+        handler.into_staged_activation(value, None)
     }
 
     /// Evaluates admitted source while dispatching its terminal runtime effect
@@ -493,8 +490,8 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        let (mutations, effects) = handler.into_parts()?;
-        if !mutations.is_empty()
+        let (mutations, effects) = handler.into_parts();
+        if !mutations.mutations.is_empty()
             && let Some(effect) = effects.iter().find(|effect| {
                 matches!(
                     effect,
@@ -518,13 +515,7 @@ impl ApplicationAuthority {
                 .await
                 .map_err(ApplicationError::SourceEffectFailed)?;
         }
-        Ok(StagedActivation {
-            value,
-            mutations,
-            snapshot_generation: None,
-            source_row_schemas: Vec::new(),
-            protected_field_pins: Vec::new(),
-        })
+        mutations.into_staged_activation(value, None)
     }
 
     /// Computes the canonical digest for staged table work in one captured
@@ -1708,10 +1699,8 @@ impl AsyncSourceMutationEffectHandler {
         })
     }
 
-    fn into_parts(
-        self,
-    ) -> Result<(Vec<TableMutation>, Vec<ApplicationEffectRequest>), ApplicationError> {
-        Ok((self.mutations.into_validated_mutations()?, self.effects))
+    fn into_parts(self) -> (SourceMutationEffectHandler, Vec<ApplicationEffectRequest>) {
+        (self.mutations, self.effects)
     }
 }
 
