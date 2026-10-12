@@ -26029,7 +26029,15 @@ mod tests {
             include_str!("../../orna-cli-v1/tests/fixtures/publication_metadata.orna"),
         )]);
 
-        assert!(analysis.is_ok(), "diagnostics: {:?}", analysis.diagnostics);
+        assert!(
+            analysis.is_ok(),
+            "diagnostics: {:?}",
+            analysis
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+                .collect::<Vec<_>>()
+        );
     }
     #[test]
     fn infers_primitive_record_list_and_function_without_any() {
