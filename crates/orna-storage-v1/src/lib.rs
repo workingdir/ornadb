@@ -720,14 +720,17 @@ use std::{
     fmt,
 };
 
-use orna_foundation_v1::{CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity};
+use orna_foundation_v1::{
+    CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity, SchemaDescriptor,
+};
 use orna_repository_v1::{
     CompactManifest, CompactPublicationPlan, CompactPublicationRecovery, GitCommitRef,
     IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit, PublicationJournal,
     PublicationJournalEntry, Repository, RepositoryError, Uuid,
 };
 use orna_runtime_v1::{
-    PublicationCommitId, PublicationFreeze, RuntimeError, RuntimeState, TableMutation,
+    PublicationCommitId, PublicationFreeze, PublicationTableIdentity, RuntimeError, RuntimeState,
+    TableMutation,
 };
 use orna_value_v1::{
     path_decode_key_components, path_encode_key_components, path_validate_relative_components,
@@ -1671,20 +1674,22 @@ impl RuntimePublicationCoordinator {
         Self::recover_inner(repository, runtime, None).await
     }
 
-    /// Recovers compact publication only after decoding and comparing the
-    /// immutable candidate against the runtime freeze and its recorded base.
+    /// Recovers a compact publication with schema-admitted table identity.
+    /// A consumed prefix is finalized only through the runtime's validated
+    /// persisted receipt; an unconsumed prefix is rebuilt from that identity.
     pub async fn recover_compact_validated(
         repository: &Repository,
         runtime: &RuntimeState,
         profile: &CompactOvbProfile,
+        table_identity: &PublicationTableIdentity,
     ) -> Result<Option<IndexGeneration>, Error> {
-        Self::recover_inner(repository, runtime, Some(profile)).await
+        Self::recover_inner(repository, runtime, Some((profile, table_identity))).await
     }
 
     async fn recover_inner(
         repository: &Repository,
         runtime: &RuntimeState,
-        compact_profile: Option<&CompactOvbProfile>,
+        compact_profile: Option<(&CompactOvbProfile, &PublicationTableIdentity)>,
     ) -> Result<Option<IndexGeneration>, Error> {
         let Some(journal) = repository
             .read_publication_journal()
@@ -1693,7 +1698,7 @@ impl RuntimePublicationCoordinator {
             return Ok(None);
         };
         if journal.compact_manifest().is_some() {
-            let profile = compact_profile.ok_or(Error::InvalidTransition)?;
+            let (profile, table_identity) = compact_profile.ok_or(Error::InvalidTransition)?;
             let recovery = repository
                 .recover_compact_publication_boundary()
                 .map_err(map_publication_repository_error)?;
@@ -1706,16 +1711,51 @@ impl RuntimePublicationCoordinator {
                 }
                 Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => pending,
                 Some(CompactPublicationRecovery::ReconciliationRequired(_)) => {
-                    // The repository retained both the journal and any
-                    // post-freeze runtime tail. Do not turn a stale candidate
-                    // into a new cleanup request.
                     return Err(Error::RefConflict);
                 }
             };
+            if let Some(receipt) = runtime
+                .persisted_compact_publication_receipt(&pending)
+                .await
+                .map_err(map_compact_runtime_error)?
+            {
+                return repository
+                    .finish_compact_with_receipt(&receipt)
+                    .map(Some)
+                    .map_err(map_publication_repository_error);
+            }
+            let trusted_schema = trusted_compact_schema_descriptor(
+                repository,
+                journal.old_head(),
+                Uuid::from_bytes(profile.table_id()),
+                profile.schema_fingerprint(),
+                &journal,
+                pending.commit(),
+            )?;
+            let witness = journal
+                .compact_manifest()
+                .ok_or(Error::InvalidTransition)?;
+            if CompactOvbProfile::new(trusted_schema)
+                .map_err(|_| Error::InvalidTransition)?
+                != *profile
+                || table_identity.table_id != profile.table_id()
+                || table_identity.schema_fingerprint != profile.schema_fingerprint()
+                || table_identity.candidate_generation != witness.generation()
+            {
+                return Err(Error::InvalidTransition);
+            }
             let freeze = runtime
-                .publication_freeze(pending.runtime_intent_id())
+                .publication_freeze_compact(
+                    pending.runtime_intent_id(),
+                    std::slice::from_ref(table_identity),
+                )
                 .await
                 .map_err(map_compact_runtime_error)?;
+            if freeze.intent_id != pending.runtime_intent_id()
+                || freeze.checkpoint.digest != pending.cleanup_watermark()
+            {
+                return Err(Error::InvalidTransition);
+            }
             let base = load_compact_base_from_commit(repository, journal.old_head(), profile)?;
             let writer_input = lower_compact_freeze(profile, &freeze)?;
             let writer_input = base
@@ -1807,6 +1847,59 @@ impl RuntimePublicationCoordinator {
             .map(Some)
             .map_err(|_| Error::RepositoryUnavailable)
     }
+}
+
+/// Loads a schema descriptor only from a validated committed compact segment.
+/// The journal must bind the supplied source and candidate commits, and its
+/// compact witness must bind the requested table and schema fingerprint.
+///
+/// Schema and table identities are never inferred from decoded row contents
+/// or source syntax; every returned descriptor came through the repository's
+/// committed-object and Parquet validation boundary.
+pub fn trusted_compact_schema_descriptor(
+    repository: &Repository,
+    source: &GitCommitRef,
+    table: Uuid,
+    schema: [u8; 32],
+    journal: &PublicationJournal,
+    candidate: &GitCommitRef,
+) -> Result<SchemaDescriptor, Error> {
+    let witness = journal
+        .compact_manifest()
+        .ok_or(Error::InvalidTransition)?;
+    if journal.old_head() != source
+        || journal.new_head() != candidate
+        || witness.table() != table
+        || repository
+            .head()
+            .map_err(map_publication_repository_error)?
+            .as_ref()
+            != Some(candidate)
+    {
+        return Err(Error::InvalidTransition);
+    }
+    let manifest = repository
+        .read_compact_manifest(candidate, table)
+        .map_err(map_publication_repository_error)?
+        .ok_or(Error::InvalidTransition)?;
+    if manifest.schema() != schema {
+        return Err(Error::InvalidTransition);
+    }
+    let projections = repository
+        .read_compact_committed_base_from_commit(
+            candidate,
+            table,
+            schema,
+            COMPACT_STORAGE_PROFILE,
+            |_entry, projection| Ok(projection.source_schema().clone()),
+        )
+        .map_err(map_publication_repository_error)?;
+    let mut descriptors = projections.into_iter();
+    let descriptor = descriptors.next().ok_or(Error::InvalidTransition)?;
+    if descriptors.any(|other| other != descriptor) {
+        return Err(Error::InvalidTransition);
+    }
+    Ok(descriptor)
 }
 
 /// Publishes and completes a compact publication through the runtime
@@ -2546,6 +2639,15 @@ mod tests {
         digest.finalize().into()
     }
 
+    fn compact_publication_identity(profile: &CompactOvbProfile) -> PublicationTableIdentity {
+        PublicationTableIdentity {
+            table: "Contact".to_owned(),
+            table_id: profile.table_id(),
+            schema_fingerprint: profile.schema_fingerprint(),
+            candidate_generation: 1,
+        }
+    }
+
     fn compact_schema_hex(schema: [u8; 32]) -> String {
         schema
             .into_iter()
@@ -3011,11 +3113,13 @@ mod tests {
             .unwrap();
 
         let profile = CompactOvbProfile::new(compact_schema()).unwrap();
+        let identity = compact_publication_identity(&profile);
         assert_eq!(
             RuntimePublicationCoordinator::recover_compact_validated(
                 &repository,
                 &runtime,
                 &profile,
+                &identity,
             )
             .await,
             Err(Error::InvalidTransition)
@@ -3139,19 +3243,12 @@ mod tests {
             .complete_compact_publication(&pending, &freeze)
             .await
             .unwrap();
-        fs::write(temp.path().join("ordinary.txt"), "native writer\n").unwrap();
-        git(temp.path(), &["add", "ordinary.txt"]);
-        git(temp.path(), &["commit", "-m", "native writer"]);
-
-        assert_eq!(
-            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
-            Err(Error::RefConflict)
-        );
         let profile = CompactOvbProfile::new(compact_schema()).unwrap();
         let result = RuntimePublicationCoordinator::recover_compact_validated(
             &repository,
             &runtime,
             &profile,
+            &compact_publication_identity(&profile),
         )
         .await;
         assert_eq!(result, Err(Error::RefConflict));

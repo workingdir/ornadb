@@ -2,6 +2,10 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
@@ -11,7 +15,11 @@ use orna_runtime_v1::{
     RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use orna_value_v1::{ContextValue, ValueFormat};
+use orna_value_v1::{
+    AvailabilityState, Blob, BlobResolver, ContentIdentity, ContentReference, ContextValue,
+    Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
+    ValueFormat,
+};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -20,7 +28,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let (directory, repository, relation_id) = empty_format3_repository();
     let root = directory.path();
     let payload = b"{\"source\":\"cli\"}";
-    std::fs::write(root.join("capture.json"), payload).unwrap();
+    std::fs::write(root.join("note.wav"), payload).unwrap();
     let head_before_capture = git_output(root, &["rev-parse", "HEAD"], None);
 
     let runtime_identity = RuntimeIdentity {
@@ -53,34 +61,35 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
 
     let capability = repository.capture_capability(relation_id).unwrap();
 
-    let mut filesystem = FilesystemProvider::with_limits(1024, 16).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(65_536, 16).unwrap();
     filesystem.allow_root(root).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let source = format!(
-        "sys.blob.capture_file({root:?}, \"capture.json\", 64)",
-        root = root.to_string_lossy().as_ref()
-    );
+    let media_root = format!("{:?}", root.to_string_lossy().as_ref());
+    let source = include_str!("fixtures/media/import-song-annotation.orna")
+        .replace("__MEDIA_ROOT__", &media_root)
+        .replace("\"audio/wav\"", "\"audio/mp4\"")
+        .replace("\"note\"", "\"m4b\"");
     let value = evaluate_expression_ovb2_with_effects(
         &source,
         &Default::default(),
         Limits::default(),
         &mut bindings,
     )
-    .unwrap();
+    .unwrap_or_else(|error| panic!("authored capture annotation failed: {}", error.code()));
 
     assert_eq!(value.format(), ValueFormat::Ovb2);
     let blob = value.blob().unwrap();
     assert_eq!(blob.read_to_end().unwrap(), payload);
-    assert_eq!(blob.media_type(), "application/json");
-    assert_eq!(blob.suffix(), None);
+    assert_eq!(blob.media_type(), "audio/mp4");
+    assert_eq!(blob.suffix(), Some("m4b"));
 
     let round_trip = ContextValue::decode(&value.encode().unwrap(), ValueFormat::Ovb2).unwrap();
     let round_trip_blob = round_trip.blob().unwrap();
     assert_eq!(round_trip_blob.read_to_end().unwrap(), payload);
-    assert_eq!(round_trip_blob.media_type(), "application/json");
-    assert_eq!(round_trip_blob.suffix(), None);
+    assert_eq!(round_trip_blob.media_type(), "audio/mp4");
+    assert_eq!(round_trip_blob.suffix(), Some("m4b"));
 
     // Capture finishes with only owner-scoped scratch state. It has not
     // inserted a runtime row or created a public commit.
@@ -94,28 +103,68 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     assert!(state.pending().await.unwrap().is_empty());
     assert_eq!(git_output(root, &["rev-parse", "HEAD"], None), head_before_capture);
 
-    // MIME-1 preserves an explicit compatible suffix that differs from the
-    // source capture's annotation.
-    let annotated = value
-        .with_blob_annotation("text/javascript;charset=utf-8", Some("mjs"))
-        .unwrap();
+    // The authored annotation survives OVB-2 evaluation and row conversion.
+    let annotated = value;
     let annotated_blob = annotated.blob().unwrap();
-    assert_eq!(annotated_blob.media_type(), "text/javascript;charset=utf-8");
-    assert_eq!(annotated_blob.suffix(), Some("mjs"));
-    assert_eq!(annotated_blob.annotation().selected_suffix(), "mjs");
-    let binding = bindings.accept_captured_blob_for_row(&annotated).unwrap();
+    assert_eq!(annotated_blob.media_type(), "audio/mp4");
+    assert_eq!(annotated_blob.suffix(), Some("m4b"));
+    assert_eq!(annotated_blob.annotation().selected_suffix(), "m4b");
+    // Materialize the captured identity through a real Format3 resolver before
+    // accepting the annotated value for row conversion.
+    let (format3_context, resolver_bytes_read) = resolver_context(payload);
+    let reference = format3_context
+        .reference(
+            annotated_blob.content_identity(),
+            NativeOid::from_bytes(&[0x66; 20]).unwrap(),
+        )
+        .unwrap();
+    let context_backed_blob = Blob::from_reference_with_annotation(
+        reference,
+        annotated_blob.media_type(),
+        annotated_blob.suffix(),
+    )
+    .unwrap();
+    assert!(!context_backed_blob.is_hydrated());
+    let portable = ContextValue::from_blob(&context_backed_blob, ValueFormat::Ovb2).unwrap();
+    assert_eq!(
+        resolver_bytes_read.load(Ordering::Relaxed),
+        payload.len() as u64
+    );
+    let contextual_value =
+        ContextValue::new_in_context(&format3_context, ValueFormat::Ovb2, portable.raw().clone())
+            .unwrap();
+    assert!(contextual_value.context().is_some());
+    let contextual_blob = contextual_value.blob().unwrap();
+    assert_eq!(
+        contextual_blob.content_identity(),
+        annotated_blob.content_identity()
+    );
+    assert_eq!(contextual_blob.media_type(), "audio/mp4");
+    assert_eq!(contextual_blob.suffix(), Some("m4b"));
+    let binding = bindings
+        .accept_captured_blob_for_row(&contextual_value)
+        .unwrap();
     let expected_row_value = binding.encoded_value().to_vec();
     assert!(
         expected_row_value
-            .windows(b"text/javascript;charset=utf-8".len())
-            .any(|window| window == b"text/javascript;charset=utf-8")
+            .windows(b"audio/mp4".len())
+            .any(|window| window == b"audio/mp4")
     );
     assert!(
         expected_row_value
-            .windows(b"mjs".len())
-            .any(|window| window == b"mjs")
+            .windows(b"m4b".len())
+            .any(|window| window == b"m4b")
     );
     let transfer = binding.transfer_record();
+    let captured_identity = transfer.content_identity();
+    assert_eq!(
+        annotated_blob.content_identity().length(),
+        captured_identity.length()
+    );
+    assert_eq!(
+        annotated_blob.content_identity().sha256(),
+        captured_identity.sha256()
+    );
     let pin_ref = format!(
         "refs/orna/pins/{}/pending/{}",
         hex(transfer.owner_id()),
@@ -139,7 +188,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     .unwrap()
     .with_orp_blob_binding(binding)
     .unwrap();
-    std::fs::remove_file(root.join("capture.json")).unwrap();
+    std::fs::remove_file(root.join("note.wav")).unwrap();
     let competing_context = state.begin_activation().await.unwrap();
     state
         .commit_table_activation(
@@ -361,6 +410,56 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         capture_failure(&mut bindings, root.to_str().unwrap(), "capture.json", 4),
         "ORNA-INGEST-004"
     );
+}
+
+struct FixtureResolver {
+    identity: ContentIdentity,
+    payload: Arc<[u8]>,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl BlobResolver for FixtureResolver {
+    fn read_range(
+        &self,
+        reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> orna_value_v1::Result<Vec<u8>> {
+        if reference.identity() != self.identity {
+            return Err(BlobError::ContentUnavailable);
+        }
+        let start = usize::try_from(offset).map_err(|_| BlobError::InvalidRange)?;
+        let length = usize::try_from(length).map_err(|_| BlobError::InvalidRange)?;
+        let end = start.checked_add(length).ok_or(BlobError::InvalidRange)?;
+        let bytes = self
+            .payload
+            .get(start..end)
+            .ok_or(BlobError::InvalidRange)?;
+        self.bytes_read.fetch_add(length as u64, Ordering::Relaxed);
+        Ok(bytes.to_vec())
+    }
+}
+
+fn resolver_context(payload: &[u8]) -> (Format3Context, Arc<AtomicU64>) {
+    let database = [0x67; 16];
+    let bytes_read = Arc::new(AtomicU64::new(0));
+    let context = Format3Context::from_persisted(
+        database,
+        Snapshot::cwd(database, [0x68; 16], 0.into()).unwrap(),
+        GitHash::Sha1,
+        NativeOid::from_bytes(&[0x69; 20]).unwrap(),
+        NativeOid::from_bytes(&[0x6a; 20]).unwrap(),
+        AvailabilityState::Available,
+        OwnerLifetime::new([0x6b; 16]),
+        Format3Quota::new(65_536, 1_u64 << 32).unwrap(),
+        Arc::new(FixtureResolver {
+            identity: ContentIdentity::from_bytes(payload),
+            payload: Arc::from(payload),
+            bytes_read: Arc::clone(&bytes_read),
+        }),
+    )
+    .unwrap();
+    (context, bytes_read)
 }
 
 struct FailAt(FaultPoint);
