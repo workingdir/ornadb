@@ -75,6 +75,10 @@ pub fn capture_failure(
 }
 
 pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
+    format3_repository("pub table media(id: Str) { content: Blob, }\n")
+}
+
+pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16]) {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
     git(root, &["init", "--quiet"]);
@@ -86,7 +90,6 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     let database_uuid = "00000000-0000-4000-8000-000000000001";
     let database =
         format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-    let media_source = "pub table media(id: Str) { content: Blob, }\n";
     let modules = [ModuleInput::new("main.orna", media_source)];
     let analysis = analyze(&modules);
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();

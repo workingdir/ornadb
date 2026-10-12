@@ -23,7 +23,7 @@ impl BlobResolver for UnusedResolver {
     }
 }
 
-fn foreign_database_context(commit: &GitCommitRef, database_id: [u8; 16]) -> Format3Context {
+fn format3_context_for_database(commit: &GitCommitRef, database_id: [u8; 16]) -> Format3Context {
     let oid = commit
         .as_str()
         .as_bytes()
@@ -59,7 +59,9 @@ fn foreign_database_context(commit: &GitCommitRef, database_id: [u8; 16]) -> For
 
 #[test]
 fn same_commit_context_from_another_database_cannot_admit_source_row() {
-    let (_directory, repository, _relation_id) = format3::empty_format3_repository();
+    let (_directory, repository, _relation_id) = format3::format3_repository(
+        "pub table media(id: Str) { content: Str, }\n",
+    );
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
     let project = loader
@@ -69,9 +71,22 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
         .resolve_committed_source_table_schema(&repository, &commit, "", "media")
         .unwrap();
 
+    let row_source = "{ content: \"picture\", }\n";
+    let matching_context = format3_context_for_database(&commit, *schema.database_id());
+    let accepted = admit_source_row(
+        &project,
+        "media/picture.orna",
+        row_source,
+        &schema,
+        &matching_context,
+        Vec::new(),
+        [0x76; 16],
+    );
+    assert!(accepted.is_ok(), "matching repository context should admit the full tuple");
+
     let mut foreign_database_id = *schema.database_id();
     foreign_database_id[15] ^= 1;
-    let foreign_context = foreign_database_context(&commit, foreign_database_id);
+    let foreign_context = format3_context_for_database(&commit, foreign_database_id);
     assert!(matches!(
         foreign_context.pin(),
         Snapshot::Commit {
@@ -84,7 +99,7 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
     let result = admit_source_row(
         &project,
         "media/picture.orna",
-        "{ id: \"picture\", content: null, }\n",
+        row_source,
         &schema,
         &foreign_context,
         Vec::new(),
