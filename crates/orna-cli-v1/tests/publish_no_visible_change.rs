@@ -38,14 +38,12 @@ const REIMPORT_FIXTURE: &str = concat!(
 );
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
-const COMPACT_TABLE: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-
-fn compact_schema() -> SchemaDescriptor {
+fn compact_schema(table: [u8; 16]) -> SchemaDescriptor {
     let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
     let uuid = |value: [u8; 16]| OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(value.to_vec())));
     SchemaDescriptor::new(OvbRaw::Map(vec![
         (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
-        (OvbRaw::Int(1.into()), uuid(COMPACT_TABLE)),
+        (OvbRaw::Int(1.into()), uuid(table)),
         (
             OvbRaw::Int(2.into()),
             OvbRaw::Array(vec![uuid(*field.as_bytes())]),
@@ -91,15 +89,56 @@ fn compact_columns() -> Vec<u8> {
     .unwrap()
 }
 
-fn compact_segment() -> (Uuid, [u8; 32], CompactSegment) {
+fn replace_parquet_metadata(bytes: &mut [u8], old: &str, new: &str) {
+    assert_eq!(old.len(), new.len());
+    let old = old.as_bytes();
+    let positions = bytes
+        .windows(old.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == old).then_some(index))
+        .collect::<Vec<_>>();
+    let [position] = positions.as_slice() else {
+        panic!("expected one compact Parquet metadata value");
+    };
+    bytes[*position..*position + old.len()].copy_from_slice(new.as_bytes());
+}
+
+fn fingerprint_text(fingerprint: [u8; 32]) -> String {
+    fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn compact_segment(table_id: [u8; 16]) -> (Uuid, [u8; 32], CompactSegment) {
     const PARQUET: &str = "UEFSMRUGFRAVEBWRgLnnCkwVAhUAFQIVABUAFQASAAABAAAAAAAAABkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTwWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklAAYZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY8FkgmCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABaCARUUFkQVPgAWPBYCJggWSBQAABl8GAxvcm5hLnByb2ZpbGUYEmNvbXBhY3Qtc3RvcmFnZS12MQAYCm9ybmEudGFibGUYJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAYEm9ybmEuc2NoZW1hLnNoYTI1NhhANThhMDg5NzBhZGMyMzE4N2U5Nzk0NDVlOTNiODQzN2ExNjI3ZWUxMDk0ZjI2NTg5YTJlZmVmZWE4NTFiMmExZQAYD29ybmEuc2NoZW1hLm92YhiYAXBRQUJBZGdsVUFBQUFBQUFBQUFBQUFBQUFBQUFBQUVDZ2RnbFVBR1BBQUFBQUhBQWdBQUFBQUFBQUFFRGdZWFlKVkFCandBQUFBQndBSUFBQUFBQUFBQUJlQ0ptWHpBeE9HWXdNREF3TURBd01EQXdNRE15TURBd01EQXdNREF3TURBd01EQXhnZ0JqU1c1MEFJRUFCSUE9ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBWFFDQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAA3AIAAFBBUjE=";
-    let schema = compact_schema();
+    let schema = compact_schema(table_id);
     let fingerprint = compact_schema_fingerprint(&schema);
-    let table = Uuid::from_u64_pair(0, 1);
+    let table = Uuid::from_bytes(table_id);
     let id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-    let bytes = base64::engine::general_purpose::STANDARD
+    let old_table = Uuid::from_u64_pair(0, 1);
+    let old_schema = compact_schema(*old_table.as_bytes());
+    let old_fingerprint = compact_schema_fingerprint(&old_schema);
+    let old_schema_bytes = old_schema.encode().unwrap();
+    let new_schema_bytes = schema.encode().unwrap();
+    let mut bytes = base64::engine::general_purpose::STANDARD
         .decode(PARQUET)
         .unwrap();
+    replace_parquet_metadata(
+        &mut bytes,
+        old_table.to_string().as_str(),
+        table.to_string().as_str(),
+    );
+    replace_parquet_metadata(
+        &mut bytes,
+        &fingerprint_text(old_fingerprint),
+        &fingerprint_text(fingerprint),
+    );
+    replace_parquet_metadata(
+        &mut bytes,
+        &base64::engine::general_purpose::STANDARD.encode(old_schema_bytes),
+        &base64::engine::general_purpose::STANDARD.encode(new_schema_bytes),
+    );
     let segment = CompactSegment::new(
         id,
         CompactSegmentRole::Data,
@@ -351,7 +390,7 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
 
 #[tokio::test]
 async fn publish_recovers_compact_journal_without_receipt_before_tail_selection() {
-    let (directory, repository, _) = empty_format3_repository();
+    let (directory, repository, relation_id) = empty_format3_repository();
     let root_path = directory.path();
     let old_head = repository.head().unwrap().unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
@@ -363,7 +402,7 @@ async fn publish_recovers_compact_journal_without_receipt_before_tail_selection(
         .await
         .unwrap();
     let activation = state.begin_activation().await.unwrap();
-    let (table, schema_fingerprint, segment) = compact_segment();
+    let (table, schema_fingerprint, segment) = compact_segment(relation_id);
     let mutation = TableMutation::new(
         [0xf1; 16],
         "media",
@@ -422,7 +461,7 @@ async fn publish_recovers_compact_journal_without_receipt_before_tail_selection(
 
 #[tokio::test]
 async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
-    let (directory, repository, _) = empty_format3_repository();
+    let (directory, repository, relation_id) = empty_format3_repository();
     let root_path = directory.path();
     let old_head = repository.head().unwrap().unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
@@ -434,7 +473,7 @@ async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
         .await
         .unwrap();
     let activation = state.begin_activation().await.unwrap();
-    let (table, schema_fingerprint, segment) = compact_segment();
+    let (table, schema_fingerprint, segment) = compact_segment(relation_id);
     let mutation = TableMutation::new(
         [0xf4; 16],
         "media",
@@ -554,7 +593,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         &mut bindings,
         &expression,
         relation_id,
-        b"image",
+        b"image.orna",
         0xb0,
         true,
     )
@@ -595,7 +634,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         &mut bindings,
         &expression,
         relation_id,
-        b"image",
+        b"image.orna",
         0xc0,
         false,
     )
