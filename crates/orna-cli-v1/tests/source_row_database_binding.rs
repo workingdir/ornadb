@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use orna_project_v1::{ProjectLoadError, ProjectLoader, admit_source_row};
 use orna_repository_v1::GitCommitRef;
-use orna_runtime_v1::TableObjectId;
 use orna_value_v1::{
     AvailabilityState, BlobResolver, ContentReference, Error as ValueError, Format3Context,
     Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
@@ -60,19 +59,14 @@ fn foreign_database_context(commit: &GitCommitRef, database_id: [u8; 16]) -> For
 
 #[test]
 fn same_commit_context_from_another_database_cannot_admit_source_row() {
-    let (_directory, repository, relation_id) = format3::empty_format3_repository();
+    let (_directory, repository, _relation_id) = format3::empty_format3_repository();
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
     let project = loader
         .load_committed_snapshot(&repository, &commit)
         .unwrap();
     let schema = loader
-        .resolve_committed_table_schema(
-            &repository,
-            &commit,
-            "media",
-            TableObjectId::new(relation_id),
-        )
+        .resolve_committed_source_table_schema(&repository, &commit, "", "media")
         .unwrap();
 
     let mut foreign_database_id = *schema.database_id();
