@@ -728,6 +728,18 @@ impl HistoricalFormatContext {
         self.context.load_row_map(relation_id)
     }
 
+    /// Binds a committed table declaration through this exact historical
+    /// snapshot. The same read-only pinned source and schema authority used
+    /// by the current context is retained; workspace HEAD is never consulted.
+    pub fn bind_committed_table(
+        &self,
+        declaration_name: &str,
+        table_object_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context
+            .bind_committed_table(declaration_name, table_object_id)
+    }
+
     /// Issues graph authority bound to this pinned snapshot. Rows, schema and
     /// Blob references read through the returned context resolve against the
     /// pinned commit only, never the workspace `HEAD`.
@@ -1229,10 +1241,7 @@ fn schema_descriptor_matches_source_table(
             Some(orna_syntax_v1::FieldInitializer::Computed(_)) => 2,
             Some(orna_syntax_v1::FieldInitializer::Default(_)) | None => 1,
         };
-        if *role != expected_role
-            || !source_type_matches_schema(ty, descriptor_type)
-            || source_type_contains_blob(ty) != schema_type_contains_blob(descriptor_type)
-        {
+        if *role != expected_role || !source_type_matches_schema(ty, descriptor_type) {
             return false;
         }
         source_names.push(name.as_str());
@@ -1263,10 +1272,7 @@ fn schema_role(raw: &Raw) -> Option<u8> {
 }
 
 fn source_type_matches_schema(source: &orna_syntax_v1::TypeExpr, schema: &Raw) -> bool {
-    let Some(expected) = source_type_node(source) else {
-        return source_type_contains_blob(source) == schema_type_contains_blob(schema);
-    };
-    expected == *schema
+    source_type_node(source).is_some_and(|expected| expected == *schema)
 }
 
 fn source_type_node(source: &orna_syntax_v1::TypeExpr) -> Option<Raw> {
@@ -1312,7 +1318,7 @@ fn source_type_node(source: &orna_syntax_v1::TypeExpr) -> Option<Raw> {
                 ),
             ]))
         }
-        TypeExpr::Name { .. } | TypeExpr::Product { .. } | TypeExpr::Function { .. } => None,
+        TypeExpr::Product { .. } | TypeExpr::Function { .. } => None,
     }
 }
 
@@ -1337,58 +1343,6 @@ fn is_storage_primitive(name: &str) -> bool {
     )
 }
 
-fn source_type_contains_blob(source: &orna_syntax_v1::TypeExpr) -> bool {
-    use orna_syntax_v1::TypeExpr;
-
-    match source {
-        TypeExpr::Name { path, arguments, .. } => {
-            path.last().is_some_and(|name| name == "Blob")
-                || arguments.iter().any(source_type_contains_blob)
-        }
-        TypeExpr::List { inner, .. } | TypeExpr::Optional { inner, .. } => {
-            source_type_contains_blob(inner)
-        }
-        TypeExpr::Product { lhs, rhs, .. } => {
-            source_type_contains_blob(lhs) || source_type_contains_blob(rhs)
-        }
-        TypeExpr::Record { fields, .. } => fields
-            .iter()
-            .any(|(_, ty, _)| source_type_contains_blob(ty)),
-        TypeExpr::Tuple { elements, .. } => elements.iter().any(source_type_contains_blob),
-        TypeExpr::Function { parameters, result, .. } => {
-            parameters.iter().any(source_type_contains_blob) || source_type_contains_blob(result)
-        }
-    }
-}
-
-fn schema_type_contains_blob(schema: &Raw) -> bool {
-    let Raw::Array(node) = schema else {
-        return false;
-    };
-    if matches!(
-        node.as_slice(),
-        [Raw::Int(code), Raw::Text(name)] if code == &0.into() && name == "Blob"
-    ) {
-        return true;
-    }
-    match node.first() {
-        Some(Raw::Int(code)) if code == &1.into() || code == &2.into() => {
-            node.get(1).is_some_and(schema_type_contains_blob)
-        }
-        Some(Raw::Int(code)) if code == &3.into() => match node.get(1) {
-            Some(Raw::Array(items)) => items.iter().any(schema_type_contains_blob),
-            _ => false,
-        },
-        Some(Raw::Int(code)) if code == &4.into() => match node.get(1) {
-            Some(Raw::Array(fields)) => fields.iter().any(|field| match field {
-                Raw::Array(parts) => parts.get(1).is_some_and(schema_type_contains_blob),
-                _ => false,
-            }),
-            _ => false,
-        },
-        _ => false,
-    }
-}
 
 /// The one shared bounded Orna-record parser used by repository metadata
 /// initialization and this format-context admission path.
@@ -1567,8 +1521,8 @@ mod graph_bridge_tests {
         let relation_id = [0xa1; 16];
         let (directory, expected_descriptor, expected_oid, expected_digest) =
             seeded_table_binding("Int", relation_id);
-        let context = context(directory.path());
-        let binding = context
+        let first_context = context(directory.path());
+        let binding = first_context
             .bind_committed_table("Audio", relation_id)
             .expect("source declaration and pinned schema agree");
         assert_eq!(binding.declaration_name(), "Audio");
@@ -1583,6 +1537,66 @@ mod graph_bridge_tests {
             other_context.bind_committed_table("Audio", relation_id),
             Err(super::FormatContextError::TableBindingMismatch)
         );
+    }
+
+    #[test]
+    fn committed_table_binding_rejects_unresolved_nominal_source_type() {
+        let relation_id = [0xa3; 16];
+        let (directory, _, _, _) = seeded_table_binding("Int", relation_id);
+        let root = directory.path();
+        let source = include_str!("../tests/fixtures/committed-table-binding.orna")
+            .replace("id: Int", "id: Foo");
+        fs::write(root.join("main.orna"), source).expect("write unresolved nominal source");
+        commit(root);
+
+        let context = context(root);
+        assert_eq!(
+            context.bind_committed_table("Audio", relation_id),
+            Err(super::FormatContextError::TableBindingMismatch)
+        );
+    }
+
+    #[test]
+    fn historical_table_binding_stays_on_selected_source_after_head_advances() {
+        let relation_id = [0xa2; 16];
+        let (directory, expected_descriptor, expected_oid, expected_digest) =
+            seeded_table_binding("Int", relation_id);
+        let root = directory.path();
+        let repository = Repository::discover(root).expect("discover pinned fixture");
+        let historical = repository
+            .open_format_context_at_selector("HEAD")
+            .expect("pin original format-3 snapshot");
+        let historical_snapshot_id = *historical.snapshot_id();
+
+        fs::write(
+            root.join("main.orna"),
+            "module main;\npub table Audio(id: Str) { payload: Blob, }\n",
+        )
+        .expect("write candidate source with a different key type");
+        commit(root);
+
+        let current = repository
+            .open_format_context()
+            .expect("open advanced HEAD context");
+        assert_ne!(
+            current.snapshot_pin().snapshot_id(),
+            historical_snapshot_id,
+            "the fixture advanced to a different committed source"
+        );
+        assert_eq!(
+            current.bind_committed_table("Audio", relation_id),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "candidate HEAD must not borrow the historical schema binding"
+        );
+
+        let binding = historical
+            .bind_committed_table("Audio", relation_id)
+            .expect("historical binding reads only its selected source and schema");
+        assert_eq!(binding.declaration_name(), "Audio");
+        assert_eq!(binding.relation_id(), &relation_id);
+        assert_eq!(binding.schema_oid(), &expected_oid);
+        assert_eq!(binding.schema_digest(), &expected_digest);
+        assert_eq!(binding.descriptor(), &expected_descriptor);
     }
 
     fn context(directory: &Path) -> RepositoryFormatContext {
@@ -1600,7 +1614,7 @@ mod graph_bridge_tests {
         let root = directory.path();
         fs::write(
             root.join("main.orna"),
-            "module main; pub table Audio(id: Int) { payload: Blob, }\n",
+            include_str!("../tests/fixtures/committed-table-binding.orna"),
         )
         .expect("write committed table declaration");
         commit(root);
@@ -1612,9 +1626,10 @@ mod graph_bridge_tests {
             .algorithm();
         let key_field_id = [0x11; 16];
         let payload_field_id = [0x22; 16];
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
         let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
             Raw::Array(vec![
-                Raw::Bytes(id.to_vec()),
+                uuid(id),
                 Raw::Text(name.to_owned()),
                 ty,
                 Raw::Int(role.into()),
@@ -1623,10 +1638,10 @@ mod graph_bridge_tests {
         };
         let descriptor = SchemaDescriptor::new(Raw::Map(vec![
             (Raw::Int(0.into()), Raw::Int(1.into())),
-            (Raw::Int(1.into()), Raw::Bytes(relation_id.to_vec())),
+            (Raw::Int(1.into()), uuid(relation_id)),
             (
                 Raw::Int(2.into()),
-                Raw::Array(vec![Raw::Bytes(key_field_id.to_vec())]),
+                Raw::Array(vec![uuid(key_field_id)]),
             ),
             (
                 Raw::Int(3.into()),
