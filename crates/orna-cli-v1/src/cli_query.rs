@@ -1,4 +1,4 @@
-//! `orna query <relation-hex> [--key KEY|0xBYTES] [--field N] [--limit N] [--format human|json]`
+//! `orna query <relation-hex> [--key TEXT] [--field N] [--limit N] [--format human|json]`
 //! lists the payload-free Blob metadata of committed format-3 rows, optionally
 //! narrowed by an annotation predicate (`--kind`, `--not-kind`, `--suffix`,
 //! `--min-length`, `--max-length`).
@@ -19,7 +19,6 @@
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
-use crate::cli_row_key::key_candidates;
 use orna_repository_v1::{KeyRange, Repository, TypedKey};
 use orna_value_v1::BlobMetadataFilter;
 
@@ -61,7 +60,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
             "--key" => {
                 let value = words
                     .next()
-                    .ok_or_else(|| query_error("--key needs a value", "usage: --key KEY"))?;
+                    .ok_or_else(|| query_error("--key needs a value", "usage: --key TEXT"))?;
                 key = Some(value);
             }
             "--field" => {
@@ -160,7 +159,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
+            "usage: orna query <relation-hex> [--key TEXT] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
         ));
     };
     Ok(QueryOptions {
@@ -242,25 +241,14 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let scope = graph
         .open_read_scope()
         .map_err(|error| query_error("Read scope could not be opened", format!("{error:?}")))?;
-    // `--key` asks for exactly one row. A row committed from imported media is
-    // keyed by the raw bytes a caller passed, and a row written by hand may be
-    // keyed by canonical text, so the spelling printed by the listing is tried
-    // as text and then as those same bytes. Both are bounded point reads of
-    // the committed row map, and the row that answers is a real committed row
-    // rather than a reinterpretation of the query.
+    // `--key` names one canonical OVB Text key. In particular, a `0x` prefix
+    // is ordinary Text here, not a fallback to raw key bytes.
     let rows = match options.key {
-        Some(key) => {
-            let mut found = None;
-            for candidate in key_candidates(key)? {
-                found = graph
-                    .lookup_row(&candidate, &scope)
-                    .map_err(|error| query_error("Row lookup failed", format!("{error:?}")))?;
-                if found.is_some() {
-                    break;
-                }
-            }
-            found.into_iter().collect::<Vec<_>>()
-        }
+        Some(key) => graph
+            .lookup_row(&TypedKey::Text(key.to_owned()), &scope)
+            .map_err(|error| query_error("Row lookup failed", format!("{error:?}")))?
+            .into_iter()
+            .collect::<Vec<_>>(),
         None => {
             let range = KeyRange::new(None, None, options.limit)
                 .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
