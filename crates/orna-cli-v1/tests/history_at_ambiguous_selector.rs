@@ -29,7 +29,11 @@ fn repository_with_one_commit() -> TempDir {
     let root = directory.path();
     run_git(root, &["init", "--quiet"]);
     run_git(root, &["config", "commit.gpgsign", "false"]);
-    std::fs::write(root.join("main.orna"), b"pub table Music(id: Str) {}\n").unwrap();
+    std::fs::write(
+        root.join("main.orna"),
+        include_bytes!("fixtures/run/main.orna"),
+    )
+    .unwrap();
     run_git(root, &["add", "--all"]);
     run_git(
         root,
@@ -108,6 +112,33 @@ fn a_slashed_name_carried_by_a_branch_and_a_tag_is_refused() {
         stderr_of(&output).contains("ambiguous"),
         "a slashed name collides just as a bare one does: {}",
         stderr_of(&output)
+    );
+}
+
+#[test]
+fn a_bare_name_with_at_sign_is_still_checked_for_ambiguity() {
+    let directory = repository_with_one_commit();
+    let selector = "history@pinned";
+    run_git(directory.path(), &["branch", selector]);
+    run_git(directory.path(), &["tag", selector]);
+
+    let history = run_history(directory.path(), selector);
+    assert_eq!(history.status.code(), Some(1), "{}", stderr_of(&history));
+    assert!(
+        stderr_of(&history).contains("Snapshot name is ambiguous"),
+        "--at must refuse a colliding literal @ ref before reading a row: {}",
+        stderr_of(&history)
+    );
+
+    let diff = run_in(
+        directory.path(),
+        &["history", RELATION, "--diff", selector, "HEAD"],
+    );
+    assert_eq!(diff.status.code(), Some(1), "{}", stderr_of(&diff));
+    assert!(
+        stderr_of(&diff).contains("Snapshot name is ambiguous"),
+        "--diff must use the same exact-ref guard: {}",
+        stderr_of(&diff)
     );
 }
 
