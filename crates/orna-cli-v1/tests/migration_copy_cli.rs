@@ -20,10 +20,7 @@ fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
 fn initialize_legacy_source(root: &Path) {
     git_output(root, &["init", "-b", "main"]);
     git_output(root, &["config", "user.name", "kierandrewett"]);
-    git_output(
-        root,
-        &["config", "user.email", "kieran@drewett.dev"],
-    );
+    git_output(root, &["config", "user.email", "kieran@drewett.dev"]);
     git_output(root, &["config", "commit.gpgsign", "false"]);
     fs::write(
         root.join("main.orna"),
@@ -102,6 +99,17 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
     let conflict = run_copy(&source, &destination, "1");
     assert_eq!(conflict.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("E2100"));
+    let foreign = parent.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("marker"), b"foreign destination\n").unwrap();
+    let foreign_copy = run_copy(&source, &foreign, "0");
+    assert_eq!(foreign_copy.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&foreign_copy.stderr).contains("E2100"));
+    assert_eq!(
+        fs::read(foreign.join("marker")).unwrap(),
+        b"foreign destination\n",
+        "a foreign destination is never overwritten"
+    );
     assert_eq!(
         String::from_utf8(git_output(&source, &["rev-parse", "HEAD"]))
             .unwrap()
