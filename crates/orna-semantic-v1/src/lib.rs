@@ -16386,7 +16386,7 @@ fn infer_descriptor_system_path(
     }
     if let Some(relation) = api.relation(&name) {
         return DescriptorPathInference::Resolved(Inferred {
-            ty: Type::Relation(Box::new(Type::Named(relation.name.clone()))),
+            ty: Type::Relation(Box::new(descriptor_relation_record_type(relation))),
             effects: descriptor_effects(system_api::SystemEffect::Read),
         });
     }
@@ -22782,10 +22782,45 @@ fn infer_historical_member(
     })
 }
 
+fn descriptor_member_type(ty: &system_api::SystemType) -> Type {
+    let value = descriptor_type(ty);
+    let Type::Named(name) = &value else {
+        return value;
+    };
+    let api = system_api::embedded_system_api();
+    if api
+        .type_parameters(name)
+        .is_none_or(|parameters| !parameters.is_empty())
+    {
+        return value;
+    }
+    let Some(fields) = api.value_type_fields(name).filter(|fields| !fields.is_empty()) else {
+        return value;
+    };
+    Type::Record(
+        fields
+            .iter()
+            .map(|(name, field)| (name.clone(), descriptor_type(field)))
+            .collect(),
+    )
+}
+
+fn descriptor_relation_record_type(relation: &system_api::RelationDescriptor) -> Type {
+    Type::Record(
+        relation
+            .fields
+            .iter()
+            .map(|(name, field)| (name.clone(), descriptor_member_type(field)))
+            .collect(),
+    )
+}
+
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
     let api = system_api::embedded_system_api();
     match base {
-        Type::Named(system_type) => api.field(system_type, name).map(descriptor_type),
+        Type::Named(system_type) => api
+            .field(system_type, name)
+            .map(descriptor_member_type),
         Type::Applied {
             base: system_type,
             arguments,
@@ -25977,6 +26012,19 @@ mod tests {
                 result: Box::new(Type::Int),
             }
         );
+    }
+
+    #[test]
+    fn system_storage_publication_policy_exposes_record_fields() {
+        let analysis = checked(&[ModuleInput::new(
+            "storage-publication-policy.orna",
+            r#"
+                fn visible(storage: sys.Storage): Bool = !storage.publication_policy.redacted && storage.publication_policy.canonical_digest != null;
+                fn visible_in_query(): Bool = sys.Storage | map(storage => !storage.publication_policy.redacted && storage.publication_policy.canonical_digest != null) | first() ?? false;
+            "#,
+        )]);
+
+        assert!(analysis.is_ok(), "diagnostics: {:?}", analysis.diagnostics);
     }
 
     #[test]
