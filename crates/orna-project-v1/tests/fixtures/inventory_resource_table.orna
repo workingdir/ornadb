@@ -1,0 +1,3 @@
+pub table Resource(path: Str) {
+    value: Str,
+}
