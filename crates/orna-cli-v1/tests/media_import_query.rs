@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
+use orna_foundation_v1::{CanonicalValue, OvbRaw};
 use orna_repository_v1::{KeyRange, Repository, RowRevision, TypedKey};
 use orna_runtime_v1::{
     RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
@@ -84,7 +85,7 @@ const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 /// One committed media row, as its listing query sees it.
 #[derive(Debug, PartialEq, Eq)]
 struct MediaListing {
-    key: Vec<u8>,
+    key: String,
     media_type: String,
     suffix: Option<String>,
     length: u64,
@@ -156,7 +157,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     ];
     assert_eq!(listing.len(), expected.len());
     for (row, (key, media_type, length, file)) in listing.iter().zip(expected) {
-        assert_eq!(row.key, key.as_bytes());
+        assert_eq!(row.key, key);
         assert_eq!(row.media_type, media_type);
         assert_eq!(row.length, length);
         assert!(!row.hydrated, "listing must not hydrate {key}");
@@ -165,7 +166,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     }
 
     // Filters select rows from payload-free metadata; nothing is hydrated.
-    let song = || vec![b"song".to_vec()];
+    let song = || vec!["song".to_owned()];
     let by_type = BlobMetadataFilter::new().with_media_type("audio/wav");
     assert_eq!(filter_media(&state, &by_type).await, song());
     let by_size = BlobMetadataFilter::new().with_min_length(1000);
@@ -175,7 +176,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         .with_max_length(100);
     assert_eq!(
         filter_media(&state, &small_png).await,
-        vec![b"image".to_vec()]
+        vec!["image".to_owned()]
     );
     let too_small = BlobMetadataFilter::new().with_max_length(10);
     assert!(filter_media(&state, &too_small).await.is_empty());
@@ -202,7 +203,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     let edit = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
     import_media(&repository, &state, writer, &mut bindings, &edit, "song", 0x90, false).await;
     let edited = list_media(&state).await;
-    let song = edited.iter().find(|row| row.key == b"song").unwrap();
+    let song = edited.iter().find(|row| row.key == "song").unwrap();
     assert_eq!(song.media_type, "image/png");
     assert_eq!(song.length, 73);
     assert!(!song.hydrated, "edited listing must not hydrate the song");
@@ -263,10 +264,7 @@ async fn history_pages_cover_every_revision_once_across_imported_rows() {
     for key in ["song", "song-again"] {
         let row = rows
             .iter()
-            .find(|row| {
-                row.key() == &TypedKey::Bytes(key.as_bytes().to_vec())
-                    || row.key() == &TypedKey::Text(key.to_owned())
-            })
+            .find(|row| row.key() == &TypedKey::Text(key.to_owned()))
             .unwrap_or_else(|| panic!("the {key} row is committed"));
         let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
@@ -329,10 +327,7 @@ async fn author_filter_keeps_every_revision_of_each_imported_row() {
     for key in ["song", "song-authored"] {
         let row = rows
             .iter()
-            .find(|row| {
-                row.key() == &TypedKey::Bytes(key.as_bytes().to_vec())
-                    || row.key() == &TypedKey::Text(key.to_owned())
-            })
+            .find(|row| row.key() == &TypedKey::Text(key.to_owned()))
             .unwrap_or_else(|| panic!("the {key} row is committed"));
         let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
@@ -378,7 +373,7 @@ async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
     let later = import_expression(SINCE_SONG_IMPORT_FIXTURE, source.path());
     import_media(&repository, &state, writer, &mut bindings, &later, "song-later", 0x80, true).await;
     // Reading the committed rows first, as the listing does, makes them visible to the graph.
-    state.committed_table_rows("media").await.unwrap();
+    state.committed_table_rows("Object").await.unwrap();
 
     let format = repository.open_format_context().unwrap();
     let row_map = format.load_row_map(relation_id).unwrap();
@@ -393,10 +388,7 @@ async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
     for key in ["song", "song-later"] {
         let row = rows
             .iter()
-            .find(|row| {
-                row.key() == &TypedKey::Bytes(key.as_bytes().to_vec())
-                    || row.key() == &TypedKey::Text(key.to_owned())
-            })
+            .find(|row| row.key() == &TypedKey::Text(key.to_owned()))
             .unwrap_or_else(|| panic!("the {key} row is committed"));
         let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
@@ -454,7 +446,7 @@ async fn limit_walk_matches_the_truncated_full_walk_for_each_imported_row() {
         import_media(&repository, &state, writer, &mut bindings, &expression, key, ordinal, true).await;
     }
     // Reading the committed rows first makes them visible to the graph.
-    state.committed_table_rows("media").await.unwrap();
+    state.committed_table_rows("Object").await.unwrap();
 
     let format = repository.open_format_context().unwrap();
     let row_map = format.load_row_map(relation_id).unwrap();
@@ -467,10 +459,7 @@ async fn limit_walk_matches_the_truncated_full_walk_for_each_imported_row() {
     for (key, _, _) in imports {
         let row = rows
             .iter()
-            .find(|row| {
-                row.key() == &TypedKey::Bytes(key.as_bytes().to_vec())
-                    || row.key() == &TypedKey::Text(key.to_owned())
-            })
+            .find(|row| row.key() == &TypedKey::Text(key.to_owned()))
             .unwrap_or_else(|| panic!("the {key} row is committed"));
         let full = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         // `orna history --limit N` walks only N commits, so each bounded walk
@@ -497,10 +486,7 @@ fn assert_song_revision_history(
         .unwrap();
     let song = rows
         .iter()
-        .find(|row| {
-            row.key() == &TypedKey::Bytes(b"song".to_vec())
-                || row.key() == &TypedKey::Text("song".to_owned())
-        })
+        .find(|row| row.key() == &TypedKey::Text("song".to_owned()))
         .expect("the song row is committed");
 
     let revisions = graph.list_row_revisions(song, "HEAD", 64, &scope).unwrap();
@@ -654,6 +640,23 @@ fn import_expression(fixture: &str, root: &Path) -> String {
     fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root)
 }
 
+fn encode_text_key(text: &str) -> Vec<u8> {
+    CanonicalValue::new(OvbRaw::Text(text.to_owned()))
+        .expect("Text keys are canonical values")
+        .encode()
+        .expect("Text keys encode as canonical OVB")
+}
+
+fn decode_text_key(bytes: &[u8]) -> String {
+    match CanonicalValue::decode(bytes)
+        .expect("committed table keys are canonical OVB values")
+        .raw()
+    {
+        OvbRaw::Text(text) => text.clone(),
+        other => panic!("expected Text key, got {other:?}"),
+    }
+}
+
 /// Captures one file through `sys.blob.capture_file` and commits its row in an
 /// admitted request. The row stores the annotated Blob reference.
 async fn import_media(
@@ -694,12 +697,12 @@ async fn import_media(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let key_text = key;
-    let (id, key, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
+    let key_bytes = encode_text_key(key);
+    let (id, row) = ([ordinal + 3; 16], Vec::new());
     let mutation = if insert_only {
-        TableMutation::insert(id, "media", key, row)
+        TableMutation::insert(id, "Object", key_bytes, row)
     } else {
-        TableMutation::new(id, "media", key, Some(row))
+        TableMutation::new(id, "Object", key_bytes, Some(row))
     }
     .unwrap()
     .with_orp_blob_binding(binding)
@@ -763,7 +766,10 @@ async fn deleting_a_committed_media_row_removes_it_from_listing_and_filters() {
     let song_filter = BlobMetadataFilter::new().with_media_type("audio/wav");
     let image_filter = BlobMetadataFilter::new().with_media_type("image/png");
     assert_eq!(list_media(&state).await.len(), 2);
-    assert_eq!(filter_media(&state, &song_filter).await, vec![b"song".to_vec()]);
+    assert_eq!(
+        filter_media(&state, &song_filter).await,
+        vec!["song".to_owned()]
+    );
 
     // Membership follows the edit: the committed delete removes the song row
     // from the listing and from every filter that used to select it.
@@ -774,9 +780,12 @@ async fn deleting_a_committed_media_row_removes_it_from_listing_and_filters() {
         .into_iter()
         .map(|row| row.key)
         .collect::<Vec<_>>();
-    assert_eq!(keys, vec![b"image".to_vec()]);
+    assert_eq!(keys, vec!["image".to_owned()]);
     assert!(filter_media(&state, &song_filter).await.is_empty());
-    assert_eq!(filter_media(&state, &image_filter).await, vec![b"image".to_vec()]);
+    assert_eq!(
+        filter_media(&state, &image_filter).await,
+        vec!["image".to_owned()]
+    );
 }
 
 #[tokio::test]
@@ -1203,7 +1212,7 @@ async fn delete_media(
     let context = state.begin_activation().await.unwrap();
     // A row mutation without a value deletes the committed row.
     let mutation =
-        TableMutation::new([ordinal + 3; 16], "media", key.as_bytes().to_vec(), None).unwrap();
+        TableMutation::new([ordinal + 3; 16], "Object", encode_text_key(key), None).unwrap();
     let committed = state
         .commit_table_request_activation(
             writer,
@@ -1220,29 +1229,29 @@ async fn delete_media(
     assert_eq!(committed.request.state, RequestState::Completed);
 }
 
-async fn filter_media(state: &RuntimeState, filter: &BlobMetadataFilter) -> Vec<Vec<u8>> {
+async fn filter_media(state: &RuntimeState, filter: &BlobMetadataFilter) -> Vec<String> {
     state
-        .committed_table_rows("media")
+        .committed_table_rows("Object")
         .await
         .unwrap()
         .into_iter()
         .filter(|(_, row)| filter.matches(&decode_rov3_blob_metadata(row).unwrap()))
-        .map(|(key, _)| key)
+        .map(|(key, _)| decode_text_key(&key))
         .collect()
 }
 
-/// Lists every committed media row as payload-free metadata. Rows are decoded
+/// Lists every committed Object row as payload-free metadata. Rows are decoded
 /// as Blob references only; no read or hydration call is made.
 async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
     state
-        .committed_table_rows("media")
+        .committed_table_rows("Object")
         .await
         .unwrap()
         .into_iter()
         .map(|(key, row)| {
             let metadata = decode_rov3_blob_metadata(&row).unwrap();
             MediaListing {
-                key,
+                key: decode_text_key(&key),
                 media_type: metadata.media_type().to_owned(),
                 suffix: metadata.suffix().map(str::to_owned),
                 length: metadata.length(),
@@ -1282,15 +1291,15 @@ async fn listing_projects_suffix_column_for_song_and_image_rows() {
     import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
 
     let listing = list_media(&state).await;
-    let suffixes: Vec<(Vec<u8>, Option<String>)> = listing
+    let suffixes: Vec<(String, Option<String>)> = listing
         .into_iter()
         .map(|row| (row.key, row.suffix))
         .collect();
     assert_eq!(
         suffixes,
         vec![
-            (b"image".to_vec(), Some("png".to_owned())),
-            (b"song".to_vec(), Some("wav".to_owned())),
+            ("image".to_owned(), Some("png".to_owned())),
+            ("song".to_owned(), Some("wav".to_owned())),
         ]
     );
 }
@@ -1324,9 +1333,15 @@ async fn negated_media_type_filter_excludes_only_the_named_type() {
     import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true).await;
 
     let not_png = BlobMetadataFilter::new().without_media_type("image/png");
-    assert_eq!(filter_media(&state, &not_png).await, vec![b"song".to_vec()]);
+    assert_eq!(
+        filter_media(&state, &not_png).await,
+        vec!["song".to_owned()]
+    );
     let not_wav = BlobMetadataFilter::new().without_media_type("audio/wav");
-    assert_eq!(filter_media(&state, &not_wav).await, vec![b"image".to_vec()]);
+    assert_eq!(
+        filter_media(&state, &not_wav).await,
+        vec!["image".to_owned()]
+    );
     let neither = BlobMetadataFilter::new()
         .without_media_type("image/png")
         .without_media_type("audio/wav");
@@ -1363,7 +1378,7 @@ async fn sort_orders_mixed_media_types_by_type_then_length() {
     import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true).await;
 
     let mut metadata: Vec<_> = state
-        .committed_table_rows("media")
+        .committed_table_rows("Object")
         .await
         .unwrap()
         .into_iter()
@@ -1394,8 +1409,7 @@ fn song_revisions_limited_to(
     let song = rows
         .iter()
         .find(|row| {
-            row.key() == &TypedKey::Bytes(b"song".to_vec())
-                || row.key() == &TypedKey::Text("song".to_owned())
+            row.key() == &TypedKey::Text("song".to_owned())
         })
         .expect("the song row is committed");
     graph.list_row_revisions(song, "HEAD", max_commits, &scope).unwrap()
