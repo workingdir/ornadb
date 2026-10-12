@@ -52,8 +52,9 @@ pub use compact::{
     CompactSegment, CompactSegmentRole, validate_compact_page_uncompressed_sizes,
 };
 pub use init::format_context::{
-    CaptureCapabilityError, FinalFormatCapability, FormatContextError, HistoricalFormatContext,
-    RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin, SchemaRootPin, StoreRootPin,
+    CaptureCapabilityError, CommittedTableBinding, FinalFormatCapability, FormatContextError,
+    HistoricalFormatContext, RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin,
+    SchemaRootPin, StoreRootPin,
 };
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
