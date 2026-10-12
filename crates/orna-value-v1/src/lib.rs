@@ -4392,10 +4392,15 @@ fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> 
     let code = int_u64(node.first().ok_or(Error::InvalidSchema)?)?;
     match code {
         0 => {
-            if matches!(node.get(1), Some(Raw::Text(name)) if name == "Blob")
-                && matches!(value, Raw::Tag(ROV3_BLOB_TAG, payload) if valid_stored_blob_reference(payload))
-            {
-                return Ok(());
+            if matches!(node.get(1), Some(Raw::Text(name)) if name == "Blob") {
+                return match value {
+                    Raw::Tag(ROV3_BLOB_TAG, payload)
+                        if valid_stored_blob_reference(payload) =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidValue),
+                };
             }
             if let Raw::Tag(tag, payload) = value {
                 validate_tag(*tag, payload)?;
@@ -4529,12 +4534,13 @@ fn valid_stored_blob_reference(payload: &Raw) -> bool {
     let Ok(fields) = array(payload) else {
         return false;
     };
-    fields.len() == 5
-        && int_u64(&fields[0]).is_ok_and(|length| length < MAX_BLOB_LENGTH)
-        && bytes(&fields[1]).is_ok_and(|digest| digest.len() == 32)
-        && text(&fields[2]).is_ok()
-        && matches!(fields[3], Raw::Null | Raw::Text(_))
-        && bytes(&fields[4]).is_ok_and(|oid| matches!(oid.len(), 20 | 32))
+    let [length, digest, Raw::Text(media_type), suffix, Raw::Bytes(oid)] = fields.as_slice() else {
+        return false;
+    };
+    int_u64(length).is_ok_and(|length| length < MAX_BLOB_LENGTH)
+        && bytes(digest).is_ok_and(|digest| digest.len() == 32)
+        && bytes(oid).is_ok_and(|oid| matches!(oid.len(), 20 | 32))
+        && validate_annotation_fields(media_type, suffix, MimeRegistry::mime1()).is_ok()
 }
 
 fn validate_table_reference_value(value: &Raw, node: &[Raw], definitions: &[Raw]) -> Result<()> {
@@ -6342,14 +6348,14 @@ mod tests {
         ])
     }
 
-    fn stored_blob_reference() -> Raw {
+    fn stored_blob_reference(media_type: &str, suffix: Raw) -> Raw {
         Raw::Tag(
             ROV3_BLOB_TAG,
             Box::new(Raw::Array(vec![
                 Raw::Int(3.into()),
                 Raw::Bytes(vec![4; 32]),
-                Raw::Text("image/png".into()),
-                Raw::Null,
+                Raw::Text(media_type.to_owned()),
+                suffix,
                 Raw::Bytes(vec![5; 20]),
             ])),
         )
@@ -6365,7 +6371,7 @@ mod tests {
         let key = encode_raw(&Raw::Int(7.into())).unwrap();
         let fields = encode_raw(&Raw::Array(vec![Raw::Bytes(vec![1, 2, 3])])).unwrap();
 
-        assert!(schema.validate_stored_row([9; 16], &key, &fields).is_ok());
+        assert!(schema.validate_stored_row([9; 16], &key, &fields).is_err());
         assert!(schema.validate_stored_row([8; 16], &key, &fields).is_err());
         assert!(
             schema
@@ -6391,7 +6397,7 @@ mod tests {
                 .is_err()
         );
 
-        let blob_reference = stored_blob_reference();
+        let blob_reference = stored_blob_reference("image/png", Raw::Null);
         let referenced_fields =
             encode_canonical_storage_value(&Raw::Array(vec![blob_reference])).unwrap();
         assert!(
@@ -6399,6 +6405,16 @@ mod tests {
                 .validate_stored_row([9; 16], &key, &referenced_fields)
                 .is_ok()
         );
+
+        for malformed_reference in [
+            stored_blob_reference("not a mime", Raw::Null),
+            stored_blob_reference("image/png", Raw::Text("PNG".into())),
+        ] {
+            let fields = encode_raw(&Raw::Array(vec![malformed_reference])).unwrap();
+            assert!(schema
+                .validate_stored_row([9; 16], &key, &fields)
+                .is_err());
+        }
     }
 
     #[test]
@@ -6412,7 +6428,7 @@ mod tests {
         ))
         .unwrap();
         let list_fields = encode_canonical_storage_value(&Raw::Array(vec![Raw::Array(vec![
-            stored_blob_reference(),
+            stored_blob_reference("image/png", Raw::Null),
         ])]))
         .unwrap();
         assert!(list_schema
@@ -6426,7 +6442,7 @@ mod tests {
         .unwrap();
         let option_fields = encode_canonical_storage_value(&Raw::Array(vec![Raw::Tag(
             60013,
-            Box::new(Raw::Array(vec![Raw::Int(1.into()), stored_blob_reference()])),
+                stored_blob_reference("image/png", Raw::Null),
         )]))
         .unwrap();
         assert!(option_schema
