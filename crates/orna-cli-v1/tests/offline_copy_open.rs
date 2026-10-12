@@ -121,19 +121,19 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     // Freeze the snapshot, then reconstruct it somewhere else entirely.
     let outside = TempDir::new().unwrap();
     let archive = outside.path().join("archive");
-    let source_snapshot = String::from_utf8(git_output(
-        directory.path(),
-        &["rev-parse", "HEAD"],
-        None,
-    ))
-    .unwrap()
-    .trim()
-    .to_owned();
+    let source_snapshot =
+        String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_owned();
     let manifest = export_complete_copy(&repository, &source_snapshot, &archive, &[])
         .expect("export the pinned snapshot");
     assert_eq!(manifest.snapshot, source_snapshot);
     assert_eq!(
-        manifest.members.first().map(|member| member.commit.as_str()),
+        manifest
+            .members
+            .first()
+            .map(|member| member.commit.as_str()),
         Some(source_snapshot.as_str()),
         "the selected source commit is the primary archived member"
     );
