@@ -1,5 +1,6 @@
 pub dim Information;
-pub unit MiB : Information base;
+pub unit B : Information base;
+pub unit MiB : Information = 1048576.B;
 
 pub table Media(id: Str) {
     payload: Blob,
