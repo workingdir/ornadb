@@ -21,7 +21,7 @@ use orna_repository_v1::{
     TypedKey,
 };
 use orna_runtime_v1::TableObjectId;
-use orna_value_v1::{BlobMetadata, ROV3_BLOB_TAG, Raw, Value};
+use orna_value_v1::{BlobMetadata, Raw, Value, ROV3_BLOB_TAG};
 
 use std::collections::BTreeMap;
 
@@ -511,7 +511,7 @@ pub(super) fn bare_ref_selector_is_ambiguous(
     Ok(matches > 1)
 }
 
-/// The payload-free content coordinate used to compare one logical field.
+/// The source-qualified value coordinate of one field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FieldContent {
     Value(Raw),
