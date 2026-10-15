@@ -131,11 +131,13 @@ fn parse_options(arguments: &[String]) -> Result<Mode, Diagnostic> {
                 archive: archive.clone(),
             })
         }
-        ([archive], true, Some(destination), false) if dependencies.is_empty() => Ok(Mode::Restore {
-            archive: archive.clone(),
-            destination,
-            worktree,
-        }),
+        ([archive], true, Some(destination), false) if dependencies.is_empty() => {
+            Ok(Mode::Restore {
+                archive: archive.clone(),
+                destination,
+                worktree,
+            })
+        }
         _ => Err(export_error("Export options do not name one mode", USAGE)),
     }
 }
