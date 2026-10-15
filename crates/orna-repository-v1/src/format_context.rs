@@ -1529,7 +1529,7 @@ mod graph_bridge_tests {
             "binding rejects a foreign source snapshot"
         );
 
-        let wrong_descriptor = descriptor_for_table(relation_id, "Str");
+        let wrong_descriptor = descriptor_for_table(relation_id, "Str", "Blob");
         assert_eq!(
             context.bind_committed_table(
                 "media",
@@ -1543,7 +1543,7 @@ mod graph_bridge_tests {
             "binding rejects a differing field type under the same table ID"
         );
         let other_id = [0xa2; 16];
-        let wrong_table_descriptor = descriptor_for_table(other_id, "Int");
+        let wrong_table_descriptor = descriptor_for_table(other_id, "Int", "Blob");
         assert_eq!(
             context.bind_committed_table(
                 "media",
@@ -1577,14 +1577,31 @@ mod graph_bridge_tests {
             .expect("admit fixture format context")
     }
 
-    fn descriptor_for_table(relation_id: [u8; 16], key_type: &str) -> SchemaDescriptor {
+    fn descriptor_for_table(
+        relation_id: [u8; 16],
+        key_type: &str,
+        payload_type: &str,
+    ) -> SchemaDescriptor {
+        descriptor_for_table_fields(
+            relation_id,
+            &[
+                ([0x11; 16], "id", key_type, 0),
+                ([0x22; 16], "payload", payload_type, 1),
+            ],
+        )
+    }
+
+    fn descriptor_for_table_fields(
+        relation_id: [u8; 16],
+        fields: &[([u8; 16], &str, &str, u8)],
+    ) -> SchemaDescriptor {
         let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
-        let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
+        let field = |(id, name, ty, role): &([u8; 16], &str, &str, u8)| {
             Raw::Array(vec![
-                uuid(id),
-                Raw::Text(name.to_owned()),
-                ty,
-                Raw::Int(role.into()),
+                uuid(*id),
+                Raw::Text((*name).to_owned()),
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text((*ty).to_owned())]),
+                Raw::Int((*role).into()),
                 Raw::Array(vec![Raw::Int(0.into())]),
             ])
         };
@@ -1594,30 +1611,48 @@ mod graph_bridge_tests {
             (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
             (
                 Raw::Int(3.into()),
-                Raw::Array(vec![
-                    field(
-                        [0x11; 16],
-                        "id",
-                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text(key_type.into())]),
-                        0,
-                    ),
-                    field(
-                        [0x22; 16],
-                        "payload",
-                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".into())]),
-                        1,
-                    ),
-                ]),
+                Raw::Array(fields.iter().map(field).collect()),
             ),
             (Raw::Int(4.into()), Raw::Array(Vec::new())),
         ]))
         .expect("valid stored schema descriptor")
     }
 
+    fn descriptor_for_table_with_caption(relation_id: [u8; 16]) -> SchemaDescriptor {
+        descriptor_for_table_fields(
+            relation_id,
+            &[
+                ([0x11; 16], "id", "Int", 0),
+                ([0x22; 16], "payload", "Blob", 1),
+                ([0x33; 16], "caption", "Str", 1),
+            ],
+        )
+    }
+
     fn seeded_table_binding(relation_id: [u8; 16]) -> (TempDir, SchemaDescriptor) {
+        seeded_table_binding_with_source(
+            relation_id,
+            include_str!("../tests/fixtures/committed-table-binding.orna"),
+            "Blob",
+        )
+    }
+
+    fn seeded_table_binding_with_source(
+        relation_id: [u8; 16],
+        source: &str,
+        payload_type: &str,
+    ) -> (TempDir, SchemaDescriptor) {
+        let descriptor = descriptor_for_table(relation_id, "Int", payload_type);
+        seeded_table_binding_with_descriptor(relation_id, source, descriptor)
+    }
+
+    fn seeded_table_binding_with_descriptor(
+        relation_id: [u8; 16],
+        source: &str,
+        descriptor: SchemaDescriptor,
+    ) -> (TempDir, SchemaDescriptor) {
         let directory = repository();
         let root = directory.path();
-        let source = include_str!("../tests/fixtures/committed-table-binding.orna");
         fs::write(root.join("main.orna"), "use media;\n").expect("write importing root module");
         fs::write(root.join("media.orna"), source).expect("write imported table module");
         commit(root);
@@ -1627,7 +1662,6 @@ mod graph_bridge_tests {
             .expect("pinned store root")
             .oid
             .algorithm();
-        let descriptor = descriptor_for_table(relation_id, "Int");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
         let schema_digest = Sha256::digest(&schema_bytes).into();
         let schema_oid = schema_descriptor_node(
@@ -1648,6 +1682,8 @@ mod graph_bridge_tests {
         install_rows_store(root, &initial, relation_id, &schema_oid, &primary_root, 0);
         (directory, descriptor)
     }
+
+
 
     fn write_git_object(
         directory: &Path,
@@ -2548,16 +2584,38 @@ mod graph_bridge_tests {
         overflow_bytes: &[u8],
         semantic_digest_override: Option<[u8; 32]>,
     ) -> ([u8; 16], [u8; 32]) {
+        let (schema_oid, schema_digest) = schema_node(directory, context);
+        install_overflow_row_store_with_schema(
+            directory,
+            context,
+            relation_id,
+            overflow_bytes,
+            semantic_digest_override,
+            schema_oid,
+            schema_digest,
+            None,
+        )
+    }
+
+    fn install_overflow_row_store_with_schema(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+        overflow_bytes: &[u8],
+        semantic_digest_override: Option<[u8; 32]>,
+        schema_oid: NativeOid,
+        schema_digest: [u8; 32],
+        dependency_root: Option<NativeOid>,
+    ) -> ([u8; 16], [u8; 32]) {
         let algorithm = context
             .validate_store_root()
             .expect("pinned format-3 store")
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
         let semantic_digest: [u8; 32] = Sha256::digest(overflow_bytes).into();
         let stored_digest = semantic_digest_override.unwrap_or(semantic_digest);
-        let chunk_oid = write_git_object(directory, algorithm, "blob", &overflow_bytes);
+        let chunk_oid = write_git_object(directory, algorithm, "blob", overflow_bytes);
         let byte_root = write_native_node(
             directory,
             algorithm,
@@ -2578,7 +2636,7 @@ mod graph_bridge_tests {
                 encoded_length: overflow_bytes.len() as u64,
                 semantic_digest: stored_digest,
                 byte_root,
-                dependency_root: None,
+                dependency_root,
             },
         );
         let mut overflow_value = Vec::new();
@@ -2615,8 +2673,7 @@ mod graph_bridge_tests {
                 }],
             },
         );
-        let store_root =
-            write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        let store_root = write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
         commit_store_root(directory, algorithm, &store_root);
         (relation_id, semantic_digest)
     }
@@ -3320,6 +3377,122 @@ mod graph_bridge_tests {
             Err(crate::native_graph::GraphError::ContentIdentityMismatch)
         ));
     }
+    #[test]
+    fn decode_admitted_overflow_row_fields_uses_five_tuple_schema_without_media_reads() {
+        let relation_id = [0x73; 16];
+        let source = "pub table Audio(id: Int) {\n    payload: Blob,\n    caption: Str,\n}\n";
+        let descriptor = descriptor_for_table_with_caption(relation_id);
+        let (directory, descriptor) =
+            seeded_table_binding_with_descriptor(relation_id, source, descriptor);
+        let root = directory.path();
+        let initial = context(root);
+        let seeded_rows = initial
+            .load_row_map(relation_id)
+            .expect("load seeded table");
+        let schema = seeded_rows.version().schema();
+        let graph = initial
+            .open_native_graph(&seeded_rows)
+            .expect("open source-bound table graph");
+        let write_scope = graph.open_read_scope().expect("open Blob capture scope");
+        let payload = b"source-bound Blob metadata";
+        let mut input = std::io::Cursor::new(payload.to_vec());
+        let candidate = graph
+            .capture_blob_candidate(&mut input, payload.len() as u64, &write_scope)
+            .expect("capture Blob content");
+        let pin = graph
+            .protect_captured_blob(candidate, &write_scope)
+            .expect("protect Blob content");
+        let blob = graph
+            .accept_protected_blob_pin_with_annotation(pin, "audio/mpeg", Some("mp3"))
+            .expect("create canonical ROV3 Blob value");
+        let identity = blob.content_identity();
+        let descriptor_oid = blob.descriptor_oid().clone();
+        let text = vec![b'x'; crate::row_store::ROW_INLINE_LIMIT + 1];
+
+        let mut encoded_fields = vec![0x82];
+        encoded_fields.extend_from_slice(blob.encoded_value());
+        cbor_head(&mut encoded_fields, 3, text.len() as u64);
+        encoded_fields.extend_from_slice(&text);
+
+        let mut semantic_fields = vec![0x82];
+        cbor_head(&mut semantic_fields, 6, 60112);
+        cbor_head(&mut semantic_fields, 4, 4);
+        cbor_head(&mut semantic_fields, 0, identity.length());
+        cbor_bytes(&mut semantic_fields, &identity.sha256());
+        cbor_head(&mut semantic_fields, 3, "audio/mpeg".len() as u64);
+        semantic_fields.extend_from_slice(b"audio/mpeg");
+        cbor_head(&mut semantic_fields, 3, 3);
+        semantic_fields.extend_from_slice(b"mp3");
+        cbor_head(&mut semantic_fields, 3, text.len() as u64);
+        semantic_fields.extend_from_slice(&text);
+        let semantic_digest = Sha256::digest(&semantic_fields).into();
+
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let dependency_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::DependencyIndex {
+                height: 0,
+                children: vec![descriptor_oid.clone()],
+            },
+        );
+        install_overflow_row_store_with_schema(
+            root,
+            &initial,
+            relation_id,
+            &encoded_fields,
+            Some(semantic_digest),
+            schema.schema_oid().clone(),
+            *schema.schema_digest(),
+            Some(dependency_root),
+        );
+
+        let pinned = context(root);
+        let snapshot = pinned.load_row_map(relation_id).expect("load row map");
+        let snapshot_id = pinned.snapshot_pin().snapshot_id();
+        let binding = pinned
+            .bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                &snapshot_id,
+                &descriptor,
+            )
+            .expect("bind the committed source table");
+        let graph = pinned.open_native_graph(&snapshot).expect("admit graph");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let row = graph
+            .lookup_row(&TypedKey::UInt(7), &scope)
+            .expect("read overflow row")
+            .expect("stored row");
+
+        let decoded = graph
+            .decode_admitted_row_fields(&row, &binding, &scope)
+            .expect("decode canonical overflow tuple against source schema");
+        assert_eq!(decoded.key(), &TypedKey::UInt(7));
+        assert_eq!(decoded.fields().len(), 2);
+        assert_eq!(decoded.fields()[0].field_id(), &[0x22; 16]);
+        let metadata = decoded.fields()[0]
+            .blob_metadata()
+            .expect("source field retains ROV3 Blob metadata");
+        assert_eq!(metadata.length(), identity.length());
+        assert_eq!(metadata.sha256(), identity.sha256());
+        assert_eq!(metadata.media_type(), "audio/mpeg");
+        assert_eq!(metadata.suffix(), Some("mp3"));
+        let value_descriptor_oid = orna_value_v1::NativeOid::from_bytes(descriptor_oid.as_bytes())
+            .expect("convert the stored descriptor OID");
+        assert_eq!(metadata.descriptor_oid(), Some(&value_descriptor_oid));
+        assert!(!metadata.is_hydrated());
+        assert_eq!(decoded.fields()[1].field_id(), &[0x33; 16]);
+        assert_eq!(decoded.canonical_fields(), encoded_fields);
+        assert_eq!(scope.payload_bytes_read(), 0);
+    }
+
     #[test]
     fn rejects_small_noncanonical_overflow_value() {
         let directory = repository();
