@@ -661,7 +661,7 @@ impl SystemApi {
             || self.enums.contains_key(name)
     }
 
-    pub(crate) fn field(&self, type_name: &str, field: &str) -> Option<&SystemType> {
+    pub(crate) fn record_fields(&self, type_name: &str) -> Option<&BTreeMap<String, SystemType>> {
         self.types
             .get(type_name)
             .map(|descriptor| &descriptor.fields)
@@ -669,8 +669,11 @@ impl SystemApi {
                 self.relations
                     .get(type_name)
                     .map(|descriptor| &descriptor.fields)
-            })?
-            .get(field)
+            })
+    }
+
+    pub(crate) fn field(&self, type_name: &str, field: &str) -> Option<&SystemType> {
+        self.record_fields(type_name)?.get(field)
     }
 
     pub(crate) fn type_parameters(&self, type_name: &str) -> Option<&[String]> {
