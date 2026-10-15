@@ -8668,6 +8668,52 @@ mod persisted_orp_tests {
             .expect("read captured source row")
             .expect("captured source row exists");
 
+        assert_eq!(old_row.version(), source_graph.row_snapshot.version());
+        crate::test_support::configure_fixture_git_identity(directory.path());
+        let revision_tree = encode_git_tree(vec![ParsedGitTreeEntry {
+            mode: b"40000".to_vec(),
+            name: b"descriptor".to_vec(),
+            oid: descriptor_oid.clone(),
+        }])
+        .expect("encode the source-history tree");
+        let revision_tree_oid = fixture_git_object(directory.path(), "tree", &revision_tree);
+        let revision_tree_hex = revision_tree_oid.to_hex();
+        let commit = Command::new("git")
+            .current_dir(directory.path())
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "commit-tree",
+                &revision_tree_hex,
+                "-m",
+                "captured row history",
+            ])
+            .output()
+            .expect("create source-history commit");
+        assert!(
+            commit.status.success(),
+            "commit-tree failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        let commit_oid = String::from_utf8(commit.stdout)
+            .expect("commit-tree prints UTF-8")
+            .trim()
+            .to_owned();
+        let update_head = Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-ref", "HEAD", &commit_oid])
+            .status()
+            .expect("set source-history commit as HEAD");
+        assert!(update_head.success());
+        let source_history = source_graph
+            .list_row_revisions(&old_row, "HEAD", 1, &source_scope)
+            .expect("traverse history for the source-admitted row");
+        assert_eq!(source_history.len(), 1);
+        assert_eq!(source_history[0].commit().to_hex(), commit_oid);
+        assert_eq!(source_history[0].tree(), &revision_tree_oid);
+        assert!(source_history[0].present());
+        assert_eq!(source_scope.payload_bytes_read(), 0);
+
         let later_snapshot_id = [0x40; 32];
         let later_store_root = source_graph
             .maintain_relation_rows(
@@ -8703,9 +8749,14 @@ mod persisted_orp_tests {
         )
         .expect("issue valid later-root graph");
         let later_scope = later_graph.open_read_scope().expect("later read scope");
+        assert_ne!(old_row.version(), later_graph.row_snapshot.version());
 
         assert!(matches!(
             later_graph.resolve_row_node(&old_row, &descriptor_oid, &later_scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert!(matches!(
+            later_graph.list_row_revisions(&old_row, "HEAD", 1, &later_scope),
             Err(GraphError::ContextMismatch)
         ));
         assert_eq!(later_scope.objects_read(), 0);
