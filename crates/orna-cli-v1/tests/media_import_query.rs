@@ -2154,10 +2154,10 @@ async fn source_admitted_query_decodes_inline_and_overflow_rows_without_payload_
         .unwrap();
     let manifest = ObjectIdentityManifest::read_committed(&repository, &selected_commit).unwrap();
     let payload_field_id = *manifest
-        .id(ObjectKind::Column, "Object.payload")
+        .id(ObjectKind::Field, "Object.payload")
         .expect("payload identity is committed");
     let content_field_id = *manifest
-        .id(ObjectKind::Column, "Object.content")
+        .id(ObjectKind::Field, "Object.content")
         .expect("content identity is committed");
     let row_map = selected_format.load_row_map(relation_id).unwrap();
     let graph = selected_format.open_native_graph(&row_map).unwrap();
