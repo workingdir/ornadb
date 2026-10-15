@@ -2465,6 +2465,9 @@ impl UnitFraction {
             numerator = -numerator;
             denominator = -denominator;
         }
+        if numerator.is_zero() {
+            return Some(Self { numerator, denominator: BigInt::one() });
+        }
         let mut left = numerator.abs();
         let mut right = denominator.clone();
         while !right.is_zero() {
@@ -25100,6 +25103,13 @@ mod tests {
         }];
         assert_eq!(mebibyte.scale.numerator, "1048576");
         assert_eq!(mebibyte.scale.denominator, "1");
+        assert_eq!(
+            mebibyte.dimension_basis.keys().next(),
+            Some(&SourceDimensionIdentity {
+                namespace: Namespace(vec!["units".into()]),
+                name: "Information".into(),
+            })
+        );
         assert_eq!(mebibyte.dimension_basis.len(), 1);
         assert_eq!(mebibyte.dimension_basis.values().copied().collect::<Vec<_>>(), [1]);
         assert_eq!(mebibyte.provenance.logical_path, "units/main.orna");
