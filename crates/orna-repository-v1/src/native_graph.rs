@@ -1266,6 +1266,15 @@ impl NativeGraphContext {
                 {
                     return Err(GraphError::NonCanonicalData);
                 }
+                let Some(CborValue::Text(media_type)) = fields.get(2) else {
+                    return Err(GraphError::NonCanonicalData);
+                };
+                let suffix = match fields.get(3) {
+                    Some(CborValue::Null) => None,
+                    Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
+                    _ => return Err(GraphError::NonCanonicalData),
+                };
+                validate_canonical_mime1_annotation(media_type, suffix)?;
                 Ok(CborValue::Tag(
                     60112,
                     Box::new(CborValue::Array(fields.into_iter().take(4).collect())),
@@ -9309,6 +9318,7 @@ fn collect_blob_value_fields(
                 Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
                 _ => return Err(GraphError::NonCanonicalData),
             };
+            validate_canonical_mime1_annotation(media_type, suffix)?;
             let mut digest_bytes = [0u8; 32];
             digest_bytes.copy_from_slice(digest);
             let identity = crate::blob_store::ContentIdentity::new(*length, digest_bytes)
@@ -9458,6 +9468,18 @@ fn collect_overflow_oids(
     Ok(())
 }
 
+fn validate_canonical_mime1_annotation(
+    media_type: &str,
+    suffix: Option<&str>,
+) -> Result<(), GraphError> {
+    let annotation =
+        MediaAnnotation::new(media_type, suffix).map_err(|_| GraphError::InvalidBlobAnnotation)?;
+    if annotation.media_type() != media_type || annotation.suffix() != suffix {
+        return Err(GraphError::InvalidBlobAnnotation);
+    }
+    Ok(())
+}
+
 pub(crate) fn row_fields_dependencies(value: &[u8]) -> Result<Vec<NativeDependency>, GraphError> {
     let parsed = decode_canonical_cbor(value)?;
     if !matches!(parsed, CborValue::Array(_) | CborValue::Tag(60113, _)) {
@@ -9494,6 +9516,15 @@ fn collect_row_dependencies(
             {
                 return Err(GraphError::NonCanonicalData);
             }
+            let Some(CborValue::Text(media_type)) = fields.get(2) else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            let suffix = match fields.get(3) {
+                Some(CborValue::Null) => None,
+                Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
+                _ => return Err(GraphError::NonCanonicalData),
+            };
+            validate_canonical_mime1_annotation(media_type, suffix)?;
             let CborValue::Bytes(oid_bytes) = fields.get(4).ok_or(GraphError::NonCanonicalData)?
             else {
                 return Err(GraphError::NonCanonicalData);
