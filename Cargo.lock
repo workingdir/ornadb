@@ -1425,6 +1425,7 @@ dependencies = [
 name = "orna-project-v1"
 version = "1.0.0"
 dependencies = [
+ "num-bigint",
  "orna-repository-v1",
  "orna-runtime-v1",
  "orna-semantic-v1",
