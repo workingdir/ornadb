@@ -131,7 +131,7 @@ fn parse_options(arguments: &[String]) -> Result<Mode, Diagnostic> {
                 archive: archive.clone(),
             })
         }
-        ([archive], true, Some(destination), false) => Ok(Mode::Restore {
+        ([archive], true, Some(destination), false) if dependencies.is_empty() => Ok(Mode::Restore {
             archive: archive.clone(),
             destination,
             worktree,
@@ -319,6 +319,17 @@ mod tests {
         // `--worktree` only means something for a reconstruction.
         assert!(parse_options(&words(&["out", "--at", "main", "--worktree"])).is_err());
         assert!(parse_options(&words(&["a", "b", "--restore", "c"])).is_err());
+        // `--dependency` only applies while exporting a snapshot.
+        assert!(
+            parse_options(&words(&[
+                "archive",
+                "--restore",
+                "out",
+                "--dependency",
+                "deps/std=/srv/std",
+            ]))
+            .is_err()
+        );
         // A selector needs a value, and one flag cannot carry two.
         assert!(parse_options(&words(&["out", "--at"])).is_err());
         assert!(parse_options(&words(&["out", "--at", ""])).is_err());
