@@ -22785,7 +22785,7 @@ fn infer_historical_member(
 fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
     let api = system_api::embedded_system_api();
     match base {
-        Type::Named(system_type) => api.field(system_type, name).map(descriptor_type),
+        Type::Named(system_type) => descriptor_member_type(system_type, name, &BTreeMap::new()),
         Type::Applied {
             base: system_type,
             arguments,
@@ -22799,11 +22799,86 @@ fn infer_system_member(base: &Type, name: &str) -> Option<Type> {
                 .cloned()
                 .zip(arguments.iter().cloned())
                 .collect::<BTreeMap<_, _>>();
-            api.field(system_type, name)
-                .and_then(|ty| substitute_generic_descriptor_type(ty, &substitutions))
+            descriptor_member_type(system_type, name, &substitutions)
         }
         _ => None,
     }
+}
+
+fn descriptor_member_type(
+    system_type: &str,
+    member: &str,
+    substitutions: &BTreeMap<String, Type>,
+) -> Option<Type> {
+    let field = system_api::embedded_system_api().field(system_type, member)?;
+    descriptor_type_with_records(field, substitutions, &mut BTreeSet::new())
+}
+
+fn descriptor_type_with_records(
+    ty: &system_api::SystemType,
+    substitutions: &BTreeMap<String, Type>,
+    expanding: &mut BTreeSet<String>,
+) -> Option<Type> {
+    match ty {
+        system_api::SystemType::Named(name) => {
+            if let Some(ty) = substitutions.get(name) {
+                return Some(ty.clone());
+            }
+            descriptor_relation_record_type(name, substitutions, expanding)
+                .or_else(|| Some(descriptor_type(ty)))
+        }
+        system_api::SystemType::Applied { base, arguments }
+            if matches!(base.as_str(), "Relation" | "Query") =>
+        {
+            Some(Type::Relation(Box::new(descriptor_type_with_records(
+                arguments.first()?,
+                substitutions,
+                expanding,
+            )?)))
+        }
+        system_api::SystemType::Applied { base, arguments } if base == "Stream" => {
+            Some(Type::Stream(Box::new(descriptor_type_with_records(
+                arguments.first()?,
+                substitutions,
+                expanding,
+            )?)))
+        }
+        system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
+            base: base.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| descriptor_type_with_records(argument, substitutions, expanding))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        system_api::SystemType::List(element) => Some(Type::List(Box::new(
+            descriptor_type_with_records(element, substitutions, expanding)?,
+        ))),
+        system_api::SystemType::Optional(element) => Some(Type::Optional(Box::new(
+            descriptor_type_with_records(element, substitutions, expanding)?,
+        ))),
+    }
+}
+
+fn descriptor_relation_record_type(
+    system_type: &str,
+    substitutions: &BTreeMap<String, Type>,
+    expanding: &mut BTreeSet<String>,
+) -> Option<Type> {
+    let fields = system_api::embedded_system_api().record_fields(system_type)?;
+    if fields.is_empty() || !expanding.insert(system_type.to_owned()) {
+        return None;
+    }
+    let fields = fields
+        .iter()
+        .map(|(name, ty)| {
+            Some((
+                name.clone(),
+                descriptor_type_with_records(ty, substitutions, expanding)?,
+            ))
+        })
+        .collect::<Option<BTreeMap<_, _>>>();
+    expanding.remove(system_type);
+    fields.map(Type::Record)
 }
 
 fn infer_text_member(base: &Type, name: &str) -> Option<Type> {
