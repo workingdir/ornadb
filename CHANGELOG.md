@@ -103,6 +103,9 @@ release gate has passed.
   annotation-default count and no-persistent-consumers choice. This preparation
   step does not convert legacy rows into a format-3 store or activate a writable
   format-3 repository.
+- Format-3 committed Blob rows require exact canonical MIME-1 media types and
+  suffixes. Readers reject noncanonical stored annotations instead of
+  normalizing them during metadata projection or SOV-3 conversion.
 - Product selection retains standard-library snapshots through `orna.std/9`.
   The pre-1.0 V10 `std/cli.orna` source and V9-to-V10 upgrade constructor are
   retired; a stored V10 revision can only be verified when supplied directly
