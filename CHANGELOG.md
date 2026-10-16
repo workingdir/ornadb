@@ -117,6 +117,9 @@ release gate has passed.
 - The CLI publication boundary resolves each frozen row against its committed
   source schema before staging files or writing a commit. Invalid or
   unresolvable rows fail closed while preserving the pending range.
+- `orna history <relation> --diff <from> <to>` decodes source-owned Object row
+  fields against each endpoint's committed schema and compares stored Blob
+  annotations without fetching payloads.
 - Product selection retains standard-library snapshots through `orna.std/9`.
   The pre-1.0 V10 `std/cli.orna` source and V9-to-V10 upgrade constructor are
   retired; a stored V10 revision can only be verified when supplied directly
