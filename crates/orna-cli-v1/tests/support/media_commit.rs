@@ -32,7 +32,26 @@ pub async fn commit_capture(
 ) {
     commit_capture_inner(
         repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
-        true,
+        "media", true, true,
+    )
+    .await;
+}
+
+pub async fn commit_capture_for_table(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    table_name: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+) {
+    commit_capture_inner(
+        repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
+        table_name, true, false,
     )
     .await;
 }
@@ -52,7 +71,7 @@ pub async fn commit_capture_pending(
 ) {
     commit_capture_inner(
         repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
-        false,
+        "media", false, true,
     )
     .await;
 }
@@ -67,20 +86,10 @@ async fn commit_capture_inner(
     ordinal: u8,
     insert_only: bool,
     relation_id: [u8; 16],
+    table_name: &str,
     publish: bool,
+    source_admission: bool,
 ) {
-    let logical_path = format!("media/{key}.orna");
-    let commit = repository.head().unwrap().unwrap();
-    let loader = ProjectLoader::default();
-    let project = loader
-        .load_committed_snapshot(repository, &commit)
-        .expect("load the committed media project");
-    let schema = loader
-        .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
-        .expect("resolve the media table from its committed identity manifest");
-    let source = format!("{{ content: {expression}, }}\n");
-    let format_context = current_format3_context(repository);
-
     let request_identity = RequestIdentity {
         session_id: [ordinal; 16],
         request_id: [ordinal + 1; 16],
@@ -109,37 +118,72 @@ async fn commit_capture_inner(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let admitted = admit_source_row(
-        &project,
-        &logical_path,
-        &source,
-        &schema,
-        &format_context,
-        vec![("content".to_owned(), binding)],
-        [ordinal + 3; 16],
-    )
-    .expect("admit a source-owned media row with its Blob binding");
-    let (source_mutation, source_bindings, _) = admitted.into_mutation_and_bindings();
-    let mutation = if insert_only {
-        let mut mutation = TableMutation::insert(
-            source_mutation.id(),
-            source_mutation.table().to_owned(),
-            source_mutation.key().to_vec(),
-            source_mutation
-                .value()
-                .expect("an admitted media row has stored fields")
-                .to_vec(),
+    let mutation = if source_admission {
+        let logical_path = format!("{table_name}/{key}.orna");
+        let commit = repository.head().unwrap().unwrap();
+        let loader = ProjectLoader::default();
+        let project = loader
+            .load_committed_snapshot(repository, &commit)
+            .expect("load the committed media project");
+        let schema = loader
+            .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
+            .expect("resolve the media table from its committed identity manifest");
+        let source = format!("{{ content: {expression}, }}\n");
+        let format_context = current_format3_context(repository);
+        let admitted = admit_source_row(
+            &project,
+            &logical_path,
+            &source,
+            &schema,
+            &format_context,
+            vec![("content".to_owned(), binding)],
+            [ordinal + 3; 16],
         )
-        .unwrap()
-        .with_table_object_id(TableObjectId::new(relation_id));
-        for binding in &source_bindings {
-            mutation = mutation
-                .with_protected_content_pin(binding.pin())
-                .expect("retain the admitted Blob pin");
+        .expect("admit a source-owned media row with its Blob binding");
+        let (source_mutation, source_bindings, _) = admitted.into_mutation_and_bindings();
+        if insert_only {
+            let mut mutation = TableMutation::insert(
+                source_mutation.id(),
+                source_mutation.table().to_owned(),
+                source_mutation.key().to_vec(),
+                source_mutation
+                    .value()
+                    .expect("an admitted media row has stored fields")
+                    .to_vec(),
+            )
+            .unwrap()
+            .with_table_object_id(TableObjectId::new(relation_id));
+            for binding in &source_bindings {
+                mutation = mutation
+                    .with_protected_content_pin(binding.pin())
+                    .expect("retain the admitted Blob pin");
+            }
+            mutation
+        } else {
+            source_mutation
         }
-        mutation
     } else {
-        source_mutation
+        let row = Vec::new();
+        let mutation = if insert_only {
+            TableMutation::insert(
+                [ordinal + 3; 16],
+                table_name,
+                key.as_bytes().to_vec(),
+                row,
+            )
+        } else {
+            TableMutation::new(
+                [ordinal + 3; 16],
+                table_name,
+                key.as_bytes().to_vec(),
+                Some(row),
+            )
+        }
+        .unwrap()
+        .with_table_object_id(TableObjectId::new(relation_id))
+        .with_orp_blob_binding(binding)
+        .unwrap();
+        mutation
     };
     let committed = state
         .commit_table_request_activation(
@@ -187,11 +231,11 @@ pub async fn commit_source_captures(
     let mut retained_sources = Vec::with_capacity(captures.len());
     for (expression, key, ordinal) in captures {
         let logical_path = format!("Object/{key}.orna");
-        let row = project
-            .loose_rows()
-            .iter()
-            .find(|row| row.logical_path() == logical_path)
+        let row_source = repository
+            .read_committed_file(&commit, &logical_path, 1 << 20)
             .expect("the committed project contains this source Object row");
+        let row_source = std::str::from_utf8(&row_source)
+            .expect("the committed source Object row is valid UTF-8");
         let value = evaluate_expression_ovb2_with_effects(
             expression,
             &Default::default(),
@@ -204,8 +248,8 @@ pub async fn commit_source_captures(
             .expect("accept the captured Blob for this row");
         let admitted = admit_source_row_with_owner_fields(
             &project,
-            row.logical_path(),
-            row.source(),
+            &logical_path,
+            row_source,
             &schema,
             format_context,
             vec![("payload".to_owned(), blob_binding)],
