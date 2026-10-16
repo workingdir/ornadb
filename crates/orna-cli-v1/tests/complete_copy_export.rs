@@ -166,40 +166,6 @@ const IMPORT_FIXTURE: &str = concat!(
 );
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
-/// The identity `orna publish` derives for a repository: the metadata's
-/// database id with a rotated-and-salted repository id, and the concatenation
-/// of both as the initial digest. This is `cli_publish`'s own derivation (see
-/// `cli_publish.rs::runtime_identity`), so the harness must open the runtime
-/// under exactly this identity or `orna publish` reports a runtime for a
-/// repository it cannot see.
-fn cli_runtime_identity(
-    repository: &orna_repository_v1::Repository,
-) -> (orna_runtime_v1::RuntimeIdentity, [u8; 32]) {
-    let metadata = orna_repository_v1::inspect_metadata(repository)
-        .unwrap()
-        .expect("the fixture records repository metadata");
-    let database_id = *metadata.database_id().as_bytes();
-    let mut repository_id = database_id;
-    for (index, byte) in repository_id.iter_mut().enumerate() {
-        let rotation = u32::try_from(index % 7 + 1).unwrap();
-        let salt = u8::try_from(index).unwrap();
-        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
-    }
-    if repository_id == [0; 16] {
-        repository_id[0] = 1;
-    }
-    let mut initial_digest = [0; 32];
-    initial_digest[..16].copy_from_slice(&database_id);
-    initial_digest[16..].copy_from_slice(&repository_id);
-    (
-        orna_runtime_v1::RuntimeIdentity {
-            database_id,
-            repository_id,
-        },
-        initial_digest,
-    )
-}
-
 /// Reads every committed row through the ordinary repository reader, exactly
 /// as a query does.
 fn committed_rows(
@@ -632,7 +598,7 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
     let expression = fixture
         .trim_end()
         .replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
-    media_commit::commit_capture(
+    media_commit::commit_capture_pending(
         &repository,
         &state,
         writer,
@@ -641,6 +607,7 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
         "image",
         0xb0,
         true,
+        relation_id,
     )
     .await;
     drop(bindings);
