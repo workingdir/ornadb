@@ -82,6 +82,11 @@ pub(super) enum Command {
         mountpoint: PathBuf,
         selector: String,
     },
+    /// mount DIR --cwd: read-only view of the current committed workspace.
+    MountCwd {
+        mountpoint: PathBuf,
+    },
+
     /// `mount status [--json]`: the attached read-only views.
     MountStatus {
         json: bool,
@@ -414,6 +419,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             } else {
                 let mountpoint = PathBuf::from(first);
                 let mut selector = None;
+                let mut cwd = false;
                 while let Some(option) = words.next() {
                     match option {
                         "--at" => {
@@ -424,7 +430,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                                     "supply a commit or ref that resolves to one snapshot",
                                 )
                             })?;
-                            if selector.is_some() {
+                            if selector.is_some() || cwd {
                                 return Err(Diagnostic::usage(
                                     "E1001",
                                     "`mount` names one snapshot",
@@ -433,14 +439,15 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                             }
                             selector = Some(value.to_owned());
                         }
-                        // `--cwd` is the writable workspace view; this slice
-                        // implements the always-read-only `--at` view only.
-                        "--cwd" | "--read-only" => {
-                            return Err(Diagnostic::usage(
-                                "E1002",
-                                "`mount --cwd` is not implemented",
-                                "use `mount DIR --at SELECTOR`, which is always read-only",
-                            ));
+                        "--cwd" => {
+                            if cwd || selector.is_some() {
+                                return Err(Diagnostic::usage(
+                                    "E1001",
+                                    "mount accepts exactly one view mode",
+                                    "use mount DIR --cwd or mount DIR --at SELECTOR",
+                                ));
+                            }
+                            cwd = true;
                         }
                         _ => {
                             return Err(Diagnostic::usage(
@@ -451,16 +458,20 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                         }
                     }
                 }
-                let selector = selector.ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`mount` needs a snapshot selector",
-                        "use `mount DIR --at SELECTOR`; exactly one selector is required",
-                    )
-                })?;
-                Command::Mount {
-                    mountpoint,
-                    selector,
+                if cwd {
+                    Command::MountCwd { mountpoint }
+                } else {
+                    let selector = selector.ok_or_else(|| {
+                        Diagnostic::usage(
+                            "E1001",
+                            "mount needs a view mode",
+                            "use mount DIR --cwd or mount DIR --at SELECTOR",
+                        )
+                    })?;
+                    Command::Mount {
+                        mountpoint,
+                        selector,
+                    }
                 }
             }
         }

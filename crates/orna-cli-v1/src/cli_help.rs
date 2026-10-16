@@ -21,6 +21,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  push [REMOTE] [BRANCH]        publish the branch with its continuity refs",
     "  push exit status: 0 pushed; 1 repository, remote, or continuity conflict",
     "  serve [--port PORT]",
+    "  mount DIR --cwd              read-only view of the current committed workspace",
     "  mount DIR --at SELECTOR       read-only view of one resolved snapshot",
     "  mount status [--json]         report attached read-only views",
     "  unmount DIR                   release a view's record",
