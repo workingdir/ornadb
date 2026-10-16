@@ -316,7 +316,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     for (key, expected_payload) in &expected_payloads {
         let scope = graph.open_read_scope().expect("open pinned read scope");
         let row = graph
-            .lookup_row(&TypedKey::Bytes(key.as_bytes().to_vec()), &scope)
+            .lookup_row(&TypedKey::Text((*key).to_owned()), &scope)
             .expect("look up captured row")
             .expect("captured media row exists");
         let dependency = row
