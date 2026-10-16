@@ -77,6 +77,7 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
         "song",
         0x80,
         true,
+        relation_id,
     )
     .await;
     commit_capture(
@@ -88,6 +89,7 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
         "image",
         0x90,
         true,
+        relation_id,
     )
     .await;
 
@@ -142,6 +144,7 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
         "song",
         0xa0,
         false,
+        relation_id,
     )
     .await;
     commit_capture(
@@ -153,6 +156,7 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
         "image",
         0xb0,
         false,
+        relation_id,
     )
     .await;
 

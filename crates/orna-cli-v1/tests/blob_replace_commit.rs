@@ -142,6 +142,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
         "image",
         0xb0,
         true,
+        relation_id,
     )
     .await;
 
@@ -166,6 +167,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
         "image",
         0xc0,
         false,
+        relation_id,
     )
     .await;
     let after = state.committed_table_rows("media").await.unwrap();
@@ -278,6 +280,7 @@ async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
         "image",
         0xb0,
         true,
+        relation_id,
     )
     .await;
     commit_capture(
@@ -289,6 +292,7 @@ async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
         "clip",
         0xb4,
         true,
+        relation_id,
     )
     .await;
 
@@ -311,6 +315,7 @@ async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
         "image",
         0xc0,
         false,
+        relation_id,
     )
     .await;
     let after = state.committed_table_rows("media").await.unwrap();
