@@ -56,7 +56,7 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let head_before = git_head(root);
 
     let input = format!(
-        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64); let audio = sys.blob.annotate(raw, \"audio/mpeg\"); main.add(\"london\", \"Live in London\", audio);",
+        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", max_bytes: 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add(\"london\", \"Live in London\", audio)",
         root = root.to_string_lossy().as_ref(),
     );
     let output = run_repl(root, &input);
@@ -77,7 +77,7 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
         .committed_table_row("media", b"london")
         .await
         .expect("read the durable row after restart")
-        .expect("the captured row is durable");
+        .unwrap_or_else(|| panic!("the captured row is durable; REPL output: {stdout}"));
     let format = repository
         .open_format_context()
         .expect("open committed format-3 context");

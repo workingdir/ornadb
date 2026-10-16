@@ -63,10 +63,14 @@ release gate has passed.
 - The CLI exposes function invocation, a bounded local function-backed REPL
   route, daemon/server administration, runtime description, source
   check/diff/apply, raw calls, USER state, inspection, and security
-  administration. The local REPL route does not establish engine execution for
-  the canonical `ORNA-REPL-001..006` requirements. `--explain`, argument
-  files, canonical output, JSON/table/CSV presenters, and bounded invocation
-  tracing are implemented where the selected route supports them.
+  administration. A local format-3 REPL with writable, identity-admitted source
+  matching `HEAD` can commit a Blob capture and its source-row table insert as
+  one durable runtime transaction without publishing a Git commit. Other
+  effectful REPL submissions fail closed when matching format-3 transaction
+  authority is unavailable. This does not establish engine
+  execution for the canonical `ORNA-REPL-001..006` requirements. `--explain`,
+  argument files, canonical output, JSON/table/CSV presenters, and bounded
+  invocation tracing are implemented where the selected route supports them.
 - USER state is principal-scoped and typed. Local peer authentication supplies
   the principal; optimistic revision conflicts and invalid expected types fail
   closed. State values use the canonical ORV5 value representation.
