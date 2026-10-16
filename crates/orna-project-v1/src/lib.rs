@@ -517,11 +517,10 @@ fn admit_source_row_with_owner_fields_inner(
     {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
-    let owner_field_names = owner_field_values
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
-    let lowered = lower_row_unit_with_owner_fields(&analysis, &input, &owner_field_names)
+    let owner_field_names = owner_field_values.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+    let mut reserved_field_names = blob_bindings.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+    reserved_field_names.extend(owner_field_names.iter().cloned());
+    let lowered = lower_row_unit_with_owner_fields(&analysis, &input, &reserved_field_names)
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     if lowered.owner != table_path {
         return Err(ProjectLoadError::InvalidSourceRow);
@@ -555,18 +554,24 @@ fn admit_source_row_with_owner_fields_inner(
     let mut retained_bindings = Vec::new();
     for field in fields.iter().filter(|field| field.role == 1) {
         if field.is_blob {
-            if lowered.fields.contains_key(&field.name)
-                || pending_owner_fields.contains_key(&field.name)
-            {
+            if pending_owner_fields.contains_key(&field.name) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
-            let binding = pending_bindings
-                .remove(&field.id)
-                .ok_or(ProjectLoadError::InvalidSourceRow)?;
+            let Some(binding) = pending_bindings.remove(&field.id) else {
+                if field.is_optional_blob
+                    && lowered.fields.get(&field.name) == Some(&Raw::Null)
+                {
+                    stored_fields.push(Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))));
+                    continue;
+                }
+                return Err(ProjectLoadError::InvalidSourceRow);
+            };
+            if lowered.fields.contains_key(&field.name) {
+                return Err(ProjectLoadError::InvalidSourceRow);
+            }
             let encoded_value = binding.encoded_value().to_vec();
-            let decoded =
-                ContextValue::decode_in_context(&encoded_value, ValueFormat::Rov3, context)
-                    .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+            let decoded = ContextValue::decode_in_context(&encoded_value, ValueFormat::Rov3, context)
+                .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
             if !matches!(decoded.raw(), Raw::Tag(ROV3_BLOB_TAG, _)) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
@@ -595,9 +600,13 @@ fn admit_source_row_with_owner_fields_inner(
         return Err(ProjectLoadError::InvalidSourceRow);
     }
 
-    let canonical_fields = Value::new(Raw::Array(stored_fields))
-        .and_then(|value| value.encode())
-        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    let canonical_fields = ContextValue::new_in_context(
+        context,
+        ValueFormat::Rov3,
+        Raw::Array(stored_fields),
+    )
+    .and_then(|value| value.encode())
+    .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     schema
         .descriptor()
         .validate_stored_row(
@@ -636,6 +645,23 @@ struct SourceSchemaField {
     name: String,
     role: u64,
     is_blob: bool,
+    is_optional_blob: bool,
+}
+
+fn source_schema_blob_optional(ty: &Raw) -> Option<bool> {
+    let Raw::Array(parts) = ty else { return None; };
+    match parts.as_slice() {
+        [Raw::Int(kind), Raw::Text(name)]
+            if kind.to_string() == "0"
+                && matches!(name.as_str(), "Blob" | "std.BINARY_LARGE_OBJECT") =>
+        {
+            Some(false)
+        }
+        [Raw::Int(kind), inner] if kind.to_string() == "2" => {
+            source_schema_blob_optional(inner).map(|_| true)
+        }
+        _ => None,
+    }
 }
 
 fn source_schema_fields(
@@ -661,10 +687,16 @@ fn source_schema_fields(
         if !ids.insert(id) || !names.insert(name.clone()) {
             return Err(ProjectLoadError::InvalidSourceRow);
         }
-        let is_blob = matches!(ty, Raw::Array(parts) if matches!(parts.as_slice(), [Raw::Int(kind), Raw::Text(name)] if kind.to_string() == "0" && name == "Blob"));
+        let blob_optional = source_schema_blob_optional(ty);
         let role = role.to_string().parse::<u64>().map_err(|_| ProjectLoadError::InvalidSourceRow)?;
         if role > 1 { return Err(ProjectLoadError::InvalidSourceRow); }
-        fields.push(SourceSchemaField { id, name: name.clone(), role, is_blob });
+        fields.push(SourceSchemaField {
+            id,
+            name: name.clone(),
+            role,
+            is_blob: blob_optional.is_some(),
+            is_optional_blob: blob_optional == Some(true),
+        });
     }
     Ok((table_id, fields))
 }
