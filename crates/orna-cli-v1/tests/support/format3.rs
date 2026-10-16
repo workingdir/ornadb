@@ -196,7 +196,14 @@ pub fn capture_failure(
 }
 
 pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
-    format3_repository(include_str!("../fixtures/media/empty-media-main.orna"))
+    let (directory, repository, relation_id) =
+        format3_repository(include_str!("../fixtures/media/empty-media-main.orna"));
+    let row = directory.path().join("media/1.orna");
+    std::fs::create_dir_all(row.parent().unwrap()).unwrap();
+    std::fs::write(row, "{}").unwrap();
+    git(directory.path(), &["add", "--all"]);
+    git(directory.path(), &["commit", "--quiet", "-m", "add committed media row"]);
+    (directory, repository, relation_id)
 }
 
 /// Creates an Object project, its canonical identity manifest, source rows, and
