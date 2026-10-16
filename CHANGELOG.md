@@ -114,6 +114,9 @@ release gate has passed.
   admitted with. The candidate metadata lookup rejects a row whose spelling is
   not canonical MIME-1, or that differs from the admitted pair, so a transfer
   record cannot report an annotation the pin never admitted.
+- The CLI publication boundary resolves each frozen row against its committed
+  source schema before staging files or writing a commit. Invalid or
+  unresolvable rows fail closed while preserving the pending range.
 - Product selection retains standard-library snapshots through `orna.std/9`.
   The pre-1.0 V10 `std/cli.orna` source and V9-to-V10 upgrade constructor are
   retired; a stored V10 revision can only be verified when supplied directly
