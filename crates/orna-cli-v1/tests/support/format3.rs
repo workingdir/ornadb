@@ -163,6 +163,13 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
 }
 
 pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16]) {
+    format3_repository_for_table(media_source, "media")
+}
+
+pub fn format3_repository_for_table(
+    media_source: &str,
+    table_name: &str,
+) -> (TempDir, Repository, [u8; 16]) {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
     git(root, &["init", "--quiet"]);
@@ -179,7 +186,7 @@ pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16])
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
     let manifest_bytes = identities.encode().unwrap();
     let table = identities
-        .source_table_schema(&analysis, "", "main.orna", "media")
+        .source_table_schema(&analysis, "", "main.orna", table_name)
         .unwrap();
     let relation_id = *table.table_object_id();
     let schema_source = table.descriptor().encode().unwrap();
