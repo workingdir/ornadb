@@ -1347,11 +1347,27 @@ fn project_runtime_mutation(
                 eprintln!("projection: decode ROV3 row relation={relation_id:?}: {error:?}");
                 Error::RepositoryUnavailable
             })?;
-            let Raw::Array(_) = decoded.raw() else {
-                eprintln!("projection: ROV3 row is not an array relation={relation_id:?}");
-                return Err(Error::RepositoryUnavailable);
-            };
-            let fields = bytes.to_vec();
+            let fields = if schema
+                .descriptor
+                .validate_stored_row(relation_id, row_key, bytes)
+                .is_ok()
+            {
+                bytes.to_vec()
+             } else if schema.stored_field_count == 1 {
+                 let fields = ContextValue::new_in_context(
+                     value_context,
+                     ValueFormat::Rov3,
+                     Raw::Array(vec![decoded.raw().clone()]),
+                 )
+                 .and_then(|value| value.encode())
+                 .map_err(|error| {
+                     eprintln!("projection: encode single stored field relation={relation_id:?}: {error:?}");
+                     Error::RepositoryUnavailable
+                 })?;
+                 fields
+             } else {
+                bytes.to_vec()
+             };
             schema
                 .descriptor
                 .validate_stored_row(relation_id, row_key, &fields)
