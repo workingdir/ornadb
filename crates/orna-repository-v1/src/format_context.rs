@@ -1869,7 +1869,7 @@ mod graph_bridge_tests {
         }
 
         let writing = context(directory);
-        let (schema_oid, schema_digest) = schema_node(directory, &writing);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, &writing, relation_id);
         let snapshot = writing
             .load_row_map(relation_id)
             .expect("load the seeded row-map identity");
@@ -2063,7 +2063,7 @@ mod graph_bridge_tests {
             .expect("accept the annotated Blob binding");
         let descriptor = binding.descriptor_oid().clone();
 
-        let (schema_oid, schema_digest) = schema_node(root, &seeding);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &seeding, relation_id);
         let algorithm = seeding
             .validate_store_root()
             .expect("pinned store root")
@@ -2242,7 +2242,7 @@ mod graph_bridge_tests {
         let seeded = context(root);
         install_overflow_row_store(root, &seeded, fanout_relation, None);
         let ready = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &ready);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &ready, fanout_relation);
         let algorithm = ready
             .validate_store_root()
             .expect("pinned store root")
@@ -2275,7 +2275,7 @@ mod graph_bridge_tests {
         let seeded = context(root);
         install_overflow_row_store(root, &seeded, domain_relation, None);
         let ready = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &ready);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &ready, domain_relation);
         let algorithm = ready
             .validate_store_root()
             .expect("pinned store root")
@@ -2312,7 +2312,7 @@ mod graph_bridge_tests {
         let seeded = context(root);
         install_overflow_row_store(root, &seeded, count_relation, None);
         let ready = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &ready);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &ready, count_relation);
         let algorithm = ready
             .validate_store_root()
             .expect("pinned store root")
@@ -2618,22 +2618,21 @@ mod graph_bridge_tests {
         schema_oid
     }
 
-    fn schema_node(directory: &Path, context: &RepositoryFormatContext) -> (NativeOid, [u8; 32]) {
-        let algorithm = context
-            .validate_schema_root()
-            .expect("pinned source schema root")
-            .oid
-            .algorithm();
-        let schema_bytes = MAIN_SOURCE.as_bytes();
-        let schema_digest: [u8; 32] = Sha256::digest(schema_bytes).into();
-        let schema_oid = schema_descriptor_node(
-            directory,
-            algorithm,
-            schema_bytes,
-            schema_bytes.len() as u64,
-            schema_digest,
-        );
-        (schema_oid, schema_digest)
+    fn graph_bridge_test_relation_id(context: &RepositoryFormatContext) -> [u8; 16] {
+        let database_id = context.require_database_id().expect("database identity");
+        let mut relation_hash = Sha256::new();
+        relation_hash.update(b"orna.test.graph-bridge.relation.v1\0");
+        relation_hash.update(database_id.as_bytes());
+        let relation_digest = relation_hash.finalize();
+        let mut relation_id = [0u8; 16];
+        relation_id.copy_from_slice(&relation_digest[..16]);
+        relation_id
+    }
+    fn schema_node(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+    ) -> (NativeOid, [u8; 32]) {
+        schema_node_for_relation(directory, context, graph_bridge_test_relation_id(context))
     }
 
     fn schema_node_for_relation(
@@ -2934,12 +2933,7 @@ mod graph_bridge_tests {
         let database_id = context.require_database_id().expect("database identity");
         let store = context.validate_store_root().expect("pinned store root");
 
-        let mut relation_hash = Sha256::new();
-        relation_hash.update(b"orna.test.graph-bridge.relation.v1\0");
-        relation_hash.update(database_id.as_bytes());
-        let relation_digest = relation_hash.finalize();
-        let mut relation_id = [0u8; 16];
-        relation_id.copy_from_slice(&relation_digest[..16]);
+        let relation_id = graph_bridge_test_relation_id(context);
 
         let schema_generation = SchemaGeneration::issue(
             *database_id.as_bytes(),
@@ -2959,10 +2953,17 @@ mod graph_bridge_tests {
         )
         .expect("consistent row-map identity");
 
+        let snapshot_id = context.snapshot.snapshot_id();
+        let row_count = version.row_count().expect("sealed fixture row count");
         let mut authority = Sha256::new();
-        authority.update(b"orna.test.graph-bridge.row-authority.v1\0");
-        authority.update(context.snapshot.commit.as_str().as_bytes());
+        authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
         authority.update(database_id.as_bytes());
+        authority.update(snapshot_id);
+        authority.update(store.oid.as_bytes());
+        authority.update(relation_id);
+        authority.update(version.primary_root().as_bytes());
+        authority.update(schema_digest);
+        authority.update(row_count.to_be_bytes());
         RowMapSnapshot::issue(version, authority.finalize().into(), Vec::new())
             .expect("seal row-map snapshot")
     }
@@ -4129,7 +4130,7 @@ mod graph_bridge_tests {
         install_overflow_row_store(root, &initial, relation_id, None);
 
         let writing_context = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &writing_context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &writing_context, relation_id);
         let snapshot = writing_context
             .load_row_map(relation_id)
             .expect("load the committed row-map identity");
@@ -4444,7 +4445,7 @@ mod graph_bridge_tests {
         install_overflow_row_store(root, &initial, relation_id, None);
 
         let writing_context = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &writing_context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &writing_context, relation_id);
         let snapshot = writing_context
             .load_row_map(relation_id)
             .expect("load the committed row-map identity");
