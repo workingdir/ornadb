@@ -850,11 +850,17 @@ pub struct FrozenBatch {
     pub id: MutationId,
     pub mutations: Vec<LooseMutation>,
     pub watermark: u64,
+    // The loose candidate stores opaque row bytes; retain protected transfer
+    // evidence beside them until runtime completion consumes the frozen prefix.
+    protected_source_mutations: Vec<TableMutation>,
 }
 
 impl FrozenBatch {
     /// Enforces the complete staging gate before any materialisation can begin.
-    pub fn new(
+    ///
+    /// It stays private so public publication can only start from a
+    /// runtime-issued freeze lowered by `prepare`.
+    fn new(
         id: MutationId,
         mutations: Vec<LooseMutation>,
         watermark: u64,
@@ -879,6 +885,7 @@ impl FrozenBatch {
             id,
             mutations,
             watermark,
+            protected_source_mutations: Vec::new(),
         })
     }
 }
@@ -1148,8 +1155,8 @@ pub fn build_private_publication_candidate(
 }
 
 /// Converts the runtime's validated typed table prefix into the loose-row
-/// representation. Key decoding remains schema-owned: this function refuses
-/// to invent path components for an opaque runtime key.
+/// representation without decoding or narrowing row values. Key decoding
+/// remains schema-owned: this function refuses to invent paths for opaque keys.
 pub fn lower_runtime_table_mutations(
     freeze: &PublicationFreeze,
     mutations: &[TableMutation],
@@ -1162,6 +1169,9 @@ pub fn lower_runtime_table_mutations(
 
 /// Converts the runtime's validated typed table prefix into the loose-row
 /// representation, reporting a prefix with no visible change as `None`.
+///
+/// Row values remain opaque and byte-exact. Graph-issued pin owners carried by
+/// the frozen prefix stay attached through publication completion.
 ///
 /// Lowering still refuses an empty prefix, because an empty freeze is not a
 /// publication. A prefix whose every row folds to the bytes already committed
@@ -1223,7 +1233,13 @@ pub fn lower_runtime_table_mutations_allow_empty(
         // frozen intent has no visible change to publish.
         return Ok(None);
     }
-    FrozenBatch::new(batch_id, visible, freeze.checkpoint.mutation_sequence).map(Some)
+    let mut batch = FrozenBatch::new(batch_id, visible, freeze.checkpoint.mutation_sequence)?;
+    batch.protected_source_mutations = mutations
+        .iter()
+        .filter(|mutation| !mutation.protected_content_transfers().is_empty())
+        .cloned()
+        .collect();
+    Ok(Some(batch))
 }
 
 /// A prepared, runtime-bound publication. Preparation creates only private
@@ -1234,8 +1250,10 @@ pub struct RuntimePublicationCoordinator {
     expected_index: IndexGeneration,
     candidate: PrivateCommit,
     journal: PublicationJournal,
+    // Retain protected transfer evidence across publication until both runtime
+    // and journal completion have succeeded.
+    protected_source_mutations: Vec<TableMutation>,
 }
-
 /// The committed snapshot and pending-mutation window a logical compact reader
 /// must use for one observation.  The two choices deliberately make the
 /// publication boundary explicit: the frozen prefix is read either from the
@@ -1472,10 +1490,10 @@ impl RuntimePublicationCoordinator {
         .await
     }
 
-    /// Reads the exact typed prefix named by `freeze`, then prepares its
-    /// canonical loose-row candidate. The resolver is the schema boundary for
-    /// turning a typed table key into representable path components.
-    pub async fn prepare_from_runtime(
+    /// Prepares the exact prefix issued by `runtime` as a canonical loose-row
+    /// candidate. Protected source mutations are retained from that prefix
+    /// before any repository candidate is written.
+    pub async fn prepare(
         repository: &Repository,
         runtime: &RuntimeState,
         expected_head: &GitCommitRef,
@@ -1484,7 +1502,7 @@ impl RuntimePublicationCoordinator {
         path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
         message: &str,
     ) -> Result<Self, Error> {
-        Self::prepare_from_runtime_allow_noop(
+        Self::prepare_allow_noop(
             repository,
             runtime,
             expected_head,
@@ -1504,7 +1522,7 @@ impl RuntimePublicationCoordinator {
     /// change, so there is no publication to prepare. The caller completes the
     /// frozen intent without a commit; a save that changed nothing stays
     /// successful instead of failing on the empty batch.
-    pub async fn prepare_from_runtime_allow_noop(
+    pub async fn prepare_allow_noop(
         repository: &Repository,
         runtime: &RuntimeState,
         expected_head: &GitCommitRef,
@@ -1526,28 +1544,42 @@ impl RuntimePublicationCoordinator {
         else {
             return Ok(None);
         };
-        Self::prepare(
+        Self::prepare_lowered(
             repository,
             expected_head,
             expected_index,
             freeze,
+            &mutations,
             batch,
             message,
         )
         .map(Some)
     }
 
-    /// Prepares a candidate from a validated runtime freeze and already
-    /// lowered loose mutations. The journal captures the runtime intent and
-    /// exact worktree expectations before any visible Git change.
-    pub fn prepare(
+    /// Builds the repository candidate from mutations lowered from the exact
+    /// runtime prefix. This stays private so no caller can omit its protected
+    /// source mutation evidence.
+    fn prepare_lowered(
         repository: &Repository,
         expected_head: &GitCommitRef,
         expected_index: IndexGeneration,
         freeze: &PublicationFreeze,
+        runtime_mutations: &[TableMutation],
         batch: FrozenBatch,
         message: &str,
     ) -> Result<Self, Error> {
+        let mut retained_protected = batch.protected_source_mutations.iter();
+        for mutation in runtime_mutations
+            .iter()
+            .filter(|mutation| !mutation.protected_content_transfers().is_empty())
+        {
+            if retained_protected.next() != Some(mutation) {
+                return Err(Error::IncompleteStaging);
+            }
+        }
+        if retained_protected.next().is_some() {
+            return Err(Error::IncompleteStaging);
+        }
         if batch.watermark != freeze.checkpoint.mutation_sequence
             || batch.id != MutationId::new(hex_id(freeze.intent_id))?
         {
@@ -1603,6 +1635,7 @@ impl RuntimePublicationCoordinator {
             expected_index,
             candidate,
             journal,
+            protected_source_mutations: batch.protected_source_mutations,
         })
     }
 
@@ -1661,7 +1694,9 @@ impl RuntimePublicationCoordinator {
             .map_err(|_| Error::RuntimeUnavailable)?;
         repository
             .mark_runtime_complete(freeze.intent_id, &mut self.journal)
-            .map_err(|_| Error::RepositoryUnavailable)
+            .map_err(|_| Error::RepositoryUnavailable)?;
+        self.protected_source_mutations.clear();
+        Ok(())
     }
 
     /// Recovers a persisted runtime publication after a process interruption.
@@ -1701,16 +1736,22 @@ impl RuntimePublicationCoordinator {
             let recovery = repository
                 .recover_compact_publication_boundary()
                 .map_err(map_publication_repository_error)?;
-            let pending = match recovery {
+            let (pending, descendant) = match recovery {
                 None => {
                     return repository
                         .index_generation()
                         .map(Some)
                         .map_err(map_publication_repository_error);
                 }
-                Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => pending,
-                Some(CompactPublicationRecovery::ReconciliationRequired(_)) => {
-                    return Err(Error::RefConflict);
+                Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => {
+                    (pending, false)
+                }
+                Some(CompactPublicationRecovery::ReconciliationRequired(reconciliation)) => {
+                    let pending = repository
+                        .compact_descendant_receipt_request(&reconciliation)
+                        .map_err(map_publication_repository_error)?
+                        .ok_or(Error::RefConflict)?;
+                    (pending, true)
                 }
             };
             // A validated receipt is enough to finalize; schema identity is needed only
@@ -1724,6 +1765,12 @@ impl RuntimePublicationCoordinator {
                     .finish_compact_with_receipt(&receipt)
                     .map(Some)
                     .map_err(map_publication_repository_error);
+            }
+            if descendant {
+                // A descendant already includes the candidate. Without its
+                // original durable receipt, rebuilding or re-consuming the
+                // frozen prefix could publish a duplicate generation.
+                return Err(Error::RefConflict);
             }
             let (profile, table_identity) = compact_profile.ok_or(Error::InvalidTransition)?;
             let trusted_schema = trusted_compact_schema_descriptor(
@@ -3289,11 +3336,12 @@ mod tests {
         )
         .unwrap();
 
-        RuntimePublicationCoordinator::prepare(
+        RuntimePublicationCoordinator::prepare_lowered(
             repository,
             &repository.head().unwrap().unwrap(),
             repository.index_generation().unwrap(),
             &freeze,
+            &[],
             batch,
             "orna: publish runtime data",
         )
@@ -3324,11 +3372,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            RuntimePublicationCoordinator::prepare(
+            RuntimePublicationCoordinator::prepare_lowered(
                 &repository,
                 &repository.head().unwrap().unwrap(),
                 repository.index_generation().unwrap(),
                 &freeze,
+                &[],
                 batch,
                 "orna: reject unrelated batch",
             ),
@@ -3338,7 +3387,7 @@ mod tests {
 
     #[test]
     fn runtime_table_prefix_lowers_into_a_bound_publication() {
-        let (_temp, repository) = repository();
+        let (root, repository) = repository();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
         let freeze = PublicationFreeze {
@@ -3351,9 +3400,20 @@ mod tests {
             candidate_digest: [8; 32],
             mutations: Vec::new(),
         };
-        let mutation =
-            TableMutation::new([9; 16], "Contact", b"Alice".to_vec(), Some(b"row".to_vec()))
-                .unwrap();
+        let full_row = b"full typed row tuple\0primary field\0Blob field";
+        let candidate_path = LoosePath::for_key("Contact", &["Alice".into()])
+            .unwrap()
+            .as_managed_path()
+            .as_path()
+            .to_string_lossy()
+            .into_owned();
+        let mutation = TableMutation::new(
+            [9; 16],
+            "Contact",
+            b"Alice".to_vec(),
+            Some(full_row.to_vec()),
+        )
+        .unwrap();
         let batch = lower_runtime_table_mutations(
             &freeze,
             std::slice::from_ref(&mutation),
@@ -3366,18 +3426,33 @@ mod tests {
             |_path| Ok(None),
         )
         .unwrap();
-        let plan = RuntimePublicationCoordinator::prepare(
+        assert!(batch.protected_source_mutations.is_empty());
+        assert_eq!(batch.mutations[0].next.as_ref().unwrap().bytes(), full_row);
+        let plan = RuntimePublicationCoordinator::prepare_lowered(
             &repository,
             &head,
             index,
             &freeze,
+            std::slice::from_ref(&mutation),
             batch,
             "orna: publish runtime data",
         )
         .unwrap();
+        assert!(plan.protected_source_mutations.is_empty());
         assert_ne!(plan.candidate().commit(), &head);
         assert_eq!(plan.journal().runtime_intent_id(), Some([7; 16]));
         assert_eq!(plan.journal().entries().len(), 1);
+        assert_eq!(
+            git_output(
+                root.path(),
+                &[
+                    "show",
+                    &format!("{}:{candidate_path}", plan.candidate().commit()),
+                ],
+            )
+            .as_bytes(),
+            full_row
+        );
     }
 
     #[test]
@@ -3409,9 +3484,10 @@ mod tests {
             Some(b"final".to_vec()),
         )
         .unwrap();
+        let source_mutations = [first, final_mutation];
         let batch = lower_runtime_table_mutations(
             &freeze,
-            &[first, final_mutation],
+            &source_mutations,
             |mutation| {
                 LoosePath::for_key(
                     mutation.table(),
@@ -3425,11 +3501,12 @@ mod tests {
         assert_eq!(batch.mutations.len(), 1);
         assert_eq!(batch.mutations[0].next.as_ref().unwrap().bytes(), b"final");
         assert_eq!(batch.mutations[0].expected, None);
-        let plan = RuntimePublicationCoordinator::prepare(
+        let plan = RuntimePublicationCoordinator::prepare_lowered(
             &repository,
             &head,
             index,
             &freeze,
+            &source_mutations,
             batch,
             "orna: publish folded runtime data",
         )
@@ -3587,11 +3664,12 @@ mod tests {
             mutations: Vec::new(),
         };
         assert_eq!(
-            RuntimePublicationCoordinator::prepare(
+            RuntimePublicationCoordinator::prepare_lowered(
                 &repository,
                 &head,
                 staged_index,
                 &freeze,
+                &[],
                 staged_batch,
                 "orna: reject managed edit",
             ),
@@ -3639,11 +3717,12 @@ mod tests {
             mutations: Vec::new(),
         };
         assert_eq!(
-            RuntimePublicationCoordinator::prepare(
+            RuntimePublicationCoordinator::prepare_lowered(
                 &repository,
                 &head,
                 unstaged_index,
                 &freeze,
+                &[],
                 unstaged_batch,
                 "orna: reject managed edit",
             ),
@@ -3723,20 +3802,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         plan.publish(&repository).unwrap();
@@ -3796,20 +3873,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
 
@@ -3870,20 +3945,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         plan.publish(&repository).unwrap();
@@ -3996,20 +4069,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index.clone(),
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index.clone(),
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         repository
@@ -4078,20 +4149,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index.clone(),
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index.clone(),
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         let path = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
@@ -4211,20 +4280,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         let tail_context = runtime.begin_activation().await.unwrap();
@@ -4309,20 +4376,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         plan.publish(&repository).unwrap();
@@ -4390,20 +4455,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         plan.publish(&repository).unwrap();
@@ -4868,6 +4931,11 @@ mod tests {
     fn frozen_batch_builds_a_real_private_candidate_without_advancing_head() {
         let (root, repository) = repository();
         let head = repository.head().unwrap().unwrap();
+        fs::write(root.path().join("ordinary.txt"), "staged user content\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        let expected_index = repository.index_generation().unwrap();
+        let unstaged = b"unstaged user content\n";
+        fs::write(root.path().join("ordinary.txt"), unstaged).unwrap();
         let candidate = build_private_publication_candidate(
             &repository,
             &head,
@@ -4878,6 +4946,22 @@ mod tests {
 
         assert_ne!(candidate.commit(), &head);
         assert_eq!(repository.head().unwrap().unwrap(), head);
+        assert_eq!(repository.index_generation().unwrap(), expected_index);
+        assert_eq!(
+            fs::read(root.path().join("ordinary.txt")).unwrap(),
+            unstaged
+        );
+        assert_eq!(
+            git_output(root.path(), &["show", ":ordinary.txt"]),
+            "staged user content"
+        );
+        assert_eq!(
+            git_output(
+                root.path(),
+                &["show", &format!("{}:ordinary.txt", candidate.commit())]
+            ),
+            "base"
+        );
         assert_eq!(
             git_output(
                 root.path(),

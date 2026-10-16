@@ -16,6 +16,9 @@ use orna_storage_v1::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use orna_project_v1::ObjectIdentityManifest;
+use orna_semantic_v1::{ModuleInput, analyze};
+
 pub fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -73,6 +76,10 @@ pub fn capture_failure(
 }
 
 pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
+    format3_repository("pub table media(id: Str) { content: Blob, }\n")
+}
+
+pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16]) {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
     git(root, &["init", "--quiet"]);
@@ -81,23 +88,31 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     git(root, &["config", "commit.gpgsign", "false"]);
 
     let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
-    let relation_id = [0x43; 16];
     let database_uuid = "00000000-0000-4000-8000-000000000001";
     let database =
         format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-    let schema_source = include_bytes!("../fixtures/reference-project/main.orna");
+    let modules = [ModuleInput::new("main.orna", media_source)];
+    let analysis = analyze(&modules);
+    let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
+    let manifest_bytes = identities.encode().unwrap();
+    let table = identities
+        .source_table_schema(&analysis, "", "main.orna", "media")
+        .unwrap();
+    let relation_id = *table.table_object_id();
+    let schema_source = table.descriptor().encode().unwrap();
     std::fs::create_dir_all(root.join(".orna/store")).unwrap();
     std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
+    std::fs::write(root.join(".orna/object-identities.cbor"), &manifest_bytes).unwrap();
     std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
-    std::fs::write(root.join("main.orna"), schema_source).unwrap();
+    std::fs::write(root.join("main.orna"), media_source).unwrap();
     git(root, &["add", "--all"]);
     git(
         root,
         &["commit", "--quiet", "-m", "format3 capture fixture"],
     );
 
-    let schema_digest: [u8; 32] = Sha256::digest(schema_source).into();
-    let chunk_oid = git_object(root, "blob", schema_source);
+    let schema_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    let chunk_oid = git_object(root, "blob", &schema_source);
     let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
     append_cbor_head(&mut byte_index, 0, schema_source.len());
     byte_index.push(0x81);
@@ -149,11 +164,12 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     let store_root_oid =
         native_fixture_node(root, &store_root, &[(relation_map_oid.as_str(), "tree")]);
     let database_oid = git_object(root, "blob", database.as_bytes());
-    let source_oid = git_object(root, "blob", schema_source);
+    let manifest_oid = git_object(root, "blob", &manifest_bytes);
+    let source_oid = git_object(root, "blob", media_source.as_bytes());
     let orna_tree = git_tree(
         root,
         &format!(
-            "100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_root_oid}\tstore\n"
+            "100644 blob {database_oid}\tdatabase.orna\n100644 blob {manifest_oid}\tobject-identities.cbor\n040000 tree {store_root_oid}\tstore\n"
         ),
     );
     let root_tree = git_tree(

@@ -1069,11 +1069,11 @@ fn blob_annotation_contract(
 
 /// Native provider linked to the generated portable Blob annotation role.
 ///
-/// The provider keeps the evaluator's validated OVB-2 source alongside the
-/// typed invocation. It applies the MIME-1 metadata edit to that source with
-/// `ContextValue::with_blob_annotation`, preserving raw identity and capture
-/// provenance instead of rebuilding a Blob from bytes. This pure language
-/// operation needs no host-operation effect grant.
+/// The provider keeps the evaluator's validated OVB-2 or Format-3 source
+/// alongside the typed invocation. It applies the MIME-1 metadata edit with
+/// `ContextValue::with_blob_annotation`, preserving raw identity, the exact
+/// resolution context, and capture provenance without reading Blob bytes.
+/// This pure language operation needs no host-operation effect grant.
 struct BlobAnnotationProvider<'a> {
     offer: ProviderOffer,
     source: &'a ContextValue,
@@ -1085,7 +1085,10 @@ impl<'a> BlobAnnotationProvider<'a> {
         role: &SemanticRoleContract,
         source: &'a ContextValue,
     ) -> Result<Self, EvaluationError> {
-        if source.format() != ValueFormat::Ovb2 {
+        if !matches!(
+            source.format(),
+            ValueFormat::Ovb2 | ValueFormat::Rov3 | ValueFormat::Sov3
+        ) {
             return Err(redacted_error("ORNA-EVAL-VALUE"));
         }
         Ok(Self {
@@ -1197,9 +1200,16 @@ pub(crate) fn dispatch_blob_annotation(
     let provider = BlobAnnotationProvider::linked(role, source)?;
     let mut typed = Vec::with_capacity(parameters.len());
     for (parameter, argument) in parameters.iter().zip(arguments) {
-        let canonical = argument
-            .encode()
-            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        let canonical = if matches!(
+            &parameter.ty,
+            orna_sys_v1::AbiType::Named(name) if name == "Blob"
+        ) {
+            argument.encode()
+        } else {
+            ContextValue::new(ValueFormat::Ovb2, argument.raw().clone())
+                .and_then(|value| value.encode())
+        }
+        .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
         // The ABI admits an optional argument under its full declared optional
         // type, while the canonical payload carries the null itself, so an
         // absent optional stays distinguishable from a present inner value.
@@ -1215,9 +1225,9 @@ pub(crate) fn dispatch_blob_annotation(
                 .ok_or_else(|| redacted_error("ORNA-EVAL-VALUE"))?;
             let decoded = match source.context() {
                 Some(context) => {
-                    ContextValue::decode_in_context(canonical, ValueFormat::Ovb2, context)
+                    ContextValue::decode_in_context(canonical, source.format(), context)
                 }
-                None => ContextValue::decode(canonical, ValueFormat::Ovb2),
+                None => ContextValue::decode(canonical, source.format()),
             };
             decoded.map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
         }
@@ -1427,56 +1437,118 @@ mod tests {
     }
 
     #[test]
-    fn blob_annotation_keeps_bound_format3_context() {
-        struct NoReadResolver;
+    fn blob_annotation_preserves_contextual_formats_without_metadata_reads() {
+        struct CountingResolver {
+            bytes: Vec<u8>,
+            bytes_read: std::sync::atomic::AtomicU64,
+        }
 
-        impl orna_value_v1::BlobResolver for NoReadResolver {
+        impl orna_value_v1::BlobResolver for CountingResolver {
             fn read_range(
                 &self,
                 _reference: &orna_value_v1::ContentReference,
-                _offset: u64,
-                _length: u64,
+                offset: u64,
+                length: u64,
             ) -> orna_value_v1::Result<Vec<u8>> {
-                Err(orna_value_v1::Error::ContentUnavailable)
+                let start =
+                    usize::try_from(offset).map_err(|_| orna_value_v1::Error::InvalidRange)?;
+                let length =
+                    usize::try_from(length).map_err(|_| orna_value_v1::Error::InvalidRange)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(orna_value_v1::Error::InvalidRange)?;
+                let bytes = self
+                    .bytes
+                    .get(start..end)
+                    .ok_or(orna_value_v1::Error::InvalidRange)?;
+                self.bytes_read
+                    .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                Ok(bytes.to_vec())
             }
         }
 
-        let database = [1; 16];
-        let context = orna_value_v1::Format3Context::from_persisted(
-            database,
-            orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
-            orna_value_v1::GitHash::Sha1,
-            orna_value_v1::NativeOid::from_bytes(&[9; 20]).unwrap(),
-            orna_value_v1::NativeOid::from_bytes(&[8; 20]).unwrap(),
-            orna_value_v1::AvailabilityState::Available,
-            orna_value_v1::OwnerLifetime::new([3; 16]),
-            orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
-            std::sync::Arc::new(NoReadResolver),
-        )
-        .unwrap();
-        let source_blob =
-            Blob::from_bytes_with_annotation(b"payload".to_vec(), "application/octet-stream", None)
-                .unwrap();
-        let portable = ContextValue::from_blob(&source_blob, ValueFormat::Ovb2).unwrap();
-        let source =
-            ContextValue::new_in_context(&context, ValueFormat::Ovb2, portable.raw().clone())
-                .unwrap();
-        let arguments = [
-            source,
-            ContextValue::new(
-                ValueFormat::Ovb2,
-                OvbRaw::Text("application/json".to_owned()),
+        let payload = b"payload";
+        for format in [ValueFormat::Rov3, ValueFormat::Sov3] {
+            let resolver = std::sync::Arc::new(CountingResolver {
+                bytes: payload.to_vec(),
+                bytes_read: std::sync::atomic::AtomicU64::new(0),
+            });
+            let database = [1; 16];
+            let resolver_for_context: std::sync::Arc<dyn orna_value_v1::BlobResolver> =
+                resolver.clone();
+            let context = orna_value_v1::Format3Context::from_persisted(
+                database,
+                orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+                orna_value_v1::GitHash::Sha1,
+                orna_value_v1::NativeOid::from_bytes(&[9; 20]).unwrap(),
+                orna_value_v1::NativeOid::from_bytes(&[8; 20]).unwrap(),
+                orna_value_v1::AvailabilityState::Available,
+                orna_value_v1::OwnerLifetime::new([3; 16]),
+                orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+                resolver_for_context,
             )
-            .unwrap(),
-            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Null).unwrap(),
-        ];
+            .unwrap();
+            let identity = orna_value_v1::ContentIdentity::from_bytes(payload);
+            let reference = context
+                .reference(
+                    identity,
+                    orna_value_v1::NativeOid::from_bytes(&[7; 20]).unwrap(),
+                )
+                .unwrap();
+            let source_blob =
+                Blob::from_reference_with_annotation(reference, "application/octet-stream", None)
+                    .unwrap();
+            assert!(!source_blob.is_hydrated());
+            let source = ContextValue::from_blob(&source_blob, format).unwrap();
+            let arguments = [
+                source,
+                ContextValue::new_in_context(
+                    &context,
+                    format,
+                    OvbRaw::Text("audio/mp4".to_owned()),
+                )
+                .unwrap(),
+                ContextValue::new_in_context(&context, format, OvbRaw::Text("m4b".to_owned()))
+                    .unwrap(),
+            ];
 
-        let annotated = dispatch_blob_annotation(BLOB_ANNOTATION_OPERATION, &arguments)
-            .expect("annotation dispatch should accept its bound source context");
+            let annotated = dispatch_blob_annotation(BLOB_ANNOTATION_OPERATION, &arguments)
+                .expect("annotation dispatch preserves its source profile");
 
-        assert!(annotated.context().is_some());
-        let blob = annotated.blob().unwrap();
-        assert_eq!(blob.media_type(), "application/json");
-        assert_eq!(blob.read_to_end().unwrap(), b"payload");
+            assert_eq!(annotated.format(), format);
+            assert!(annotated.context().is_some());
+            let blob = annotated.blob().unwrap();
+            assert_eq!(blob.content_identity(), identity);
+            assert_eq!(blob.media_type(), "audio/mp4");
+            assert_eq!(blob.suffix(), Some("m4b"));
+            assert!(!blob.is_hydrated());
+            assert_eq!(
+                resolver
+                    .bytes_read
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+
+            // Format-3 stores the Blob descriptor; explicit reads use the
+            // original authorized capture reference.
+            assert_eq!(source_blob.read_to_end().unwrap(), payload);
+            assert_eq!(
+                resolver
+                    .bytes_read
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                payload.len() as u64
+            );
+        }
+        let role = orna_sys_v1::system_dispatch_table()
+            .role(BLOB_ANNOTATION_ROLE)
+            .expect("generated Blob annotation role exists");
+        let legacy = ContextValue::new(ValueFormat::Ovb1, OvbRaw::Bytes(payload.to_vec())).unwrap();
+        assert_eq!(
+            BlobAnnotationProvider::linked(role, &legacy)
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("ORNA-EVAL-VALUE".to_owned()),
+            "the annotated-Blob ABI must not reinterpret OVB-1 bytes"
+        );
     }
 }

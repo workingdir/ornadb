@@ -52,8 +52,9 @@ pub use compact::{
     CompactSegment, CompactSegmentRole, validate_compact_page_uncompressed_sizes,
 };
 pub use init::format_context::{
-    CaptureCapabilityError, FinalFormatCapability, FormatContextError, HistoricalFormatContext,
-    RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin, SchemaRootPin, StoreRootPin,
+    CaptureCapabilityError, CommittedTableBinding, FinalFormatCapability, FormatContextError,
+    HistoricalFormatContext, RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin,
+    SchemaRootPin, StoreRootPin,
 };
 pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
@@ -62,18 +63,18 @@ pub use init::{
 pub use mount::{MountError, MountStatus, MountView};
 pub use native_graph::RowRevision;
 pub use native_graph::{
-    AdmittedBlobReference, CapturedBlobCandidate, GitHashAlgorithm, GraphError, IndexMaintenance,
-    NativeGraphContext, NativeObjectKind, NativeOid, OrpBlobBinding, OrpGraphCandidate,
-    ProtectedBlobMetadata, ProtectedContentPin, ProtectedContentTransfer, Pub3ReleaseReceipt,
-    RangeVerification, RepositoryCaptureCapability, RepositoryReadScope, RowIndexMutation,
-    VerifiedBlobRange,
+    AdmittedBlobReference, AdmittedRowField, AdmittedRowFields, CapturedBlobCandidate,
+    GitHashAlgorithm, GraphError, IndexMaintenance, NativeGraphContext, NativeObjectKind,
+    NativeOid, OrpBlobBinding, OrpGraphCandidate, ProtectedBlobMetadata, ProtectedContentPin,
+    ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification,
+    RepositoryCaptureCapability, RepositoryReadScope, RowIndexMutation, VerifiedBlobRange,
 };
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
 };
 pub use row_store::{
     AdmittedRow, KeyRange, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity, RowMapSnapshot,
-    TypedKey,
+    RowMapVersion, SchemaGeneration, TypedKey,
 };
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
