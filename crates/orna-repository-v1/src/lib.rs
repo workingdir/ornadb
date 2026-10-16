@@ -6319,8 +6319,26 @@ impl Repository {
     }
 
     fn is_reachable_from_ref(&self, snapshot: &GitCommitRef) -> Result<bool, RepositoryError> {
-        let refs = self.git(["for-each-ref", "--format=%(refname)"])?;
-        for reference in refs.lines().filter(|reference| !reference.is_empty()) {
+        // A ref need not name a commit: the internal `refs/orna/pins/*`
+        // publication pins name trees. Ancestry is only defined between
+        // commits, so a ref that cannot peel to a commit is skipped rather than
+        // failing the resolution of a snapshot that is otherwise valid
+        // (`orna export DEST --at SELECTOR` freezes and verifies the selected
+        // snapshot closure).
+        let refs = self.git([
+            "for-each-ref",
+            "--format=%(objecttype)%00%(*objecttype)%00%(refname)",
+        ])?;
+        for line in refs.lines().filter(|line| !line.is_empty()) {
+            let mut fields = line.split('\0');
+            let object_type = fields.next().unwrap_or_default();
+            let peeled_type = fields.next().unwrap_or_default();
+            let Some(reference) = fields.next().filter(|reference| !reference.is_empty()) else {
+                continue;
+            };
+            if object_type != "commit" && peeled_type != "commit" {
+                continue;
+            }
             let mut command = self.command();
             command.args(["merge-base", "--is-ancestor", snapshot.as_str(), reference]);
             let output = command
