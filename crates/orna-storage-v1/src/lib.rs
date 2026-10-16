@@ -1479,7 +1479,7 @@ fn build_frozen_publication_store_root(
 
     let mut relation_candidates = Vec::with_capacity(operations_by_relation.len());
     for (relation_id, operations) in operations_by_relation {
-        let (rows, graph, _) = relation_bases
+        let (rows, graph, _, _) = relation_bases
             .remove(&relation_id)
             .ok_or(Error::RepositoryUnavailable)?;
         let maintenance = if operations.is_empty() {
