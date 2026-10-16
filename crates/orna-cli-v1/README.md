@@ -75,6 +75,20 @@ $_
 :quit
 ```
 
+## Read-only mounts
+
+On Linux, `orna mount DIR --cwd` mounts the current committed workspace at
+`DIR` through host FUSE. It requires a committed HEAD and provides a pinned,
+read-only view with the kernel options `ro,nodev,nosuid,noexec`; later workspace
+changes do not change that mounted snapshot. The command stays in the
+foreground until `orna unmount DIR` releases the kernel mount and its view
+record.
+
+`orna mount DIR --at SELECTOR` attaches a read-only snapshot record for one
+resolved selector without starting a host FUSE mount. `orna mount status`
+reports attached views in human or `--json` form. Host FUSE mounts are supported
+on Linux only.
+
 ## Boundary
 
 Execution currently uses the bounded pure evaluator. Unsupported declarations

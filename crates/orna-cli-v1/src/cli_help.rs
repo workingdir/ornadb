@@ -14,12 +14,14 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  explain CODE",
     "Repository and maintenance commands:",
     "  init [DIRECTORY]",
+    "  mv TABLE NEW_NAME              rename a table in its existing module namespace",
     "  status [--porcelain|--short|--format human|short|json]",
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",
     "  push [REMOTE] [BRANCH]        publish the branch with its continuity refs",
     "  push exit status: 0 pushed; 1 repository, remote, or continuity conflict",
     "  serve [--port PORT]",
+    "  mount DIR --cwd              read-only view of the current committed workspace",
     "  mount DIR --at SELECTOR       read-only view of one resolved snapshot",
     "  mount status [--json]         report attached read-only views",
     "  unmount DIR                   release a view's record",
@@ -78,6 +80,11 @@ mod tests {
     fn help_groups_orna_work_and_repository_maintenance() {
         assert_eq!(HELP_LINES[0], "Orna commands:");
         assert!(HELP_LINES.contains(&"Repository and maintenance commands:"));
+        assert!(
+            HELP_LINES
+                .iter()
+                .any(|line| line.starts_with("  mv ") && line.contains("table"))
+        );
         assert!(HELP_LINES.contains(&"  fetch [REMOTE] [BRANCH]"));
         assert!(HELP_LINES.contains(&"  diff [GIT_DIFF_ARGS...]"));
         assert!(HELP_LINES.contains(&"  log [GIT_LOG_ARGS...]"));

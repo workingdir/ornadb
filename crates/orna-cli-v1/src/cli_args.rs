@@ -65,6 +65,10 @@ pub(super) enum Command {
         remote: String,
         branch: Option<String>,
     },
+    Mv {
+        old: String,
+        new: String,
+    },
     SemanticLegend {
         format: LegendFormat,
         limit: Option<usize>,
@@ -78,6 +82,11 @@ pub(super) enum Command {
         mountpoint: PathBuf,
         selector: String,
     },
+    /// mount DIR --cwd: read-only view of the current committed workspace.
+    MountCwd {
+        mountpoint: PathBuf,
+    },
+
     /// `mount status [--json]`: the attached read-only views.
     MountStatus {
         json: bool,
@@ -365,6 +374,18 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             }
             Command::Push { remote, branch }
         }
+        Some("mv") => {
+            let old = words.next().ok_or_else(|| {
+                Diagnostic::usage("E1001", "`mv` needs a source name", "use `mv OLD NEW`")
+            })?;
+            let new = words.next().ok_or_else(|| {
+                Diagnostic::usage("E1001", "`mv` needs a target name", "use `mv OLD NEW`")
+            })?;
+            Command::Mv {
+                old: old.to_owned(),
+                new: new.to_owned(),
+            }
+        }
         Some("history") => Command::History(words.by_ref().map(str::to_owned).collect()),
         Some("query") => Command::Query(words.by_ref().map(str::to_owned).collect()),
         Some("mount") => {
@@ -398,6 +419,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             } else {
                 let mountpoint = PathBuf::from(first);
                 let mut selector = None;
+                let mut cwd = false;
                 while let Some(option) = words.next() {
                     match option {
                         "--at" => {
@@ -408,7 +430,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                                     "supply a commit or ref that resolves to one snapshot",
                                 )
                             })?;
-                            if selector.is_some() {
+                            if selector.is_some() || cwd {
                                 return Err(Diagnostic::usage(
                                     "E1001",
                                     "`mount` names one snapshot",
@@ -417,14 +439,15 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                             }
                             selector = Some(value.to_owned());
                         }
-                        // `--cwd` is the writable workspace view; this slice
-                        // implements the always-read-only `--at` view only.
-                        "--cwd" | "--read-only" => {
-                            return Err(Diagnostic::usage(
-                                "E1002",
-                                "`mount --cwd` is not implemented",
-                                "use `mount DIR --at SELECTOR`, which is always read-only",
-                            ));
+                        "--cwd" => {
+                            if cwd || selector.is_some() {
+                                return Err(Diagnostic::usage(
+                                    "E1001",
+                                    "mount accepts exactly one view mode",
+                                    "use mount DIR --cwd or mount DIR --at SELECTOR",
+                                ));
+                            }
+                            cwd = true;
                         }
                         _ => {
                             return Err(Diagnostic::usage(
@@ -435,16 +458,20 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                         }
                     }
                 }
-                let selector = selector.ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`mount` needs a snapshot selector",
-                        "use `mount DIR --at SELECTOR`; exactly one selector is required",
-                    )
-                })?;
-                Command::Mount {
-                    mountpoint,
-                    selector,
+                if cwd {
+                    Command::MountCwd { mountpoint }
+                } else {
+                    let selector = selector.ok_or_else(|| {
+                        Diagnostic::usage(
+                            "E1001",
+                            "mount needs a view mode",
+                            "use mount DIR --cwd or mount DIR --at SELECTOR",
+                        )
+                    })?;
+                    Command::Mount {
+                        mountpoint,
+                        selector,
+                    }
                 }
             }
         }
@@ -729,6 +756,37 @@ mod tests {
                 "unsupported value for `status --format`",
                 "choose `human`, `short`, or `json` after `status --format`"
             )
+        );
+    }
+
+    #[test]
+    fn parser_accepts_exact_mv_source_and_target() {
+        assert_eq!(
+            parse_cli(&args(&["mv", "Media", "Archive"]))
+                .expect("mv parses")
+                .command,
+            Command::Mv {
+                old: "Media".into(),
+                new: "Archive".into(),
+            }
+        );
+        assert_eq!(
+            parse_cli(&args(&["mv"]))
+                .expect_err("missing source is rejected")
+                .code,
+            "E1001"
+        );
+        assert_eq!(
+            parse_cli(&args(&["mv", "Media"]))
+                .expect_err("missing target is rejected")
+                .code,
+            "E1001"
+        );
+        assert_eq!(
+            parse_cli(&args(&["mv", "Media", "Archive", "Extra"]))
+                .expect_err("extra arguments are rejected")
+                .code,
+            "E1003"
         );
     }
 
