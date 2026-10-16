@@ -77,6 +77,7 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
         "song",
         0x80,
         true,
+        relation_id,
     )
     .await;
     commit_capture(
@@ -88,11 +89,12 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
         "image",
         0x90,
         true,
+        relation_id,
     )
     .await;
 
     // The rows query from the committed relation alone: no media byte is read.
-    let committed = state.committed_table_rows("media").await.unwrap();
+    let committed = committed_admitted_rows(&state, "media", relation_id).await;
     assert_eq!(committed.len(), 2, "the song and the image both commit");
     assert_eq!(committed[0].0, b"image".to_vec());
     assert_eq!(committed[1].0, b"song".to_vec());
@@ -142,6 +144,7 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
         "song",
         0xa0,
         false,
+        relation_id,
     )
     .await;
     commit_capture(
@@ -153,10 +156,11 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
         "image",
         0xb0,
         false,
+        relation_id,
     )
     .await;
 
-    let recommitted = state.committed_table_rows("media").await.unwrap();
+    let recommitted = committed_admitted_rows(&state, "media", relation_id).await;
     assert_eq!(
         recommitted, committed,
         "re-importing identical bytes leaves both rows unchanged"
