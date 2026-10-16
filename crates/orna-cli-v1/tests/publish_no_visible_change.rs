@@ -208,6 +208,7 @@ async fn commit_capture(
     key: &[u8],
     ordinal: u8,
     insert_only: bool,
+    relation_id: [u8; 16],
 ) {
     let request_identity = RequestIdentity {
         session_id: [ordinal; 16],
@@ -244,6 +245,7 @@ async fn commit_capture(
         TableMutation::new(id, "media", key_bytes, Some(row))
     }
     .unwrap()
+    .with_table_object_id(TableObjectId::new(relation_id))
     .with_orp_blob_binding(binding)
     .unwrap();
     let mutation = mutation.with_table_object_id(TableObjectId::new(table_object_id));
@@ -261,36 +263,6 @@ async fn commit_capture(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
-}
-
-/// The identity `orna publish` derives for a repository: the metadata's
-/// database id, with a rotated-and-salted repository id, and the concatenation
-/// of both as the initial digest. A harness that opens the runtime under any
-/// other identity leaves the verb unable to see its rows.
-fn cli_runtime_identity(repository: &Repository) -> (RuntimeIdentity, [u8; 32]) {
-    let metadata = orna_repository_v1::inspect_metadata(repository)
-        .unwrap()
-        .expect("the fixture records repository metadata");
-    let database_id = *metadata.database_id().as_bytes();
-    let mut repository_id = database_id;
-    for (index, byte) in repository_id.iter_mut().enumerate() {
-        let rotation = u32::try_from(index % 7 + 1).unwrap();
-        let salt = u8::try_from(index).unwrap();
-        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
-    }
-    if repository_id == [0; 16] {
-        repository_id[0] = 1;
-    }
-    let mut initial_digest = [0; 32];
-    initial_digest[..16].copy_from_slice(&database_id);
-    initial_digest[16..].copy_from_slice(&repository_id);
-    (
-        RuntimeIdentity {
-            database_id,
-            repository_id,
-        },
-        initial_digest,
-    )
 }
 
 #[tokio::test]
@@ -596,6 +568,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         b"image.orna",
         0xb0,
         true,
+        relation_id,
     )
     .await;
     let pending = state.pending_count().await.unwrap();
@@ -637,6 +610,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         b"image.orna",
         0xc0,
         false,
+        relation_id,
     )
     .await;
     let pending = state.pending_count().await.unwrap();
@@ -731,6 +705,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         b"image",
         0xd0,
         true,
+        relation_id,
     )
     .await;
 

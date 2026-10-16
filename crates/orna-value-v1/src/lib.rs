@@ -4300,6 +4300,16 @@ impl SchemaDescriptor {
     ) -> Result<()> {
         validate_schema_stored_row(&self.0, relation_id, canonical_key, canonical_fields)
     }
+    /// Validates one canonical ORP key against this descriptor and relation.
+    /// The repository owner remains responsible for authenticating the
+    /// descriptor bytes and its snapshot.
+    pub fn validate_stored_key(
+        &self,
+        relation_id: [u8; 16],
+        canonical_key: &[u8],
+    ) -> Result<()> {
+        validate_schema_stored_key(&self.0, relation_id, canonical_key)
+    }
 }
 
 fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
@@ -4326,48 +4336,12 @@ fn validate_schema_stored_row(
     canonical_key: &[u8],
     canonical_fields: &[u8],
 ) -> Result<()> {
-    let mut schema_map = BTreeMap::new();
-    for (key, value) in map(schema)? {
-        schema_map.insert(int_u64(key)?, value);
-    }
-    if uuid_array(schema_map.get(&1).ok_or(Error::InvalidSchema)?)? != relation_id {
-        return Err(Error::InvalidSchema);
-    }
-    let key_ids = array(schema_map.get(&2).ok_or(Error::InvalidSchema)?)?;
-    let declared_fields = array(schema_map.get(&3).ok_or(Error::InvalidSchema)?)?;
-    let definitions = array(schema_map.get(&4).ok_or(Error::InvalidSchema)?)?;
+    let (key_types, declared_fields, definitions) =
+        schema_stored_key_types(schema, relation_id)?;
     let key = decode_canonical_storage_value(canonical_key)?;
+    validate_stored_key_value(&key, &key_types, definitions)?;
     let values = decode_canonical_storage_value(canonical_fields)?;
     let values = array(&values)?;
-
-    let mut key_types = Vec::with_capacity(key_ids.len());
-    for key_id in key_ids {
-        let key_id = uuid_array(key_id)?;
-        let field = declared_fields
-            .iter()
-            .find(|field| {
-                let Ok(fields) = array(field) else {
-                    return false;
-                };
-                fields.first().and_then(|id| uuid_array(id).ok()) == Some(key_id)
-            })
-            .ok_or(Error::InvalidSchema)?;
-        key_types.push(array(field)?.get(2).ok_or(Error::InvalidSchema)?);
-    }
-    if key_types.is_empty() {
-        return Err(Error::InvalidSchema);
-    }
-    if key_types.len() == 1 {
-        validate_stored_value_as_type(&key, key_types[0], definitions)?;
-    } else {
-        let key_values = array(&key)?;
-        if key_values.len() != key_types.len() {
-            return Err(Error::InvalidValue);
-        }
-        for (value, ty) in key_values.iter().zip(key_types) {
-            validate_stored_value_as_type(value, ty, definitions)?;
-        }
-    }
 
     let stored_types = declared_fields
         .iter()
@@ -4387,6 +4361,68 @@ fn validate_schema_stored_row(
     Ok(())
 }
 
+fn validate_schema_stored_key(
+    schema: &Raw,
+    relation_id: [u8; 16],
+    canonical_key: &[u8],
+) -> Result<()> {
+    let (key_types, _, definitions) = schema_stored_key_types(schema, relation_id)?;
+    let key = decode_canonical_storage_value(canonical_key)?;
+    validate_stored_key_value(&key, &key_types, definitions)
+}
+
+fn schema_stored_key_types<'a>(
+    schema: &'a Raw,
+    relation_id: [u8; 16],
+) -> Result<(Vec<&'a Raw>, &'a [Raw], &'a [Raw])> {
+    let mut schema_map = BTreeMap::new();
+    for (key, value) in map(schema)? {
+        schema_map.insert(int_u64(key)?, value);
+    }
+    if uuid_array(schema_map.get(&1).ok_or(Error::InvalidSchema)?)? != relation_id {
+        return Err(Error::InvalidSchema);
+    }
+    let key_ids = array(schema_map.get(&2).ok_or(Error::InvalidSchema)?)?;
+    let declared_fields = array(schema_map.get(&3).ok_or(Error::InvalidSchema)?)?;
+    let definitions = array(schema_map.get(&4).ok_or(Error::InvalidSchema)?)?;
+    let mut key_types = Vec::with_capacity(key_ids.len());
+    for key_id in key_ids {
+        let key_id = uuid_array(key_id)?;
+        let field = declared_fields
+            .iter()
+            .find(|field| {
+                let Ok(fields) = array(field) else {
+                    return false;
+                };
+                fields.first().and_then(|id| uuid_array(id).ok()) == Some(key_id)
+            })
+            .ok_or(Error::InvalidSchema)?;
+        key_types.push(array(field)?.get(2).ok_or(Error::InvalidSchema)?);
+    }
+    if key_types.is_empty() {
+        return Err(Error::InvalidSchema);
+    }
+    Ok((key_types, declared_fields, definitions))
+}
+
+fn validate_stored_key_value(
+    key: &Raw,
+    key_types: &[&Raw],
+    definitions: &[Raw],
+) -> Result<()> {
+    if key_types.len() == 1 {
+        validate_stored_value_as_type(key, key_types[0], definitions)
+    } else {
+        let key_values = array(key)?;
+        if key_values.len() != key_types.len() {
+            return Err(Error::InvalidValue);
+        }
+        for (value, ty) in key_values.iter().zip(key_types) {
+            validate_stored_value_as_type(value, ty, definitions)?;
+        }
+        Ok(())
+    }
+}
 fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> Result<()> {
     let node = array(ty)?;
     let code = int_u64(node.first().ok_or(Error::InvalidSchema)?)?;
@@ -5706,6 +5742,7 @@ fn validate_schema(raw: &Raw) -> Result<()> {
         return Err(Error::InvalidSchema);
     }
     let mut definition_ids = Vec::new();
+    let mut unit_definition_ids = Vec::new();
     for d in defs {
         let a = array(d)?;
         if a.len() != 3 {
@@ -5719,22 +5756,31 @@ fn validate_schema(raw: &Raw) -> Result<()> {
             return Err(Error::InvalidSchema);
         }
         definition_ids.push(id);
-        validate_definition(int_u64(&a[1])?, &a[2])?;
+        let kind = int_u64(&a[1])?;
+        if kind == 3 {
+            unit_definition_ids.push(id);
+        }
+        validate_definition(kind, &a[2])?;
     }
     for field in fields {
-        validate_type_refs(&array(field)?[2], &definition_ids)?;
+        validate_type_refs(&array(field)?[2], &definition_ids, &unit_definition_ids)?;
     }
     for definition in defs {
         validate_definition_refs(
             int_u64(&array(definition)?[1])?,
             &array(definition)?[2],
             &definition_ids,
+            &unit_definition_ids,
         )?;
     }
     validate_schema_constructibility(fields, defs, &definition_ids)?;
     Ok(())
 }
-fn validate_type_refs(node: &Raw, definitions: &[[u8; 16]]) -> Result<()> {
+fn validate_type_refs(
+    node: &Raw,
+    definitions: &[[u8; 16]],
+    unit_definitions: &[[u8; 16]],
+) -> Result<()> {
     let a = array(node)?;
     match int_u64(&a[0])? {
         5 | 8 => {
@@ -5742,43 +5788,53 @@ fn validate_type_refs(node: &Raw, definitions: &[[u8; 16]]) -> Result<()> {
                 return Err(Error::InvalidSchema);
             }
         }
-        1 | 2 | 9 => validate_type_refs(&a[1], definitions)?,
+        1 | 2 | 9 => validate_type_refs(&a[1], definitions, unit_definitions)?,
         3 => {
             for x in array(&a[1])? {
-                validate_type_refs(x, definitions)?
+                validate_type_refs(x, definitions, unit_definitions)?
             }
         }
         4 => {
             for x in array(&a[1])? {
-                validate_type_refs(&array(x)?[1], definitions)?
+                validate_type_refs(&array(x)?[1], definitions, unit_definitions)?
             }
         }
         6 => {
             for x in array(&a[3])? {
-                validate_type_refs(x, definitions)?
+                validate_type_refs(x, definitions, unit_definitions)?
             }
         }
-        7 => validate_type_refs(&a[1], definitions)?,
+        7 => {
+            if !unit_definitions.contains(&uuid_array(&a[2])?) {
+                return Err(Error::InvalidSchema);
+            }
+            validate_type_refs(&a[1], definitions, unit_definitions)?;
+        }
         0 => {}
         _ => return Err(Error::InvalidSchema),
     }
     Ok(())
 }
-fn validate_definition_refs(kind: u64, body: &Raw, definitions: &[[u8; 16]]) -> Result<()> {
+fn validate_definition_refs(
+    kind: u64,
+    body: &Raw,
+    definitions: &[[u8; 16]],
+    unit_definitions: &[[u8; 16]],
+) -> Result<()> {
     match kind {
         0 => {
             for f in array(body)? {
-                validate_type_refs(&array(f)?[2], definitions)?
+                validate_type_refs(&array(f)?[2], definitions, unit_definitions)?
             }
         }
         1 => {
             for v in array(body)? {
                 for f in array(&array(v)?[2])? {
-                    validate_type_refs(&array(f)?[2], definitions)?
+                    validate_type_refs(&array(f)?[2], definitions, unit_definitions)?
                 }
             }
         }
-        2 => validate_type_refs(&array(body)?[0], definitions)?,
+        2 => validate_type_refs(&array(body)?[0], definitions, unit_definitions)?,
         3 | 4 => {}
         _ => return Err(Error::InvalidSchema),
     }
@@ -6022,7 +6078,7 @@ fn validate_definition(kind: u64, body: &Raw) -> Result<()> {
                 return Err(Error::InvalidSchema);
             }
             let dimension = array(&a[0])?;
-            if dimension.len() != 7 || dimension.iter().any(|v| !matches!(v, Raw::Int(_))) {
+            if dimension.iter().any(|v| !matches!(v, Raw::Int(_))) {
                 return Err(Error::InvalidSchema);
             }
             for value in &a[1..5] {
@@ -6414,6 +6470,77 @@ mod tests {
                 .validate_stored_row([9; 16], &key, &fields)
                 .is_err());
         }
+    }
+
+    #[test]
+    fn schema_quantity_uses_canonical_unit_identity_and_dimension_vector() {
+        let unit_a = [1; 16];
+        let unit_b = [2; 16];
+        let unit_definition = |id, dimensions: &[i64]| {
+            nominal_definition(
+                id,
+                3,
+                Raw::Array(vec![
+                    Raw::Array(dimensions.iter().map(|value| Raw::Int((*value).into())).collect()),
+                    Raw::Int(1.into()),
+                    Raw::Int(1.into()),
+                    Raw::Int(0.into()),
+                    Raw::Int(1.into()),
+                    Raw::Bool(false),
+                ]),
+            )
+        };
+        let unit_definitions = vec![
+            unit_definition(1, &[1, 0, 0, 0, 0, 0, 0, 1]),
+            unit_definition(2, &[0, 1, 0, 0, 0, 0, 0, 1]),
+        ];
+        let quantity_type = |unit_id| {
+            Raw::Array(vec![
+                Raw::Int(7.into()),
+                schema_type(0, Raw::Text("Float".into())),
+                uuid_raw(unit_id),
+            ])
+        };
+        let schema = SchemaDescriptor::new(schema_for_type(
+            quantity_type(unit_a),
+            unit_definitions.clone(),
+        ))
+        .unwrap();
+        let other_schema = SchemaDescriptor::new(schema_for_type(
+            quantity_type(unit_b),
+            unit_definitions.clone(),
+        ))
+        .unwrap();
+        assert_ne!(schema, other_schema);
+        let key = encode_raw(&Raw::Int(7.into())).unwrap();
+        let quantity = |unit_id| {
+            Raw::Tag(
+                60006,
+                Box::new(Raw::Array(vec![Raw::Float(1.0_f64.to_bits()), uuid_raw(unit_id)])),
+            )
+        };
+        let matching_fields =
+            encode_canonical_storage_value(&Raw::Array(vec![quantity(unit_a)])).unwrap();
+        assert!(schema
+            .validate_stored_row([9; 16], &key, &matching_fields)
+            .is_ok());
+
+        let different_dimension_fields =
+            encode_canonical_storage_value(&Raw::Array(vec![quantity(unit_b)])).unwrap();
+        assert!(schema
+            .validate_stored_row([9; 16], &key, &different_dimension_fields)
+            .is_err());
+
+        assert!(SchemaDescriptor::new(schema_for_type(
+            quantity_type([3; 16]),
+            unit_definitions.clone(),
+        ))
+        .is_err());
+        assert!(SchemaDescriptor::new(schema_for_type(
+            quantity_type([3; 16]),
+            vec![unit_definitions[0].clone(), record_definition(3, Vec::new())],
+        ))
+        .is_err());
     }
 
     #[test]
