@@ -3347,6 +3347,17 @@ impl Scope {
         Self::from_environment_with_nominals(environment, &NominalDefinitions::new(), context)
     }
 
+    fn from_repl_environment(
+        environment: &Environment,
+        contextual_environment: &BTreeMap<String, ContextValue>,
+        context: &mut Context,
+    ) -> Result<Self, EvaluationError> {
+        let mut scope = Self::from_environment(environment, context)?;
+        let contextual_scope = Self::from_context_environment(contextual_environment, context)?;
+        scope.0.extend(contextual_scope.0);
+        Ok(scope)
+    }
+
     fn from_ovb2_environment(
         environment: &BTreeMap<String, ContextValue>,
         context: &mut Context,

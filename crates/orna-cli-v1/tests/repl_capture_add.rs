@@ -1,6 +1,6 @@
 use std::{
-    io::Write,
-    process::{Command, Output, Stdio},
+    io::{Read as _, Write},
+    process::{Child, ChildStdout, Command, Output, Stdio},
 };
 
 use orna_runtime_v1::RuntimeState;
@@ -33,6 +33,50 @@ fn run_repl(directory: &std::path::Path, input: &str) -> Output {
     child.wait_with_output().expect("wait for Orna REPL")
 }
 
+fn start_repl(directory: &std::path::Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Orna REPL process")
+}
+
+fn read_prompt(stdout: &mut ChildStdout) -> Vec<u8> {
+    let mut output = Vec::new();
+    while !output.ends_with(b"> ") {
+        let mut byte = [0];
+        stdout.read_exact(&mut byte).expect("read REPL prompt");
+        output.push(byte[0]);
+    }
+    output
+}
+
+fn scratch_refs(directory: &std::path::Path) -> Vec<String> {
+    let output = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)", "refs/orna/pins"])
+        .current_dir(directory)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("list repository pin refs");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .expect("Git ref names are UTF-8")
+        .lines()
+        .filter(|reference| reference.contains("/scratch/"))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn capture_input(root: &std::path::Path) -> String {
+    format!(
+        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);",
+        root = root.to_string_lossy().as_ref(),
+    )
+}
+
 fn git_head(directory: &std::path::Path) -> String {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -56,7 +100,7 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let head_before = git_head(root);
 
     let input = format!(
-        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", max_bytes: 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add(\"london\", \"Live in London\", audio)",
+        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add(\"london\", \"Live in London\", audio)",
         root = root.to_string_lossy().as_ref(),
     );
     let output = run_repl(root, &input);
@@ -102,6 +146,105 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let blob = blob_value.blob().expect("content field is a Blob");
     assert_eq!(blob.media_type(), "audio/mpeg");
     assert_eq!(blob.read_to_end().expect("read protected captured bytes"), payload);
+}
+
+#[test]
+fn repl_capture_candidate_is_released_when_the_session_exits() {
+    let (directory, _repository, _) = format3_repository(MUSIC_SOURCE);
+    let root = directory.path();
+    std::fs::write(root.join("recording.mp3"), b"session-drop capture")
+        .expect("write synthetic media");
+
+    let mut child = start_repl(root);
+    let mut stdin = child.stdin.take().expect("REPL stdin");
+    let mut stdout = child.stdout.take().expect("REPL stdout");
+    let _initial_prompt = read_prompt(&mut stdout);
+    writeln!(stdin, "{}", capture_input(root)).expect("capture file in REPL");
+    stdin.flush().expect("flush capture input");
+    let captured = read_prompt(&mut stdout);
+    assert!(
+        !String::from_utf8_lossy(&captured).contains("ORNA-"),
+        "capture submission failed: {}",
+        String::from_utf8_lossy(&captured)
+    );
+    assert_eq!(scratch_refs(root).len(), 1, "capture holds one scratch ref");
+
+    stdin.write_all(b":quit\n").expect("quit REPL");
+    stdin.flush().expect("flush quit command");
+    drop(stdin);
+    assert_eq!(child.wait().expect("wait for REPL exit").code(), Some(0));
+    let mut trailing = Vec::new();
+    stdout.read_to_end(&mut trailing).expect("read REPL output");
+    assert!(scratch_refs(root).is_empty(), "session drop releases unconsumed capture");
+}
+
+#[test]
+fn repl_snapshot_replacement_releases_unconsumed_capture() {
+    let (directory, _repository, _) = format3_repository(MUSIC_SOURCE);
+    let root = directory.path();
+    std::fs::write(root.join("recording.mp3"), b"snapshot replacement capture")
+        .expect("write synthetic media");
+
+    let mut child = start_repl(root);
+    let mut stdin = child.stdin.take().expect("REPL stdin");
+    let mut stdout = child.stdout.take().expect("REPL stdout");
+    let _initial_prompt = read_prompt(&mut stdout);
+    writeln!(stdin, "{}", capture_input(root)).expect("capture file in REPL");
+    stdin.flush().expect("flush capture input");
+    let captured = read_prompt(&mut stdout);
+    assert!(!String::from_utf8_lossy(&captured).contains("ORNA-"));
+    assert_eq!(scratch_refs(root).len(), 1, "capture holds one scratch ref");
+
+    stdin.write_all(b":at HEAD\n").expect("select committed snapshot");
+    stdin.flush().expect("flush snapshot command");
+    let replaced = read_prompt(&mut stdout);
+    assert!(
+        !String::from_utf8_lossy(&replaced).contains("ORNA-REPL-AT"),
+        "snapshot replacement failed: {}",
+        String::from_utf8_lossy(&replaced)
+    );
+    assert!(
+        scratch_refs(root).is_empty(),
+        "successful snapshot replacement releases old session captures"
+    );
+
+    stdin.write_all(b":quit\n").expect("quit REPL");
+    stdin.flush().expect("flush quit command");
+    drop(stdin);
+    assert_eq!(child.wait().expect("wait for REPL exit").code(), Some(0));
+}
+
+#[tokio::test]
+async fn repl_capture_candidate_is_reclaimed_after_crash_and_runtime_reopen() {
+    let (directory, repository, _) = format3_repository(MUSIC_SOURCE);
+    let root = directory.path();
+    std::fs::write(root.join("recording.mp3"), b"crash-recovery capture")
+        .expect("write synthetic media");
+
+    let mut child = start_repl(root);
+    let mut stdin = child.stdin.take().expect("REPL stdin");
+    let mut stdout = child.stdout.take().expect("REPL stdout");
+    let _initial_prompt = read_prompt(&mut stdout);
+    writeln!(stdin, "{}", capture_input(root)).expect("capture file in REPL");
+    stdin.flush().expect("flush capture input");
+    let captured = read_prompt(&mut stdout);
+    assert!(!String::from_utf8_lossy(&captured).contains("ORNA-"));
+    assert_eq!(scratch_refs(root).len(), 1, "capture holds one scratch ref");
+
+    child.kill().expect("terminate the live REPL as a crashed owner");
+    assert!(!child.wait().expect("reap crashed REPL").success());
+    drop(stdin);
+    drop(stdout);
+
+    let (identity, initial_digest) = cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, identity, initial_digest)
+        .await
+        .expect("reopen runtime to recover the crashed owner");
+    assert!(
+        scratch_refs(root).is_empty(),
+        "runtime reopen reclaims the crashed session's unaccepted scratch ref"
+    );
+    drop(state);
 }
 
 #[path = "support/format3.rs"]
