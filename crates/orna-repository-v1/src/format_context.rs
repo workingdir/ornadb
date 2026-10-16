@@ -3044,29 +3044,60 @@ mod graph_bridge_tests {
         // The envelope the writer produced is what a reader decodes, so the
         // store position can be pinned from it.
         let index = root.join(".git/private-store-index");
-        fs::write(&index, b"").expect("create a private index file");
+        let initialized_index = Command::new("git")
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", &index)
+            .args(["read-tree", "--empty"])
+            .output()
+            .expect("initialize an empty private index");
+        assert!(
+            initialized_index.status.success(),
+            "initialize private index: {}",
+            String::from_utf8_lossy(&initialized_index.stderr)
+        );
         graph
             .pin_store_subtree_in_index(&index, &store_root)
             .expect("a real store root is pinned at the fixed store path");
-        let staged = Command::new("git")
+        let staged_output = Command::new("git")
             .current_dir(root)
             .env("GIT_INDEX_FILE", &index)
             .args(["ls-files", "--stage", "--", ".orna/store"])
             .output()
             .expect("list the private index");
-        assert!(staged.status.success(), "list private index tree entry");
-        let staged = String::from_utf8_lossy(&staged.stdout).into_owned();
+        assert!(staged_output.status.success(), "list private index subtree");
+        let staged = String::from_utf8_lossy(&staged_output.stdout).into_owned();
+        let expected_tree = store_root.to_hex();
+        let expected = String::from_utf8(git_output(
+            root,
+            &["ls-tree", "-r", "--full-tree", &expected_tree],
+            None,
+        ))
+        .expect("store tree entries are UTF-8")
+        .lines()
+        .map(|entry| {
+            let (metadata, path) = entry.split_once('\t').expect("tree entry path");
+            let mut fields = metadata.split_whitespace();
+            let mode = fields.next().expect("tree entry mode");
+            let _kind = fields.next().expect("tree entry kind");
+            let oid = fields.next().expect("tree entry object id");
+            format!("{mode} {oid} 0\t.orna/store/{path}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
         assert_eq!(
             staged.trim(),
-            format!("040000 {} 0\t.orna/store", store_root.to_hex()),
-            "the private index stages the encoded store tree at .orna/store"
+            expected,
+            "the private index expands the encoded store tree exactly at .orna/store"
         );
 
         // A raw object cannot be planted at the store position.
         let blob = write_git_object(root, graph.algorithm(), "blob", b"not a store root");
         assert!(matches!(
             graph.pin_store_subtree_in_index(&index, &blob),
-            Err(crate::native_graph::GraphError::WrongNodeKind { .. })
+            Err(crate::native_graph::GraphError::WrongObjectKind {
+                expected: crate::native_graph::NativeObjectKind::Tree,
+                actual: crate::native_graph::NativeObjectKind::Blob,
+            })
         ));
     }
 
@@ -3208,9 +3239,14 @@ mod graph_bridge_tests {
     fn object_stats_since_traverses_the_second_fixture_root_against_the_first() {
         let directory = repository();
         let root = directory.path();
+        let relation_id = [0x52; 16];
+        let initial_context = context(root);
+        install_overflow_row_store(root, &initial_context, relation_id, None);
+
         let first_context = context(root);
-        let (first_schema, first_digest) = schema_node(root, &first_context);
-        let first_rows = sealed_rows(&first_context, &first_schema, first_digest);
+        let first_rows = first_context
+            .load_row_map(relation_id)
+            .expect("load the first committed row-map fixture");
         let first = first_context
             .open_native_graph(&first_rows)
             .expect("admit the first fixture root");
@@ -3219,12 +3255,21 @@ mod graph_bridge_tests {
             .object_stats(&first_scope)
             .expect("walk the first fixture root");
 
-        fs::write(root.join(".orna/store/data"), b"store root two")
-            .expect("write second store root");
-        commit(root);
+        let second_text = vec![b'y'; crate::row_store::ROW_INLINE_LIMIT + 1];
+        let mut second_encoded = vec![0x81];
+        cbor_head(&mut second_encoded, 3, second_text.len() as u64);
+        second_encoded.extend_from_slice(&second_text);
+        install_overflow_row_store_with_bytes(
+            root,
+            &first_context,
+            relation_id,
+            &second_encoded,
+            None,
+        );
         let second_context = context(root);
-        let (second_schema, second_digest) = schema_node(root, &second_context);
-        let second_rows = sealed_rows(&second_context, &second_schema, second_digest);
+        let second_rows = second_context
+            .load_row_map(relation_id)
+            .expect("load the second committed row-map fixture");
         let second = second_context
             .open_native_graph(&second_rows)
             .expect("admit the second fixture root");
@@ -3249,9 +3294,14 @@ mod graph_bridge_tests {
     fn object_stats_counts_each_reachable_tree_once_against_git_enumeration() {
         let directory = repository();
         let root = directory.path();
+        let relation_id = [0x53; 16];
+        let initial_context = context(root);
+        install_overflow_row_store(root, &initial_context, relation_id, None);
+
         let context = context(root);
-        let (schema, digest) = schema_node(root, &context);
-        let rows = sealed_rows(&context, &schema, digest);
+        let rows = context
+            .load_row_map(relation_id)
+            .expect("load the committed row-map fixture");
         let graph = context
             .open_native_graph(&rows)
             .expect("admit the fixture graph");
@@ -3264,9 +3314,8 @@ mod graph_bridge_tests {
             .expect("repeat the walk");
         assert_eq!(again, stats, "a repeated walk visits the same nodes");
 
-        // Git enumerates every object reachable from the store root exactly
-        // once. Count its trees by type and compare with the node walk, which
-        // must also visit each tree once even when subtrees are shared.
+        // OGS-1 node envelopes are the reachable trees with a top-level data
+        // blob. Their `refs` trees are Git trees too, but are not graph nodes.
         let store_root = graph.store_root().to_hex();
         let listing = Command::new("git")
             .current_dir(root)
@@ -3293,15 +3342,26 @@ mod graph_bridge_tests {
             .write_all(format!("{}\n", oids.join("\n")).as_bytes())
             .expect("write object ids");
         let types = check.wait_with_output().expect("read object types");
-        let trees = String::from_utf8(types.stdout)
-            .expect("types are UTF-8")
-            .lines()
-            .filter(|kind| *kind == "tree")
-            .count() as u64;
+        let types = String::from_utf8(types.stdout).expect("types are UTF-8");
+        let mut node_trees = 0u64;
+        for (oid, kind) in oids.iter().zip(types.lines()) {
+            if kind != "tree" {
+                continue;
+            }
+            let entries = String::from_utf8(git_output(root, &["ls-tree", oid], None))
+                .expect("tree entries are UTF-8");
+            let is_node_envelope = entries.lines().any(|entry| {
+                let Some((metadata, name)) = entry.split_once('\t') else {
+                    return false;
+                };
+                name == "data" && metadata.split_whitespace().nth(1) == Some("blob")
+            });
+            node_trees += u64::from(is_node_envelope);
+        }
         let walked: u64 = stats.nodes().values().sum();
         assert_eq!(
-            walked, trees,
-            "the node walk visits each reachable tree exactly once"
+            walked, node_trees,
+            "the node walk visits each reachable OGS-1 envelope exactly once"
         );
     }
 
@@ -3314,7 +3374,7 @@ mod graph_bridge_tests {
         let rows = sealed_rows(&context, &schema, digest);
         let graph = context
             .open_native_graph(&rows)
-            .expect("admit the SHA-1 fixture graph");
+            .expect("admit the fixture graph");
         let scope = graph.open_read_scope().expect("read scope");
         // An all-zero SHA-256 id belongs to a different object format than
         // the SHA-1 repository, so it must fail on width, not on lookup.
@@ -4673,8 +4733,18 @@ mod graph_bridge_tests {
         assert_eq!(stats.kind_count(), stats.rows_by_type_name().len());
         assert!(stats.kind_count() >= 1 && stats.kind_count() <= 8, "at most eight kinds exist");
         let table = stats.to_table();
-        assert!(table.starts_with("KIND  COUNT\n"), "table header: {table}");
-        assert!(table.contains("StoreRoot  1\n"), "table row: {table}");
+        let expected_header = format!(
+            "{:<width$}  COUNT\n",
+            "KIND",
+            width = "blob_references".len()
+        );
+        assert!(table.starts_with(&expected_header), "table header: {table}");
+        let expected_store_root = format!(
+            "{:<width$}  1\n",
+            "StoreRoot",
+            width = "blob_references".len()
+        );
+        assert!(table.contains(&expected_store_root), "table row: {table}");
         assert!(table.ends_with(&format!("blob_references  {}\n", stats.blob_references())));
         let json = stats.to_json();
         assert!(
