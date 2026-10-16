@@ -12,7 +12,8 @@
 //!   (ORNA-GIT-003, ORNA-GIT-007, ORNA-GIT-008).
 //! - `orna export ARCHIVE --check` reads an archive back and reports exactly
 //!   what it records, without a repository.
-//! - `orna export ARCHIVE --restore DEST [--worktree]` reconstructs the archive
+//! - `orna export ARCHIVE --restore DEST [--at COMMIT] [--worktree]`
+//!   reconstructs the archive, optionally selecting one recorded commit,
 //!   into a directory that holds no object of the source, verifies every
 //!   recorded object and every blob's bytes with this build's own extractor,
 //!   and optionally materialises the pinned snapshot and its dependencies as a
@@ -24,6 +25,7 @@ use orna_repository_v1::Repository;
 use orna_repository_v1::complete_copy::{
     CompleteCopyError, CompleteCopyManifest, DependencySource, export_complete_copy_of,
     materialize_complete_copy, read_complete_copy_manifest, restore_complete_copy,
+    restore_complete_copy_at,
 };
 
 use super::Diagnostic;
@@ -31,7 +33,7 @@ use super::Diagnostic;
 const USAGE: &str = "usage:\n  \
      orna export <DEST> --at <SELECTOR> [--at <SELECTOR>]... [--dependency PATH=DIR]...\n  \
      orna export <ARCHIVE> --check\n  \
-     orna export <ARCHIVE> --restore <DEST> [--worktree]";
+     orna export <ARCHIVE> --restore <DEST> [--at <COMMIT>] [--worktree]";
 
 /// What one invocation of the export verb was asked to do.
 #[derive(Debug, Eq, PartialEq)]
@@ -48,6 +50,7 @@ enum Mode {
     Restore {
         archive: PathBuf,
         destination: PathBuf,
+        snapshot: Option<String>,
         worktree: bool,
     },
 }
@@ -131,11 +134,16 @@ fn parse_options(arguments: &[String]) -> Result<Mode, Diagnostic> {
                 archive: archive.clone(),
             })
         }
-        ([archive], true, Some(destination), false) => Ok(Mode::Restore {
-            archive: archive.clone(),
-            destination,
-            worktree,
-        }),
+        ([archive], _, Some(destination), false)
+            if selectors.len() <= 1 && dependencies.is_empty() =>
+        {
+            Ok(Mode::Restore {
+                archive: archive.clone(),
+                destination,
+                snapshot: selectors.into_iter().next(),
+                worktree,
+            })
+        }
         _ => Err(export_error("Export options do not name one mode", USAGE)),
     }
 }
@@ -151,8 +159,9 @@ pub(super) fn run(project: &Path, arguments: &[String]) -> Result<(), Diagnostic
         Mode::Restore {
             archive,
             destination,
+            snapshot,
             worktree,
-        } => run_restore(&archive, &destination, worktree),
+        } => run_restore(&archive, &destination, snapshot.as_deref(), worktree),
     }
 }
 
@@ -186,9 +195,17 @@ fn run_export(
 }
 
 /// Reconstructs one archive into a fresh directory and verifies it there.
-fn run_restore(archive: &Path, destination: &Path, worktree: bool) -> Result<(), Diagnostic> {
-    let manifest = restore_complete_copy(archive, destination)
-        .map_err(|error| describe_export_failure(&error))?;
+fn run_restore(
+    archive: &Path,
+    destination: &Path,
+    snapshot: Option<&str>,
+    worktree: bool,
+) -> Result<(), Diagnostic> {
+    let manifest = match snapshot {
+        Some(commit) => restore_complete_copy_at(archive, destination, commit),
+        None => restore_complete_copy(archive, destination),
+    }
+    .map_err(|error| describe_export_failure(&error))?;
     let (objects, dependencies) = manifest.counts();
     println!(
         "restored {} ({} snapshots): {objects} objects, {dependencies} pinned dependencies verified",
@@ -303,7 +320,18 @@ mod tests {
             Mode::Restore {
                 archive: "archive".into(),
                 destination: "out".into(),
+                snapshot: None,
                 worktree: true
+            }
+        );
+        assert_eq!(
+            parse_options(&words(&["archive", "--restore", "out", "--at", "past"]))
+                .expect("parse selected restore"),
+            Mode::Restore {
+                archive: "archive".into(),
+                destination: "out".into(),
+                snapshot: Some("past".into()),
+                worktree: false
             }
         );
     }
@@ -322,6 +350,18 @@ mod tests {
         // A selector needs a value, and one flag cannot carry two.
         assert!(parse_options(&words(&["out", "--at"])).is_err());
         assert!(parse_options(&words(&["out", "--at", ""])).is_err());
+        assert!(
+            parse_options(&words(&[
+                "archive",
+                "--restore",
+                "out",
+                "--at",
+                "a",
+                "--at",
+                "b"
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
