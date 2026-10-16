@@ -343,12 +343,12 @@ impl FsBuilder {
                     let stored = graph
                         .read_stored_blob_value(&row, &descriptor, &row_scope)
                         .map_err(|error| format!("committed Blob reference could not be admitted: {error:?}"))?;
-                    let suffix = stored
-                        .annotation()
-                        .suffix()
-                        .or(metadata.suffix())
-                        .unwrap_or("blob");
-                    let file_name = safe_component(&format!("{field_name}.{suffix}"));
+                    let annotation = stored.annotation();
+                    let file_name = orna_runtime_v1::vfs::project_content_name(
+                        field_name,
+                        annotation.media_type(),
+                        annotation.suffix().or(metadata.suffix()),
+                    );
                     let relative_path = format!("./{file_name}");
                     writeln!(
                         &mut document,

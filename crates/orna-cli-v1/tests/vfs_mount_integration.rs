@@ -29,10 +29,12 @@ struct MountedProcess {
 
 impl Drop for MountedProcess {
     fn drop(&mut self) {
-        let _ = Command::new("fusermount3")
-            .args(["-u", self.mountpoint.to_str().unwrap_or_default()])
-            .status();
-        let _ = self.child.kill();
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = Command::new("fusermount3")
+                .args(["-u", self.mountpoint.to_str().unwrap_or_default()])
+                .status();
+            let _ = self.child.kill();
+        }
         let _ = self.child.wait();
     }
 }
@@ -49,8 +51,9 @@ fn run_unmount(repository: &Path, mountpoint: &Path) {
         .expect("run `orna unmount`");
     assert!(
         output.status.success(),
-        "`orna unmount` failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "orna unmount failed; stdout={:?}, stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
 }
 
@@ -66,8 +69,26 @@ fn mount_options(mountpoint: &Path) -> String {
         .expect("FUSE mount is present in the kernel mount table")
 }
 
+fn directory_entries(path: &Path) -> String {
+    match std::fs::read_dir(path) {
+        Ok(entries) => entries
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .unwrap_or_else(|error| format!("<entry error: {error}>"))
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        Err(error) => format!("<directory error: {error}>"),
+    }
+}
+
 #[tokio::test]
 async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
+    if !Path::new("/dev/fuse").exists() {
+        eprintln!("SKIP: cwd FUSE mount test requires /dev/fuse, which is unavailable");
+        return;
+    }
     let source = "pub table Music(id: Str) { content: Blob, }\n";
     let (repository_directory, repository, relation_id) =
         format3::format3_repository_for_table(source, "Music");
@@ -105,6 +126,17 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     )
     .await;
 
+    assert_eq!(format3::committed_store_rows(&repository, relation_id).len(), 1);
+    let current = repository.head().unwrap().unwrap();
+    let schema = orna_project_v1::ProjectLoader::default()
+        .resolve_committed_source_table_schema(
+            &repository,
+            &current,
+            orna_runtime_v1::TableObjectId::new(relation_id),
+        )
+        .expect("format-3 row data is not source text");
+    assert_eq!(schema.declaration_name(), "Music");
+
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
@@ -119,7 +151,7 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start `orna mount --cwd`");
+        .expect("start mount --cwd");
     let mut mounted = MountedProcess { child, mountpoint: mountpoint.clone() };
 
     let data_path = mountpoint.join("Music/london/data.orna");
@@ -133,7 +165,13 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
             }
             panic!("mount exited {status}: {stderr}");
         }
-        assert!(Instant::now() < deadline, "FUSE mount did not expose the row files");
+        assert!(
+            Instant::now() < deadline,
+            "FUSE mount did not expose the row files; root=[{}], Music=[{}], london=[{}]",
+            directory_entries(&mountpoint),
+            directory_entries(&mountpoint.join("Music")),
+            directory_entries(&mountpoint.join("Music/london")),
+        );
         thread::sleep(Duration::from_millis(20));
     }
 
@@ -157,6 +195,7 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     let count = blob.read(&mut actual).unwrap();
     assert_eq!(&actual[..count], &expected[start..start + count]);
 
+    drop(blob);
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
     assert!(status.success(), "mount process exits cleanly after unmount");

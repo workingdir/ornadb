@@ -67,6 +67,10 @@ release gate has passed.
   the canonical `ORNA-REPL-001..006` requirements. `--explain`, argument
   files, canonical output, JSON/table/CSV presenters, and bounded invocation
   tracing are implemented where the selected route supports them.
+- On Linux, `orna mount DIR --cwd` mounts the current committed workspace
+  through host FUSE as a read-only view (`ro,nodev,nosuid,noexec`), pinned to
+  the selected commit. `orna unmount DIR` releases its kernel mount and view
+  record; `orna mount DIR --at SELECTOR` attaches a record-only snapshot view.
 - USER state is principal-scoped and typed. Local peer authentication supplies
   the principal; optimistic revision conflicts and invalid expected types fail
   closed. State values use the canonical ORV5 value representation.
