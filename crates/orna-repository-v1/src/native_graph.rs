@@ -2484,7 +2484,14 @@ impl NativeGraphContext {
         let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
         let entry = find_ordered_entry_with(&mut read_node, node, &domain, None, None, key)?;
         entry
-            .map(|entry| decode_candidate_blob_metadata(&entry.value, &candidate.transfer))
+            .map(|entry| {
+                decode_candidate_blob_metadata(
+                    &entry.value,
+                    &candidate.transfer,
+                    &candidate.media_type,
+                    candidate.suffix.as_deref(),
+                )
+            })
             .transpose()
     }
 
@@ -7915,6 +7922,110 @@ mod persisted_orp_tests {
     }
 
     #[test]
+    fn candidate_row_annotation_must_be_the_admitted_canonical_pair() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"candidate annotation is bound to its pin";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+        let transfer = pin.transfer_record();
+        let identity = transfer.content_identity();
+
+        let stored_row = |media_type: &str, suffix: Option<&str>| {
+            let mut row = Vec::new();
+            array(&mut row, 1);
+            cbor_head(&mut row, 6, 60111);
+            array(&mut row, 5);
+            uint(&mut row, identity.length());
+            bytes(&mut row, &identity.sha256());
+            cbor_head(&mut row, 3, media_type.len() as u64);
+            row.extend_from_slice(media_type.as_bytes());
+            match suffix {
+                Some(suffix) => {
+                    cbor_head(&mut row, 3, suffix.len() as u64);
+                    row.extend_from_slice(suffix.as_bytes());
+                }
+                None => null(&mut row),
+            }
+            bytes(&mut row, transfer.descriptor_oid().as_bytes());
+            row
+        };
+
+        let admitted = decode_candidate_blob_metadata(
+            &stored_row("text/plain", None),
+            &transfer,
+            "text/plain",
+            None,
+        )
+        .expect("the admitted annotation binds the candidate row");
+        assert_eq!(admitted.media_type(), "text/plain");
+        assert_eq!(admitted.suffix(), None);
+        assert_eq!(admitted.content_identity(), identity);
+
+        let annotated = decode_candidate_blob_metadata(
+            &stored_row("audio/mpeg", Some("mp2")),
+            &transfer,
+            "audio/mpeg",
+            Some("mp2"),
+        )
+        .expect("a matching annotated pair binds the candidate row");
+        assert_eq!(annotated.media_type(), "audio/mpeg");
+        assert_eq!(annotated.suffix(), Some("mp2"));
+
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("TEXT/PLAIN", None),
+                &transfer,
+                "TEXT/PLAIN",
+                None,
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
+        // An explicit suffix equal to the type's default is parseable but not
+        // canonical MIME-1, so it cannot bind even when the pin admits it.
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("text/plain", Some("txt")),
+                &transfer,
+                "text/plain",
+                Some("txt"),
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("image/png", None),
+                &transfer,
+                "text/plain",
+                None,
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("audio/mpeg", Some("mp2")),
+                &transfer,
+                "text/plain",
+                None,
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("text/plain", None),
+                &transfer,
+                "text/plain",
+                Some("txt"),
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
+    }
+
+    #[test]
     fn protected_pin_acceptance_rejects_a_tampered_descriptor() {
         let (_directory, graph) = capture_test_context();
         let scope = graph.open_read_scope().expect("owner read scope");
@@ -9372,6 +9483,8 @@ fn row_page_anchor(height: u8, key: &crate::row_store::TypedKey) -> Result<bool,
 fn decode_candidate_blob_metadata(
     encoded_row: &[u8],
     transfer: &ProtectedContentTransfer,
+    admitted_media_type: &str,
+    admitted_suffix: Option<&str>,
 ) -> Result<ProtectedBlobMetadata, GraphError> {
     let CborValue::Array(mut fields) = decode_canonical_cbor(encoded_row)? else {
         return Err(GraphError::NonCanonicalData);
@@ -9418,6 +9531,12 @@ fn decode_candidate_blob_metadata(
         CborValue::Text(suffix) => Some(suffix.clone()),
         _ => unreachable!("suffix variant checked above"),
     };
+    bind_candidate_blob_annotation(
+        media_type,
+        suffix.as_deref(),
+        admitted_media_type,
+        admitted_suffix,
+    )?;
     Ok(ProtectedBlobMetadata {
         content_identity: identity,
         media_type: media_type.clone(),
@@ -9475,6 +9594,27 @@ fn validate_canonical_mime1_annotation(
     let annotation =
         MediaAnnotation::new(media_type, suffix).map_err(|_| GraphError::InvalidBlobAnnotation)?;
     if annotation.media_type() != media_type || annotation.suffix() != suffix {
+        return Err(GraphError::InvalidBlobAnnotation);
+    }
+    Ok(())
+}
+
+/// Binds the annotation of a candidate row to the annotation its pin was
+/// admitted with.
+///
+/// The transfer record carries content identity alone, so the row's own bytes
+/// are the only place a candidate annotation appears. Accepting whatever that
+/// row spells would let a candidate claim an annotation the pin never admitted,
+/// so the stored spelling must be canonical MIME-1 and must equal the admitted
+/// `(media_type, suffix)` pair exactly.
+fn bind_candidate_blob_annotation(
+    stored_media_type: &str,
+    stored_suffix: Option<&str>,
+    admitted_media_type: &str,
+    admitted_suffix: Option<&str>,
+) -> Result<(), GraphError> {
+    validate_canonical_mime1_annotation(stored_media_type, stored_suffix)?;
+    if stored_media_type != admitted_media_type || stored_suffix != admitted_suffix {
         return Err(GraphError::InvalidBlobAnnotation);
     }
     Ok(())
