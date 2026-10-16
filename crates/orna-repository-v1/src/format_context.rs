@@ -2636,6 +2636,29 @@ mod graph_bridge_tests {
         (schema_oid, schema_digest)
     }
 
+    fn schema_node_for_relation(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+    ) -> (NativeOid, [u8; 32]) {
+        let algorithm = context
+            .validate_schema_root()
+            .expect("pinned source schema root")
+            .oid
+            .algorithm();
+        let descriptor = descriptor_for_table(relation_id, "Int");
+        let schema_bytes = descriptor.encode().expect("encode schema descriptor");
+        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            directory,
+            algorithm,
+            &schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+        (schema_oid, schema_digest)
+    }
+
     fn install_overflow_row_store(
         directory: &Path,
         context: &RepositoryFormatContext,
@@ -2668,7 +2691,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
         let semantic_digest: [u8; 32] = Sha256::digest(overflow_bytes).into();
         let stored_digest = semantic_digest_override.unwrap_or(semantic_digest);
         let chunk_oid = write_git_object(directory, algorithm, "blob", &overflow_bytes);
@@ -2747,7 +2770,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
 
         let mut branch_entries = Vec::new();
         for &(key, stored_fence) in rows_and_fences {
@@ -2820,7 +2843,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
         let domain = row_domain(relation_id, schema_digest);
 
         let mut next_key = 0u64;
@@ -3384,12 +3407,11 @@ mod graph_bridge_tests {
 
     #[test]
     fn pinned_orp_loader_issues_lazy_snapshot_and_reads_verified_overflow_by_point_and_range() {
-        let directory = repository();
+        let relation_id = [0x72; 16];
+        let (directory, _descriptor) = seeded_table_binding(relation_id);
         let root = directory.path();
         let initial = context(root);
-        let relation_id = [0x72; 16];
-        let (relation_id, expected_digest) =
-            install_overflow_row_store(root, &initial, relation_id, None);
+        let (_, expected_digest) = install_overflow_row_store(root, &initial, relation_id, None);
         let pinned = context(root);
         let snapshot = pinned
             .load_row_map(relation_id)
@@ -3403,6 +3425,8 @@ mod graph_bridge_tests {
             .open_native_graph(&snapshot)
             .expect("issue graph context from repository snapshot");
         let scope = graph.open_read_scope().expect("owner read scope");
+        let media_before_point = scope.payload_bytes_read();
+        let structured_before_point = scope.structured_metadata_bytes_read();
         let row = graph
             .lookup_row(&TypedKey::UInt(7), &scope)
             .expect("bounded point lookup")
@@ -3410,15 +3434,26 @@ mod graph_bridge_tests {
         let RowValue::Overflow(reference) = row.value() else {
             panic!("verified kind-3 row should decode as overflow");
         };
-        assert!(reference.encoded_length() > crate::row_store::ROW_INLINE_LIMIT as u64);
+        let encoded_length = reference.encoded_length();
+        assert!(encoded_length > crate::row_store::ROW_INLINE_LIMIT as u64);
         assert_eq!(reference.semantic_digest(), &expected_digest);
+        assert_eq!(
+            scope.structured_metadata_bytes_read() - structured_before_point,
+            encoded_length
+        );
+        assert_eq!(scope.payload_bytes_read() - media_before_point, 0);
 
+        let structured_before_range = scope.structured_metadata_bytes_read();
         let range = KeyRange::new(Some(TypedKey::UInt(7)), None, 1).unwrap();
-        let ranged = graph
-            .range_rows(&range, &scope)
+        let ranged = snapshot
+            .range_with_graph_context(&graph, &scope, &range)
             .expect("bounded ORP range lookup");
         assert_eq!(ranged, vec![row]);
-
+        assert_eq!(
+            scope.structured_metadata_bytes_read() - structured_before_range,
+            encoded_length
+        );
+        assert_eq!(scope.payload_bytes_read() - media_before_point, 0);
         let bad_digest = [0x99; 32];
         install_overflow_row_store(root, &pinned, relation_id, Some(bad_digest));
         let tampered_context = context(root);
@@ -3434,6 +3469,228 @@ mod graph_bridge_tests {
             Err(crate::native_graph::GraphError::ContentIdentityMismatch)
         ));
     }
+    #[test]
+    fn admitted_fields_decode_inline_and_overflow_from_bound_manifest_without_media_reads() {
+        let relation_id = [0x73; 16];
+        let directory = repository();
+        let root = directory.path();
+        fs::write(root.join("main.orna"), "use media;\n").expect("write importing module");
+        fs::write(
+            root.join("media.orna"),
+            "pub table Audio(id: Int) {\n    payload: Blob,\n    note: Str,\n}\n",
+        )
+        .expect("write committed table manifest");
+        commit(root);
+
+        let initial = context(root);
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
+        let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
+            Raw::Array(vec![
+                uuid(id),
+                Raw::Text(name.to_owned()),
+                ty,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid(relation_id)),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
+            (
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    field(
+                        [0x11; 16],
+                        "id",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]),
+                        0,
+                    ),
+                    field(
+                        [0x22; 16],
+                        "payload",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".into())]),
+                        1,
+                    ),
+                    field(
+                        [0x33; 16],
+                        "note",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                        1,
+                    ),
+                ]),
+            ),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid three-field table manifest");
+        let schema_bytes = descriptor.encode().expect("encode schema descriptor");
+        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            root,
+            algorithm,
+            &schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+
+        let media = b"media payload not read by field projection";
+        let media_digest = Sha256::digest(media).into();
+        let media_chunk = write_git_object(root, algorithm, "blob", media);
+        let media_byte_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: media.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: media.len() as u64,
+                    target: media_chunk,
+                    chunk_sha256: Some(media_digest),
+                }],
+            },
+        );
+        let blob_descriptor = write_native_node(
+            root,
+            algorithm,
+            &NodeData::BlobDescriptor {
+                length: media.len() as u64,
+                raw_sha256: media_digest,
+                byte_root: Some(media_byte_root),
+            },
+        );
+        let fields = |note: &str| {
+            let mut encoded = vec![0x82];
+            cbor_head(&mut encoded, 6, 60111);
+            cbor_head(&mut encoded, 4, 5);
+            cbor_head(&mut encoded, 0, media.len() as u64);
+            cbor_bytes(&mut encoded, &media_digest);
+            cbor_head(&mut encoded, 3, "image/png".len() as u64);
+            encoded.extend_from_slice(b"image/png");
+            encoded.push(0xf6);
+            cbor_bytes(&mut encoded, blob_descriptor.as_bytes());
+            cbor_head(&mut encoded, 3, note.len() as u64);
+            encoded.extend_from_slice(note.as_bytes());
+            encoded
+        };
+        let inline_fields = fields("short");
+        let overflow_note = "x".repeat(crate::row_store::ROW_INLINE_LIMIT + 1);
+        let overflow_fields = fields(&overflow_note);
+        assert!(overflow_fields.len() > crate::row_store::ROW_INLINE_LIMIT);
+        let mut semantic_fields = vec![0x82];
+        cbor_head(&mut semantic_fields, 6, 60112);
+        cbor_head(&mut semantic_fields, 4, 4);
+        cbor_head(&mut semantic_fields, 0, media.len() as u64);
+        cbor_bytes(&mut semantic_fields, &media_digest);
+        cbor_head(&mut semantic_fields, 3, "image/png".len() as u64);
+        semantic_fields.extend_from_slice(b"image/png");
+        semantic_fields.push(0xf6);
+        cbor_head(&mut semantic_fields, 3, overflow_note.len() as u64);
+        semantic_fields.extend_from_slice(overflow_note.as_bytes());
+        let semantic_digest = Sha256::digest(&semantic_fields).into();
+        let overflow_digest = Sha256::digest(&overflow_fields).into();
+        let overflow_chunk = write_git_object(root, algorithm, "blob", &overflow_fields);
+        let overflow_byte_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: overflow_fields.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: overflow_fields.len() as u64,
+                    target: overflow_chunk,
+                    chunk_sha256: Some(overflow_digest),
+                }],
+            },
+        );
+        let dependency_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::DependencyIndex {
+                height: 0,
+                children: vec![blob_descriptor.clone()],
+            },
+        );
+        let overflow_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::ValueOverflow {
+                encoded_length: overflow_fields.len() as u64,
+                semantic_digest,
+                byte_root: overflow_byte_root,
+                dependency_root: Some(dependency_root),
+            },
+        );
+        let mut overflow_value = Vec::new();
+        cbor_head(&mut overflow_value, 6, 60113);
+        cbor_head(&mut overflow_value, 4, 1);
+        cbor_bytes(&mut overflow_value, overflow_root.as_bytes());
+        let rows = rows_leaf(
+            root,
+            algorithm,
+            &row_domain(relation_id, schema_digest),
+            &[(7, inline_fields.clone()), (8, overflow_value)],
+        );
+        install_rows_store(root, &initial, relation_id, &schema_oid, &rows, 2);
+
+        let pinned = context(root);
+        let snapshot_id = pinned.snapshot_pin().snapshot_id();
+        let database_id = pinned.require_database_id().expect("repository identity");
+        let binding = pinned
+            .bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &snapshot_id,
+                &descriptor,
+            )
+            .expect("source-qualified committed TableManifest");
+        let snapshot = pinned.load_row_map(relation_id).expect("pinned row map");
+        let graph = pinned
+            .open_native_graph(&snapshot)
+            .expect("owner-issued graph context");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        for (key, expected_fields) in [
+            (7, inline_fields.as_slice()),
+            (8, overflow_fields.as_slice()),
+        ] {
+            let row = graph
+                .lookup_row(&TypedKey::UInt(key), &scope)
+                .expect("read persisted row")
+                .expect("row exists");
+            let structured_before = scope.structured_metadata_bytes_read();
+            let media_before = scope.payload_bytes_read();
+            let decoded = graph
+                .decode_admitted_row_fields(&row, &binding, &scope)
+                .expect("decode against source-bound TableManifest");
+            assert_eq!(decoded.fields().len(), 2);
+            assert_eq!(decoded.canonical_fields(), expected_fields);
+            assert_eq!(decoded.fields()[0].field_id(), &[0x22; 16]);
+            assert_eq!(decoded.fields()[1].field_id(), &[0x33; 16]);
+            let metadata = decoded.fields()[0]
+                .blob_metadata()
+                .expect("Blob field identity");
+            assert_eq!(metadata.length(), media.len() as u64);
+            assert_eq!(metadata.sha256(), media_digest);
+            assert_eq!(
+                metadata.descriptor_oid().map(|oid| oid.as_bytes()),
+                Some(blob_descriptor.as_bytes())
+            );
+            assert!(!metadata.is_hydrated());
+            assert_eq!(
+                scope.structured_metadata_bytes_read() - structured_before,
+                expected_fields.len() as u64
+            );
+            assert_eq!(scope.payload_bytes_read() - media_before, 0);
+        }
+    }
+
     #[test]
     fn rejects_small_noncanonical_overflow_value() {
         let directory = repository();
@@ -3579,9 +3836,9 @@ mod graph_bridge_tests {
 
     #[test]
     fn indexed_range_includes_fence_and_excludes_next_child_minimum() {
-        let directory = repository();
-        let root = directory.path();
         let relation_id = [0x7a; 16];
+        let (directory, _descriptor) = seeded_table_binding(relation_id);
+        let root = directory.path();
         install_nested_row_store(root, &context(root), relation_id, 2, 2, 4);
 
         let pinned = context(root);
@@ -3591,7 +3848,9 @@ mod graph_bridge_tests {
         let range = KeyRange::new(Some(TypedKey::UInt(40)), Some(TypedKey::UInt(90)), 8)
             .expect("valid fence-aligned range");
 
-        let rows = graph.range_rows(&range, &scope).expect("bounded ORP range");
+        let rows = snapshot
+            .range_with_graph_context(&graph, &scope, &range)
+            .expect("bounded ORP range");
         let keys: Vec<_> = rows.iter().map(|row| row.key().clone()).collect();
         assert_eq!(
             keys,
@@ -3603,7 +3862,50 @@ mod graph_bridge_tests {
                 TypedKey::UInt(80),
             ]
         );
+        let source_row = rows[0].clone();
         assert_eq!(scope.payload_bytes_read_for_test(), 0);
+
+        let limited = KeyRange::new(Some(TypedKey::UInt(40)), Some(TypedKey::UInt(90)), 3)
+            .expect("valid limited range");
+        let limited_rows = snapshot
+            .range_with_graph_context(&graph, &scope, &limited)
+            .expect("bounded limited range");
+        assert_eq!(
+            limited_rows
+                .iter()
+                .map(|row| row.key().clone())
+                .collect::<Vec<_>>(),
+            vec![TypedKey::UInt(40), TypedKey::UInt(50), TypedKey::UInt(60)]
+        );
+
+        let (later_directory, _descriptor) = seeded_table_binding(relation_id);
+        let later_root = later_directory.path();
+        install_nested_row_store(later_root, &context(later_root), relation_id, 2, 1, 4);
+        let later_pinned = context(later_root);
+        let later_snapshot = later_pinned
+            .load_row_map(relation_id)
+            .expect("load later ORP identity");
+        let later_graph = later_pinned
+            .open_native_graph(&later_snapshot)
+            .expect("issue later graph context");
+        let later_scope = later_graph
+            .open_read_scope()
+            .expect("later owner read scope");
+        assert!(matches!(
+            snapshot.range_with_graph_context(&later_graph, &later_scope, &range),
+            Err(crate::row_store::RowStoreError::BoundaryMismatch)
+        ));
+        assert_eq!(later_scope.objects_read_for_test(), 0);
+        let before_foreign_row = later_scope.objects_read_for_test();
+        assert!(matches!(
+            later_graph.resolve_row_node(
+                &source_row,
+                snapshot.version().primary_root(),
+                &later_scope
+            ),
+            Err(crate::native_graph::GraphError::ContextMismatch)
+        ));
+        assert_eq!(later_scope.objects_read_for_test(), before_foreign_row);
     }
 
     /// One relation's index shape and the objects a point lookup, a missing-key
@@ -3660,8 +3962,8 @@ mod graph_bridge_tests {
 
         let range = KeyRange::new(Some(TypedKey::UInt(30)), Some(TypedKey::UInt(80)), 256).unwrap();
         let before = scope.objects_read_for_test();
-        let ranged = graph
-            .range_rows(&range, &scope)
+        let ranged = snapshot
+            .range_with_graph_context(&graph, &scope, &range)
             .expect("bounded range read");
         let range_reads = scope.objects_read_for_test() - before;
         let keys: Vec<_> = ranged.iter().map(|row| row.key().clone()).collect();
@@ -3685,8 +3987,8 @@ mod graph_bridge_tests {
         assert!(total <= MAX_ROW_RANGE_LIMIT as u64 * 3);
         let unbounded = KeyRange::new(None, None, MAX_ROW_RANGE_LIMIT).unwrap();
         let before = scope.objects_read_for_test();
-        let all = graph
-            .range_rows(&unbounded, &scope)
+        let all = snapshot
+            .range_with_graph_context(&graph, &scope, &unbounded)
             .expect("full index walk");
         let full = scope.objects_read_for_test() - before;
         assert_eq!(all.len() as u64, total);
