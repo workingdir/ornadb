@@ -25,8 +25,7 @@ use orna_semantic_v1::{
 };
 use orna_syntax_v1::{Declaration, Expr, parse_module, parse_row};
 use orna_value_v1::{
-    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat,
-    ROV3_BLOB_TAG,
+    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, ValueFormat, ROV3_BLOB_TAG,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -2136,6 +2135,7 @@ mod source_row_admission_tests {
 #[cfg(test)]
 mod committed_loose_row_projection_tests {
     use super::*;
+    use orna_value_v1::Value;
     use std::{path::Path, process::Command};
 
     fn git(root: &Path, args: &[&str]) {
