@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use orna_value_v1::{BlobMetadata, MimeRegistry};
 
 use crate::native_graph::{
-    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeObjectId,
-    NativeObjectKind, MAX_REFS, NODE_DATA_LIMIT,
+    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeGraphContext,
+    NativeObjectId, NativeObjectKind, RepositoryReadScope, MAX_REFS, NODE_DATA_LIMIT,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
@@ -175,7 +175,7 @@ impl KeyRange {
         if lower_inclusive
             .as_ref()
             .zip(upper_exclusive.as_ref())
-            .is_some_and(|(lower, upper)| lower >= upper)
+            .is_some_and(|(lower, upper)| !lower.same_key_type(upper) || lower >= upper)
         {
             return Err(RowStoreError::InvalidKeyRange);
         }
@@ -496,6 +496,44 @@ impl RowMapSnapshot {
             .map(|entry| AdmittedRow::from_entry(&self.version, entry))
             .collect())
     }
+
+    /// Reads a bounded range from a persisted snapshot through its matching
+    /// repository graph context. The graph remains the only decoder: it checks
+    /// the admitted schema domain on each traversed page before exposing rows.
+    pub fn range_with_graph_context(
+        &self,
+        context: &NativeGraphContext,
+        scope: &RepositoryReadScope,
+        range: &KeyRange,
+    ) -> Result<Vec<AdmittedRow>, RowStoreError> {
+        let version = &self.version;
+        if context.row_map_version() != version {
+            return Err(RowStoreError::BoundaryMismatch);
+        }
+
+        let row_count = version.row_count.ok_or(RowStoreError::RowCountMismatch)?;
+        let mut authority = Sha256::new();
+        authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
+        authority.update(context.database_id());
+        authority.update(context.snapshot_id());
+        authority.update(version.store_root.as_bytes());
+        authority.update(version.relation_id);
+        authority.update(version.primary_root.as_bytes());
+        authority.update(context.schema_digest());
+        authority.update(row_count.to_be_bytes());
+        let expected_authority: [u8; 32] = authority.finalize().into();
+        if version.database_id() != context.database_id()
+            || version.schema().database_id() != context.database_id()
+            || version.schema().schema_digest() != context.schema_digest()
+            || self.authority != expected_authority
+        {
+            return Err(RowStoreError::BoundaryMismatch);
+        }
+
+        context
+            .range_rows(range, scope)
+            .map_err(RowStoreError::from)
+    }
 }
 
 /// The identity carried across the row-root/key boundary.  A key is never
@@ -556,6 +594,25 @@ pub enum TypedKey {
 }
 
 impl TypedKey {
+    fn same_key_type(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null)
+            | (Self::Bool(_), Self::Bool(_))
+            | (Self::Int(_), Self::Int(_))
+            | (Self::UInt(_), Self::UInt(_))
+            | (Self::Text(_), Self::Text(_))
+            | (Self::Bytes(_), Self::Bytes(_)) => true,
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| left.same_key_type(right))
+            }
+            _ => false,
+        }
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, RowStoreError> {
         let mut output = Vec::new();
         encode_key(self, &mut output)?;
@@ -1586,7 +1643,9 @@ impl fmt::Display for RowStoreError {
                 f,
                 "row range limit {limit} is outside 1..={MAX_ROW_RANGE_LIMIT}"
             ),
-            Self::InvalidKeyRange => f.write_str("row range lower bound is not below upper bound"),
+            Self::InvalidKeyRange => {
+                f.write_str("row range bounds must share one logical key type and be ordered")
+            }
             Self::RowsNotStrictlyOrdered => {
                 f.write_str("admitted row keys are not strictly logically ordered")
             }
@@ -1722,6 +1781,28 @@ mod tests {
             ]
         );
         assert!(rows.iter().all(|row| row.version() == &version));
+    }
+
+    #[test]
+    fn key_range_rejects_bounds_from_different_typed_key_domains() {
+        assert!(matches!(
+            KeyRange::new(Some(TypedKey::Int(1)), Some(TypedKey::UInt(2)), 1),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
+        assert!(matches!(
+            KeyRange::new(
+                Some(TypedKey::Tuple(vec![
+                    TypedKey::Text("id".into()),
+                    TypedKey::Int(1)
+                ])),
+                Some(TypedKey::Tuple(vec![
+                    TypedKey::Text("id".into()),
+                    TypedKey::UInt(2)
+                ])),
+                1,
+            ),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
     }
 
     #[test]

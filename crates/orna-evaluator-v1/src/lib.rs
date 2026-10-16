@@ -221,6 +221,14 @@ pub struct RelationPage {
     pub next: Option<Vec<u8>>,
 }
 
+/// One bounded ordered relation page whose rows retain their value profiles
+/// and format-3 owner contexts across an evaluator source scan.
+#[derive(Clone, Debug)]
+pub struct ContextValueRelationPage {
+    pub rows: Vec<ContextValue>,
+    pub next: Option<Vec<u8>>,
+}
+
 /// Opaque identity for one relation source in an evaluator plan.
 ///
 /// Cloned plans retain this identity across their page reads; independently
@@ -921,12 +929,11 @@ pub trait EffectHandler {
     }
 }
 
-/// Executes a native effect with values carried in the OVB-2 profile.
+/// Executes native effects with values carried as [`ContextValue`]s.
 ///
-/// This binding is deliberately separate from [`EffectHandler`]: OVB-1
-/// callers continue to receive canonical values, while profile-aware native
-/// bindings can retain OVB-2 values such as MIME-1 annotated Blobs at both
-/// sides of the dispatch boundary.
+/// OVB-2 remains the default profile. Context-aware named invocation can also
+/// preserve ROV-3/SOV-3 owner contexts and ordered relation rows across this
+/// boundary, while legacy [`EffectHandler`] callers stay canonical.
 pub trait Ovb2EffectHandler {
     fn handle(
         &mut self,
@@ -983,6 +990,19 @@ pub trait Ovb2EffectHandler {
     ) -> Result<Option<ContextValue>, EvaluationError> {
         self.handle_registered_with_budget(operation, callee, arguments, budget)
     }
+
+    /// Supplies ordered relation rows without flattening contextual values to
+    /// canonical OVB-1. `None` falls back to the canonical page hook.
+    fn scan_context_relation_page_scoped(
+        &mut self,
+        _source: &str,
+        _scope: RelationReadScope,
+        _after: Option<&[u8]>,
+        _limit: usize,
+        _budget: &mut StepBudget,
+    ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
+        Ok(None)
+    }
 }
 
 struct Ovb2EffectHandlerAdapter<'a> {
@@ -1007,9 +1027,9 @@ impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
     }
 }
 
-/// Effect boundary for named source invocation with preserved ContextValues.
-/// Arguments retain their profile and format-3 capability context. A handler
-/// result may establish a new profile for subsequent effects and the result.
+/// Effect and relation boundary for named invocation with preserved
+/// ContextValues. Arguments retain their profile and format-3 capability
+/// context; results may establish the owner context for subsequent effects.
 pub trait ContextValueEffectHandler: EffectHandler {
     fn handle_context(
         &mut self,
@@ -1046,6 +1066,18 @@ pub trait ContextValueEffectHandler: EffectHandler {
     ) -> Result<Option<ContextValue>, EvaluationError> {
         self.handle_context_registered_with_budget(operation, callee, arguments, budget)
     }
+    /// Supplies rows for a context-preserving indexed source scan. Returning
+    /// `None` keeps the existing canonical `EffectHandler` scan path.
+    fn scan_context_relation_page_scoped(
+        &mut self,
+        _source: &str,
+        _scope: RelationReadScope,
+        _after: Option<&[u8]>,
+        _limit: usize,
+        _budget: &mut StepBudget,
+    ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
+        Ok(None)
+    }
 }
 
 struct ContextValueEffectHandlerAdapter<'a> {
@@ -1064,7 +1096,10 @@ impl ContextValueEffectHandlerAdapter<'_> {
         }
     }
     fn profile(&self) -> (ValueFormat, Option<&Format3Context>) {
-        if matches!(self.source_format, ValueFormat::Rov3 | ValueFormat::Sov3) {
+        if matches!(self.format, ValueFormat::Rov3 | ValueFormat::Sov3) && self.context.is_some()
+        {
+            (self.format, self.context.as_ref())
+        } else if matches!(self.source_format, ValueFormat::Rov3 | ValueFormat::Sov3) {
             (self.source_format, self.source_context.as_ref())
         } else {
             (self.format, self.context.as_ref())
@@ -1129,6 +1164,29 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
             )?;
         self.record_result_profile(&result);
         Ok(result)
+    }
+
+    fn scan_context_relation_page_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
+        let page = self
+            .handler
+            .scan_context_relation_page_scoped(source, scope, after, limit, budget)?;
+        if let Some(row) = page.as_ref().and_then(|page| page.rows.first())
+            && matches!(row.format(), ValueFormat::Rov3 | ValueFormat::Sov3)
+            && let Some(context) = row.context()
+        {
+            self.format = row.format();
+            self.context = Some(context.clone());
+            self.source_format = row.format();
+            self.source_context = Some(context.clone());
+        }
+        Ok(page)
     }
 
     fn value_format(&self) -> ValueFormat {
@@ -5954,16 +6012,20 @@ impl Context<'_, '_> {
             // must remain interruptible even when its callbacks are absent,
             // short-circuiting, or otherwise do not execute.
             self.step()?;
-            let page = self.relation_page(&plan.source, plan.source_identity, after.as_deref())?;
-            let page_len = page.rows.len();
-            for canonical in page.rows {
+            let (rows, next) = self.relation_page(
+                &plan.source,
+                plan.source_identity,
+                after.as_deref(),
+                depth,
+            )?;
+            let page_len = rows.len();
+            for value in rows {
                 self.step()?;
-                let value = Value::from_canonical(&canonical, self, depth + 1)?;
                 if !visit(self, value)? {
                     return Ok(());
                 }
             }
-            let Some(next) = page.next else {
+            let Some(next) = next else {
                 return Ok(());
             };
             if page_len == 0 {
@@ -6338,7 +6400,13 @@ impl Context<'_, '_> {
         source: &str,
         scope: RelationReadScope,
         after: Option<&[u8]>,
-    ) -> Result<RelationPage, EvaluationError> {
+        depth: usize,
+    ) -> Result<(Vec<Value>, Option<Vec<u8>>), EvaluationError> {
+        enum SourcePage {
+            Canonical(RelationPage),
+            Contextual(ContextValueRelationPage),
+        }
+
         let remaining = self.limits.max_steps.saturating_sub(self.steps);
         let mut budget = StepBudget::new(remaining);
         let result = self
@@ -6346,7 +6414,24 @@ impl Context<'_, '_> {
             .as_deref_mut()
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
             .and_then(|effects| {
-                effects.scan_relation_page_scoped(source, scope, after, 1, &mut budget)
+                let contextual = if let Some(handler) = effects.ovb2_binding() {
+                    handler.scan_context_relation_page_scoped(
+                        source,
+                        scope,
+                        after,
+                        1,
+                        &mut budget,
+                    )?
+                } else {
+                    None
+                };
+                if let Some(page) = contextual {
+                    Ok(Some(SourcePage::Contextual(page)))
+                } else {
+                    effects
+                        .scan_relation_page_scoped(source, scope, after, 1, &mut budget)
+                        .map(|page| page.map(SourcePage::Canonical))
+                }
             });
         let debited = remaining.saturating_sub(budget.remaining());
         self.steps = self
@@ -6354,12 +6439,48 @@ impl Context<'_, '_> {
             .checked_add(debited)
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         let page = result?.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
-        if let (Some(after), Some(next)) = (after, page.next.as_deref())
+        let page_size = match &page {
+            SourcePage::Canonical(page) => page.rows.len(),
+            SourcePage::Contextual(page) => page.rows.len(),
+        };
+        if page_size > 1 {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let (rows, next) = match page {
+            SourcePage::Canonical(page) => page
+                .rows
+                .iter()
+                .map(|row| Value::from_canonical(row, self, depth + 1))
+                .collect::<Result<Vec<_>, _>>()
+                .map(|rows| (rows, page.next)),
+            SourcePage::Contextual(page) => {
+                let (format, accepts_context_values) = {
+                    let handler = self
+                        .ovb2_effects()
+                        .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+                    (handler.value_format(), handler.accepts_context_values())
+                };
+                let rows = page
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        if !accepts_context_values
+                            && (row.format() != format || format != ValueFormat::Ovb2)
+                        {
+                            return Err(error("ORNA-EVAL-VALUE"));
+                        }
+                        Value::from_context_value(row, self, depth + 1)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((rows, page.next))
+            }
+        }?;
+        if let (Some(after), Some(next)) = (after, next.as_deref())
             && next <= after
         {
             return Err(error("ORNA-EVAL-VALUE"));
         }
-        Ok(page)
+        Ok((rows, next))
     }
 
     fn validate_relation_plan_sources(
@@ -15009,6 +15130,176 @@ mod tests {
 
         assert_eq!(result.format(), ValueFormat::Ovb2);
         assert!(matches!(result.raw(), Raw::Tag(OVB2_BLOB_TAG, _)));
+    }
+
+    #[test]
+    fn context_named_invocation_adopts_effect_result_owner_context() {
+        struct EmptyResolver;
+
+        impl orna_value_v1::BlobResolver for EmptyResolver {
+            fn read_range(
+                &self,
+                _reference: &orna_value_v1::ContentReference,
+                _offset: u64,
+                _length: u64,
+            ) -> orna_value_v1::Result<Vec<u8>> {
+                Err(orna_value_v1::Error::ContentUnavailable)
+            }
+        }
+
+        struct ReplaceAndConsume {
+            returned: ContextValue,
+            page_row: ContextValue,
+            consumed_context: Option<[u8; 16]>,
+            page_reads: usize,
+        }
+
+        impl EffectHandler for ReplaceAndConsume {
+            fn handle(
+                &mut self,
+                _callee: &Expr,
+                _arguments: &[CanonicalValue],
+            ) -> Result<Option<CanonicalValue>, EvaluationError> {
+                Err(error("ORNA-EVAL-UNSUPPORTED"))
+            }
+            fn validate_relation_source(&mut self, source: &str) -> Result<(), EvaluationError> {
+                assert_eq!(source, "sys.Storage");
+                Ok(())
+            }
+
+        }
+
+        impl ContextValueEffectHandler for ReplaceAndConsume {
+            fn handle_context(
+                &mut self,
+                callee: &Expr,
+                arguments: &[ContextValue],
+            ) -> Result<Option<ContextValue>, EvaluationError> {
+                assert_eq!(arguments.len(), 1);
+                match function_name(callee).as_deref() {
+                    Some("sys.test.replace_blob") => {
+                        assert_eq!(arguments[0].format(), ValueFormat::Rov3);
+                        Ok(Some(self.returned.clone()))
+                    }
+                    Some("sys.test.consume_blob") => {
+                        let owner = arguments[0]
+                            .context()
+                            .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+                        self.consumed_context = Some(owner.database_uuid());
+                        Ok(Some(
+                            ContextValue::new(ValueFormat::Ovb1, Raw::Bool(true))
+                                .map_err(|_| error("ORNA-EVAL-VALUE"))?,
+                        ))
+                    }
+                    _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+                }
+            }
+
+            fn scan_context_relation_page_scoped(
+                &mut self,
+                source: &str,
+                _scope: RelationReadScope,
+                after: Option<&[u8]>,
+                limit: usize,
+                budget: &mut StepBudget,
+            ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
+                assert_eq!(source, "sys.Storage");
+                assert!(after.is_none(), "the fixture source contains one row");
+                assert_eq!(limit, 1);
+                budget.debit(1)?;
+                self.page_reads += 1;
+                Ok(Some(ContextValueRelationPage {
+                    rows: vec![self.page_row.clone()],
+                    next: None,
+                }))
+            }
+        }
+
+        let context = |database: [u8; 16], base: u8| {
+            Format3Context::from_persisted(
+                database,
+                orna_value_v1::Snapshot::cwd(database, [base; 16], 0.into())
+                    .expect("format-3 snapshot"),
+                orna_value_v1::GitHash::Sha1,
+                orna_value_v1::NativeOid::from_bytes(&[base + 1; 20]).unwrap(),
+                orna_value_v1::NativeOid::from_bytes(&[base + 2; 20]).unwrap(),
+                orna_value_v1::AvailabilityState::Available,
+                orna_value_v1::OwnerLifetime::new([base + 3; 16]),
+                orna_value_v1::Format3Quota::new(1024, 1 << 20).unwrap(),
+                Arc::new(EmptyResolver),
+            )
+            .expect("format-3 owner context")
+        };
+        let source_context = context([0x31; 16], 0x32);
+        let result_context = context([0x41; 16], 0x42);
+        let source_blob = orna_value_v1::Blob::from_reference(
+            source_context
+                .reference(
+                    orna_value_v1::ContentIdentity::from_bytes(b"source"),
+                    orna_value_v1::NativeOid::from_bytes(&[0x37; 20]).unwrap(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let indexed_row = ContextValue::from_blob(
+            &orna_value_v1::Blob::from_reference(
+                result_context
+                    .reference(
+                        orna_value_v1::ContentIdentity::from_bytes(b"replacement"),
+                        orna_value_v1::NativeOid::from_bytes(&[0x47; 20]).unwrap(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap(),
+            ValueFormat::Rov3,
+        )
+        .unwrap();
+        let returned = ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap();
+        let page_row = indexed_row.clone();
+        let parsed = orna_syntax_v1::parse_module(include_str!(
+            "../tests/fixtures/context-result-owner.orna"
+        ));
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let orna_syntax_v1::Declaration::Function { signature, body } =
+            &parsed.value.items[0].declaration
+        else {
+            panic!("function expected")
+        };
+        let functions = Functions::from([(
+            String::from("entry"),
+            PureFunction {
+                parameters: signature.parameters.clone(),
+                body: body.clone(),
+                environment: Environment::new(),
+            },
+        )]);
+        let arguments = BTreeMap::from([(
+            String::from("blob"),
+            indexed_row.clone(),
+        )]);
+
+        let mut budget = StepBudget::new(Limits::default().max_steps);
+        let mut effects = ReplaceAndConsume {
+            returned,
+            page_row,
+            consumed_context: None,
+            page_reads: 0,
+        };
+        let result = invoke_named_with_context_effects(
+            "entry",
+            &functions,
+            &arguments,
+            Limits::default(),
+            &mut effects,
+            &mut budget,
+        )
+        .unwrap_or_else(|error| panic!("source consumer failed: {}", error.code()));
+
+        assert_eq!(result.format(), ValueFormat::Rov3);
+        assert_eq!(result.context().unwrap().database_uuid(), [0x41; 16]);
+        assert_eq!(result.raw(), &Raw::Bool(true));
+        assert_eq!(effects.consumed_context, Some([0x41; 16]));
+        assert_eq!(effects.page_reads, 1);
     }
 
     #[test]
