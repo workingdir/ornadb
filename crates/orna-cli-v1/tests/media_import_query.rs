@@ -7,7 +7,10 @@ use orna_runtime_v1::{
     TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use orna_value_v1::{BlobMetadataFilter, compare_blob_metadata, decode_rov3_blob_metadata};
+use orna_value_v1::{
+    BlobMetadata, BlobMetadataFilter, compare_blob_metadata, decode_rov3_blob_metadata,
+    selected_suffix,
+};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -150,7 +153,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     std::fs::remove_file(source.path().join("tone.wav")).unwrap();
     std::fs::remove_file(source.path().join("pixel.png")).unwrap();
 
-    let listing = list_media(&state).await;
+    let listing = list_media(&state, relation_id).await;
     // Rows come back ordered by key: image before song.
     let expected = [
         ("image", "image/png", 73_u64, "pixel.png"),
@@ -169,18 +172,18 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     // Filters select rows from payload-free metadata; nothing is hydrated.
     let song = || vec![b"song".to_vec()];
     let by_type = BlobMetadataFilter::new().with_media_type("audio/wav");
-    assert_eq!(filter_media(&state, &by_type).await, song());
+    assert_eq!(filter_media(&state, relation_id, &by_type).await, song());
     let by_size = BlobMetadataFilter::new().with_min_length(1000);
-    assert_eq!(filter_media(&state, &by_size).await, song());
+    assert_eq!(filter_media(&state, relation_id, &by_size).await, song());
     let small_png = BlobMetadataFilter::new()
         .with_media_type("image/png")
         .with_max_length(100);
     assert_eq!(
-        filter_media(&state, &small_png).await,
+        filter_media(&state, relation_id, &small_png).await,
         vec![b"image".to_vec()]
     );
     let too_small = BlobMetadataFilter::new().with_max_length(10);
-    assert!(filter_media(&state, &too_small).await.is_empty());
+    assert!(filter_media(&state, relation_id, &too_small).await.is_empty());
 
     // Bytes avoided: every listed payload is committed but never hydrated, so
     // the listing saves the full committed length of each row.
@@ -203,7 +206,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     .unwrap();
     let edit = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
     import_media(&repository, &state, writer, &mut bindings, &edit, "song", 0x90, false, relation_id).await;
-    let edited = list_media(&state).await;
+    let edited = list_media(&state, relation_id).await;
     let song = edited.iter().find(|row| row.key == b"song").unwrap();
     assert_eq!(song.media_type, "image/png");
     assert_eq!(song.length, 73);
@@ -213,7 +216,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
     // exactly as the edit left it. Only committed rows are compared.
     import_media(&repository, &state, writer, &mut bindings, &edit, "song", 0xa0, false, relation_id).await;
     assert_eq!(
-        list_media(&state).await,
+        list_media(&state, relation_id).await,
         edited,
         "re-importing the same fixture must not change the listing"
     );
@@ -379,8 +382,7 @@ async fn since_cut_keeps_only_newer_revisions_of_each_imported_row() {
     import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true, relation_id).await;
     let later = import_expression(SINCE_SONG_IMPORT_FIXTURE, source.path());
     import_media(&repository, &state, writer, &mut bindings, &later, "song-later", 0x80, true, relation_id).await;
-    // Reading the committed rows first, as the listing does, makes them visible to the graph.
-    state.committed_table_rows("media").await.unwrap();
+    // The published store carries both rows; the graph read below reads it.
 
     let format = repository.open_format_context().unwrap();
     let row_map = format.load_row_map(relation_id).unwrap();
@@ -455,8 +457,7 @@ async fn limit_walk_matches_the_truncated_full_walk_for_each_imported_row() {
         let expression = import_expression(fixture, source.path());
         import_media(&repository, &state, writer, &mut bindings, &expression, key, ordinal, true, relation_id).await;
     }
-    // Reading the committed rows first makes them visible to the graph.
-    state.committed_table_rows("media").await.unwrap();
+    // The published store carries every imported row; the graph read below reads it.
 
     let format = repository.open_format_context().unwrap();
     let row_map = format.load_row_map(relation_id).unwrap();
@@ -775,21 +776,21 @@ async fn deleting_a_committed_media_row_removes_it_from_listing_and_filters() {
 
     let song_filter = BlobMetadataFilter::new().with_media_type("audio/wav");
     let image_filter = BlobMetadataFilter::new().with_media_type("image/png");
-    assert_eq!(list_media(&state).await.len(), 2);
-    assert_eq!(filter_media(&state, &song_filter).await, vec![b"song".to_vec()]);
+    assert_eq!(list_media(&state, relation_id).await.len(), 2);
+    assert_eq!(filter_media(&state, relation_id, &song_filter).await, vec![b"song".to_vec()]);
 
     // Membership follows the edit: the committed delete removes the song row
     // from the listing and from every filter that used to select it.
-    delete_media(&state, writer, "song", 0x90, relation_id).await;
+    delete_media(&repository, &state, writer, "song", 0x90, relation_id).await;
 
-    let keys = list_media(&state)
+    let keys = list_media(&state, relation_id)
         .await
         .into_iter()
         .map(|row| row.key)
         .collect::<Vec<_>>();
     assert_eq!(keys, vec![b"image".to_vec()]);
-    assert!(filter_media(&state, &song_filter).await.is_empty());
-    assert_eq!(filter_media(&state, &image_filter).await, vec![b"image".to_vec()]);
+    assert!(filter_media(&state, relation_id, &song_filter).await.is_empty());
+    assert_eq!(filter_media(&state, relation_id, &image_filter).await, vec![b"image".to_vec()]);
 }
 
 #[tokio::test]
@@ -983,8 +984,8 @@ async fn history_on_an_emptied_catalogue_is_refused_with_no_listing() {
     let song = import_expression(EMPTY_CATALOGUE_SONG_FIXTURE, source.path());
     import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true, relation_id).await;
     // Deleting the only committed row leaves the catalogue empty.
-    delete_media(&state, writer, "song", 0x80, relation_id).await;
-    assert!(list_media(&state).await.is_empty(), "the catalogue is empty");
+    delete_media(&repository, &state, writer, "song", 0x80, relation_id).await;
+    assert!(list_media(&state, relation_id).await.is_empty(), "the catalogue is empty");
     drop(bindings);
     drop(state);
 
@@ -1188,8 +1189,9 @@ fn history_at_refuses_a_legacy_snapshot_it_cannot_walk() {
 }
 
 /// Deletes one committed media row through an admitted request, the same path
-/// the import uses for inserts.
+/// the import uses for inserts, and publishes it, so the row leaves the store.
 async fn delete_media(
+    repository: &Repository,
     state: &RuntimeState,
     writer: orna_runtime_v1::WriterLease,
     key: &str,
@@ -1234,29 +1236,30 @@ async fn delete_media(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
+    publish_media_row(repository, state, key, ordinal + 0x10).await;
 }
 
-async fn filter_media(state: &RuntimeState, filter: &BlobMetadataFilter) -> Vec<Vec<u8>> {
-    state
-        .committed_table_rows("media")
+async fn filter_media(
+    state: &RuntimeState,
+    relation_id: [u8; 16],
+    filter: &BlobMetadataFilter,
+) -> Vec<Vec<u8>> {
+    committed_admitted_rows(state, "media", relation_id)
         .await
-        .unwrap()
         .into_iter()
-        .filter(|(_, row)| filter.matches(&decode_rov3_blob_metadata(row).unwrap()))
+        .filter(|(_, row)| filter.matches(&canonical_blob_metadata(row)))
         .map(|(key, _)| key)
         .collect()
 }
 
 /// Lists every committed media row as payload-free metadata. Rows are decoded
 /// as Blob references only; no read or hydration call is made.
-async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
-    state
-        .committed_table_rows("media")
+async fn list_media(state: &RuntimeState, relation_id: [u8; 16]) -> Vec<MediaListing> {
+    committed_admitted_rows(state, "media", relation_id)
         .await
-        .unwrap()
         .into_iter()
         .map(|(key, row)| {
-            let metadata = decode_rov3_blob_metadata(&row).unwrap();
+            let metadata = canonical_blob_metadata(&row);
             MediaListing {
                 key,
                 media_type: metadata.media_type().to_owned(),
@@ -1267,6 +1270,24 @@ async fn list_media(state: &RuntimeState) -> Vec<MediaListing> {
             }
         })
         .collect()
+}
+
+/// The payload-free metadata a listing reads from a committed row's own bytes.
+///
+/// A stored row records the annotation's wire form, whose suffix is absent when
+/// it equals the media type's preferred suffix, so the column reports the
+/// suffix the MIME-1 registry selects for that media type.
+fn canonical_blob_metadata(row: &[u8]) -> BlobMetadata {
+    let metadata = decode_rov3_blob_metadata(row).expect("a committed media row holds a Blob");
+    let selected = selected_suffix(metadata.media_type(), metadata.suffix())
+        .expect("the MIME-1 registry resolves the row's media type");
+    BlobMetadata::from_stored_reference(
+        metadata.length(),
+        metadata.sha256(),
+        metadata.media_type(),
+        Some(&selected),
+        metadata.descriptor_oid().cloned(),
+    )
 }
 
 #[tokio::test]
@@ -1297,7 +1318,7 @@ async fn listing_projects_suffix_column_for_song_and_image_rows() {
     let image = import_expression(IMAGE_IMPORT_FIXTURE, source.path());
     import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true, relation_id).await;
 
-    let listing = list_media(&state).await;
+    let listing = list_media(&state, relation_id).await;
     let suffixes: Vec<(Vec<u8>, Option<String>)> = listing
         .into_iter()
         .map(|row| (row.key, row.suffix))
@@ -1340,13 +1361,13 @@ async fn negated_media_type_filter_excludes_only_the_named_type() {
     import_media(&repository, &state, writer, &mut bindings, &image, "image", 0x80, true, relation_id).await;
 
     let not_png = BlobMetadataFilter::new().without_media_type("image/png");
-    assert_eq!(filter_media(&state, &not_png).await, vec![b"song".to_vec()]);
+    assert_eq!(filter_media(&state, relation_id, &not_png).await, vec![b"song".to_vec()]);
     let not_wav = BlobMetadataFilter::new().without_media_type("audio/wav");
-    assert_eq!(filter_media(&state, &not_wav).await, vec![b"image".to_vec()]);
+    assert_eq!(filter_media(&state, relation_id, &not_wav).await, vec![b"image".to_vec()]);
     let neither = BlobMetadataFilter::new()
         .without_media_type("image/png")
         .without_media_type("audio/wav");
-    assert!(filter_media(&state, &neither).await.is_empty());
+    assert!(filter_media(&state, relation_id, &neither).await.is_empty());
 }
 
 #[tokio::test]
@@ -1378,10 +1399,8 @@ async fn sort_orders_mixed_media_types_by_type_then_length() {
     let song = import_expression(SONG_IMPORT_FIXTURE, source.path());
     import_media(&repository, &state, writer, &mut bindings, &song, "song", 0x70, true, relation_id).await;
 
-    let mut metadata: Vec<_> = state
-        .committed_table_rows("media")
+    let mut metadata: Vec<_> = committed_admitted_rows(&state, "media", relation_id)
         .await
-        .unwrap()
         .into_iter()
         .map(|(_, row)| decode_rov3_blob_metadata(&row).unwrap())
         .collect();
@@ -2040,7 +2059,7 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     assert!(
         text.contains("plan: annotation predicate")
             && text.contains("coordinates kind,suffix,length")
-            && text.contains("decode-required coordinates duration,dimensions"),
+            && text.contains("decoded-payload coordinates duration,dimensions"),
         "the human plan must name the coordinates it used: {text}"
     );
     assert!(
@@ -2052,9 +2071,10 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     // than silently ignored.
     let unknown = run_query(directory.path(), &[&relation, "--dimensions", "100x100"]);
     assert_eq!(unknown.status.code(), Some(1));
+    let refusal = String::from_utf8_lossy(&unknown.stderr).into_owned();
     assert!(
-        String::from_utf8_lossy(&unknown.stderr).contains("--dimensions"),
-        "an unknown predicate flag is named in the refusal"
+        refusal.contains("--dimensions"),
+        "an unknown predicate flag is named in the refusal: {refusal}"
     );
     drop(directory);
 }
