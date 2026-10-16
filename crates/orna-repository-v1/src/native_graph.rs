@@ -9123,7 +9123,7 @@ mod persisted_orp_tests {
 
     #[test]
     fn prior_root_captured_blob_is_rejected_before_later_graph_reads() {
-        let (_directory, graph) = capture_test_context_with_blob_field();
+        let (directory, graph) = capture_test_context_with_blob_field();
         let capture_scope = graph.open_read_scope().expect("capture scope");
         let payload = b"captured OGB-2 payload on the earlier StoreRoot";
         let candidate = graph

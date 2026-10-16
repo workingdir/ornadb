@@ -4,6 +4,14 @@ This file is the user-facing inventory for the OrnaDB source tree. It is not a
 Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
+## Unreleased
+
+- Source identity reconciliation accepts explicit rename mappings and preserves
+  existing IDs across authorized name changes. Unassisted renames remain
+  delete-plus-create, and retired IDs are never reused.
+- The `mv` CLI command renames committed tables and retains their table and
+  child-field IDs in uncommitted source and identity-manifest changes.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
@@ -67,6 +75,12 @@ release gate has passed.
   the canonical `ORNA-REPL-001..006` requirements. `--explain`, argument
   files, canonical output, JSON/table/CSV presenters, and bounded invocation
   tracing are implemented where the selected route supports them.
+- On Linux, `orna mount DIR --cwd` mounts the current committed workspace
+  through host FUSE as a read-only view (`ro,nodev,nosuid,noexec`), pinned to
+  the selected commit. `orna unmount DIR` releases its kernel mount and view
+  record; `orna mount DIR --at SELECTOR` attaches a record-only snapshot view.
+- Committed snapshot loading preserves nested module import candidates while
+  keeping format-3 row documents out of loose-row source discovery.
 - USER state is principal-scoped and typed. Local peer authentication supplies
   the principal; optimistic revision conflicts and invalid expected types fail
   closed. State values use the canonical ORV5 value representation.

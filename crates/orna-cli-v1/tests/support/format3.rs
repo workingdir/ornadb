@@ -385,8 +385,15 @@ fn collect_row_dependencies(raw: &Raw, dependencies: &mut BTreeSet<String>) {
 }
 
 pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16]) {
+    format3_repository_for_table(media_source, "media")
+}
+
+pub fn format3_repository_for_table(
+    media_source: &str,
+    table_name: &str,
+) -> (TempDir, Repository, [u8; 16]) {
     let (directory, repository, relation_id, _, _) =
-        format3_repository_parts(media_source, "media");
+        format3_repository_parts(media_source, table_name);
     (directory, repository, relation_id)
 }
 

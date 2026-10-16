@@ -8,7 +8,7 @@
 
 use std::{fmt, process::Command, str::FromStr};
 
-use orna_syntax_v1::{parse_module, parse_row, Declaration, Expr, LiteralKind, RecordField};
+use orna_syntax_v1::{Declaration, Expr, LiteralKind, RecordField, parse_module, parse_row};
 use sha2::{Digest, Sha256};
 
 use crate::native_graph::{
@@ -1039,7 +1039,9 @@ impl Repository {
         &self,
         relation_id: [u8; 16],
     ) -> Result<RepositoryCaptureCapability, CaptureCapabilityError> {
-        let format = self.open_format_context().map_err(CaptureCapabilityError::Format)?;
+        let format = self
+            .open_format_context()
+            .map_err(CaptureCapabilityError::Format)?;
         let row_map = format
             .load_row_map(relation_id)
             .map_err(CaptureCapabilityError::Format)?;
@@ -1048,7 +1050,9 @@ impl Repository {
                 .open_native_graph(&row_map)
                 .map_err(CaptureCapabilityError::Format)?,
         );
-        let scope = graph.open_read_scope().map_err(CaptureCapabilityError::Graph)?;
+        let scope = graph
+            .open_read_scope()
+            .map_err(CaptureCapabilityError::Graph)?;
         RepositoryCaptureCapability::new(graph, scope).map_err(CaptureCapabilityError::Graph)
     }
 
@@ -1612,7 +1616,10 @@ mod graph_bridge_tests {
         // Reset the index to that committed graph before staging only the source change.
         git(root, &["read-tree", "HEAD"]);
         git(root, &["add", "--", "media.orna"]);
-        git(root, &["commit", "--quiet", "-m", "advance imported source fixture"]);
+        git(
+            root,
+            &["commit", "--quiet", "-m", "advance imported source fixture"],
+        );
         let large_context = Repository::discover(root)
             .expect("discover large imported module")
             .open_format_context()
@@ -1869,7 +1876,7 @@ mod graph_bridge_tests {
         }
 
         let writing = context(directory);
-        let (schema_oid, schema_digest) = schema_node(directory, &writing);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, &writing, relation_id);
         let snapshot = writing
             .load_row_map(relation_id)
             .expect("load the seeded row-map identity");
@@ -1930,7 +1937,8 @@ mod graph_bridge_tests {
                 }],
             },
         );
-        let store_root = write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        let store_root =
+            write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
         commit_store_root(directory, algorithm, &store_root);
         descriptor_oid
     }
@@ -2063,7 +2071,7 @@ mod graph_bridge_tests {
             .expect("accept the annotated Blob binding");
         let descriptor = binding.descriptor_oid().clone();
 
-        let (schema_oid, schema_digest) = schema_node(root, &seeding);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &seeding, relation_id);
         let algorithm = seeding
             .validate_store_root()
             .expect("pinned store root")
@@ -2165,6 +2173,11 @@ mod graph_bridge_tests {
 
         // A real churn pass: prepend, delete and rekey, with one media row left
         // untouched.
+        let row_before_rekey = graph
+            .lookup_row(&TypedKey::UInt(10), &scope)
+            .expect("read row before rekey")
+            .expect("source row exists");
+        let rekeyed_value = row_before_rekey.value().clone();
         let mutations = [
             RowIndexMutation::Delete {
                 key: TypedKey::UInt(2),
@@ -2220,6 +2233,13 @@ mod graph_bridge_tests {
             .expect("admit the rewritten page");
         let graph = successor.open_native_graph(&snapshot).expect("admit graph");
         let scope = graph.open_read_scope().expect("owner scope");
+        let rekey_scope = graph.open_read_scope().expect("rekey read scope");
+        let row_after_rekey = graph
+            .lookup_row(&TypedKey::UInt(50), &rekey_scope)
+            .expect("read row after rekey")
+            .expect("destination row exists");
+        assert_eq!(row_after_rekey.key(), &TypedKey::UInt(50));
+        assert_eq!(row_after_rekey.value(), &rekeyed_value);
         for (key, present) in [(0u64, true), (2, false), (5, true), (10, false), (50, true)] {
             assert_eq!(
                 graph
@@ -2242,7 +2262,7 @@ mod graph_bridge_tests {
         let seeded = context(root);
         install_overflow_row_store(root, &seeded, fanout_relation, None);
         let ready = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &ready);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &ready, fanout_relation);
         let algorithm = ready
             .validate_store_root()
             .expect("pinned store root")
@@ -2275,7 +2295,7 @@ mod graph_bridge_tests {
         let seeded = context(root);
         install_overflow_row_store(root, &seeded, domain_relation, None);
         let ready = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &ready);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &ready, domain_relation);
         let algorithm = ready
             .validate_store_root()
             .expect("pinned store root")
@@ -2312,7 +2332,7 @@ mod graph_bridge_tests {
         let seeded = context(root);
         install_overflow_row_store(root, &seeded, count_relation, None);
         let ready = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &ready);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &ready, count_relation);
         let algorithm = ready
             .validate_store_root()
             .expect("pinned store root")
@@ -2376,8 +2396,12 @@ mod graph_bridge_tests {
                 .database_id()
         );
 
-        let snapshot = mounted.load_row_map(relation_id).expect("historical row map");
-        let graph = mounted.open_native_graph(&snapshot).expect("historical graph");
+        let snapshot = mounted
+            .load_row_map(relation_id)
+            .expect("historical row map");
+        let graph = mounted
+            .open_native_graph(&snapshot)
+            .expect("historical graph");
         let scope = graph.open_read_scope().expect("historical read scope");
         let row = graph
             .lookup_row(&TypedKey::UInt(1), &scope)
@@ -2420,7 +2444,9 @@ mod graph_bridge_tests {
             .open_format_context()
             .expect("admit the workspace context");
         let head_snapshot = head.load_row_map(relation_id).expect("workspace row map");
-        let head_graph = head.open_native_graph(&head_snapshot).expect("workspace graph");
+        let head_graph = head
+            .open_native_graph(&head_snapshot)
+            .expect("workspace graph");
         let head_scope = head_graph.open_read_scope().expect("workspace read scope");
         let head_row = head_graph
             .lookup_row(&TypedKey::UInt(1), &head_scope)
@@ -2551,7 +2577,10 @@ mod graph_bridge_tests {
         let parent_entries = git_output(directory, &["ls-tree", "HEAD"], None);
         let parent_entries = std::str::from_utf8(&parent_entries).expect("root tree entries UTF-8");
         let mut root_tree_spec = format!("040000 tree {}\t.orna\n", orna_tree_oid.to_hex());
-        for entry in parent_entries.lines().filter(|entry| !entry.ends_with("\t.orna")) {
+        for entry in parent_entries
+            .lines()
+            .filter(|entry| !entry.ends_with("\t.orna"))
+        {
             root_tree_spec.push_str(entry);
             root_tree_spec.push('\n');
         }
@@ -2618,22 +2647,21 @@ mod graph_bridge_tests {
         schema_oid
     }
 
-    fn schema_node(directory: &Path, context: &RepositoryFormatContext) -> (NativeOid, [u8; 32]) {
-        let algorithm = context
-            .validate_schema_root()
-            .expect("pinned source schema root")
-            .oid
-            .algorithm();
-        let schema_bytes = MAIN_SOURCE.as_bytes();
-        let schema_digest: [u8; 32] = Sha256::digest(schema_bytes).into();
-        let schema_oid = schema_descriptor_node(
-            directory,
-            algorithm,
-            schema_bytes,
-            schema_bytes.len() as u64,
-            schema_digest,
-        );
-        (schema_oid, schema_digest)
+    fn graph_bridge_test_relation_id(context: &RepositoryFormatContext) -> [u8; 16] {
+        let database_id = context.require_database_id().expect("database identity");
+        let mut relation_hash = Sha256::new();
+        relation_hash.update(b"orna.test.graph-bridge.relation.v1\0");
+        relation_hash.update(database_id.as_bytes());
+        let relation_digest = relation_hash.finalize();
+        let mut relation_id = [0u8; 16];
+        relation_id.copy_from_slice(&relation_digest[..16]);
+        relation_id
+    }
+    fn schema_node(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+    ) -> (NativeOid, [u8; 32]) {
+        schema_node_for_relation(directory, context, graph_bridge_test_relation_id(context))
     }
 
     fn schema_node_for_relation(
@@ -2934,12 +2962,7 @@ mod graph_bridge_tests {
         let database_id = context.require_database_id().expect("database identity");
         let store = context.validate_store_root().expect("pinned store root");
 
-        let mut relation_hash = Sha256::new();
-        relation_hash.update(b"orna.test.graph-bridge.relation.v1\0");
-        relation_hash.update(database_id.as_bytes());
-        let relation_digest = relation_hash.finalize();
-        let mut relation_id = [0u8; 16];
-        relation_id.copy_from_slice(&relation_digest[..16]);
+        let relation_id = graph_bridge_test_relation_id(context);
 
         let schema_generation = SchemaGeneration::issue(
             *database_id.as_bytes(),
@@ -2959,10 +2982,17 @@ mod graph_bridge_tests {
         )
         .expect("consistent row-map identity");
 
+        let snapshot_id = context.snapshot.snapshot_id();
+        let row_count = version.row_count().expect("sealed fixture row count");
         let mut authority = Sha256::new();
-        authority.update(b"orna.test.graph-bridge.row-authority.v1\0");
-        authority.update(context.snapshot.commit.as_str().as_bytes());
+        authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
         authority.update(database_id.as_bytes());
+        authority.update(snapshot_id);
+        authority.update(store.oid.as_bytes());
+        authority.update(relation_id);
+        authority.update(version.primary_root().as_bytes());
+        authority.update(schema_digest);
+        authority.update(row_count.to_be_bytes());
         RowMapSnapshot::issue(version, authority.finalize().into(), Vec::new())
             .expect("seal row-map snapshot")
     }
@@ -3043,29 +3073,60 @@ mod graph_bridge_tests {
         // The envelope the writer produced is what a reader decodes, so the
         // store position can be pinned from it.
         let index = root.join(".git/private-store-index");
-        fs::write(&index, b"").expect("create a private index file");
+        let initialized_index = Command::new("git")
+            .current_dir(root)
+            .env("GIT_INDEX_FILE", &index)
+            .args(["read-tree", "--empty"])
+            .output()
+            .expect("initialize an empty private index");
+        assert!(
+            initialized_index.status.success(),
+            "initialize private index: {}",
+            String::from_utf8_lossy(&initialized_index.stderr)
+        );
         graph
             .pin_store_subtree_in_index(&index, &store_root)
             .expect("a real store root is pinned at the fixed store path");
-        let staged = Command::new("git")
+        let staged_output = Command::new("git")
             .current_dir(root)
             .env("GIT_INDEX_FILE", &index)
             .args(["ls-files", "--stage", "--", ".orna/store"])
             .output()
             .expect("list the private index");
-        assert!(staged.status.success(), "list private index tree entry");
-        let staged = String::from_utf8_lossy(&staged.stdout).into_owned();
+        assert!(staged_output.status.success(), "list private index subtree");
+        let staged = String::from_utf8_lossy(&staged_output.stdout).into_owned();
+        let expected_tree = store_root.to_hex();
+        let expected = String::from_utf8(git_output(
+            root,
+            &["ls-tree", "-r", "--full-tree", &expected_tree],
+            None,
+        ))
+        .expect("store tree entries are UTF-8")
+        .lines()
+        .map(|entry| {
+            let (metadata, path) = entry.split_once('\t').expect("tree entry path");
+            let mut fields = metadata.split_whitespace();
+            let mode = fields.next().expect("tree entry mode");
+            let _kind = fields.next().expect("tree entry kind");
+            let oid = fields.next().expect("tree entry object id");
+            format!("{mode} {oid} 0\t.orna/store/{path}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
         assert_eq!(
             staged.trim(),
-            format!("040000 {} 0\t.orna/store", store_root.to_hex()),
-            "the private index stages the encoded store tree at .orna/store"
+            expected,
+            "the private index expands the encoded store tree exactly at .orna/store"
         );
 
         // A raw object cannot be planted at the store position.
         let blob = write_git_object(root, graph.algorithm(), "blob", b"not a store root");
         assert!(matches!(
             graph.pin_store_subtree_in_index(&index, &blob),
-            Err(crate::native_graph::GraphError::WrongNodeKind { .. })
+            Err(crate::native_graph::GraphError::WrongObjectKind {
+                expected: crate::native_graph::NativeObjectKind::Tree,
+                actual: crate::native_graph::NativeObjectKind::Blob,
+            })
         ));
     }
 
@@ -3122,7 +3183,12 @@ mod graph_bridge_tests {
         // N = H + P: the candidate's parent is the captured HEAD.
         let parents = Command::new("git")
             .current_dir(root)
-            .args(["rev-list", "--parents", "--no-walk", candidate.commit().as_str()])
+            .args([
+                "rev-list",
+                "--parents",
+                "--no-walk",
+                candidate.commit().as_str(),
+            ])
             .output()
             .expect("read candidate parents");
         let parents = String::from_utf8_lossy(&parents.stdout).into_owned();
@@ -3158,7 +3224,10 @@ mod graph_bridge_tests {
         );
         let managed = Command::new("git")
             .current_dir(root)
-            .args(["rev-parse", &format!("{}:main.orna", candidate.commit().as_str())])
+            .args([
+                "rev-parse",
+                &format!("{}:main.orna", candidate.commit().as_str()),
+            ])
             .output()
             .expect("read the candidate managed blob");
         let unchanged = Command::new("git")
@@ -3207,9 +3276,14 @@ mod graph_bridge_tests {
     fn object_stats_since_traverses_the_second_fixture_root_against_the_first() {
         let directory = repository();
         let root = directory.path();
+        let relation_id = [0x52; 16];
+        let initial_context = context(root);
+        install_overflow_row_store(root, &initial_context, relation_id, None);
+
         let first_context = context(root);
-        let (first_schema, first_digest) = schema_node(root, &first_context);
-        let first_rows = sealed_rows(&first_context, &first_schema, first_digest);
+        let first_rows = first_context
+            .load_row_map(relation_id)
+            .expect("load the first committed row-map fixture");
         let first = first_context
             .open_native_graph(&first_rows)
             .expect("admit the first fixture root");
@@ -3218,12 +3292,21 @@ mod graph_bridge_tests {
             .object_stats(&first_scope)
             .expect("walk the first fixture root");
 
-        fs::write(root.join(".orna/store/data"), b"store root two")
-            .expect("write second store root");
-        commit(root);
+        let second_text = vec![b'y'; crate::row_store::ROW_INLINE_LIMIT + 1];
+        let mut second_encoded = vec![0x81];
+        cbor_head(&mut second_encoded, 3, second_text.len() as u64);
+        second_encoded.extend_from_slice(&second_text);
+        install_overflow_row_store_with_bytes(
+            root,
+            &first_context,
+            relation_id,
+            &second_encoded,
+            None,
+        );
         let second_context = context(root);
-        let (second_schema, second_digest) = schema_node(root, &second_context);
-        let second_rows = sealed_rows(&second_context, &second_schema, second_digest);
+        let second_rows = second_context
+            .load_row_map(relation_id)
+            .expect("load the second committed row-map fixture");
         let second = second_context
             .open_native_graph(&second_rows)
             .expect("admit the second fixture root");
@@ -3236,7 +3319,10 @@ mod graph_bridge_tests {
             .object_stats_since(&second_scope, first.store_root())
             .expect("traverse the second root and prune what the first root reaches");
         assert!(first_stats.total_nodes() >= 1);
-        assert!(added.total_nodes() >= 1, "the new store root adds at least one node");
+        assert!(
+            added.total_nodes() >= 1,
+            "the new store root adds at least one node"
+        );
         assert!(
             added.total_nodes() < second_stats.total_nodes(),
             "shared subtrees are pruned, so the added count is smaller than the whole walk"
@@ -3248,9 +3334,14 @@ mod graph_bridge_tests {
     fn object_stats_counts_each_reachable_tree_once_against_git_enumeration() {
         let directory = repository();
         let root = directory.path();
+        let relation_id = [0x53; 16];
+        let initial_context = context(root);
+        install_overflow_row_store(root, &initial_context, relation_id, None);
+
         let context = context(root);
-        let (schema, digest) = schema_node(root, &context);
-        let rows = sealed_rows(&context, &schema, digest);
+        let rows = context
+            .load_row_map(relation_id)
+            .expect("load the committed row-map fixture");
         let graph = context
             .open_native_graph(&rows)
             .expect("admit the fixture graph");
@@ -3263,9 +3354,8 @@ mod graph_bridge_tests {
             .expect("repeat the walk");
         assert_eq!(again, stats, "a repeated walk visits the same nodes");
 
-        // Git enumerates every object reachable from the store root exactly
-        // once. Count its trees by type and compare with the node walk, which
-        // must also visit each tree once even when subtrees are shared.
+        // OGS-1 node envelopes are the reachable trees with a top-level data
+        // blob. Their `refs` trees are Git trees too, but are not graph nodes.
         let store_root = graph.store_root().to_hex();
         let listing = Command::new("git")
             .current_dir(root)
@@ -3292,15 +3382,26 @@ mod graph_bridge_tests {
             .write_all(format!("{}\n", oids.join("\n")).as_bytes())
             .expect("write object ids");
         let types = check.wait_with_output().expect("read object types");
-        let trees = String::from_utf8(types.stdout)
-            .expect("types are UTF-8")
-            .lines()
-            .filter(|kind| *kind == "tree")
-            .count() as u64;
+        let types = String::from_utf8(types.stdout).expect("types are UTF-8");
+        let mut node_trees = 0u64;
+        for (oid, kind) in oids.iter().zip(types.lines()) {
+            if kind != "tree" {
+                continue;
+            }
+            let entries = String::from_utf8(git_output(root, &["ls-tree", oid], None))
+                .expect("tree entries are UTF-8");
+            let is_node_envelope = entries.lines().any(|entry| {
+                let Some((metadata, name)) = entry.split_once('\t') else {
+                    return false;
+                };
+                name == "data" && metadata.split_whitespace().nth(1) == Some("blob")
+            });
+            node_trees += u64::from(is_node_envelope);
+        }
         let walked: u64 = stats.nodes().values().sum();
         assert_eq!(
-            walked, trees,
-            "the node walk visits each reachable tree exactly once"
+            walked, node_trees,
+            "the node walk visits each reachable OGS-1 envelope exactly once"
         );
     }
 
@@ -3313,7 +3414,7 @@ mod graph_bridge_tests {
         let rows = sealed_rows(&context, &schema, digest);
         let graph = context
             .open_native_graph(&rows)
-            .expect("admit the SHA-1 fixture graph");
+            .expect("admit the fixture graph");
         let scope = graph.open_read_scope().expect("read scope");
         // An all-zero SHA-256 id belongs to a different object format than
         // the SHA-1 repository, so it must fail on width, not on lookup.
@@ -3323,7 +3424,10 @@ mod graph_bridge_tests {
             .object_stats_since(&scope, &foreign)
             .expect_err("a SHA-256 id must not resolve in a SHA-1 graph");
         assert!(
-            matches!(error, crate::native_graph::GraphError::InvalidOidWidth { .. }),
+            matches!(
+                error,
+                crate::native_graph::GraphError::InvalidOidWidth { .. }
+            ),
             "cross-format id is an invalid width, not an unresolved object: {error:?}"
         );
         assert_eq!(error.exit_code(), 1, "cross-format id exits 1, not 3");
@@ -3345,7 +3449,11 @@ mod graph_bridge_tests {
         let listed = graph
             .unresolved_object_ids(&scope, &[graph.store_root().clone(), missing.clone()])
             .expect("list unresolved ids");
-        assert_eq!(listed, vec![missing], "the resolvable store root is left out");
+        assert_eq!(
+            listed,
+            vec![missing],
+            "the resolvable store root is left out"
+        );
     }
 
     #[test]
@@ -3697,13 +3805,7 @@ mod graph_bridge_tests {
         let root = directory.path();
         let initial = context(root);
         let relation_id = [0x79; 16];
-        install_overflow_row_store_with_bytes(
-            root,
-            &initial,
-            relation_id,
-            &[0x81, 0x01],
-            None,
-        );
+        install_overflow_row_store_with_bytes(root, &initial, relation_id, &[0x81, 0x01], None);
 
         let pinned = context(root);
         let snapshot = pinned.load_row_map(relation_id).unwrap();
@@ -3714,7 +3816,6 @@ mod graph_bridge_tests {
             Err(crate::native_graph::GraphError::NonCanonicalData)
         ));
     }
-
 
     #[test]
     fn indexed_point_and_range_reads_walk_only_the_pages_they_need() {
@@ -4129,7 +4230,7 @@ mod graph_bridge_tests {
         install_overflow_row_store(root, &initial, relation_id, None);
 
         let writing_context = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &writing_context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &writing_context, relation_id);
         let snapshot = writing_context
             .load_row_map(relation_id)
             .expect("load the committed row-map identity");
@@ -4151,7 +4252,10 @@ mod graph_bridge_tests {
         let chunk_spans = crate::blob_store::GearChunker::new()
             .spans(&payload)
             .expect("chunk the test payload");
-        assert!(chunk_spans.len() > 1, "fixture must contain multiple chunks");
+        assert!(
+            chunk_spans.len() > 1,
+            "fixture must contain multiple chunks"
+        );
         let chunk_boundary = chunk_spans[0].offset() + chunk_spans[0].length();
         let mut input = std::io::Cursor::new(payload.clone());
         let candidate = graph
@@ -4302,7 +4406,10 @@ mod graph_bridge_tests {
         let packed_stats = admitted_graph
             .object_stats(&packed_scope)
             .expect("count packed objects after repacking");
-        assert_eq!(packed_stats, loose_stats, "repacking must not change reachable objects");
+        assert_eq!(
+            packed_stats, loose_stats,
+            "repacking must not change reachable objects"
+        );
         let packed = admitted_graph
             .read_blob_range(&reference, 0..identity.length(), &packed_scope)
             .expect("verify the complete OGB-2 closure after repacking");
@@ -4444,7 +4551,7 @@ mod graph_bridge_tests {
         install_overflow_row_store(root, &initial, relation_id, None);
 
         let writing_context = context(root);
-        let (schema_oid, schema_digest) = schema_node(root, &writing_context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &writing_context, relation_id);
         let snapshot = writing_context
             .load_row_map(relation_id)
             .expect("load the committed row-map identity");
@@ -4629,7 +4736,10 @@ mod graph_bridge_tests {
         assert_eq!(all.len(), commit_count);
         assert_eq!(all[0].commit().to_hex(), head);
         assert_eq!(all[0].tree().to_hex(), head_tree);
-        assert_eq!(graph.list_revision_snapshots("HEAD", 1).unwrap(), all[..1].to_vec());
+        assert_eq!(
+            graph.list_revision_snapshots("HEAD", 1).unwrap(),
+            all[..1].to_vec()
+        );
         assert!(graph.list_revision_snapshots("HEAD", 0).unwrap().is_empty());
         assert!(matches!(
             graph.list_revision_snapshots("HEAD", 4097),
@@ -4640,22 +4750,39 @@ mod graph_bridge_tests {
         let stats = graph
             .object_stats(&scope)
             .expect("count objects reachable from the admitted store root");
-        assert_eq!(stats.node_count(crate::native_graph::NodeKind::StoreRoot), 1);
+        assert_eq!(
+            stats.node_count(crate::native_graph::NodeKind::StoreRoot),
+            1
+        );
         assert!(stats.node_count(crate::native_graph::NodeKind::OrderedLeaf) >= 1);
         let total: u64 = stats.nodes().values().sum();
-        assert!(total >= 3, "store root, relation map, and row leaf are reachable");
-        let again = graph.object_stats(&graph.open_read_scope().unwrap()).unwrap();
+        assert!(
+            total >= 3,
+            "store root, relation map, and row leaf are reachable"
+        );
+        let again = graph
+            .object_stats(&graph.open_read_scope().unwrap())
+            .unwrap();
         assert_eq!(again, stats, "object counts are deterministic");
         let rows = stats.rows_by_type_name();
-        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0), "rows sort by type name");
+        assert!(
+            rows.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "rows sort by type name"
+        );
         assert_eq!(rows.iter().map(|(_, count)| count).sum::<u64>(), total);
-        assert!(rows.iter().any(|(name, count)| *name == "StoreRoot" && *count == 1));
+        assert!(
+            rows.iter()
+                .any(|(name, count)| *name == "StoreRoot" && *count == 1)
+        );
         assert_eq!(stats.to_quiet_line(), total.to_string());
         assert_eq!(stats.total_nodes(), total);
         let since_self = graph
             .object_stats_since(&scope, graph.store_root())
             .expect("count objects added since the current root");
-        assert!(since_self.nodes().is_empty(), "nothing is added since the current root");
+        assert!(
+            since_self.nodes().is_empty(),
+            "nothing is added since the current root"
+        );
         assert_eq!(since_self.blob_references(), 0);
         assert!(since_self.is_empty());
         assert_eq!(since_self.exit_code(), 3, "an empty store exits 3");
@@ -4670,10 +4797,23 @@ mod graph_bridge_tests {
             Err(crate::native_graph::GraphError::InventoryQuotaExceeded)
         ));
         assert_eq!(stats.kind_count(), stats.rows_by_type_name().len());
-        assert!(stats.kind_count() >= 1 && stats.kind_count() <= 8, "at most eight kinds exist");
+        assert!(
+            stats.kind_count() >= 1 && stats.kind_count() <= 8,
+            "at most eight kinds exist"
+        );
         let table = stats.to_table();
-        assert!(table.starts_with("KIND  COUNT\n"), "table header: {table}");
-        assert!(table.contains("StoreRoot  1\n"), "table row: {table}");
+        let expected_header = format!(
+            "{:<width$}  COUNT\n",
+            "KIND",
+            width = "blob_references".len()
+        );
+        assert!(table.starts_with(&expected_header), "table header: {table}");
+        let expected_store_root = format!(
+            "{:<width$}  1\n",
+            "StoreRoot",
+            width = "blob_references".len()
+        );
+        assert!(table.contains(&expected_store_root), "table row: {table}");
         assert!(table.ends_with(&format!("blob_references  {}\n", stats.blob_references())));
         let json = stats.to_json();
         assert!(
@@ -4685,7 +4825,11 @@ mod graph_bridge_tests {
             stats.blob_references(),
             crate::native_graph::STATS_SCHEMA_VERSION
         )));
-        assert_eq!(stats.schema_version(), 1, "--version reports the stats schema");
+        assert_eq!(
+            stats.schema_version(),
+            1,
+            "--version reports the stats schema"
+        );
     }
 
     #[test]
@@ -4709,13 +4853,8 @@ mod graph_bridge_tests {
         let source_repository = Repository::discover(source_root).expect("discover source");
         let archive_parent = TempDir::new().expect("create archive parent");
         let archive = archive_parent.path().join("archive");
-        crate::complete_copy::export_complete_copy(
-            &source_repository,
-            "HEAD",
-            &archive,
-            &[],
-        )
-        .expect("export committed ORP and Blob closure");
+        crate::complete_copy::export_complete_copy(&source_repository, "HEAD", &archive, &[])
+            .expect("export committed ORP and Blob closure");
 
         // Delete the entire source object database before reconstructing or
         // reading the row. No source alternate or remote can answer this path.

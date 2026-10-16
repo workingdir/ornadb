@@ -117,6 +117,37 @@ fn committed_project_carries_verified_source_snapshot_identity() {
 }
 
 #[test]
+fn format3_committed_rows_are_not_loaded_as_source_files() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
+        (
+            ".orna/database.orna",
+            "{\n    repository_format: 3,\n    database_id: \"00000000-0000-4000-8000-000000000001\",\n}\n",
+        ),
+        (".orna/store/data", "format-3 row graph"),
+    ]);
+    let row_path = directory.path().join("Music/london.orna");
+    fs::create_dir_all(row_path.parent().unwrap()).unwrap();
+    fs::write(&row_path, [0xff; 73]).unwrap();
+    commit_all(&directory);
+
+    let commit = repository.head().unwrap().unwrap();
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &commit)
+        .unwrap();
+
+    assert_eq!(
+        project
+            .identities()
+            .iter()
+            .map(|identity| identity.logical_path())
+            .collect::<Vec<_>>(),
+        ["main.orna"]
+    );
+    assert!(project.loose_rows().is_empty());
+}
+
+#[test]
 fn loads_only_reachable_modules_in_deterministic_logical_order() {
     let (_directory, repository) = repository(&[
         (
