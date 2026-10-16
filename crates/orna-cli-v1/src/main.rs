@@ -12,6 +12,8 @@ mod cli_row_key;
 mod cli_export;
 mod cli_import;
 mod cli_mount;
+#[cfg(target_os = "linux")]
+mod fuse_mount;
 mod cli_annotate;
 mod cli_publish;
 mod cli_status;
@@ -174,6 +176,28 @@ impl Diagnostic {
         Self::target("E2000", title, help)
     }
 }
+impl From<orna_repository_v1::RepositoryError> for Diagnostic {
+    fn from(error: orna_repository_v1::RepositoryError) -> Self {
+        match error {
+            orna_repository_v1::RepositoryError::RepositoryBusy => Self::target(
+                "E2100",
+                "repository coordination lock is busy",
+                "wait for the active repository operation to finish, then retry mv",
+            ),
+            orna_repository_v1::RepositoryError::LocalStateUnavailable => Self::target(
+                "E2100",
+                "repository coordination state is unavailable",
+                "check local Git worktree permissions, then retry mv",
+            ),
+            _ => Self::target(
+                "E2100",
+                "repository coordination lock could not be acquired",
+                "check local Git worktree state, then retry mv",
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DiagnosticDocumentation {
     code: &'static str,
