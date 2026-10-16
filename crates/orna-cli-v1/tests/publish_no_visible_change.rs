@@ -17,7 +17,7 @@ use std::process::{Command, Output};
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    NoFault, RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation,
+    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TableObjectId,
     TerminalOutcome, WriterLease,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
@@ -80,6 +80,7 @@ async fn commit_capture(
     key: &str,
     ordinal: u8,
     insert_only: bool,
+    relation_id: [u8; 16],
 ) {
     let request_identity = RequestIdentity {
         session_id: [ordinal; 16],
@@ -116,6 +117,7 @@ async fn commit_capture(
         TableMutation::new(id, "media", key_bytes, Some(row))
     }
     .unwrap()
+    .with_table_object_id(TableObjectId::new(relation_id))
     .with_orp_blob_binding(binding)
     .unwrap();
     let committed = state
@@ -132,36 +134,6 @@ async fn commit_capture(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
-}
-
-/// The identity `orna publish` derives for a repository: the metadata's
-/// database id, with a rotated-and-salted repository id, and the concatenation
-/// of both as the initial digest. A harness that opens the runtime under any
-/// other identity leaves the verb unable to see its rows.
-fn cli_runtime_identity(repository: &Repository) -> (RuntimeIdentity, [u8; 32]) {
-    let metadata = orna_repository_v1::inspect_metadata(repository)
-        .unwrap()
-        .expect("the fixture records repository metadata");
-    let database_id = *metadata.database_id().as_bytes();
-    let mut repository_id = database_id;
-    for (index, byte) in repository_id.iter_mut().enumerate() {
-        let rotation = u32::try_from(index % 7 + 1).unwrap();
-        let salt = u8::try_from(index).unwrap();
-        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
-    }
-    if repository_id == [0; 16] {
-        repository_id[0] = 1;
-    }
-    let mut initial_digest = [0; 32];
-    initial_digest[..16].copy_from_slice(&database_id);
-    initial_digest[16..].copy_from_slice(&repository_id);
-    (
-        RuntimeIdentity {
-            database_id,
-            repository_id,
-        },
-        initial_digest,
-    )
 }
 
 #[tokio::test]
@@ -209,6 +181,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         "image",
         0xb0,
         true,
+        relation_id,
     )
     .await;
     let pending = state.pending_count().await.unwrap();
@@ -249,6 +222,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         "image",
         0xc0,
         false,
+        relation_id,
     )
     .await;
     let pending = state.pending_count().await.unwrap();
@@ -289,4 +263,247 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
     );
 
     drop(directory);
+}
+
+#[tokio::test]
+async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let root_path = directory.path();
+    let deleted_path = root_path.join("delete-me.orna");
+    std::fs::write(&deleted_path, b"tracked before publication\n").unwrap();
+    let rename_path = root_path.join("rename-source/original.orna");
+    std::fs::create_dir_all(rename_path.parent().unwrap()).unwrap();
+    std::fs::write(&rename_path, b"renamed into the publication directory\n").unwrap();
+    git(root_path, &["read-tree", "HEAD"]);
+    git(
+        root_path,
+        &["add", "--", "delete-me.orna", "rename-source/original.orna"],
+    );
+    git(
+        root_path,
+        &["commit", "--quiet", "-m", "index reconciliation fixtures"],
+    );
+    git(root_path, &["rm", "--quiet", "delete-me.orna"]);
+    let source = TempDir::new().unwrap();
+
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("pixel.png"),
+        source.path().join("pixel.png"),
+    )
+    .unwrap();
+    let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    let fixture = std::fs::read_to_string(REIMPORT_FIXTURE).unwrap();
+    let root = format!("{:?}", source.path().to_string_lossy().as_ref());
+    let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root);
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    commit_capture(
+        &state,
+        writer,
+        &mut bindings,
+        &expression,
+        "image",
+        0xd0,
+        true,
+        relation_id,
+    )
+    .await;
+
+    let source_path = root_path.join("unrelated.orna");
+    std::fs::write(
+        &source_path,
+        include_bytes!("fixtures/project-core-main.orna"),
+    )
+    .unwrap();
+    git(root_path, &["add", "unrelated.orna"]);
+    std::fs::write(
+        &source_path,
+        include_bytes!("fixtures/project-run-zero.orna"),
+    )
+    .unwrap();
+    let unstaged_source = git_output(
+        root_path,
+        &["diff", "--binary", "--", "unrelated.orna"],
+        None,
+    );
+    let staged_unrelated = git_output(
+        root_path,
+        &["diff", "--cached", "--binary", "--", "unrelated.orna"],
+        None,
+    );
+
+    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+    let freeze = state.freeze([0xd1; 16], &checkpoint).await.unwrap();
+    let base_head = repository.head().unwrap().unwrap();
+    let index = repository.index_generation().unwrap();
+    let prepared = orna_storage_v1::RuntimePublicationCoordinator::prepare(
+        &repository,
+        &state,
+        &base_head,
+        index,
+        &freeze,
+        |mutation| {
+            let key = std::str::from_utf8(mutation.key())
+                .map_err(|_| orna_storage_v1::Error::InvalidKey)?
+                .to_owned();
+            orna_storage_v1::LoosePath::for_key(mutation.table(), &[key])
+        },
+        "orna: interrupted publication",
+    )
+    .await
+    .unwrap();
+    repository
+        .write_publication_journal(prepared.journal())
+        .unwrap();
+    assert!(repository.read_publication_journal().unwrap().is_some());
+    repository
+        .advance_current_ref(&base_head, prepared.candidate())
+        .unwrap();
+    // This tracked-file rename creates a staged file at `media`, where the
+    // publication candidate needs the directory `media/image.orna`.
+    git(root_path, &["mv", "rename-source/original.orna", "media"]);
+
+    let concurrent_path = root_path.join("concurrent.orna");
+    std::fs::write(
+        &concurrent_path,
+        include_bytes!("fixtures/project-core-main.orna"),
+    )
+    .unwrap();
+    git(root_path, &["add", "concurrent.orna"]);
+    std::fs::write(
+        &concurrent_path,
+        include_bytes!("fixtures/project-run-zero.orna"),
+    )
+    .unwrap();
+    let staged_before = git_output(root_path, &["diff", "--cached", "--binary"], None);
+    let unstaged_before = git_output(root_path, &["diff", "--binary"], None);
+    let published_head = head(root_path);
+    assert_ne!(published_head, base_head.as_str());
+    assert!(state.pending_count().await.unwrap() > 0);
+    drop(state);
+
+    let conflict = run(root_path, &["publish"]);
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("E2300"));
+    assert_eq!(head(root_path), published_head);
+    assert!(repository.read_publication_journal().unwrap().is_some());
+    let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
+    let preserved = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    assert!(preserved.pending_count().await.unwrap() > 0);
+    drop(preserved);
+    assert_eq!(
+        git_output(root_path, &["diff", "--cached", "--binary"], None),
+        staged_before
+    );
+    assert_eq!(
+        git_output(root_path, &["diff", "--binary"], None),
+        unstaged_before
+    );
+
+    git(
+        root_path,
+        &["update-index", "--force-remove", "--", "concurrent.orna"],
+    );
+    let staged_without_untracked_conflict =
+        git_output(root_path, &["diff", "--cached", "--binary"], None);
+    let rename_conflict = run(root_path, &["publish"]);
+    assert!(!rename_conflict.status.success());
+    assert!(String::from_utf8_lossy(&rename_conflict.stderr).contains("E2300"));
+    assert_eq!(head(root_path), published_head);
+    assert!(repository.read_publication_journal().unwrap().is_some());
+    let still_pending = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    assert!(still_pending.pending_count().await.unwrap() > 0);
+    drop(still_pending);
+    assert_eq!(
+        git_output(root_path, &["diff", "--cached", "--binary"], None),
+        staged_without_untracked_conflict,
+        "the D/F rename conflict preserves the staged index"
+    );
+
+    // Revert only the rename that occupies the candidate's directory path.
+    // The unrelated staged deletion must survive both the conflict and retry.
+    git(
+        root_path,
+        &[
+            "restore",
+            "--source",
+            base_head.as_str(),
+            "--staged",
+            "--worktree",
+            "--",
+            "media",
+            "rename-source/original.orna",
+        ],
+    );
+    let output = run(root_path, &["publish"]);
+    assert!(
+        output.status.success(),
+        "recovery succeeds after resolving the D/F rename conflict: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout(&output).contains("nothing to publish"));
+    assert_eq!(head(root_path), published_head);
+    assert_eq!(repository.read_publication_journal().unwrap(), None);
+    let staged_status = String::from_utf8(git_output(
+        root_path,
+        &["diff", "--cached", "--name-status"],
+        None,
+    ))
+    .unwrap();
+    assert!(
+        staged_status.contains("D\tdelete-me.orna"),
+        "staged deletion survives: {staged_status:?}"
+    );
+    assert!(
+        !staged_status.contains("media/image.orna"),
+        "published row is not staged as a reversal: {staged_status:?}"
+    );
+    assert!(
+        !staged_status.contains("rename-source/original.orna"),
+        "resolved rename does not leak into the index: {staged_status:?}"
+    );
+    assert_eq!(
+        git_output(
+            root_path,
+            &["diff", "--cached", "--binary", "--", "unrelated.orna"],
+            None
+        ),
+        staged_unrelated,
+        "unrelated staged source remains unchanged"
+    );
+    assert_eq!(
+        git_output(
+            root_path,
+            &["diff", "--binary", "--", "unrelated.orna"],
+            None
+        ),
+        unstaged_source
+    );
+    assert_eq!(
+        std::fs::read(&concurrent_path).unwrap(),
+        include_bytes!("fixtures/project-run-zero.orna")
+    );
+    assert!(
+        String::from_utf8_lossy(&git_output(root_path, &["status", "--short"], None))
+            .contains("?? concurrent.orna")
+    );
+    let recovered = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    assert_eq!(recovered.pending_count().await.unwrap(), 0);
 }
