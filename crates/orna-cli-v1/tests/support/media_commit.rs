@@ -179,16 +179,33 @@ pub async fn commit_source_captures(
             [ordinal.wrapping_add(3); 16],
         )
         .expect("admit a source-bound full Object row");
-        let (mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
+        let (source_mutation, source_bindings, resolved_schema) =
+            admitted.into_mutation_and_bindings();
         assert_eq!(
             resolved_schema.table_object_id(),
             TableObjectId::new(relation_id)
         );
-        assert_eq!(mutation.table(), "Object");
+        assert_eq!(source_mutation.table(), "Object");
         assert_eq!(
-            mutation.table_object_id(),
+            source_mutation.table_object_id(),
             Some(TableObjectId::new(relation_id))
         );
+        let mut mutation = TableMutation::insert(
+            source_mutation.id(),
+            source_mutation.table().to_owned(),
+            source_mutation.key().to_vec(),
+            source_mutation
+                .value()
+                .expect("admitted source row has a value")
+                .to_vec(),
+        )
+        .expect("the source row is a new store row")
+        .with_table_object_id(TableObjectId::new(relation_id));
+        for binding in &source_bindings {
+            mutation = mutation
+                .with_protected_content_pin(binding.pin())
+                .expect("retain the admitted Blob pin on the insert");
+        }
         assert!(mutation.value().is_some_and(|value| !value.is_empty()));
         paths_by_key.insert(
             mutation.key().to_vec(),
