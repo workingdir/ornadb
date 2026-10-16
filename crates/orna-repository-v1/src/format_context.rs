@@ -3862,6 +3862,7 @@ mod graph_bridge_tests {
                 TypedKey::UInt(80),
             ]
         );
+        let source_row = rows[0].clone();
         assert_eq!(scope.payload_bytes_read_for_test(), 0);
 
         let limited = KeyRange::new(Some(TypedKey::UInt(40)), Some(TypedKey::UInt(90)), 3)
@@ -3895,6 +3896,16 @@ mod graph_bridge_tests {
             Err(crate::row_store::RowStoreError::BoundaryMismatch)
         ));
         assert_eq!(later_scope.objects_read_for_test(), 0);
+        let before_foreign_row = later_scope.objects_read_for_test();
+        assert!(matches!(
+            later_graph.resolve_row_node(
+                &source_row,
+                snapshot.version().primary_root(),
+                &later_scope
+            ),
+            Err(crate::native_graph::GraphError::ContextMismatch)
+        ));
+        assert_eq!(later_scope.objects_read_for_test(), before_foreign_row);
     }
 
     /// One relation's index shape and the objects a point lookup, a missing-key
