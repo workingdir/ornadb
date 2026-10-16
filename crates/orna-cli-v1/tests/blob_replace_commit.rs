@@ -146,7 +146,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
     )
     .await;
 
-    let before = state.committed_table_rows("media").await.unwrap();
+    let before = committed_admitted_rows(&state, "media", relation_id).await;
     assert_eq!(before.len(), 1, "the first capture commits one media row");
     let before_metadata = stored_metadata(row_for(&before, b"image"));
     assert_eq!(before_metadata.length(), ORIGINAL_PIXEL.len() as u64);
@@ -170,7 +170,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
         relation_id,
     )
     .await;
-    let after = state.committed_table_rows("media").await.unwrap();
+    let after = committed_admitted_rows(&state, "media", relation_id).await;
 
     assert_eq!(
         after.len(),
@@ -296,7 +296,7 @@ async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
     )
     .await;
 
-    let before = state.committed_table_rows("media").await.unwrap();
+    let before = committed_admitted_rows(&state, "media", relation_id).await;
     assert_eq!(before.len(), 2, "two captures commit two media rows");
     let clip_before = stored_metadata(row_for(&before, b"clip"));
     assert_eq!(clip_before.media_type(), "audio/wav");
@@ -318,7 +318,7 @@ async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
         relation_id,
     )
     .await;
-    let after = state.committed_table_rows("media").await.unwrap();
+    let after = committed_admitted_rows(&state, "media", relation_id).await;
 
     assert_eq!(after.len(), 2, "editing one row does not move the other");
     assert_eq!(

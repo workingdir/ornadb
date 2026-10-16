@@ -15,6 +15,8 @@ use orna_runtime_v1::{
 
 use super::format3::publish_media_row;
 
+/// Commits one captured media row and publishes it, so the row is durable in
+/// the store before the caller reads it.
 pub async fn commit_capture(
     repository: &Repository,
     state: &RuntimeState,
@@ -25,6 +27,45 @@ pub async fn commit_capture(
     ordinal: u8,
     insert_only: bool,
     relation_id: [u8; 16],
+) {
+    commit_capture_inner(
+        repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
+        true,
+    )
+    .await;
+}
+
+/// Commits one captured media row and leaves the range pending, so a caller can
+/// publish it with the CLI verb exactly as a production run does.
+pub async fn commit_capture_pending(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+) {
+    commit_capture_inner(
+        repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
+        false,
+    )
+    .await;
+}
+
+async fn commit_capture_inner(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+    publish: bool,
 ) {
     let request_identity = RequestIdentity {
         session_id: [ordinal; 16],
@@ -78,5 +119,7 @@ pub async fn commit_capture(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
-    publish_media_row(repository, state, key, ordinal + 0x10).await;
+    if publish {
+        publish_media_row(repository, state, key, ordinal + 0x10).await;
+    }
 }

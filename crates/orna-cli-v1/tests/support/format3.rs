@@ -10,8 +10,8 @@ use std::{
 
 use orna_conformance_v1::DurableTransactionalEvaluator;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::Repository;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_repository_v1::{AdmittedRow, KeyRange, Repository, TypedKey};
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState, RuntimeTableIdentity, TableObjectId};
 use orna_storage_v1::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -59,6 +59,57 @@ pub fn cli_runtime_identity(repository: &Repository) -> (RuntimeIdentity, [u8; 3
         },
         initial_digest,
     )
+}
+
+/// Reads one admitted relation's committed rows at the published `HEAD`, by the
+/// relation's committed identity.
+///
+/// The runtime stores an admitted mutation under
+/// `TableMutation::table_storage_key(table, object_id)`, so a name-keyed read
+/// misses every row whose mutation carried its admitted table object id. This
+/// is the identity-keyed read, not a second key form.
+pub async fn committed_admitted_rows(
+    state: &RuntimeState,
+    table: &str,
+    relation_id: [u8; 16],
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let identity = RuntimeTableIdentity::new(table, TableObjectId::new(relation_id))
+        .expect("the fixture table admits a committed identity");
+    state
+        .read_admitted_table_at_head(&identity)
+        .await
+        .expect("the published HEAD answers the admitted relation")
+        .rows()
+        .to_vec()
+}
+
+/// Reads one admitted relation's committed rows from the published store, the
+/// same reader the query and history verbs use: the format context's relation
+/// row map, then the native graph's bounded range read.
+pub fn committed_store_rows(repository: &Repository, relation_id: [u8; 16]) -> Vec<AdmittedRow> {
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the relation row map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the native graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    graph
+        .range_rows(&KeyRange::new(None, None, 16).expect("key range"), &scope)
+        .expect("read the committed rows")
+}
+
+/// The logical key bytes a store row carries: the text a `Str` key spells, or
+/// the bytes an opaque key holds.
+pub fn logical_key_bytes(key: &TypedKey) -> Vec<u8> {
+    match key {
+        TypedKey::Text(text) => text.as_bytes().to_vec(),
+        TypedKey::Bytes(bytes) => bytes.clone(),
+        other => other.canonical_bytes().expect("a canonical logical key"),
+    }
 }
 
 /// Publishes one committed media row through the explicit publication
