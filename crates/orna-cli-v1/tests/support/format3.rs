@@ -198,14 +198,16 @@ pub fn capture_failure(
 pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     let (directory, repository, relation_id) =
         format3_repository(include_str!("../fixtures/media/empty-media-main.orna"));
-    let row = directory.path().join("media/1.orna");
-    std::fs::create_dir_all(row.parent().unwrap()).unwrap();
-    std::fs::write(row, "{}").unwrap();
-    git(directory.path(), &["add", "--all"]);
-    git(directory.path(), &["commit", "--quiet", "-m", "add committed media row"]);
+    let root = repository.worktree();
+    for key in ["image", "song", "clip"] {
+        let path = root.join("media").join(format!("{key}.orna"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{ content: null, }\n").unwrap();
+    }
+    git(root, &["add", "--all"]);
+    git(root, &["commit", "--quiet", "-m", "add media source rows"]);
     (directory, repository, relation_id)
 }
-
 /// Creates an Object project, its canonical identity manifest, source rows, and
 /// matching native descriptor roots in one committed repository.
 pub fn object_format3_repository(
@@ -551,6 +553,21 @@ impl BlobResolver for UnreadableFixtureResolver {
     }
 }
 
+pub fn current_format3_context(repository: &Repository) -> Format3Context {
+    let commit = repository.head().unwrap().unwrap();
+    let root = repository.worktree();
+    let schema_path = format!("{}:main.orna", commit.as_str());
+    let store_path = format!("{}:.orna/store", commit.as_str());
+    let schema_root = String::from_utf8(git_output(root, &["rev-parse", &schema_path], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let store_root = String::from_utf8(git_output(root, &["rev-parse", &store_path], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    persisted_format3_context(repository, commit.as_str(), &schema_root, &store_root)
+}
 fn persisted_format3_context(
     repository: &Repository,
     commit: &str,

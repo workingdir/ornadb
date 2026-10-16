@@ -69,6 +69,7 @@ fn compact_schema_fingerprint(schema: &SchemaDescriptor) -> [u8; 32] {
     digest.finalize().into()
 }
 
+
 fn compact_columns() -> Vec<u8> {
     let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
     CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![

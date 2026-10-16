@@ -65,20 +65,10 @@ fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
     Ok(message.unwrap_or_else(|| DEFAULT_MESSAGE.to_owned()))
 }
 
-/// Projects one source-owned canonical key using its exact committed schema.
+/// Admits a source-owned path already projected from the exact committed schema.
 fn row_path(
     projection: &orna_project_v1::CommittedLooseRowProjection,
-    mutation: &TableMutation,
-    table_id: orna_runtime_v1::TableObjectId,
 ) -> Result<LoosePath, Diagnostic> {
-    if projection.table_root() != mutation.table()
-        || projection.schema().table_object_id() != table_id
-    {
-        return Err(publish_error(
-            "source row key projection conflicts with its schema",
-            "table root or TableObjectId differs from the committed source schema; the pending range was preserved",
-        ));
-    }
     LoosePath::from_encoded_key(projection.table_root(), projection.key_path_components()).map_err(
         |error| {
             publish_error(
@@ -89,14 +79,18 @@ fn row_path(
     )
 }
 
-/// Rejects mutations that cannot be represented as source-owned rows before
-/// the candidate builder reads or changes repository publication state.
+/// Resolves mutations against the pinned format-3 row map before falling back
+/// to a committed loose source row. A mutation that already exists in the
+/// native store need not have a loose source file.
 fn validate_candidate_source_rows(
     repository: &orna_repository_v1::Repository,
     head: &orna_repository_v1::GitCommitRef,
     mutations: &[TableMutation],
 ) -> Result<BTreeMap<[u8; 16], LoosePath>, Diagnostic> {
     let loader = orna_project_v1::ProjectLoader::default();
+    let format = repository
+        .open_pinned_format_context(head.as_str())
+        .map_err(|error| publish_error("format-3 row map could not be opened", format!("{error:?}; the pending range was preserved")))?;
     let mut row_paths = BTreeMap::new();
     for mutation in mutations {
         let table_id = mutation.table_object_id().ok_or_else(|| {
@@ -105,15 +99,9 @@ fn validate_candidate_source_rows(
                 "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
             )
         })?;
-        let projection = loader
-            .resolve_committed_loose_row_projection(repository, head, mutation)
-            .map_err(|error| {
-                publish_error(
-                    "source row path could not be resolved",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-        let schema = projection.schema();
+        let schema = loader
+            .resolve_committed_source_table_schema(repository, head, table_id)
+            .map_err(|error| publish_error("source row schema could not be resolved", format!("{error:?}; the pending range was preserved")))?;
         if schema.declaration_name() != mutation.table() || schema.table_object_id() != table_id {
             return Err(publish_error(
                 "source row table identity does not match its committed schema",
@@ -129,24 +117,72 @@ fn validate_candidate_source_rows(
         schema
             .descriptor()
             .validate_stored_row(table_id.bytes(), mutation.key(), fields)
-            .map_err(|error| {
-                publish_error(
-                    "source row does not match its committed schema",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
+            .map_err(|error| publish_error("source row does not match its committed schema", format!("{error:?}; the pending range was preserved")))?;
         if let Some(new_key) = mutation.rekey_to() {
             schema
                 .descriptor()
                 .validate_stored_row(table_id.bytes(), new_key, fields)
+                .map_err(|error| publish_error("source row rekey does not match its committed schema", format!("{error:?}; the pending range was preserved")))?;
+        }
+
+        let row_map = format
+            .load_row_map(table_id.bytes())
+            .map_err(|error| {
+                publish_error(
+                    "format-3 row map could not be loaded",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+        let key = orna_repository_v1::TypedKey::decode_canonical(mutation.key()).map_err(|error| {
+            publish_error(
+                "source row key is not canonical",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        let graph = format
+            .open_native_graph(&row_map)
+            .map_err(|error| {
+                publish_error(
+                    "format-3 native graph could not be opened",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+        let scope = graph.open_read_scope().map_err(|error| {
+            publish_error(
+                "format-3 native graph read scope could not be opened",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        let native_row = graph.lookup_row(&key, &scope).map_err(|error| {
+            publish_error(
+                "format-3 native row lookup failed",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        let path = if let Some(row) = native_row {
+            let leaves = typed_key_path_leaves(row.key()).ok_or_else(|| {
+                publish_error(
+                    "native row key cannot be projected to a loose path",
+                    "the committed typed key is not representable by the source path codec; the pending range was preserved",
+                )
+            })?;
+            LoosePath::for_key(mutation.table(), &leaves).map_err(|error| {
+                publish_error(
+                    "source row could not be admitted for publication",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?
+        } else {
+            let projection = loader
+                .resolve_committed_loose_row_projection(repository, head, mutation)
                 .map_err(|error| {
                     publish_error(
-                        "source row rekey does not match its committed schema",
+                        "source row path could not be resolved",
                         format!("{error:?}; the pending range was preserved"),
                     )
                 })?;
-        }
-        let path = row_path(&projection, mutation, table_id)?;
+            row_path(&projection)?
+        };
         if row_paths.insert(mutation.id(), path).is_some() {
             return Err(publish_error(
                 "source rows have duplicate mutation identities",
@@ -155,6 +191,27 @@ fn validate_candidate_source_rows(
         }
     }
     Ok(row_paths)
+}
+
+fn typed_key_path_leaves(key: &orna_repository_v1::TypedKey) -> Option<Vec<String>> {
+    fn append(key: &orna_repository_v1::TypedKey, leaves: &mut Vec<String>) -> Option<()> {
+        use orna_repository_v1::TypedKey;
+        match key {
+            TypedKey::Text(value) => leaves.push(value.clone()),
+            TypedKey::Int(value) => leaves.push(value.to_string()),
+            TypedKey::UInt(value) => leaves.push(value.to_string()),
+            TypedKey::Bool(value) => leaves.push(value.to_string()),
+            TypedKey::Bytes(value) => leaves.push(value.iter().map(|byte| format!("{byte:02x}")).collect()),
+            TypedKey::Tuple(values) => {
+                for value in values { append(value, leaves)?; }
+            }
+            TypedKey::Null => return None,
+        }
+        Some(())
+    }
+    let mut leaves = Vec::new();
+    append(key, &mut leaves)?;
+    (!leaves.is_empty()).then_some(leaves)
 }
 
 /// Names an already-committed snapshot as the publication result for a frozen
@@ -618,7 +675,26 @@ mod tests {
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
-
+    #[test]
+    fn canonical_string_mutation_key_matches_native_typed_key() {
+        let encoded_key = orna_foundation_v1::CanonicalValue::new(
+            orna_foundation_v1::OvbRaw::Text("london".to_owned()),
+        )
+        .unwrap()
+        .encode()
+        .expect("canonical source key encoding");
+        let mutation = TableMutation::new([1; 16], "Music", encoded_key, Some(vec![1]))
+            .expect("bounded mutation key");
+        let row_key = orna_repository_v1::TypedKey::Text("london".to_owned());
+        assert_eq!(
+            mutation.key(),
+            row_key.canonical_bytes().expect("canonical row-map key")
+        );
+        assert_eq!(
+            typed_key_path_leaves(&row_key).as_deref(),
+            Some(["london".to_owned()].as_slice())
+        );
+    }
     #[test]
     fn message_defaults_and_is_refused_without_a_value() {
         assert_eq!(parse_options(&args(&[])).unwrap(), DEFAULT_MESSAGE);
