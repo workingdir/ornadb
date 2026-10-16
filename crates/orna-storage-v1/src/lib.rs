@@ -737,6 +737,7 @@ use orna_value_v1::{
     ContextValue, Format3Context, Raw, ValueFormat, path_decode_key_components,
     path_encode_key_components, path_validate_relative_components,
 };
+use sha2::{Digest, Sha256};
 
 /// An opaque, deterministic mutation identity supplied by the runtime.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

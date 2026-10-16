@@ -25,8 +25,7 @@ use orna_semantic_v1::{
 };
 use orna_syntax_v1::{Declaration, Expr, parse_module, parse_row};
 use orna_value_v1::{
-    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat,
-    ROV3_BLOB_TAG,
+    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, ValueFormat, ROV3_BLOB_TAG,
 };
 use unicode_normalization::UnicodeNormalization;
 
