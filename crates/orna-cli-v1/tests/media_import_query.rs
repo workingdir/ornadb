@@ -2072,9 +2072,11 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     let unknown = run_query(directory.path(), &[&relation, "--dimensions", "100x100"]);
     assert_eq!(unknown.status.code(), Some(1));
     let refusal = String::from_utf8_lossy(&unknown.stderr).into_owned();
+    // Every verb refuses an unknown flag with the same wording, without echoing
+    // the offending flag: `Unknown export|history|import|publish|query flag`.
     assert!(
-        refusal.contains("--dimensions"),
-        "an unknown predicate flag is named in the refusal: {refusal}"
+        refusal.contains("Unknown query flag"),
+        "the refusal states the flag class it rejected: {refusal}"
     );
     drop(directory);
 }
