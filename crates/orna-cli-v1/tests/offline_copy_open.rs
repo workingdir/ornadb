@@ -16,8 +16,9 @@ use std::{path::Path, process::Command};
 
 use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_repository_v1::{
-    AdmittedRow, GitHashAlgorithm, KeyRange, NativeOid, RangeVerification, Repository, TypedKey,
-    complete_copy::read_complete_copy_manifest,
+    AdmittedRow, FormatContextError, GitHashAlgorithm, KeyRange, NativeOid,
+    RangeVerification, Repository, TypedKey,
+    complete_copy::{CompleteCopyReadError, export_complete_copy, read_complete_copy_manifest},
 };
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
@@ -144,7 +145,18 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     }
     drop(bindings);
     drop(state);
+    // Remove the original media directory and advertise a remote beneath it;
+    // export and restore must not need either source.
+    let original_media_root = source.path().to_path_buf();
+    let unavailable_remote = source.path().join("unavailable-origin");
+    let unavailable_remote_url = format!("file://{}", unavailable_remote.display());
     drop(source);
+    assert!(!original_media_root.exists(), "the original media directory is unavailable");
+    git_output(
+        directory.path(),
+        &["remote", "add", "origin", &unavailable_remote_url],
+        None,
+    );
 
     // Freeze the runtime snapshot, then advance the primary ref so the archive
     // must preserve and later select the earlier media-bearing commit.
@@ -249,6 +261,68 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         restored_rows, source_rows,
         "the restored copy reads the same committed rows offline"
     );
+
+    // Obtain an owner-issued pin for the selected archived member. It carries
+    // the exact commit identity and repository-bound format context.
+    let pin = manifest
+        .pin_member(&copy, &source_snapshot)
+        .expect("pin the selected copied member");
+    assert_eq!(pin.commit().as_str(), source_snapshot);
+    let pin_row_map = pin
+        .format_context()
+        .load_row_map(relation_id)
+        .expect("load the selected member's committed relation descriptor");
+    let pin_graph = pin
+        .format_context()
+        .open_native_graph(&pin_row_map)
+        .expect("open the selected member's graph");
+    let pin_scope = pin_graph.open_read_scope().expect("open a pin read scope");
+    for (key, _) in &expected_payloads {
+        assert!(
+            pin_graph
+                .lookup_row(&TypedKey::Text((*key).to_owned()), &pin_scope)
+                .expect("read the selected member row")
+                .is_some(),
+            "the selected member contains {key}"
+        );
+    }
+
+    let (_, earlier_format) = copy
+        .open_pinned_format_context_with_commit("HEAD^")
+        .expect("pin the earlier snapshot");
+    let earlier_row_map = earlier_format
+        .load_row_map(relation_id)
+        .expect("load the earlier snapshot's relation descriptor");
+    assert!(matches!(
+        pin.format_context().open_native_graph(&earlier_row_map),
+        Err(FormatContextError::RowMapMismatch)
+    ));
+    assert!(matches!(
+        manifest.pin_member(&copy, "unlisted"),
+        Err(CompleteCopyReadError::MemberNotInCopy { .. })
+    ));
+
+    // A repository without the exact archived commit cannot issue a pin.
+    let unrelated = TempDir::new().unwrap();
+    git(unrelated.path(), &["init", "--quiet"]);
+    git(
+        unrelated.path(),
+        &["config", "user.email", "offline-copy@example.invalid"],
+    );
+    git(
+        unrelated.path(),
+        &["config", "user.name", "Offline Copy Test"],
+    );
+    std::fs::write(unrelated.path().join("unrelated"), b"not the copied member").unwrap();
+    git(unrelated.path(), &["add", "unrelated"]);
+    git(unrelated.path(), &["commit", "--quiet", "-m", "unrelated"]);
+    let unrelated_repository = Repository::discover(unrelated.path()).unwrap();
+    assert!(matches!(
+        manifest.pin_member(&unrelated_repository, &source_snapshot),
+        Err(CompleteCopyReadError::FormatContext(
+            FormatContextError::SnapshotUnavailable
+        ))
+    ));
     // The selected snapshot's query reports row metadata without reading its
     // payload; the later explicit Blob read exports the exact captured bytes.
     let selected_snapshot = String::from_utf8(git_output(&restored, &["rev-parse", "HEAD"], None))
@@ -347,4 +421,33 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         assert_eq!(exported.bytes(), expected_payload.as_slice());
         assert_eq!(scope.payload_bytes_read(), expected_payload.len() as u64);
     }
+}
+
+#[test]
+fn complete_copy_rejects_a_valid_unlisted_commit_at_admission() {
+    let (directory, repository, _) = empty_format3_repository();
+    let root = directory.path();
+    let archive = root.join("archive");
+    let manifest = export_complete_copy(&repository, "HEAD", &archive, &[])
+        .expect("export the listed snapshot");
+
+    git(
+        root,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "unlisted complete-copy member",
+        ],
+    );
+    let unlisted = String::from_utf8(git_output(root, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_ne!(unlisted, manifest.snapshot);
+    assert!(matches!(
+        manifest.pin_member(&repository, &unlisted),
+        Err(CompleteCopyReadError::MemberNotInCopy { .. })
+    ));
 }
