@@ -114,6 +114,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         "song",
         0x80,
         true,
+        relation_id,
     )
     .await;
     let image_fixture = std::fs::read_to_string(IMAGE_IMPORT_FIXTURE).unwrap();
