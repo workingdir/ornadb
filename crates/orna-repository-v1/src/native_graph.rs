@@ -1309,17 +1309,8 @@ impl NativeGraphContext {
 
         let mut fields = Vec::with_capacity(values.len());
         for (field_id, value) in field_ids.into_iter().zip(values) {
-            let blob_metadata = if matches!(&value, CborValue::Tag(60111, _)) {
-                let mut encoded = Vec::new();
-                CborValue::Array(vec![value]).encode(&mut encoded);
-                let single_field = crate::row_store::RowValue::decode_canonical_fields(encoded)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                crate::row_store::AdmittedRow::issue(version, row.key().clone(), single_field)
-                    .blob_metadata(0)
-                    .map_err(|_| GraphError::NonCanonicalData)?
-            } else {
-                None
-            };
+            let blob_metadata = crate::row_store::blob_field_metadata(&value)
+                .map_err(|_| GraphError::NonCanonicalData)?;
             fields.push(AdmittedRowField {
                 field_id,
                 blob_metadata,

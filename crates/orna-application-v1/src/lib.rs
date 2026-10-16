@@ -1248,6 +1248,19 @@ impl SourceMutationEffectHandler {
                 .iter()
                 .find(|candidate| candidate.pin_id() == pin.pin_id())
                 .ok_or(ApplicationError::InvalidTableMetadata)?;
+            let stored_blob_matches = match fields.get(field_index) {
+                Some(value) if value == encoded_blob.raw() => true,
+                Some(OvbRaw::Tag(60013, payload)) => matches!(
+                    payload.as_ref(),
+                    OvbRaw::Array(parts)
+                        if matches!(
+                            parts.as_slice(),
+                            [OvbRaw::Int(state), value]
+                                if state == &role_stored && value == encoded_blob.raw()
+                        )
+                ),
+                _ => false,
+            };
             if !field_ids.insert(field_object_id)
                 || !pin_ids.insert(*pin.pin_id())
                 || transfer.database_id() != schema.database_id()
@@ -1256,7 +1269,7 @@ impl SourceMutationEffectHandler {
                 || transfer_evidence.pin_id() != transfer.pin_id()
                 || transfer_evidence.descriptor_oid() != transfer.descriptor_oid()
                 || transfer_evidence.content_identity() != transfer.content_identity()
-                || fields.get(field_index) != Some(encoded_blob.raw())
+                || !stored_blob_matches
             {
                 return Err(ApplicationError::InvalidTableMetadata);
             }
