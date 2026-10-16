@@ -70,6 +70,10 @@ release gate has passed.
 - USER state is principal-scoped and typed. Local peer authentication supplies
   the principal; optimistic revision conflicts and invalid expected types fail
   closed. State values use the canonical ORV5 value representation.
+- The system API exposes publication metadata as typed records. `sys.Storage` and
+  `sys.MaintenanceJob` include pending and published row and byte counts.
+  `sys.PublicationPolicy` declares the size and age limits. Its schema supports
+  field access under Orna 1.1.0 Section 29.
 - The Inspector exposes immutable invocation epochs, eight closed projections,
   redacted-by-default records, privilege checks, and sequence-addressable
   traces. Local SQLite inspection is narrower and stores only bounded,
@@ -103,6 +107,13 @@ release gate has passed.
   annotation-default count and no-persistent-consumers choice. This preparation
   step does not convert legacy rows into a format-3 store or activate a writable
   format-3 repository.
+- Format-3 committed Blob rows require exact canonical MIME-1 media types and
+  suffixes. Readers reject noncanonical stored annotations instead of
+  normalizing them during metadata projection or SOV-3 conversion.
+- A prepared Blob row binds its stored annotation to the annotation its pin was
+  admitted with. The candidate metadata lookup rejects a row whose spelling is
+  not canonical MIME-1, or that differs from the admitted pair, so a transfer
+  record cannot report an annotation the pin never admitted.
 - Product selection retains standard-library snapshots through `orna.std/9`.
   The pre-1.0 V10 `std/cli.orna` source and V9-to-V10 upgrade constructor are
   retired; a stored V10 revision can only be verified when supplied directly

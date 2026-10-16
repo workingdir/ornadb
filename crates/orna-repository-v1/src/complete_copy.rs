@@ -155,6 +155,42 @@ pub struct CompleteCopyDependency {
     pub member: String,
 }
 
+/// An owner-pinned format context for one member of a complete copy.
+///
+/// The commit and snapshot pin come from the same repository-issued lookup;
+/// callers cannot pair a member string with a context selected elsewhere.
+pub struct CompleteCopyMemberPin {
+    member_commit: String,
+    commit: crate::GitCommitRef,
+    format: crate::RepositoryFormatContext,
+}
+
+impl CompleteCopyMemberPin {
+    /// The repository-verified commit selected for this complete-copy member.
+    pub fn commit(&self) -> &crate::GitCommitRef {
+        &self.commit
+    }
+
+    /// The opaque repository pin for the exact selected snapshot.
+    pub fn snapshot_pin(&self) -> &crate::RepositorySnapshotPin {
+        self.format.snapshot_pin()
+    }
+
+    /// The format context bound to this pin; row and graph reads use this context.
+    pub fn format_context(&self) -> &crate::RepositoryFormatContext {
+        &self.format
+    }
+}
+
+/// One payload-free metadata projection from a restored complete-copy member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompleteCopyBlobMetadataPage {
+    /// The bounded committed row interval and its stored Blob metadata.
+    pub rows: Vec<(crate::TypedKey, crate::BlobMetadata)>,
+    /// Media payload bytes read while projecting this page.
+    pub payload_bytes_read: u64,
+}
+
 /// The verified contents of one complete-copy manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompleteCopyManifest {
@@ -189,6 +225,74 @@ impl CompleteCopyManifest {
         self.members
             .iter()
             .find(|member| member.commit.eq_ignore_ascii_case(commit))
+    }
+
+    /// Resolves a recorded member to its repository-owned immutable snapshot pin.
+    /// An unlisted commit is rejected before any row or media read.
+    pub fn pin_member(
+        &self,
+        repository: &Repository,
+        member_commit: &str,
+    ) -> Result<CompleteCopyMemberPin, CompleteCopyReadError> {
+        let member =
+            self.member(member_commit)
+                .ok_or_else(|| CompleteCopyReadError::MemberNotInCopy {
+                    commit: member_commit.to_owned(),
+                })?;
+        let (commit, format) = repository
+            .open_pinned_format_context_with_commit(&member.commit)
+            .map_err(CompleteCopyReadError::FormatContext)?;
+        if !commit.as_str().eq_ignore_ascii_case(&member.commit) {
+            return Err(CompleteCopyReadError::SnapshotMismatch {
+                expected: member.commit.clone(),
+                actual: commit.as_str().to_owned(),
+            });
+        }
+        Ok(CompleteCopyMemberPin {
+            member_commit: member.commit.clone(),
+            commit,
+            format,
+        })
+    }
+    /// Projects one bounded interval through an authenticated selected-member pin.
+    ///
+    /// The pin keeps the repository and exact commit context together. Its row
+    /// map must be authenticated by that same context; a foreign repository or
+    /// snapshot is rejected before metadata traversal, and media bytes are never
+    /// read by this projection.
+    pub fn project_member_blob_metadata(
+        &self,
+        pin: &CompleteCopyMemberPin,
+        row_map: &crate::RowMapSnapshot,
+        range: &crate::KeyRange,
+        field: usize,
+    ) -> Result<CompleteCopyBlobMetadataPage, CompleteCopyReadError> {
+        let member = self
+            .member(&pin.member_commit)
+            .filter(|member| member.commit.eq_ignore_ascii_case(pin.commit.as_str()))
+            .ok_or_else(|| CompleteCopyReadError::MemberNotInCopy {
+                commit: pin.member_commit.clone(),
+            })?;
+        if pin.snapshot_pin().snapshot_id() != pin.commit.snapshot_id() {
+            return Err(CompleteCopyReadError::SnapshotMismatch {
+                expected: member.commit.clone(),
+                actual: pin.commit.as_str().to_owned(),
+            });
+        }
+        let graph = pin
+            .format
+            .open_native_graph(row_map)
+            .map_err(CompleteCopyReadError::FormatContext)?;
+        let scope = graph
+            .open_read_scope()
+            .map_err(CompleteCopyReadError::NativeGraph)?;
+        let rows = graph
+            .project_blob_metadata_range(range, field, &scope)
+            .map_err(CompleteCopyReadError::NativeGraph)?;
+        Ok(CompleteCopyBlobMetadataPage {
+            rows,
+            payload_bytes_read: scope.payload_bytes_read(),
+        })
     }
 
     /// Decodes one manifest document.
@@ -473,6 +577,46 @@ impl From<std::io::Error> for CompleteCopyError {
     }
 }
 
+/// Why a bounded read from a restored complete-copy member failed.
+#[derive(Debug)]
+pub enum CompleteCopyReadError {
+    MemberNotInCopy { commit: String },
+    SnapshotMismatch { expected: String, actual: String },
+    FormatContext(crate::FormatContextError),
+    NativeGraph(crate::GraphError),
+}
+
+impl fmt::Display for CompleteCopyReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MemberNotInCopy { commit } => {
+                write!(
+                    formatter,
+                    "snapshot {commit} is not a member of this complete copy"
+                )
+            }
+            Self::SnapshotMismatch { expected, actual } => {
+                write!(
+                    formatter,
+                    "pinned snapshot {actual} does not match member {expected}"
+                )
+            }
+            Self::FormatContext(error) => write!(formatter, "pinned format read failed: {error}"),
+            Self::NativeGraph(error) => write!(formatter, "native row read failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CompleteCopyReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FormatContext(error) => Some(error),
+            Self::NativeGraph(error) => Some(error),
+            Self::MemberNotInCopy { .. } | Self::SnapshotMismatch { .. } => None,
+        }
+    }
+}
+
 /// One local repository that can supply a pinned dependency and its populated
 /// descendants.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -696,6 +840,36 @@ pub fn restore_complete_copy(
 ) -> Result<CompleteCopyManifest, CompleteCopyError> {
     require_empty(destination)?;
     let manifest = read_complete_copy_manifest(archive)?;
+    restore_complete_copy_from_manifest(archive, destination, manifest)
+}
+
+/// Restores one recorded snapshot member as the copy's primary snapshot.
+/// Membership is checked from the manifest before any member bundle is opened.
+pub fn restore_complete_copy_at(
+    archive: &Path,
+    destination: &Path,
+    commit: &str,
+) -> Result<CompleteCopyManifest, CompleteCopyError> {
+    let mut manifest = read_complete_copy_manifest(archive)?;
+    let selected_index = manifest
+        .members
+        .iter()
+        .position(|member| member.commit.eq_ignore_ascii_case(commit))
+        .ok_or(CompleteCopyError::InvalidArchive(
+            "snapshot member is not recorded",
+        ))?;
+    let selected_commit = manifest.members[selected_index].commit.clone();
+    manifest.snapshot = selected_commit;
+    manifest.members.swap(0, selected_index);
+    require_empty(destination)?;
+    restore_complete_copy_from_manifest(archive, destination, manifest)
+}
+
+fn restore_complete_copy_from_manifest(
+    archive: &Path,
+    destination: &Path,
+    manifest: CompleteCopyManifest,
+) -> Result<CompleteCopyManifest, CompleteCopyError> {
     let parent = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -707,8 +881,7 @@ pub fn restore_complete_copy(
     let restored = staging.path();
 
     // The primary member is fetched first so the copy's own branch and HEAD
-    // name it; the remaining members are fetched into the same object database
-    // under their own bundle refs, so both snapshots are readable from one copy.
+    // name it; remaining members stay readable under their own bundle refs.
     fetch_bundle_into(
         &archive.join(&manifest.members[0].bundle),
         restored,
@@ -773,6 +946,11 @@ pub fn materialize_complete_copy(
     copy: &Path,
     manifest: &CompleteCopyManifest,
 ) -> Result<(), CompleteCopyError> {
+    if manifest.member(&manifest.snapshot).is_none() {
+        return Err(CompleteCopyError::InvalidArchive(
+            "snapshot member is not recorded",
+        ));
+    }
     // Superproject is materialised first: a checkout deletes and recreates the
     // directory at a gitlink path, so a dependency populated before this
     // step would be discarded. Dependencies are materialised afterwards, each

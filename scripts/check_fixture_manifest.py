@@ -199,6 +199,7 @@ def _limited(errors: list[str], limit: int | None) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
+        prog="check_fixture_manifest.py",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
