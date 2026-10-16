@@ -616,11 +616,11 @@ fn admit_source_row_with_owner_fields_inner(
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
 
     let table_name = schema.declaration_name().to_owned();
-    let mut mutation = TableMutation::new(
+    let mut mutation = TableMutation::insert(
         mutation_id,
         table_name.clone(),
         lowered.canonical_key.clone(),
-        Some(canonical_fields.clone()),
+        canonical_fields.clone(),
     )
     .map_err(|_| ProjectLoadError::InvalidSourceRow)?
     .with_table_object_id(schema.table_object_id());

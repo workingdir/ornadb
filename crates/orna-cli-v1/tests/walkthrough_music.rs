@@ -148,9 +148,11 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     assert_eq!(query.status.code(), Some(0), "query failed: {}", stderr(&query));
     let report: serde_json::Value = serde_json::from_slice(&query.stdout).unwrap();
     assert_eq!(report["media_payload_bytes_read"], 0);
-    let listing = report["listings"].as_array().unwrap().iter()
-        .find(|item| item["key"] == "london" && item["field"] == 2)
-        .expect("Music.content is listed as its third stored field");
+    let listings = report["listings"].as_array().unwrap();
+    assert_eq!(listings.len(), 1);
+    let listing = listings.iter()
+        .find(|item| item["key"] == "flondon" && item["media_type"] == "audio/mpeg")
+        .unwrap_or_else(|| panic!("Music.content is listed with its stored audio annotation: {report}"));
     assert_eq!(listing["media_type"], "audio/mpeg");
     assert_eq!(listing["length"], original.len() as u64);
     let expected_sha: [u8; 32] = Sha256::digest(original).into();
@@ -201,7 +203,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let copied = Repository::discover(&restored).unwrap();
     let rows = committed_store_rows(&copied, relation_id);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].key(), &orna_repository_v1::TypedKey::Text("london".to_owned()));
+    assert_eq!(rows[0].key(), &orna_repository_v1::TypedKey::Text("flondon".to_owned()));
     let blob_fields = rows[0].blob_fields().expect("Music row carries Blob metadata");
     assert_eq!(blob_fields.len(), 1);
     assert_eq!(blob_fields[0].1.sha256(), expected_sha);
