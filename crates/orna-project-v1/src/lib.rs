@@ -759,9 +759,8 @@ impl ProjectLoader {
         commit: &GitCommitRef,
         standard_profile: Option<StandardDependencyProfile>,
     ) -> Result<LoadedProject, ProjectLoadError> {
-        let (source_paths, has_standard_gitlink) =
-            validate_committed_tree(repository, commit, self.limits)?;
-        if has_standard_gitlink
+        let snapshot = validate_committed_tree(repository, commit, self.limits)?;
+        if snapshot.has_standard_gitlink
             && let Some(profile) = &standard_profile
             && repository
                 .committed_submodule_commit(commit, "stdlib/std")
@@ -778,22 +777,26 @@ impl ProjectLoader {
                 read_committed_module(
                     repository,
                     commit,
-                    &source_paths,
+                    &snapshot.module_paths,
                     logical_path,
                     total_bytes,
                     self.limits,
                 )
             },
-            |segments| resolve_committed_import(&source_paths, segments),
+            |segments| resolve_committed_import(&snapshot.module_paths, segments),
             |tables, total_bytes| {
-                discover_committed_rows(
-                    repository,
-                    commit,
-                    &source_paths,
-                    tables,
-                    total_bytes,
-                    self.limits,
-                )
+                if snapshot.has_format3_database {
+                    Ok(Vec::new())
+                } else {
+                    discover_committed_rows(
+                        repository,
+                        commit,
+                        &snapshot.row_paths,
+                        tables,
+                        total_bytes,
+                        self.limits,
+                    )
+                }
             },
         )?;
         project.source_commit = Some(commit.clone());
@@ -870,9 +873,8 @@ impl ProjectLoader {
         candidate: &PrivateCommit,
         standard_profile: Option<StandardDependencyProfile>,
     ) -> Result<LoadedProject, ProjectLoadError> {
-        let (source_paths, has_standard_gitlink) =
-            validate_private_candidate_tree(repository, candidate, self.limits)?;
-        if has_standard_gitlink
+        let snapshot = validate_private_candidate_tree(repository, candidate, self.limits)?;
+        if snapshot.has_standard_gitlink
             && let Some(profile) = &standard_profile
             && repository
                 .private_candidate_submodule_commit(candidate, "stdlib/std")
@@ -889,22 +891,26 @@ impl ProjectLoader {
                 read_private_candidate_module(
                     repository,
                     candidate,
-                    &source_paths,
+                    &snapshot.module_paths,
                     logical_path,
                     total_bytes,
                     self.limits,
                 )
             },
-            |segments| resolve_committed_import(&source_paths, segments),
+            |segments| resolve_committed_import(&snapshot.module_paths, segments),
             |tables, total_bytes| {
-                discover_private_candidate_rows(
-                    repository,
-                    candidate,
-                    &source_paths,
-                    tables,
-                    total_bytes,
-                    self.limits,
-                )
+                if snapshot.has_format3_database {
+                    Ok(Vec::new())
+                } else {
+                    discover_private_candidate_rows(
+                        repository,
+                        candidate,
+                        &snapshot.row_paths,
+                        tables,
+                        total_bytes,
+                        self.limits,
+                    )
+                }
             },
         )?;
         project.source_commit = Some(candidate.commit().clone());
@@ -1563,11 +1569,18 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
 /// Validates the complete immutable tree before any reachable source body is
 /// read. Git emits only leaf entries, so sibling ownership is reconstructed
 /// from every component rather than inferred from the mutable worktree.
+struct ValidatedSnapshotTree {
+    module_paths: BTreeSet<String>,
+    row_paths: BTreeSet<String>,
+    has_standard_gitlink: bool,
+    has_format3_database: bool,
+}
+
 fn validate_committed_tree(
     repository: &Repository,
     commit: &GitCommitRef,
     limits: ProjectLimits,
-) -> Result<(BTreeSet<String>, bool), ProjectLoadError> {
+) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
         .list_committed_tree(commit, limits.max_repository_entries.saturating_add(1))
         .map_err(ProjectLoadError::Repository)?;
@@ -1578,7 +1591,7 @@ fn validate_private_candidate_tree(
     repository: &Repository,
     candidate: &PrivateCommit,
     limits: ProjectLimits,
-) -> Result<(BTreeSet<String>, bool), ProjectLoadError> {
+) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
         .list_private_candidate_tree(candidate, limits.max_repository_entries.saturating_add(1))
         .map_err(ProjectLoadError::Repository)?;
@@ -1588,7 +1601,7 @@ fn validate_private_candidate_tree(
 fn validate_snapshot_tree(
     entries: Vec<CommittedTreeEntry>,
     limits: ProjectLimits,
-) -> Result<(BTreeSet<String>, bool), ProjectLoadError> {
+) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     if entries.len() > limits.max_repository_entries {
         return Err(ProjectLoadError::RepositoryLimit);
     }
@@ -1597,20 +1610,37 @@ fn validate_snapshot_tree(
         entry.path().as_path() == Path::new("stdlib/std")
             && entry.kind() == CommittedTreeEntryKind::Submodule
     });
-    let mut source_paths = BTreeSet::new();
+    let has_format3_database = entries.iter().any(|entry| {
+        entry.path().as_path() == Path::new(".orna/database.orna")
+            && matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
+    });
+    let mut module_paths = BTreeSet::new();
+    let mut row_paths = BTreeSet::new();
     let mut module_owners = BTreeMap::<Vec<String>, String>::new();
     let mut siblings = BTreeMap::<PathBuf, BTreeMap<String, String>>::new();
     for entry in entries {
-        validate_committed_tree_entry(entry, &mut siblings, &mut module_owners, &mut source_paths)?;
+        validate_committed_tree_entry(
+            entry,
+            &mut siblings,
+            &mut module_owners,
+            &mut module_paths,
+            &mut row_paths,
+        )?;
     }
-    Ok((source_paths, has_standard_gitlink))
+    Ok(ValidatedSnapshotTree {
+        module_paths,
+        row_paths,
+        has_standard_gitlink,
+        has_format3_database,
+    })
 }
 
 fn validate_committed_tree_entry(
     entry: CommittedTreeEntry,
     siblings: &mut BTreeMap<PathBuf, BTreeMap<String, String>>,
     module_owners: &mut BTreeMap<Vec<String>, String>,
-    source_paths: &mut BTreeSet<String>,
+    module_paths: &mut BTreeSet<String>,
+    row_paths: &mut BTreeSet<String>,
 ) -> Result<(), ProjectLoadError> {
     let path = entry.path().as_path();
     let attached_standard_module = path == Path::new("stdlib/std");
@@ -1655,10 +1685,11 @@ fn validate_committed_tree_entry(
     if !logical_path.ends_with(".orna") {
         return Ok(());
     }
-    source_paths.insert(logical_path.to_owned());
     if !is_module_source_logical(logical_path) {
+        row_paths.insert(logical_path.to_owned());
         return Ok(());
     }
+    module_paths.insert(logical_path.to_owned());
     let namespace = namespace_for_path(logical_path)?;
     if namespace
         .first()
@@ -1799,12 +1830,12 @@ fn discover_worktree_rows(
 fn discover_committed_rows(
     repository: &Repository,
     commit: &GitCommitRef,
-    source_paths: &BTreeSet<String>,
+    row_paths: &BTreeSet<String>,
     table_paths: &BTreeSet<String>,
     total_bytes: &mut usize,
     limits: ProjectLimits,
 ) -> Result<Vec<LooseRowCandidate>, ProjectLoadError> {
-    source_paths
+    row_paths
         .iter()
         .filter_map(|logical_path| {
             table_owner_and_key(logical_path, table_paths)
@@ -1834,12 +1865,12 @@ fn discover_committed_rows(
 fn discover_private_candidate_rows(
     repository: &Repository,
     candidate: &PrivateCommit,
-    source_paths: &BTreeSet<String>,
+    row_paths: &BTreeSet<String>,
     table_paths: &BTreeSet<String>,
     total_bytes: &mut usize,
     limits: ProjectLimits,
 ) -> Result<Vec<LooseRowCandidate>, ProjectLoadError> {
-    source_paths
+    row_paths
         .iter()
         .filter_map(|logical_path| {
             table_owner_and_key(logical_path, table_paths)
