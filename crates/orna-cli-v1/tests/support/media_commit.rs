@@ -1,15 +1,22 @@
 //! Commits one captured media row through an admitted request, the same path
 //! the media import tests use. `insert_only` chooses an insert or a replace.
+//!
+//! `relation_id` is the captured table's admitted object identity. Production
+//! attaches it to every durable mutation from the admitted table identity, and
+//! publication projects rows into the native store by it, so a harness that
+//! omits it stages a row no store root can address.
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TerminalOutcome,
-    WriterLease,
+    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TableObjectId,
+    TerminalOutcome, WriterLease,
 };
 
 use super::format3::publish_media_row;
 
+/// Commits one captured media row and publishes it, so the row is durable in
+/// the store before the caller reads it.
 pub async fn commit_capture(
     repository: &Repository,
     state: &RuntimeState,
@@ -19,6 +26,46 @@ pub async fn commit_capture(
     key: &str,
     ordinal: u8,
     insert_only: bool,
+    relation_id: [u8; 16],
+) {
+    commit_capture_inner(
+        repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
+        true,
+    )
+    .await;
+}
+
+/// Commits one captured media row and leaves the range pending, so a caller can
+/// publish it with the CLI verb exactly as a production run does.
+pub async fn commit_capture_pending(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+) {
+    commit_capture_inner(
+        repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
+        false,
+    )
+    .await;
+}
+
+async fn commit_capture_inner(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+    publish: bool,
 ) {
     let request_identity = RequestIdentity {
         session_id: [ordinal; 16],
@@ -55,6 +102,7 @@ pub async fn commit_capture(
         TableMutation::new(id, "media", key_bytes, Some(row))
     }
     .unwrap()
+    .with_table_object_id(TableObjectId::new(relation_id))
     .with_orp_blob_binding(binding)
     .unwrap();
     let committed = state
@@ -71,5 +119,7 @@ pub async fn commit_capture(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
-    publish_media_row(repository, state, key, ordinal + 0x10).await;
+    if publish {
+        publish_media_row(repository, state, key, ordinal + 0x10).await;
+    }
 }

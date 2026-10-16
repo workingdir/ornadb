@@ -8,14 +8,15 @@
 
 use std::{fmt, process::Command, str::FromStr};
 
-use orna_syntax_v1::{Expr, LiteralKind, RecordField, parse_row};
+use orna_syntax_v1::{parse_module, parse_row, Declaration, Expr, LiteralKind, RecordField};
 use sha2::{Digest, Sha256};
 
-use crate::{Repository, RepositoryError};
-use crate::{
-    native_graph::{GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability},
-    row_store::RowMapSnapshot,
+use crate::native_graph::{
+    GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability,
 };
+use crate::row_store::RowMapSnapshot;
+use crate::{Repository, RepositoryError};
+use orna_value_v1::{Raw, SchemaDescriptor};
 
 use super::DatabaseId;
 
@@ -24,6 +25,8 @@ pub const FINAL_REPOSITORY_FORMAT: u8 = 3;
 
 /// The bounded size of the tracked `database.orna` record.
 pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
+/// Per-module source bound compatible with project loading's aggregate budget.
+const MAX_SOURCE_MODULE_BYTES: usize = 4 * 1024 * 1024;
 
 const DATABASE_PATH: &str = ".orna/database.orna";
 pub(crate) const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
@@ -90,6 +93,7 @@ pub enum FormatContextError {
     RowMapMismatch,
     GraphContextUnavailable,
     GraphContextInvalid,
+    TableBindingMismatch,
 }
 
 impl FormatContextError {
@@ -111,6 +115,7 @@ impl FormatContextError {
             Self::RowMapMismatch => "ORNA-REPO-CONTEXT-012",
             Self::GraphContextUnavailable => "ORNA-REPO-CONTEXT-013",
             Self::GraphContextInvalid => "ORNA-REPO-CONTEXT-014",
+            Self::TableBindingMismatch => "ORNA-REPO-CONTEXT-016",
         }
     }
 }
@@ -138,11 +143,100 @@ impl fmt::Display for FormatContextError {
             Self::RowMapMismatch => "row map does not belong to the pinned format-3 context",
             Self::GraphContextUnavailable => "native graph repository data is unavailable",
             Self::GraphContextInvalid => "native graph repository data is invalid",
+            Self::TableBindingMismatch => "table declaration and committed schema binding disagree",
         })
     }
 }
 
 impl std::error::Error for FormatContextError {}
+
+/// Owner-authenticated descriptor binding for one format-3 relation in an
+/// exact repository UUID and snapshot. A qualified source identity is retained
+/// only when its module path and unique table declaration are verified against
+/// that snapshot. The descriptor is decoded from its sealed schema object; the
+/// complete expected source descriptor must equal it exactly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedTableBinding {
+    database_id: DatabaseId,
+    snapshot_id: [u8; 32],
+    module_name: Option<String>,
+    source_path: Option<String>,
+    declaration_name: Option<String>,
+    relation_id: [u8; 16],
+    schema_oid: NativeOid,
+    schema_digest: [u8; 32],
+    descriptor: SchemaDescriptor,
+}
+
+impl CommittedTableBinding {
+    /// Stable repository UUID authenticated from the pinned `.orna/database.orna`.
+    pub const fn database_id(&self) -> DatabaseId {
+        self.database_id
+    }
+
+    pub const fn snapshot_id(&self) -> &[u8; 32] {
+        &self.snapshot_id
+    }
+
+    pub fn declaration_name(&self) -> Option<&str> {
+        self.declaration_name.as_deref()
+    }
+
+    pub fn module_name(&self) -> Option<&str> {
+        self.module_name.as_deref()
+    }
+
+    pub fn source_path(&self) -> Option<&str> {
+        self.source_path.as_deref()
+    }
+
+    pub const fn table_object_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub const fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub fn schema_oid(&self) -> &NativeOid {
+        &self.schema_oid
+    }
+
+    pub const fn schema_digest(&self) -> &[u8; 32] {
+        &self.schema_digest
+    }
+
+    pub fn descriptor(&self) -> &SchemaDescriptor {
+        &self.descriptor
+    }
+}
+
+fn source_module_name(source_path: &str) -> Option<String> {
+    if source_path.starts_with('/') || source_path.contains('\\') || source_path.contains('\0') {
+        return None;
+    }
+    let mut components = source_path.split('/').collect::<Vec<_>>();
+    let file = components.pop()?;
+    let stem = file.strip_suffix(".orna")?;
+    if components.iter().any(|component| {
+        component.is_empty()
+            || *component == "."
+            || *component == ".."
+            || component.contains('.')
+            || component.contains('\0')
+    }) || stem.is_empty()
+        || stem == "."
+        || stem == ".."
+        || stem.contains('.')
+        || stem.contains('\0')
+    {
+        return None;
+    }
+    if stem != "main" {
+        components.push(stem);
+    }
+    Some(components.join("."))
+}
 
 /// An immutable Git snapshot selected through the owning [`Repository`].
 ///
@@ -511,6 +605,142 @@ impl RepositoryFormatContext {
         .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
+    /// Resolves the committed descriptor selected by its authenticated table ID.
+    /// This descriptor is not source-bound until `bind_committed_table`
+    /// verifies the pinned module, declaration and expected source schema.
+    pub fn resolve_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.resolve_committed_relation_descriptor(relation_id)
+    }
+
+    fn resolve_committed_relation_descriptor(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.require_format3()?;
+        let rows = self.load_row_map(relation_id)?;
+        let version = rows.version();
+        if version.relation_id() != &relation_id {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        let graph = self.open_native_graph(&rows)?;
+        let scope = graph
+            .open_read_scope()
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        let descriptor = graph
+            .read_schema_descriptor(&scope)
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        if schema_descriptor_table_id(&descriptor) != Some(relation_id) {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        Ok(CommittedTableBinding {
+            database_id: self.require_database_id()?,
+            snapshot_id: self.snapshot.snapshot_id(),
+            module_name: None,
+            source_path: None,
+            declaration_name: None,
+            relation_id: *version.relation_id(),
+            schema_oid: version.schema().schema_oid().clone(),
+            schema_digest: *version.schema().schema_digest(),
+            descriptor,
+        })
+    }
+
+    fn validate_committed_source_table(
+        &self,
+        module_name: &str,
+        source_path: &str,
+        declaration_name: &str,
+    ) -> Result<(), FormatContextError> {
+        if source_module_name(source_path).as_deref() != Some(module_name) {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        let source = self
+            .snapshot
+            .read_file(&self.repository, source_path, MAX_SOURCE_MODULE_BYTES)
+            .map_err(|error| match error {
+                RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
+                _ => FormatContextError::SchemaRootInvalid,
+            })?;
+        let source =
+            std::str::from_utf8(&source).map_err(|_| FormatContextError::SchemaRootInvalid)?;
+        let parsed = parse_module(source);
+        if !parsed.is_ok() {
+            return Err(FormatContextError::SchemaRootInvalid);
+        }
+        let mut declarations =
+            parsed
+                .value
+                .items
+                .iter()
+                .filter_map(|item| match &item.declaration {
+                    Declaration::Table { name, .. } if name == declaration_name => Some(()),
+                    _ => None,
+                });
+        if declarations.next().is_none() || declarations.next().is_some() {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        Ok(())
+    }
+
+    /// Binds a qualified source table and its expected schema to this exact
+    /// repository UUID and committed snapshot. The caller supplies the module
+    /// namespace and repository-relative path from project analysis; the
+    /// binding checks source identity, repository UUID, snapshot, table ID,
+    /// and complete expected descriptor before issuing source-bound authority.
+    pub fn bind_committed_table(
+        &self,
+        module_name: &str,
+        source_path: &str,
+        declaration_name: &str,
+        table_object_id: [u8; 16],
+        expected_database_id: DatabaseId,
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.require_format3()?;
+        if self.require_database_id()? != expected_database_id
+            || *expected_snapshot_id != self.snapshot.snapshot_id()
+            || schema_descriptor_table_id(expected_schema) != Some(table_object_id)
+        {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        self.validate_committed_source_table(module_name, source_path, declaration_name)?;
+        let mut binding = self.resolve_committed_table_by_relation_id(table_object_id)?;
+        if binding.descriptor() != expected_schema {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        binding.module_name = Some(module_name.to_owned());
+        binding.source_path = Some(source_path.to_owned());
+        binding.declaration_name = Some(declaration_name.to_owned());
+        Ok(binding)
+    }
+
+    /// Binds resolved schema to the committed descriptor selected by relation
+    /// ID, rejecting any snapshot or descriptor mismatch.
+    pub fn bind_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+        expected_database_id: DatabaseId,
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.require_format3()?;
+        if self.require_database_id()? != expected_database_id
+            || *expected_snapshot_id != self.snapshot.snapshot_id()
+            || schema_descriptor_table_id(expected_schema) != Some(relation_id)
+        {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        let binding = self.resolve_committed_table_by_relation_id(relation_id)?;
+        if binding.descriptor() != expected_schema {
+            return Err(FormatContextError::TableBindingMismatch);
+        }
+        Ok(binding)
+    }
+
     /// Reads one committed path's bytes from this context's own pinned
     /// snapshot.
     ///
@@ -611,6 +841,52 @@ impl HistoricalFormatContext {
         relation_id: [u8; 16],
     ) -> Result<RowMapSnapshot, FormatContextError> {
         self.context.load_row_map(relation_id)
+    }
+
+    /// Resolves the committed descriptor selected by relation ID without
+    /// claiming a source binding.
+    pub fn resolve_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context
+            .resolve_committed_table_by_relation_id(relation_id)
+    }
+
+    pub fn bind_committed_table(
+        &self,
+        module_name: &str,
+        source_path: &str,
+        declaration_name: &str,
+        table_object_id: [u8; 16],
+        expected_database_id: DatabaseId,
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context.bind_committed_table(
+            module_name,
+            source_path,
+            declaration_name,
+            table_object_id,
+            expected_database_id,
+            expected_snapshot_id,
+            expected_schema,
+        )
+    }
+
+    pub fn bind_committed_table_by_relation_id(
+        &self,
+        relation_id: [u8; 16],
+        expected_database_id: DatabaseId,
+        expected_snapshot_id: &[u8; 32],
+        expected_schema: &SchemaDescriptor,
+    ) -> Result<CommittedTableBinding, FormatContextError> {
+        self.context.bind_committed_table_by_relation_id(
+            relation_id,
+            expected_database_id,
+            expected_snapshot_id,
+            expected_schema,
+        )
     }
 
     /// Issues graph authority bound to this pinned snapshot. Rows, schema and
@@ -1019,6 +1295,26 @@ fn parse_database_id(value: &Expr) -> Result<DatabaseId, FormatContextError> {
     DatabaseId::from_str(text).map_err(|_| FormatContextError::MetadataInvalid)
 }
 
+fn schema_descriptor_table_id(descriptor: &SchemaDescriptor) -> Option<[u8; 16]> {
+    let Raw::Tag(37, value) = schema_descriptor_entry(descriptor, 1)? else {
+        return None;
+    };
+    let Raw::Bytes(bytes) = value.as_ref() else {
+        return None;
+    };
+    bytes.as_slice().try_into().ok()
+}
+
+fn schema_descriptor_entry(descriptor: &SchemaDescriptor, field_number: u8) -> Option<&Raw> {
+    let Raw::Map(fields) = descriptor.raw() else {
+        return None;
+    };
+    let key = Raw::Int(field_number.into());
+    fields
+        .iter()
+        .find_map(|(candidate, value)| (candidate == &key).then_some(value))
+}
+
 /// The one shared bounded Orna-record parser used by repository metadata
 /// initialization and this format-context admission path.
 pub(super) fn parse_record(bytes: &[u8]) -> Result<Vec<RecordField>, ()> {
@@ -1083,19 +1379,20 @@ mod graph_bridge_tests {
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
+    use super::RepositoryFormatContext;
     use crate::{
         Repository,
         native_graph::{
-            ByteIndexEntry, CborValue, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid, NodeData,
-            OrderedBranchEntry, OrderedLeafEntry, RowIndexMutation, decode_canonical_cbor,
+            ByteIndexEntry, CborValue, GitHashAlgorithm, MAX_RANGE_GRAPH_OBJECTS, NativeOid,
+            NodeData, OrderedBranchEntry, OrderedLeafEntry, RowIndexMutation,
+            decode_canonical_cbor,
         },
         row_store::{
             KeyRange, MAX_ROW_RANGE_LIMIT, RowEntry, RowMapSnapshot, RowMapVersion, RowValue,
             SchemaGeneration, TypedKey,
         },
     };
-
-    use super::RepositoryFormatContext;
+    use orna_value_v1::{Raw, SchemaDescriptor};
 
     const DATABASE: &str = include_str!("../tests/fixtures/format-context/database-final.orna");
     const DATABASE_TEMPLATE: &str =
@@ -1190,11 +1487,280 @@ mod graph_bridge_tests {
         );
     }
 
+    #[test]
+    fn committed_table_bindings_pin_imported_source_repository_uuid_and_schema() {
+        let relation_id = [0xa1; 16];
+        let (directory, descriptor) = seeded_table_binding(relation_id);
+        let root = directory.path();
+        let repository = Repository::discover(root).expect("discover fixture");
+        let context = repository.open_format_context().expect("admit fixture");
+        let database_id = context
+            .require_database_id()
+            .expect("admitted repository UUID");
+        let snapshot_id = context.snapshot_pin().snapshot_id();
+
+        let resolved = context
+            .resolve_committed_table_by_relation_id(relation_id)
+            .expect("resolve descriptor by committed relation ID");
+        assert_eq!(resolved.database_id(), database_id);
+        assert_eq!(resolved.snapshot_id(), &snapshot_id);
+        assert_eq!(resolved.module_name(), None);
+        assert_eq!(resolved.source_path(), None);
+        assert_eq!(resolved.declaration_name(), None);
+        assert_eq!(resolved.table_object_id(), &relation_id);
+        assert_eq!(resolved.descriptor(), &descriptor);
+
+        let binding = context
+            .bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &snapshot_id,
+                &descriptor,
+            )
+            .expect("bind imported source analysis to committed descriptor");
+        assert_eq!(binding.database_id(), database_id);
+        assert_eq!(binding.snapshot_id(), &snapshot_id);
+        assert_eq!(binding.module_name(), Some("media"));
+        assert_eq!(binding.source_path(), Some("media.orna"));
+        assert_eq!(binding.declaration_name(), Some("Audio"));
+        assert_eq!(binding.descriptor(), &descriptor);
+
+        assert_eq!(
+            context.bind_committed_table(
+                "other",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &snapshot_id,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a namespace/path disagreement"
+        );
+        let mut wrong_snapshot = snapshot_id;
+        wrong_snapshot[0] ^= 1;
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &wrong_snapshot,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a foreign source snapshot"
+        );
+
+        let wrong_descriptor = descriptor_for_table(relation_id, "Str");
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &snapshot_id,
+                &wrong_descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a differing field type under the same table ID"
+        );
+        let other_id = [0xa2; 16];
+        let wrong_table_descriptor = descriptor_for_table(other_id, "Int");
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &snapshot_id,
+                &wrong_table_descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects an expected descriptor for another table"
+        );
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Missing",
+                relation_id,
+                database_id,
+                &snapshot_id,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a source declaration absent from the imported module"
+        );
+
+        let foreign_database_id = super::DatabaseId::new_v4();
+        let large_source = format!(
+            "{}{}",
+            " ".repeat(65 * 1024),
+            include_str!("../tests/fixtures/committed-table-binding.orna")
+        );
+        fs::write(root.join("media.orna"), large_source)
+            .expect("write valid imported source above the old bound");
+        // `commit_store_root` advances HEAD without refreshing the worktree/index.
+        // Reset the index to that committed graph before staging only the source change.
+        git(root, &["read-tree", "HEAD"]);
+        git(root, &["add", "--", "media.orna"]);
+        git(root, &["commit", "--quiet", "-m", "advance imported source fixture"]);
+        let large_context = Repository::discover(root)
+            .expect("discover large imported module")
+            .open_format_context()
+            .expect("open large imported-module context");
+        let large_snapshot_id = large_context.snapshot_pin().snapshot_id();
+        let large_binding = large_context
+            .bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &large_snapshot_id,
+                &descriptor,
+            )
+            .expect("bind valid imported source within project byte budget");
+        assert_eq!(large_binding.descriptor(), &descriptor);
+
+        fs::write(
+            root.join(".orna/database.orna"),
+            super::canonical_database_bytes(&foreign_database_id),
+        )
+        .expect("write another repository UUID");
+        commit(root);
+        let foreign_context = Repository::discover(root)
+            .expect("discover alternate UUID fixture")
+            .open_format_context()
+            .expect("open alternate UUID context");
+        assert_eq!(
+            foreign_context.require_database_id(),
+            Ok(foreign_database_id),
+            "fixture opens the alternate repository UUID"
+        );
+        assert_ne!(foreign_database_id, database_id);
+        assert_eq!(
+            context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                foreign_database_id,
+                &snapshot_id,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::TableBindingMismatch),
+            "binding rejects a foreign repository UUID"
+        );
+
+        fs::write(root.join("media.orna"), "pub table Audio(id: Int)\n")
+            .expect("write malformed imported table source");
+        commit(root);
+        let malformed_context = Repository::discover(root)
+            .expect("discover malformed imported module")
+            .open_format_context()
+            .expect("open malformed imported-module context");
+        let malformed_snapshot_id = malformed_context.snapshot_pin().snapshot_id();
+        assert_eq!(
+            malformed_context.bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                foreign_database_id,
+                &malformed_snapshot_id,
+                &descriptor,
+            ),
+            Err(super::FormatContextError::SchemaRootInvalid),
+            "binding rejects a recovered declaration from a malformed module"
+        );
+    }
+
     fn context(directory: &Path) -> RepositoryFormatContext {
         Repository::discover(directory)
             .expect("discover fixture repository")
             .open_format_context()
             .expect("admit fixture format context")
+    }
+
+    fn descriptor_for_table(relation_id: [u8; 16], key_type: &str) -> SchemaDescriptor {
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
+        let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
+            Raw::Array(vec![
+                uuid(id),
+                Raw::Text(name.to_owned()),
+                ty,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid(relation_id)),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
+            (
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    field(
+                        [0x11; 16],
+                        "id",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text(key_type.into())]),
+                        0,
+                    ),
+                    field(
+                        [0x22; 16],
+                        "payload",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".into())]),
+                        1,
+                    ),
+                ]),
+            ),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid stored schema descriptor")
+    }
+
+    fn seeded_table_binding(relation_id: [u8; 16]) -> (TempDir, SchemaDescriptor) {
+        let directory = repository();
+        let root = directory.path();
+        let source = include_str!("../tests/fixtures/committed-table-binding.orna");
+        fs::write(root.join("main.orna"), "use media;\n").expect("write importing root module");
+        fs::write(root.join("media.orna"), source).expect("write imported table module");
+        commit(root);
+        let initial = context(root);
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let descriptor = descriptor_for_table(relation_id, "Int");
+        let schema_bytes = descriptor.encode().expect("encode schema descriptor");
+        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            root,
+            algorithm,
+            &schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+        let primary_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: row_domain(relation_id, schema_digest),
+                entries: Vec::new(),
+            },
+        );
+        install_rows_store(root, &initial, relation_id, &schema_oid, &primary_root, 0);
+        (directory, descriptor)
     }
 
     fn write_git_object(
@@ -1969,7 +2535,6 @@ mod graph_bridge_tests {
 
     fn commit_store_root(directory: &Path, algorithm: GitHashAlgorithm, store_root: &NativeOid) {
         let database_oid = write_git_object(directory, algorithm, "blob", DATABASE.as_bytes());
-        let main_oid = write_git_object(directory, algorithm, "blob", MAIN_SOURCE.as_bytes());
         let orna_tree_spec = format!(
             "100644 blob {}\tdatabase.orna\n040000 tree {}\tstore\n",
             database_oid.to_hex(),
@@ -1983,11 +2548,13 @@ mod graph_bridge_tests {
                 .trim(),
         )
         .expect("valid .orna tree OID");
-        let root_tree_spec = format!(
-            "040000 tree {}\t.orna\n100644 blob {}\tmain.orna\n",
-            orna_tree_oid.to_hex(),
-            main_oid.to_hex()
-        );
+        let parent_entries = git_output(directory, &["ls-tree", "HEAD"], None);
+        let parent_entries = std::str::from_utf8(&parent_entries).expect("root tree entries UTF-8");
+        let mut root_tree_spec = format!("040000 tree {}\t.orna\n", orna_tree_oid.to_hex());
+        for entry in parent_entries.lines().filter(|entry| !entry.ends_with("\t.orna")) {
+            root_tree_spec.push_str(entry);
+            root_tree_spec.push('\n');
+        }
         let root_tree = git_output(directory, &["mktree"], Some(root_tree_spec.as_bytes()));
         let root_tree_oid = NativeOid::from_hex(
             algorithm,
@@ -2069,6 +2636,29 @@ mod graph_bridge_tests {
         (schema_oid, schema_digest)
     }
 
+    fn schema_node_for_relation(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+    ) -> (NativeOid, [u8; 32]) {
+        let algorithm = context
+            .validate_schema_root()
+            .expect("pinned source schema root")
+            .oid
+            .algorithm();
+        let descriptor = descriptor_for_table(relation_id, "Int");
+        let schema_bytes = descriptor.encode().expect("encode schema descriptor");
+        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            directory,
+            algorithm,
+            &schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+        (schema_oid, schema_digest)
+    }
+
     fn install_overflow_row_store(
         directory: &Path,
         context: &RepositoryFormatContext,
@@ -2101,7 +2691,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
         let semantic_digest: [u8; 32] = Sha256::digest(overflow_bytes).into();
         let stored_digest = semantic_digest_override.unwrap_or(semantic_digest);
         let chunk_oid = write_git_object(directory, algorithm, "blob", &overflow_bytes);
@@ -2180,7 +2770,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
 
         let mut branch_entries = Vec::new();
         for &(key, stored_fence) in rows_and_fences {
@@ -2253,7 +2843,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let database_id = context.require_database_id().expect("database identity");
-        let (schema_oid, schema_digest) = schema_node(directory, context);
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
         let domain = row_domain(relation_id, schema_digest);
 
         let mut next_key = 0u64;
@@ -2817,12 +3407,11 @@ mod graph_bridge_tests {
 
     #[test]
     fn pinned_orp_loader_issues_lazy_snapshot_and_reads_verified_overflow_by_point_and_range() {
-        let directory = repository();
+        let relation_id = [0x72; 16];
+        let (directory, _descriptor) = seeded_table_binding(relation_id);
         let root = directory.path();
         let initial = context(root);
-        let relation_id = [0x72; 16];
-        let (relation_id, expected_digest) =
-            install_overflow_row_store(root, &initial, relation_id, None);
+        let (_, expected_digest) = install_overflow_row_store(root, &initial, relation_id, None);
         let pinned = context(root);
         let snapshot = pinned
             .load_row_map(relation_id)
@@ -2836,6 +3425,8 @@ mod graph_bridge_tests {
             .open_native_graph(&snapshot)
             .expect("issue graph context from repository snapshot");
         let scope = graph.open_read_scope().expect("owner read scope");
+        let media_before_point = scope.payload_bytes_read();
+        let structured_before_point = scope.structured_metadata_bytes_read();
         let row = graph
             .lookup_row(&TypedKey::UInt(7), &scope)
             .expect("bounded point lookup")
@@ -2843,15 +3434,26 @@ mod graph_bridge_tests {
         let RowValue::Overflow(reference) = row.value() else {
             panic!("verified kind-3 row should decode as overflow");
         };
-        assert!(reference.encoded_length() > crate::row_store::ROW_INLINE_LIMIT as u64);
+        let encoded_length = reference.encoded_length();
+        assert!(encoded_length > crate::row_store::ROW_INLINE_LIMIT as u64);
         assert_eq!(reference.semantic_digest(), &expected_digest);
+        assert_eq!(
+            scope.structured_metadata_bytes_read() - structured_before_point,
+            encoded_length
+        );
+        assert_eq!(scope.payload_bytes_read() - media_before_point, 0);
 
+        let structured_before_range = scope.structured_metadata_bytes_read();
         let range = KeyRange::new(Some(TypedKey::UInt(7)), None, 1).unwrap();
-        let ranged = graph
-            .range_rows(&range, &scope)
+        let ranged = snapshot
+            .range_with_graph_context(&graph, &scope, &range)
             .expect("bounded ORP range lookup");
         assert_eq!(ranged, vec![row]);
-
+        assert_eq!(
+            scope.structured_metadata_bytes_read() - structured_before_range,
+            encoded_length
+        );
+        assert_eq!(scope.payload_bytes_read() - media_before_point, 0);
         let bad_digest = [0x99; 32];
         install_overflow_row_store(root, &pinned, relation_id, Some(bad_digest));
         let tampered_context = context(root);
@@ -2867,6 +3469,228 @@ mod graph_bridge_tests {
             Err(crate::native_graph::GraphError::ContentIdentityMismatch)
         ));
     }
+    #[test]
+    fn admitted_fields_decode_inline_and_overflow_from_bound_manifest_without_media_reads() {
+        let relation_id = [0x73; 16];
+        let directory = repository();
+        let root = directory.path();
+        fs::write(root.join("main.orna"), "use media;\n").expect("write importing module");
+        fs::write(
+            root.join("media.orna"),
+            "pub table Audio(id: Int) {\n    payload: Blob,\n    note: Str,\n}\n",
+        )
+        .expect("write committed table manifest");
+        commit(root);
+
+        let initial = context(root);
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
+        let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
+            Raw::Array(vec![
+                uuid(id),
+                Raw::Text(name.to_owned()),
+                ty,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid(relation_id)),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
+            (
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    field(
+                        [0x11; 16],
+                        "id",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]),
+                        0,
+                    ),
+                    field(
+                        [0x22; 16],
+                        "payload",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".into())]),
+                        1,
+                    ),
+                    field(
+                        [0x33; 16],
+                        "note",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                        1,
+                    ),
+                ]),
+            ),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid three-field table manifest");
+        let schema_bytes = descriptor.encode().expect("encode schema descriptor");
+        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_oid = schema_descriptor_node(
+            root,
+            algorithm,
+            &schema_bytes,
+            schema_bytes.len() as u64,
+            schema_digest,
+        );
+
+        let media = b"media payload not read by field projection";
+        let media_digest = Sha256::digest(media).into();
+        let media_chunk = write_git_object(root, algorithm, "blob", media);
+        let media_byte_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: media.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: media.len() as u64,
+                    target: media_chunk,
+                    chunk_sha256: Some(media_digest),
+                }],
+            },
+        );
+        let blob_descriptor = write_native_node(
+            root,
+            algorithm,
+            &NodeData::BlobDescriptor {
+                length: media.len() as u64,
+                raw_sha256: media_digest,
+                byte_root: Some(media_byte_root),
+            },
+        );
+        let fields = |note: &str| {
+            let mut encoded = vec![0x82];
+            cbor_head(&mut encoded, 6, 60111);
+            cbor_head(&mut encoded, 4, 5);
+            cbor_head(&mut encoded, 0, media.len() as u64);
+            cbor_bytes(&mut encoded, &media_digest);
+            cbor_head(&mut encoded, 3, "image/png".len() as u64);
+            encoded.extend_from_slice(b"image/png");
+            encoded.push(0xf6);
+            cbor_bytes(&mut encoded, blob_descriptor.as_bytes());
+            cbor_head(&mut encoded, 3, note.len() as u64);
+            encoded.extend_from_slice(note.as_bytes());
+            encoded
+        };
+        let inline_fields = fields("short");
+        let overflow_note = "x".repeat(crate::row_store::ROW_INLINE_LIMIT + 1);
+        let overflow_fields = fields(&overflow_note);
+        assert!(overflow_fields.len() > crate::row_store::ROW_INLINE_LIMIT);
+        let mut semantic_fields = vec![0x82];
+        cbor_head(&mut semantic_fields, 6, 60112);
+        cbor_head(&mut semantic_fields, 4, 4);
+        cbor_head(&mut semantic_fields, 0, media.len() as u64);
+        cbor_bytes(&mut semantic_fields, &media_digest);
+        cbor_head(&mut semantic_fields, 3, "image/png".len() as u64);
+        semantic_fields.extend_from_slice(b"image/png");
+        semantic_fields.push(0xf6);
+        cbor_head(&mut semantic_fields, 3, overflow_note.len() as u64);
+        semantic_fields.extend_from_slice(overflow_note.as_bytes());
+        let semantic_digest = Sha256::digest(&semantic_fields).into();
+        let overflow_digest = Sha256::digest(&overflow_fields).into();
+        let overflow_chunk = write_git_object(root, algorithm, "blob", &overflow_fields);
+        let overflow_byte_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: overflow_fields.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: overflow_fields.len() as u64,
+                    target: overflow_chunk,
+                    chunk_sha256: Some(overflow_digest),
+                }],
+            },
+        );
+        let dependency_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::DependencyIndex {
+                height: 0,
+                children: vec![blob_descriptor.clone()],
+            },
+        );
+        let overflow_root = write_native_node(
+            root,
+            algorithm,
+            &NodeData::ValueOverflow {
+                encoded_length: overflow_fields.len() as u64,
+                semantic_digest,
+                byte_root: overflow_byte_root,
+                dependency_root: Some(dependency_root),
+            },
+        );
+        let mut overflow_value = Vec::new();
+        cbor_head(&mut overflow_value, 6, 60113);
+        cbor_head(&mut overflow_value, 4, 1);
+        cbor_bytes(&mut overflow_value, overflow_root.as_bytes());
+        let rows = rows_leaf(
+            root,
+            algorithm,
+            &row_domain(relation_id, schema_digest),
+            &[(7, inline_fields.clone()), (8, overflow_value)],
+        );
+        install_rows_store(root, &initial, relation_id, &schema_oid, &rows, 2);
+
+        let pinned = context(root);
+        let snapshot_id = pinned.snapshot_pin().snapshot_id();
+        let database_id = pinned.require_database_id().expect("repository identity");
+        let binding = pinned
+            .bind_committed_table(
+                "media",
+                "media.orna",
+                "Audio",
+                relation_id,
+                database_id,
+                &snapshot_id,
+                &descriptor,
+            )
+            .expect("source-qualified committed TableManifest");
+        let snapshot = pinned.load_row_map(relation_id).expect("pinned row map");
+        let graph = pinned
+            .open_native_graph(&snapshot)
+            .expect("owner-issued graph context");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        for (key, expected_fields) in [
+            (7, inline_fields.as_slice()),
+            (8, overflow_fields.as_slice()),
+        ] {
+            let row = graph
+                .lookup_row(&TypedKey::UInt(key), &scope)
+                .expect("read persisted row")
+                .expect("row exists");
+            let structured_before = scope.structured_metadata_bytes_read();
+            let media_before = scope.payload_bytes_read();
+            let decoded = graph
+                .decode_admitted_row_fields(&row, &binding, &scope)
+                .expect("decode against source-bound TableManifest");
+            assert_eq!(decoded.fields().len(), 2);
+            assert_eq!(decoded.canonical_fields(), expected_fields);
+            assert_eq!(decoded.fields()[0].field_id(), &[0x22; 16]);
+            assert_eq!(decoded.fields()[1].field_id(), &[0x33; 16]);
+            let metadata = decoded.fields()[0]
+                .blob_metadata()
+                .expect("Blob field identity");
+            assert_eq!(metadata.length(), media.len() as u64);
+            assert_eq!(metadata.sha256(), media_digest);
+            assert_eq!(
+                metadata.descriptor_oid().map(|oid| oid.as_bytes()),
+                Some(blob_descriptor.as_bytes())
+            );
+            assert!(!metadata.is_hydrated());
+            assert_eq!(
+                scope.structured_metadata_bytes_read() - structured_before,
+                expected_fields.len() as u64
+            );
+            assert_eq!(scope.payload_bytes_read() - media_before, 0);
+        }
+    }
+
     #[test]
     fn rejects_small_noncanonical_overflow_value() {
         let directory = repository();
@@ -3012,9 +3836,9 @@ mod graph_bridge_tests {
 
     #[test]
     fn indexed_range_includes_fence_and_excludes_next_child_minimum() {
-        let directory = repository();
-        let root = directory.path();
         let relation_id = [0x7a; 16];
+        let (directory, _descriptor) = seeded_table_binding(relation_id);
+        let root = directory.path();
         install_nested_row_store(root, &context(root), relation_id, 2, 2, 4);
 
         let pinned = context(root);
@@ -3024,7 +3848,9 @@ mod graph_bridge_tests {
         let range = KeyRange::new(Some(TypedKey::UInt(40)), Some(TypedKey::UInt(90)), 8)
             .expect("valid fence-aligned range");
 
-        let rows = graph.range_rows(&range, &scope).expect("bounded ORP range");
+        let rows = snapshot
+            .range_with_graph_context(&graph, &scope, &range)
+            .expect("bounded ORP range");
         let keys: Vec<_> = rows.iter().map(|row| row.key().clone()).collect();
         assert_eq!(
             keys,
@@ -3036,7 +3862,50 @@ mod graph_bridge_tests {
                 TypedKey::UInt(80),
             ]
         );
+        let source_row = rows[0].clone();
         assert_eq!(scope.payload_bytes_read_for_test(), 0);
+
+        let limited = KeyRange::new(Some(TypedKey::UInt(40)), Some(TypedKey::UInt(90)), 3)
+            .expect("valid limited range");
+        let limited_rows = snapshot
+            .range_with_graph_context(&graph, &scope, &limited)
+            .expect("bounded limited range");
+        assert_eq!(
+            limited_rows
+                .iter()
+                .map(|row| row.key().clone())
+                .collect::<Vec<_>>(),
+            vec![TypedKey::UInt(40), TypedKey::UInt(50), TypedKey::UInt(60)]
+        );
+
+        let (later_directory, _descriptor) = seeded_table_binding(relation_id);
+        let later_root = later_directory.path();
+        install_nested_row_store(later_root, &context(later_root), relation_id, 2, 1, 4);
+        let later_pinned = context(later_root);
+        let later_snapshot = later_pinned
+            .load_row_map(relation_id)
+            .expect("load later ORP identity");
+        let later_graph = later_pinned
+            .open_native_graph(&later_snapshot)
+            .expect("issue later graph context");
+        let later_scope = later_graph
+            .open_read_scope()
+            .expect("later owner read scope");
+        assert!(matches!(
+            snapshot.range_with_graph_context(&later_graph, &later_scope, &range),
+            Err(crate::row_store::RowStoreError::BoundaryMismatch)
+        ));
+        assert_eq!(later_scope.objects_read_for_test(), 0);
+        let before_foreign_row = later_scope.objects_read_for_test();
+        assert!(matches!(
+            later_graph.resolve_row_node(
+                &source_row,
+                snapshot.version().primary_root(),
+                &later_scope
+            ),
+            Err(crate::native_graph::GraphError::ContextMismatch)
+        ));
+        assert_eq!(later_scope.objects_read_for_test(), before_foreign_row);
     }
 
     /// One relation's index shape and the objects a point lookup, a missing-key
@@ -3093,8 +3962,8 @@ mod graph_bridge_tests {
 
         let range = KeyRange::new(Some(TypedKey::UInt(30)), Some(TypedKey::UInt(80)), 256).unwrap();
         let before = scope.objects_read_for_test();
-        let ranged = graph
-            .range_rows(&range, &scope)
+        let ranged = snapshot
+            .range_with_graph_context(&graph, &scope, &range)
             .expect("bounded range read");
         let range_reads = scope.objects_read_for_test() - before;
         let keys: Vec<_> = ranged.iter().map(|row| row.key().clone()).collect();
@@ -3118,8 +3987,8 @@ mod graph_bridge_tests {
         assert!(total <= MAX_ROW_RANGE_LIMIT as u64 * 3);
         let unbounded = KeyRange::new(None, None, MAX_ROW_RANGE_LIMIT).unwrap();
         let before = scope.objects_read_for_test();
-        let all = graph
-            .range_rows(&unbounded, &scope)
+        let all = snapshot
+            .range_with_graph_context(&graph, &scope, &unbounded)
             .expect("full index walk");
         let full = scope.objects_read_for_test() - before;
         assert_eq!(all.len() as u64, total);
@@ -3597,7 +4466,7 @@ mod graph_bridge_tests {
             .protect_captured_blob(candidate, &write_scope)
             .expect("verify and durably protect the OGB-2 closure");
         let binding = graph
-            .accept_protected_blob_pin_with_annotation(pin, "audio/wav", Some("wav"))
+            .accept_protected_blob_pin_with_annotation(pin, "audio/mpeg", Some("mp2"))
             .expect("accept the durable pin as an annotated ORP Blob binding");
         let identity = binding.content_identity();
         let descriptor_oid = binding.descriptor_oid().clone();
@@ -3668,8 +4537,8 @@ mod graph_bridge_tests {
         assert_eq!(key, TypedKey::UInt(7));
         assert_eq!(metadata.length(), identity.length());
         assert_eq!(metadata.sha256(), identity.sha256());
-        assert_eq!(metadata.media_type(), "audio/wav");
-        assert_eq!(metadata.suffix(), Some("wav"));
+        assert_eq!(metadata.media_type(), "audio/mpeg");
+        assert_eq!(metadata.suffix(), Some("mp2"));
         assert!(!metadata.is_hydrated(), "projection never holds the bytes");
         assert_eq!(
             scope.payload_bytes_read(),
@@ -3833,8 +4702,8 @@ mod graph_bridge_tests {
             relation_id,
             key,
             &payload,
-            "audio/wav",
-            Some("wav"),
+            "audio/mpeg",
+            Some("mp2"),
             false,
         );
         let source_repository = Repository::discover(source_root).expect("discover source");
@@ -3882,8 +4751,8 @@ mod graph_bridge_tests {
         assert_eq!(metadata.length(), payload.len() as u64);
         let expected_sha: [u8; 32] = Sha256::digest(&payload).into();
         assert_eq!(metadata.sha256(), expected_sha);
-        assert_eq!(metadata.media_type(), "audio/wav");
-        assert_eq!(metadata.suffix(), Some("wav"));
+        assert_eq!(metadata.media_type(), "audio/mpeg");
+        assert_eq!(metadata.suffix(), Some("mp2"));
         assert_eq!(metadata_scope.payload_bytes_read(), 0);
 
         let payload_scope = graph.open_read_scope().expect("payload scope");

@@ -3137,9 +3137,52 @@ impl Repository {
         self.compact_reconciliation_boundary(&journal).map(Some)
     }
 
+    /// Returns the persisted compact receipt request when the selected HEAD is
+    /// a strict descendant of this reconciliation's candidate. This exposes
+    /// no replacement writer plan; callers may only finalize a matching
+    /// durable runtime receipt, leaving the descendant ref and worktree intact.
+    pub fn compact_descendant_receipt_request(
+        &self,
+        reconciliation: &CompactPublicationReconciliation,
+    ) -> Result<Option<CompactPublicationPending>, RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_checkout_recovery_locked()?;
+        self.ensure_no_git_operation_in_progress()?;
+        let Some(journal) = self.read_publication_journal_locked()? else {
+            return Ok(None);
+        };
+        let witness = journal
+            .compact_manifest()
+            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
+        if journal.stage() != PublicationJournalStage::WorktreeReconciled
+            || journal.new_head() != reconciliation.candidate()
+            || journal.runtime_intent_id() != Some(reconciliation.runtime_intent_id())
+            || witness.cleanup_watermark() != reconciliation.cleanup_watermark()
+        {
+            return Ok(None);
+        }
+        let candidate = self.candidate_from_journal(&journal)?;
+        self.verify_compact_publication_binding(&journal, &candidate)?;
+        let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        if &current_head == journal.new_head()
+            || !self.compact_commit_is_ancestor(journal.new_head(), &current_head)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(CompactPublicationPending {
+            index: self.index_generation()?,
+            commit: journal.new_head().clone(),
+            runtime_intent_id: witness.runtime_intent_id(),
+            cleanup_watermark: witness.cleanup_watermark(),
+            journal_verifier: compact_journal_verifier(&journal)?,
+        }))
+    }
+
     /// Authenticates a durable runtime receipt using the fixed verification
     /// key configured for this repository, then finalizes the compact journal
-    /// under the existing ref/index/worktree completion fence.
+    /// if its candidate is still HEAD or an ancestor of HEAD. Finalization only
+    /// advances and clears the journal; it never rewrites refs, index, or files.
+
     pub fn finish_compact_with_receipt(
         &self,
         receipt: &CompactRuntimeReceipt,
@@ -3212,6 +3255,32 @@ impl Repository {
             },
         ))
     }
+    fn compact_commit_is_ancestor(
+        &self,
+        candidate: &GitCommitRef,
+        head: &GitCommitRef,
+    ) -> Result<bool, RepositoryError> {
+        if candidate == head {
+            return Ok(true);
+        }
+        let mut command = self.command();
+        command.args([
+            "merge-base",
+            "--is-ancestor",
+            candidate.as_str(),
+            head.as_str(),
+        ]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if output.status.success() {
+            Ok(true)
+        } else if output.status.code() == Some(1) {
+            Ok(false)
+        } else {
+            Err(RepositoryError::GitOperationFailed)
+        }
+    }
 
     fn begin_compact_runtime_completion(
         &self,
@@ -3232,7 +3301,8 @@ impl Repository {
         }
         let candidate = self.candidate_from_journal(journal)?;
         self.verify_compact_publication_binding(journal, &candidate)?;
-        if self.head()?.as_ref() != Some(journal.new_head()) {
+        let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        if !self.compact_commit_is_ancestor(journal.new_head(), &current_head)? {
             return Err(RepositoryError::StaleHead);
         }
         Ok(CompactRuntimeCompletionFence {
@@ -3347,7 +3417,8 @@ impl Repository {
         }
         let candidate = self.candidate_from_journal(journal)?;
         self.verify_compact_publication_binding(journal, &candidate)?;
-        if self.head()?.as_ref() != Some(journal.new_head()) {
+        let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        if !self.compact_commit_is_ancestor(journal.new_head(), &current_head)? {
             return Err(RepositoryError::StaleHead);
         }
         journal.advance(PublicationJournalStage::RuntimeCompleted)?;

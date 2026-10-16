@@ -906,17 +906,14 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
 #[test]
 fn discovers_table_rows_with_dots_in_encoded_key_components() {
     let (directory, repository) = repository(&[
+        ("main.orna", "use inventory;\npub fn main(): Int = 42;\n"),
         (
-            "main.orna",
-            include_str!("fixtures/playground_asset_main.orna"),
+            "inventory.orna",
+            include_str!("fixtures/inventory_resource_table.orna"),
         ),
         (
-            "playground.orna",
-            include_str!("fixtures/playground_asset_schema.orna"),
-        ),
-        (
-            "playground/Asset/assets~2fapp.js.orna",
-            include_str!("fixtures/playground_asset_row.orna"),
+            "inventory/Resource/nested~2fworker.js.orna",
+            include_str!("fixtures/inventory_resource_nested_worker.orna"),
         ),
     ]);
     commit_all(&directory);
@@ -926,10 +923,13 @@ fn discovers_table_rows_with_dots_in_encoded_key_components() {
     assert_eq!(loaded.loose_rows().len(), 1);
     assert_eq!(
         loaded.loose_rows()[0].logical_path(),
-        "playground/Asset/assets~2fapp.js.orna"
+        "inventory/Resource/nested~2fworker.js.orna"
     );
-    assert_eq!(loaded.loose_rows()[0].table_path(), "playground/Asset");
-    assert_eq!(loaded.loose_rows()[0].key_path(), ["assets~2fapp.js.orna"]);
+    assert_eq!(loaded.loose_rows()[0].table_path(), "inventory/Resource");
+    assert_eq!(
+        loaded.loose_rows()[0].key_path(),
+        ["nested~2fworker.js.orna"]
+    );
 }
 
 #[cfg(unix)]

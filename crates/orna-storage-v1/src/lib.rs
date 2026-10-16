@@ -721,12 +721,13 @@ use std::{
 };
 
 use orna_foundation_v1::{
-    CwdCapture, RepositoryGenerationAdapter, RepositoryIdentity, SchemaDescriptor,
+    CwdCapture, OvbRaw, RepositoryGenerationAdapter, RepositoryIdentity, SchemaDescriptor,
 };
 use orna_repository_v1::{
     CompactManifest, CompactPublicationPlan, CompactPublicationRecovery, GitCommitRef,
-    IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit, PublicationJournal,
-    PublicationJournalEntry, Repository, RepositoryError, Uuid,
+    IndexGeneration, ManagedFileChange, ManagedPath, NativeGraphContext, NativeOid, PrivateCommit,
+    PublicationJournal, PublicationJournalEntry, Repository, RepositoryError, RepositoryFormat,
+    RowIndexMutation, TypedKey, Uuid,
 };
 use orna_runtime_v1::{
     PublicationCommitId, PublicationFreeze, PublicationTableIdentity, RuntimeError, RuntimeState,
@@ -850,11 +851,17 @@ pub struct FrozenBatch {
     pub id: MutationId,
     pub mutations: Vec<LooseMutation>,
     pub watermark: u64,
+    // The loose candidate stores opaque row bytes; retain protected transfer
+    // evidence beside them until runtime completion consumes the frozen prefix.
+    protected_source_mutations: Vec<TableMutation>,
 }
 
 impl FrozenBatch {
     /// Enforces the complete staging gate before any materialisation can begin.
-    pub fn new(
+    ///
+    /// It stays private so public publication can only start from a
+    /// runtime-issued freeze lowered by `prepare`.
+    fn new(
         id: MutationId,
         mutations: Vec<LooseMutation>,
         watermark: u64,
@@ -879,6 +886,7 @@ impl FrozenBatch {
             id,
             mutations,
             watermark,
+            protected_source_mutations: Vec::new(),
         })
     }
 }
@@ -1126,13 +1134,21 @@ pub fn build_private_publication_candidate(
     batch: &FrozenBatch,
     message: &str,
 ) -> Result<PrivateCommit, Error> {
+    let changes = private_publication_file_changes(batch)?;
+    repository
+        .build_private_commit(expected_head, &changes, message)
+        .map_err(|_| Error::RepositoryUnavailable)
+}
+fn private_publication_file_changes(
+    batch: &FrozenBatch,
+) -> Result<Vec<ManagedFileChange>, Error> {
     validate_portable_paths(
         batch
             .mutations
             .iter()
             .filter_map(|mutation| mutation.next.as_ref().map(|_| &mutation.path)),
     )?;
-    let changes = batch
+    Ok(batch
         .mutations
         .iter()
         .map(|mutation| {
@@ -1141,15 +1157,374 @@ pub fn build_private_publication_candidate(
                 mutation.next.as_ref().map(|row| row.bytes().to_vec()),
             )
         })
-        .collect::<Vec<_>>();
+        .collect())
+}
+
+fn build_private_publication_candidate_with_store_root(
+    repository: &Repository,
+    expected_head: &GitCommitRef,
+    batch: &FrozenBatch,
+    graph: &NativeGraphContext,
+    store_root: &NativeOid,
+    message: &str,
+) -> Result<PrivateCommit, Error> {
+    let changes = private_publication_file_changes(batch)?;
     repository
-        .build_private_commit(expected_head, &changes, message)
+        .build_private_commit_with_store_root(
+            expected_head,
+            &changes,
+            graph,
+            store_root,
+            message,
+        )
         .map_err(|_| Error::RepositoryUnavailable)
 }
 
+struct ProjectedStoreRow {
+    base_present: bool,
+    next: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+struct CommittedProjectionSchema {
+    descriptor: SchemaDescriptor,
+    text_primary_key: bool,
+    stored_field_count: usize,
+}
+
+struct ProjectedRuntimeMutation {
+    key: Vec<u8>,
+    rekey_to: Option<Vec<u8>>,
+    value: Option<Vec<u8>>,
+}
+
+fn schema_descriptor_entry(
+    schema: &SchemaDescriptor,
+    number: i64,
+) -> Result<&OvbRaw, Error> {
+    let OvbRaw::Map(entries) = schema.raw() else {
+        return Err(Error::RepositoryUnavailable);
+    };
+    let key = OvbRaw::Int(number.into());
+    entries
+        .iter()
+        .find(|(candidate, _)| candidate == &key)
+        .map(|(_, value)| value)
+        .ok_or(Error::RepositoryUnavailable)
+}
+
+fn committed_projection_schema(
+    descriptor: SchemaDescriptor,
+) -> Result<CommittedProjectionSchema, Error> {
+    let OvbRaw::Array(key_ids) = schema_descriptor_entry(&descriptor, 2)? else {
+        return Err(Error::RepositoryUnavailable);
+    };
+    let OvbRaw::Array(declared_fields) = schema_descriptor_entry(&descriptor, 3)? else {
+        return Err(Error::RepositoryUnavailable);
+    };
+    let text_primary_key = if key_ids.len() == 1 {
+        let field = declared_fields
+            .iter()
+            .find(|candidate| {
+                matches!(candidate, OvbRaw::Array(parts) if parts.first() == key_ids.first())
+            })
+            .ok_or(Error::RepositoryUnavailable)?;
+        let OvbRaw::Array(parts) = field else {
+            return Err(Error::RepositoryUnavailable);
+        };
+        let OvbRaw::Array(type_node) = parts.get(2).ok_or(Error::RepositoryUnavailable)? else {
+            return Err(Error::RepositoryUnavailable);
+        };
+        matches!(
+            type_node.as_slice(),
+            [OvbRaw::Int(code), OvbRaw::Text(name)]
+                if code == &0.into() && name == "Str"
+        )
+    } else {
+        false
+    };
+    let stored_field_count = declared_fields.iter().try_fold(0usize, |count, field| {
+        let OvbRaw::Array(parts) = field else {
+            return Err(Error::RepositoryUnavailable);
+        };
+        let role = parts.get(3).ok_or(Error::RepositoryUnavailable)?;
+        Ok(count + usize::from(matches!(role, OvbRaw::Int(role) if role == &1.into())))
+    })?;
+    Ok(CommittedProjectionSchema {
+        descriptor,
+        text_primary_key,
+        stored_field_count,
+    })
+}
+
+/// Projects the runtime row carrier only at the publication boundary. Text
+/// primary keys arrive as UTF-8 and become canonical typed keys; every other
+/// key must already be canonical. Stored-field arrays pass through byte-exact,
+/// while a scalar is wrapped byte-exactly only for a one-field committed
+/// schema. The descriptor comes from the row map at the pinned expected head.
+fn projection_schema_diagnostic(schema: &CommittedProjectionSchema) -> String {
+    let declared_fields = match schema_descriptor_entry(&schema.descriptor, 3) {
+        Ok(OvbRaw::Array(fields)) => fields
+            .iter()
+            .map(|field| match field {
+                OvbRaw::Array(parts) => {
+                    format!("({:?}, {:?}, {:?})", parts.get(1), parts.get(2), parts.get(3))
+                }
+                other => format!("malformed({other:?})"),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "unavailable".to_owned(),
+    };
+    let key_types = match (
+        schema_descriptor_entry(&schema.descriptor, 2),
+        schema_descriptor_entry(&schema.descriptor, 3),
+    ) {
+        (Ok(OvbRaw::Array(key_ids)), Ok(OvbRaw::Array(fields))) => key_ids
+            .iter()
+            .map(|key_id| {
+                fields
+                    .iter()
+                    .find_map(|field| {
+                        let OvbRaw::Array(parts) = field else {
+                            return None;
+                        };
+                        (parts.first() == Some(key_id)).then(|| parts.get(2)).flatten()
+                    })
+                    .map(|ty| format!("{ty:?}"))
+                    .unwrap_or_else(|| "unavailable".to_owned())
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "unavailable".to_owned(),
+    };
+    format!(
+        "text_primary_key={}, stored_field_count={}, declared_fields(name,type,role)=[{}], key_types=[{}]",
+        schema.text_primary_key, schema.stored_field_count, declared_fields, key_types
+    )
+}
+
+fn project_runtime_mutation(
+    schema: &CommittedProjectionSchema,
+    relation_id: [u8; 16],
+    mutation: &TableMutation,
+) -> Result<ProjectedRuntimeMutation, Error> {
+    let project_key = |bytes: &[u8]| -> Result<Vec<u8>, Error> {
+        let key = if schema.text_primary_key {
+            let text = std::str::from_utf8(bytes).map_err(|_| Error::RepositoryUnavailable)?;
+            TypedKey::Text(text.to_owned())
+                .canonical_bytes()
+                .map_err(|_| Error::RepositoryUnavailable)?
+        } else {
+            bytes.to_vec()
+        };
+        schema
+            .descriptor
+            .validate_stored_key(relation_id, &key)
+            .map_err(|error| {
+                eprintln!(
+                    "projection: validate_stored_key relation={relation_id:?}: {error:?}; {}",
+                    projection_schema_diagnostic(schema)
+                );
+                Error::RepositoryUnavailable
+            })?;
+        Ok(key)
+    };
+    let key = project_key(mutation.key())?;
+    let rekey_to = mutation.rekey_to().map(project_key).transpose()?;
+    let value = mutation
+        .value()
+        .map(|bytes| {
+            let row_key = rekey_to.as_deref().unwrap_or(key.as_slice());
+            let fields = if bytes.first().is_some_and(|byte| byte >> 5 == 4) {
+                bytes.to_vec()
+            } else {
+                if schema.stored_field_count != 1 {
+                    return Err(Error::RepositoryUnavailable);
+                }
+                let mut fields = Vec::with_capacity(bytes.len() + 1);
+                fields.push(0x81);
+                fields.extend_from_slice(bytes);
+                fields
+            };
+            schema
+                .descriptor
+                .validate_stored_row(relation_id, row_key, &fields)
+                .map_err(|error| {
+                    eprintln!(
+                        "projection: validate_stored_row relation={relation_id:?}: {error:?}; {}",
+                        projection_schema_diagnostic(schema)
+                    );
+                    Error::RepositoryUnavailable
+                })?;
+            Ok(fields)
+        })
+        .transpose()?;
+    Ok(ProjectedRuntimeMutation {
+        key,
+        rekey_to,
+        value,
+    })
+}
+
+fn build_frozen_publication_store_root(
+    repository: &Repository,
+    expected_head: &GitCommitRef,
+    mutations: &[TableMutation],
+) -> Result<(NativeGraphContext, NativeOid), Error> {
+    let format = repository
+        .open_format_context_at_selector(expected_head.as_str())
+        .map_err(|error| {
+            eprintln!("projection: open_format_context_at_selector: {error:?}");
+            Error::RepositoryUnavailable
+        })?;
+    if format.repository_format() != RepositoryFormat::Format3 {
+        return Err(Error::RepositoryUnavailable);
+    }
+
+    let mut relation_bases = BTreeMap::new();
+    let mut projected_rows = BTreeMap::<([u8; 16], Vec<u8>), ProjectedStoreRow>::new();
+    let mut operations_by_relation = BTreeMap::<[u8; 16], Vec<RowIndexMutation>>::new();
+    for mutation in mutations {
+        let relation_id = mutation
+            .table_object_id()
+            .ok_or_else(|| {
+                eprintln!("projection: mutation missing table object id");
+                Error::RepositoryUnavailable
+            })?
+            .bytes();
+        if !relation_bases.contains_key(&relation_id) {
+            let rows = format
+                .load_row_map(relation_id)
+                .map_err(|error| {
+                    eprintln!("projection: load_row_map: {error:?}");
+                    Error::RepositoryUnavailable
+                })?;
+            let graph = format
+                .open_native_graph(&rows)
+                .map_err(|error| {
+                    eprintln!("projection: open_native_graph: {error:?}");
+                    Error::RepositoryUnavailable
+                })?;
+            let scope = graph
+                .open_read_scope()
+                .map_err(|_| Error::RepositoryUnavailable)?;
+            let descriptor = graph
+                .read_schema_descriptor(&scope)
+                .map_err(|error| {
+                    eprintln!("projection: read_schema_descriptor: {error:?}");
+                    Error::RepositoryUnavailable
+                })?;
+            let schema = committed_projection_schema(descriptor).map_err(|error| {
+                eprintln!("projection: committed_projection_schema: {error:?}");
+                error
+            })?;
+            eprintln!(
+                "projection: committed schema relation={relation_id:?}: {}",
+                projection_schema_diagnostic(&schema)
+            );
+            relation_bases.insert(relation_id, (rows, graph, schema));
+        }
+        let (_, _, schema) = relation_bases
+            .get(&relation_id)
+            .ok_or(Error::RepositoryUnavailable)?;
+        operations_by_relation.entry(relation_id).or_default();
+
+        let projected = project_runtime_mutation(schema, relation_id, mutation)?;
+        let source = projected_rows
+            .entry((relation_id, projected.key))
+            .or_insert_with(|| ProjectedStoreRow {
+                base_present: !mutation.is_insert(),
+                next: None,
+            });
+        if let Some(next_key) = projected.rekey_to {
+            source.next = None;
+            projected_rows
+                .entry((relation_id, next_key))
+                .or_insert_with(|| ProjectedStoreRow {
+                    base_present: false,
+                    next: None,
+                })
+                .next = projected.value;
+        } else {
+            source.next = projected.value;
+        }
+    }
+
+    for ((relation_id, key), row) in projected_rows {
+        let operations = operations_by_relation
+            .get_mut(&relation_id)
+            .ok_or(Error::RepositoryUnavailable)?;
+        if row.base_present {
+            operations.push(
+                RowIndexMutation::delete_canonical(&key)
+                    .map_err(|_| Error::RepositoryUnavailable)?,
+            );
+        }
+        if let Some(value) = row.next {
+            operations.push(
+                RowIndexMutation::insert_canonical(&key, &value)
+                    .map_err(|_| Error::RepositoryUnavailable)?,
+            );
+        }
+    }
+
+    let mut relation_candidates = Vec::with_capacity(operations_by_relation.len());
+    for (relation_id, operations) in operations_by_relation {
+        let (rows, graph, _) = relation_bases
+            .remove(&relation_id)
+            .ok_or(Error::RepositoryUnavailable)?;
+        let maintenance = if operations.is_empty() {
+            None
+        } else {
+            let scope = graph
+                .open_read_scope()
+                .map_err(|_| Error::RepositoryUnavailable)?;
+            Some(
+                graph
+                    .maintain_row_index(&operations, &scope)
+                    .map_err(|error| {
+                        eprintln!("projection: maintain_row_index relation={relation_id:?}: {error:?}");
+                        Error::RepositoryUnavailable
+                    })?,
+            )
+        };
+        relation_candidates.push((rows, graph, maintenance));
+    }
+
+    let Some((_, base_graph, _)) = relation_candidates.first() else {
+        return Err(Error::IncompleteStaging);
+    };
+    let scope = base_graph
+        .open_read_scope()
+        .map_err(|_| Error::RepositoryUnavailable)?;
+    let candidates = relation_candidates
+        .iter()
+        .filter_map(|(rows, _, maintenance)| {
+            maintenance
+                .as_ref()
+                .map(|maintenance| (rows.version(), maintenance))
+        })
+        .collect::<Vec<_>>();
+    let store_root = base_graph
+        .maintain_relations_rows(&candidates, &scope)
+        .map_err(|error| {
+            eprintln!(
+                "projection: maintain_relations_rows relations={:?}: {error:?}",
+                relation_candidates
+                    .iter()
+                    .map(|(rows, _, _)| *rows.version().relation_id())
+                    .collect::<Vec<_>>()
+            );
+            Error::RepositoryUnavailable
+        })?;
+    let (_, graph, _) = relation_candidates.swap_remove(0);
+    Ok((graph, store_root))
+}
+
 /// Converts the runtime's validated typed table prefix into the loose-row
-/// representation. Key decoding remains schema-owned: this function refuses
-/// to invent path components for an opaque runtime key.
+/// representation without decoding or narrowing row values. Key decoding
+/// remains schema-owned: this function refuses to invent paths for opaque keys.
 pub fn lower_runtime_table_mutations(
     freeze: &PublicationFreeze,
     mutations: &[TableMutation],
@@ -1162,6 +1537,9 @@ pub fn lower_runtime_table_mutations(
 
 /// Converts the runtime's validated typed table prefix into the loose-row
 /// representation, reporting a prefix with no visible change as `None`.
+///
+/// Row values remain opaque and byte-exact. Graph-issued pin owners carried by
+/// the frozen prefix stay attached through publication completion.
 ///
 /// Lowering still refuses an empty prefix, because an empty freeze is not a
 /// publication. A prefix whose every row folds to the bytes already committed
@@ -1223,7 +1601,13 @@ pub fn lower_runtime_table_mutations_allow_empty(
         // frozen intent has no visible change to publish.
         return Ok(None);
     }
-    FrozenBatch::new(batch_id, visible, freeze.checkpoint.mutation_sequence).map(Some)
+    let mut batch = FrozenBatch::new(batch_id, visible, freeze.checkpoint.mutation_sequence)?;
+    batch.protected_source_mutations = mutations
+        .iter()
+        .filter(|mutation| !mutation.protected_content_transfers().is_empty())
+        .cloned()
+        .collect();
+    Ok(Some(batch))
 }
 
 /// A prepared, runtime-bound publication. Preparation creates only private
@@ -1234,8 +1618,10 @@ pub struct RuntimePublicationCoordinator {
     expected_index: IndexGeneration,
     candidate: PrivateCommit,
     journal: PublicationJournal,
+    // Retain protected transfer evidence across publication until both runtime
+    // and journal completion have succeeded.
+    protected_source_mutations: Vec<TableMutation>,
 }
-
 /// The committed snapshot and pending-mutation window a logical compact reader
 /// must use for one observation.  The two choices deliberately make the
 /// publication boundary explicit: the frozen prefix is read either from the
@@ -1472,10 +1858,10 @@ impl RuntimePublicationCoordinator {
         .await
     }
 
-    /// Reads the exact typed prefix named by `freeze`, then prepares its
-    /// canonical loose-row candidate. The resolver is the schema boundary for
-    /// turning a typed table key into representable path components.
-    pub async fn prepare_from_runtime(
+    /// Prepares the exact prefix issued by `runtime` as a canonical loose-row
+    /// candidate. Protected source mutations are retained from that prefix
+    /// before any repository candidate is written.
+    pub async fn prepare(
         repository: &Repository,
         runtime: &RuntimeState,
         expected_head: &GitCommitRef,
@@ -1484,7 +1870,7 @@ impl RuntimePublicationCoordinator {
         path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
         message: &str,
     ) -> Result<Self, Error> {
-        Self::prepare_from_runtime_allow_noop(
+        Self::prepare_allow_noop(
             repository,
             runtime,
             expected_head,
@@ -1504,7 +1890,7 @@ impl RuntimePublicationCoordinator {
     /// change, so there is no publication to prepare. The caller completes the
     /// frozen intent without a commit; a save that changed nothing stays
     /// successful instead of failing on the empty batch.
-    pub async fn prepare_from_runtime_allow_noop(
+    pub async fn prepare_allow_noop(
         repository: &Repository,
         runtime: &RuntimeState,
         expected_head: &GitCommitRef,
@@ -1526,28 +1912,42 @@ impl RuntimePublicationCoordinator {
         else {
             return Ok(None);
         };
-        Self::prepare(
+        Self::prepare_lowered(
             repository,
             expected_head,
             expected_index,
             freeze,
+            &mutations,
             batch,
             message,
         )
         .map(Some)
     }
 
-    /// Prepares a candidate from a validated runtime freeze and already
-    /// lowered loose mutations. The journal captures the runtime intent and
-    /// exact worktree expectations before any visible Git change.
-    pub fn prepare(
+    /// Builds the repository candidate from mutations lowered from the exact
+    /// runtime prefix. This stays private so no caller can omit its protected
+    /// source mutation evidence.
+    fn prepare_lowered(
         repository: &Repository,
         expected_head: &GitCommitRef,
         expected_index: IndexGeneration,
         freeze: &PublicationFreeze,
+        runtime_mutations: &[TableMutation],
         batch: FrozenBatch,
         message: &str,
     ) -> Result<Self, Error> {
+        let mut retained_protected = batch.protected_source_mutations.iter();
+        for mutation in runtime_mutations
+            .iter()
+            .filter(|mutation| !mutation.protected_content_transfers().is_empty())
+        {
+            if retained_protected.next() != Some(mutation) {
+                return Err(Error::IncompleteStaging);
+            }
+        }
+        if retained_protected.next().is_some() {
+            return Err(Error::IncompleteStaging);
+        }
         if batch.watermark != freeze.checkpoint.mutation_sequence
             || batch.id != MutationId::new(hex_id(freeze.intent_id))?
         {
@@ -1565,8 +1965,16 @@ impl RuntimePublicationCoordinator {
         let captured = repository
             .capture_managed_publication_state(expected_head, &expected_index, &paths)
             .map_err(map_publication_repository_error)?;
-        let candidate =
-            build_private_publication_candidate(repository, expected_head, &batch, message)?;
+        let (graph, store_root) =
+            build_frozen_publication_store_root(repository, expected_head, runtime_mutations)?;
+        let candidate = build_private_publication_candidate_with_store_root(
+            repository,
+            expected_head,
+            &batch,
+            &graph,
+            &store_root,
+            message,
+        )?;
         let entries = batch
             .mutations
             .iter()
@@ -1598,11 +2006,13 @@ impl RuntimePublicationCoordinator {
             freeze.intent_id,
             entries,
         )
+        .and_then(|journal| journal.with_store_root(&store_root))
         .map_err(|_| Error::RepositoryUnavailable)?;
         Ok(Self {
             expected_index,
             candidate,
             journal,
+            protected_source_mutations: batch.protected_source_mutations,
         })
     }
 
@@ -1661,7 +2071,9 @@ impl RuntimePublicationCoordinator {
             .map_err(|_| Error::RuntimeUnavailable)?;
         repository
             .mark_runtime_complete(freeze.intent_id, &mut self.journal)
-            .map_err(|_| Error::RepositoryUnavailable)
+            .map_err(|_| Error::RepositoryUnavailable)?;
+        self.protected_source_mutations.clear();
+        Ok(())
     }
 
     /// Recovers a persisted runtime publication after a process interruption.
@@ -1701,16 +2113,22 @@ impl RuntimePublicationCoordinator {
             let recovery = repository
                 .recover_compact_publication_boundary()
                 .map_err(map_publication_repository_error)?;
-            let pending = match recovery {
+            let (pending, descendant) = match recovery {
                 None => {
                     return repository
                         .index_generation()
                         .map(Some)
                         .map_err(map_publication_repository_error);
                 }
-                Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => pending,
-                Some(CompactPublicationRecovery::ReconciliationRequired(_)) => {
-                    return Err(Error::RefConflict);
+                Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => {
+                    (pending, false)
+                }
+                Some(CompactPublicationRecovery::ReconciliationRequired(reconciliation)) => {
+                    let pending = repository
+                        .compact_descendant_receipt_request(&reconciliation)
+                        .map_err(map_publication_repository_error)?
+                        .ok_or(Error::RefConflict)?;
+                    (pending, true)
                 }
             };
             // A validated receipt is enough to finalize; schema identity is needed only
@@ -1724,6 +2142,12 @@ impl RuntimePublicationCoordinator {
                     .finish_compact_with_receipt(&receipt)
                     .map(Some)
                     .map_err(map_publication_repository_error);
+            }
+            if descendant {
+                // A descendant already includes the candidate. Without its
+                // original durable receipt, rebuilding or re-consuming the
+                // frozen prefix could publish a duplicate generation.
+                return Err(Error::RefConflict);
             }
             let (profile, table_identity) = compact_profile.ok_or(Error::InvalidTransition)?;
             let trusted_schema = trusted_compact_schema_descriptor(
@@ -3289,11 +3713,12 @@ mod tests {
         )
         .unwrap();
 
-        RuntimePublicationCoordinator::prepare(
+        RuntimePublicationCoordinator::prepare_lowered(
             repository,
             &repository.head().unwrap().unwrap(),
             repository.index_generation().unwrap(),
             &freeze,
+            &[],
             batch,
             "orna: publish runtime data",
         )
@@ -3324,11 +3749,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            RuntimePublicationCoordinator::prepare(
+            RuntimePublicationCoordinator::prepare_lowered(
                 &repository,
                 &repository.head().unwrap().unwrap(),
                 repository.index_generation().unwrap(),
                 &freeze,
+                &[],
                 batch,
                 "orna: reject unrelated batch",
             ),
@@ -3338,7 +3764,7 @@ mod tests {
 
     #[test]
     fn runtime_table_prefix_lowers_into_a_bound_publication() {
-        let (_temp, repository) = repository();
+        let (root, repository) = repository();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
         let freeze = PublicationFreeze {
@@ -3351,9 +3777,20 @@ mod tests {
             candidate_digest: [8; 32],
             mutations: Vec::new(),
         };
-        let mutation =
-            TableMutation::new([9; 16], "Contact", b"Alice".to_vec(), Some(b"row".to_vec()))
-                .unwrap();
+        let full_row = b"full typed row tuple\0primary field\0Blob field";
+        let candidate_path = LoosePath::for_key("Contact", &["Alice".into()])
+            .unwrap()
+            .as_managed_path()
+            .as_path()
+            .to_string_lossy()
+            .into_owned();
+        let mutation = TableMutation::new(
+            [9; 16],
+            "Contact",
+            b"Alice".to_vec(),
+            Some(full_row.to_vec()),
+        )
+        .unwrap();
         let batch = lower_runtime_table_mutations(
             &freeze,
             std::slice::from_ref(&mutation),
@@ -3366,18 +3803,33 @@ mod tests {
             |_path| Ok(None),
         )
         .unwrap();
-        let plan = RuntimePublicationCoordinator::prepare(
+        assert!(batch.protected_source_mutations.is_empty());
+        assert_eq!(batch.mutations[0].next.as_ref().unwrap().bytes(), full_row);
+        let plan = RuntimePublicationCoordinator::prepare_lowered(
             &repository,
             &head,
             index,
             &freeze,
+            std::slice::from_ref(&mutation),
             batch,
             "orna: publish runtime data",
         )
         .unwrap();
+        assert!(plan.protected_source_mutations.is_empty());
         assert_ne!(plan.candidate().commit(), &head);
         assert_eq!(plan.journal().runtime_intent_id(), Some([7; 16]));
         assert_eq!(plan.journal().entries().len(), 1);
+        assert_eq!(
+            git_output(
+                root.path(),
+                &[
+                    "show",
+                    &format!("{}:{candidate_path}", plan.candidate().commit()),
+                ],
+            )
+            .as_bytes(),
+            full_row
+        );
     }
 
     #[test]
@@ -3409,9 +3861,10 @@ mod tests {
             Some(b"final".to_vec()),
         )
         .unwrap();
+        let source_mutations = [first, final_mutation];
         let batch = lower_runtime_table_mutations(
             &freeze,
-            &[first, final_mutation],
+            &source_mutations,
             |mutation| {
                 LoosePath::for_key(
                     mutation.table(),
@@ -3425,11 +3878,12 @@ mod tests {
         assert_eq!(batch.mutations.len(), 1);
         assert_eq!(batch.mutations[0].next.as_ref().unwrap().bytes(), b"final");
         assert_eq!(batch.mutations[0].expected, None);
-        let plan = RuntimePublicationCoordinator::prepare(
+        let plan = RuntimePublicationCoordinator::prepare_lowered(
             &repository,
             &head,
             index,
             &freeze,
+            &source_mutations,
             batch,
             "orna: publish folded runtime data",
         )
@@ -3587,11 +4041,12 @@ mod tests {
             mutations: Vec::new(),
         };
         assert_eq!(
-            RuntimePublicationCoordinator::prepare(
+            RuntimePublicationCoordinator::prepare_lowered(
                 &repository,
                 &head,
                 staged_index,
                 &freeze,
+                &[],
                 staged_batch,
                 "orna: reject managed edit",
             ),
@@ -3639,11 +4094,12 @@ mod tests {
             mutations: Vec::new(),
         };
         assert_eq!(
-            RuntimePublicationCoordinator::prepare(
+            RuntimePublicationCoordinator::prepare_lowered(
                 &repository,
                 &head,
                 unstaged_index,
                 &freeze,
+                &[],
                 unstaged_batch,
                 "orna: reject managed edit",
             ),
@@ -3723,20 +4179,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         plan.publish(&repository).unwrap();
@@ -3796,20 +4250,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
 
@@ -3870,20 +4322,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         plan.publish(&repository).unwrap();
@@ -3996,20 +4446,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index.clone(),
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index.clone(),
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         repository
@@ -4078,20 +4526,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index.clone(),
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index.clone(),
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         let path = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
@@ -4211,20 +4657,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         let tail_context = runtime.begin_activation().await.unwrap();
@@ -4309,20 +4753,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         plan.publish(&repository).unwrap();
@@ -4390,20 +4832,18 @@ mod tests {
             .unwrap();
         let head = repository.head().unwrap().unwrap();
         let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare_from_runtime(
-            &repository,
-            &runtime,
-            &head,
-            index,
-            &freeze,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            "orna: publish runtime data",
-        )
+        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
+        &runtime,
+        &head,
+        index,
+        &freeze,
+        |mutation| {
+            LoosePath::for_key(
+                mutation.table(),
+                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
+            )
+        },
+        "orna: publish runtime data",)
         .await
         .unwrap();
         plan.publish(&repository).unwrap();
@@ -4868,6 +5308,11 @@ mod tests {
     fn frozen_batch_builds_a_real_private_candidate_without_advancing_head() {
         let (root, repository) = repository();
         let head = repository.head().unwrap().unwrap();
+        fs::write(root.path().join("ordinary.txt"), "staged user content\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        let expected_index = repository.index_generation().unwrap();
+        let unstaged = b"unstaged user content\n";
+        fs::write(root.path().join("ordinary.txt"), unstaged).unwrap();
         let candidate = build_private_publication_candidate(
             &repository,
             &head,
@@ -4878,6 +5323,22 @@ mod tests {
 
         assert_ne!(candidate.commit(), &head);
         assert_eq!(repository.head().unwrap().unwrap(), head);
+        assert_eq!(repository.index_generation().unwrap(), expected_index);
+        assert_eq!(
+            fs::read(root.path().join("ordinary.txt")).unwrap(),
+            unstaged
+        );
+        assert_eq!(
+            git_output(root.path(), &["show", ":ordinary.txt"]),
+            "staged user content"
+        );
+        assert_eq!(
+            git_output(
+                root.path(),
+                &["show", &format!("{}:ordinary.txt", candidate.commit())]
+            ),
+            "base"
+        );
         assert_eq!(
             git_output(
                 root.path(),
