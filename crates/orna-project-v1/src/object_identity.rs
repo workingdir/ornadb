@@ -66,6 +66,43 @@ impl ObjectIdentity {
     }
 }
 
+/// An explicit move of an existing object identity to a new qualified name.
+///
+/// Rename tooling supplies these mappings from semantic intent; reconciliation
+/// never infers identity continuity from similar source text or names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectIdentityRename {
+    kind: ObjectKind,
+    old_qualified_name: String,
+    new_qualified_name: String,
+}
+
+impl ObjectIdentityRename {
+    pub fn new(
+        kind: ObjectKind,
+        old_qualified_name: impl Into<String>,
+        new_qualified_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            old_qualified_name: old_qualified_name.into(),
+            new_qualified_name: new_qualified_name.into(),
+        }
+    }
+
+    pub const fn kind(&self) -> ObjectKind {
+        self.kind
+    }
+
+    pub fn old_qualified_name(&self) -> &str {
+        &self.old_qualified_name
+    }
+
+    pub fn new_qualified_name(&self) -> &str {
+        &self.new_qualified_name
+    }
+}
+
 /// Canonical, persistent table/field identity inventory for a source project.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ObjectIdentityManifest {
@@ -317,16 +354,31 @@ impl ObjectIdentityManifest {
         Ok(manifest)
     }
 
-    /// Writer-only reconciliation. Existing IDs survive source edits; removed
-    /// names become permanently retired; new names receive random UUIDs.
+    /// Writer-only conservative reconciliation. Existing IDs survive source edits
+    /// at their current qualified names; removed names retire and new names get
+    /// random UUIDs. Use `reconcile_with_renames` for explicit semantic renames.
     pub fn reconcile(
         modules: &[ModuleInput],
         previous: Option<&Self>,
+    ) -> Result<Self, ObjectIdentityError> {
+        Self::reconcile_with_renames(modules, previous, &[])
+    }
+
+    /// Reconciles explicit semantic identity moves with current source.
+    ///
+    /// Each rename must identify one active identity from the previous manifest
+    /// and a matching new source name. Similarity or a textual name
+    /// match is never used to infer a rename.
+    pub fn reconcile_with_renames(
+        modules: &[ModuleInput],
+        previous: Option<&Self>,
+        renames: &[ObjectIdentityRename],
     ) -> Result<Self, ObjectIdentityError> {
         let active = source_identity_keys(modules)?
             .into_iter()
             .collect::<BTreeSet<_>>();
         let mut records = previous.map_or_else(Vec::new, |manifest| manifest.records.clone());
+        apply_explicit_renames(&mut records, &active, renames)?;
         for record in &mut records {
             if !active.contains(&(record.kind, record.qualified_name.clone())) {
                 record.retired = true;
@@ -421,8 +473,18 @@ impl ObjectIdentityManifest {
         repository: &Repository,
         modules: &[ModuleInput],
     ) -> Result<Self, ObjectIdentityError> {
+        Self::reconcile_and_write_worktree_with_renames(repository, modules, &[])
+    }
+
+    /// Reconciles explicit semantic renames against the worktree manifest and
+    /// atomically writes the result. Loading never allocates or renames identities.
+    pub fn reconcile_and_write_worktree_with_renames(
+        repository: &Repository,
+        modules: &[ModuleInput],
+        renames: &[ObjectIdentityRename],
+    ) -> Result<Self, ObjectIdentityError> {
         let previous = Self::read_worktree(repository)?;
-        let next = Self::reconcile(modules, previous.as_ref())?;
+        let next = Self::reconcile_with_renames(modules, previous.as_ref(), renames)?;
         next.write_worktree(repository)?;
         Ok(next)
     }
@@ -741,6 +803,40 @@ fn temporary_path(parent: &Path, manifest: &Path) -> PathBuf {
     parent.join(format!(".{name}.{}.tmp", Uuid::new_v4()))
 }
 
+fn apply_explicit_renames(
+    records: &mut [ObjectIdentity],
+    active: &BTreeSet<(ObjectKind, String)>,
+    renames: &[ObjectIdentityRename],
+) -> Result<(), ObjectIdentityError> {
+    let mut moves = BTreeMap::new();
+    let mut targets = BTreeSet::new();
+    for rename in renames {
+        let from = rename.old_qualified_name.clone();
+        let to = rename.new_qualified_name.clone();
+        if from.is_empty() || to.is_empty() || from == to {
+            return Err(ObjectIdentityError::InvalidSource);
+        }
+        let source = (rename.kind, from);
+        let target = (rename.kind, to);
+        if !records.iter().any(|record| {
+            !record.retired && record.kind == source.0 && record.qualified_name == source.1
+        }) || !active.contains(&target)
+        {
+            return Err(ObjectIdentityError::InvalidSource);
+        }
+        if moves.insert(source, target.1.clone()).is_some() || !targets.insert(target) {
+            return Err(ObjectIdentityError::IdentityCollision);
+        }
+    }
+
+    for record in records.iter_mut().filter(|record| !record.retired) {
+        if let Some(new_name) = moves.get(&(record.kind, record.qualified_name.clone())) {
+            record.qualified_name.clone_from(new_name);
+        }
+    }
+    Ok(())
+}
+
 fn source_identity_keys(
     modules: &[ModuleInput],
 ) -> Result<Vec<(ObjectKind, String)>, ObjectIdentityError> {
@@ -873,6 +969,89 @@ mod tests {
             ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(),
             removed
         );
+    }
+
+    #[test]
+    fn object_identity_rename_rekey_roundtrip() {
+        let original = ModuleInput::new(
+            "main.orna",
+            "pub dim Information;\npub unit MiB : Information = 1048576.B;\n\
+             pub table Media(id: Str) { payload: Blob, size: Float<MiB>, }",
+        );
+        let initial = ObjectIdentityManifest::reconcile(std::slice::from_ref(&original), None)
+            .expect("initial identities");
+        let table_id = *initial.id(ObjectKind::Table, "Media").unwrap();
+        let key_id = *initial.id(ObjectKind::Field, "Media.id").unwrap();
+        let removed_field_id = *initial.id(ObjectKind::Field, "Media.payload").unwrap();
+        let size_id = *initial.id(ObjectKind::Field, "Media.size").unwrap();
+        let unit_id = *initial.id(ObjectKind::Unit, "MiB").unwrap();
+
+        let renamed_source = ModuleInput::new(
+            "main.orna",
+            "pub dim Information;\npub unit MiB : Information = 1048576.B;\n\
+             pub table Archive(key: Str) { size: Float<MiB>, }",
+        );
+        let unassisted = ObjectIdentityManifest::reconcile(
+            std::slice::from_ref(&renamed_source),
+            Some(&initial),
+        )
+        .expect("unassisted source rename is treated as delete plus create");
+        assert_ne!(unassisted.id(ObjectKind::Table, "Archive"), Some(&table_id));
+        assert!(unassisted.records().iter().any(|record| {
+            record.kind() == ObjectKind::Table
+                && record.qualified_name() == "Media"
+                && record.id() == &table_id
+                && record.is_retired()
+        }));
+
+        let renames = [
+            ObjectIdentityRename::new(ObjectKind::Table, "Media", "Archive"),
+            ObjectIdentityRename::new(ObjectKind::Field, "Media.id", "Archive.key"),
+            ObjectIdentityRename::new(ObjectKind::Field, "Media.size", "Archive.size"),
+        ];
+        let renamed = ObjectIdentityManifest::reconcile_with_renames(
+            std::slice::from_ref(&renamed_source),
+            Some(&initial),
+            &renames,
+        )
+        .expect("explicit rename and key-field rekey");
+
+        assert_eq!(renamed.id(ObjectKind::Table, "Archive"), Some(&table_id));
+        assert_eq!(renamed.id(ObjectKind::Field, "Archive.key"), Some(&key_id));
+        assert_eq!(renamed.id(ObjectKind::Field, "Archive.size"), Some(&size_id));
+        assert_eq!(renamed.id(ObjectKind::Unit, "MiB"), Some(&unit_id));
+        assert!(renamed.records().iter().any(|record| {
+            record.kind() == ObjectKind::Field
+                && record.qualified_name() == "Media.payload"
+                && record.id() == &removed_field_id
+                && record.is_retired()
+        }));
+
+        let roundtrip = ObjectIdentityManifest::decode(&renamed.encode().unwrap()).unwrap();
+        assert_eq!(roundtrip, renamed);
+        let unchanged = ObjectIdentityManifest::reconcile(
+            std::slice::from_ref(&renamed_source),
+            Some(&roundtrip),
+        )
+        .expect("identity survives a normal subsequent reconciliation");
+        assert_eq!(unchanged.id(ObjectKind::Table, "Archive"), Some(&table_id));
+        assert_eq!(unchanged.id(ObjectKind::Field, "Archive.key"), Some(&key_id));
+
+        let field_reintroduced = ModuleInput::new(
+            "main.orna",
+            "pub dim Information;\npub unit MiB : Information = 1048576.B;\n\
+             pub table Archive(key: Str) { payload: Blob, size: Float<MiB>, }",
+        );
+        let reintroduced = ObjectIdentityManifest::reconcile(
+            std::slice::from_ref(&field_reintroduced),
+            Some(&roundtrip),
+        )
+        .expect("reintroduced field receives a fresh identity");
+        let new_field_id = reintroduced.id(ObjectKind::Field, "Archive.payload").unwrap();
+        assert_ne!(new_field_id, &removed_field_id);
+        assert!(reintroduced.records().iter().any(|record| {
+            record.id() == &removed_field_id && record.is_retired()
+        }));
     }
 
     #[test]
