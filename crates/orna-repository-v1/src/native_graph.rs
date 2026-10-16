@@ -541,7 +541,7 @@ impl NativeGraphContext {
 
     /// Decodes the schema descriptor retained by this graph's sealed row map.
     /// The caller cannot substitute an OID or bytes from another snapshot.
-    pub(crate) fn read_schema_descriptor(
+    pub fn read_schema_descriptor(
         &self,
         scope: &RepositoryReadScope,
     ) -> Result<SchemaDescriptor, GraphError> {
@@ -3229,8 +3229,10 @@ impl NativeGraphContext {
     /// The store root is an OGS-1 tree, not a regular file, so the ordinary
     /// managed-file path cannot express it. This checks the supplied object is
     /// a real, fully decodable `StoreRoot` node first: a raw OID cannot be
-    /// planted at the store position. The caller keeps ownership of the index
-    /// file and of any later ref advancement.
+    /// planted at the store position. The base commit's own store entries are
+    /// removed before the new subtree is bound, because a directory entry may
+    /// not overlap the file entries the base contributed. The caller keeps
+    /// ownership of the index file and of any later ref advancement.
     pub(crate) fn pin_store_subtree_in_index(
         &self,
         index: &std::path::Path,
@@ -3257,20 +3259,17 @@ impl NativeGraphContext {
                 actual: node.kind(),
             });
         }
-        let cacheinfo = format!(
-            "040000,{},{}",
-            store_root.to_hex(),
-            crate::init::format_context::STORE_PATH
-        );
-        let output = self
-            .git_command()
-            .env("GIT_INDEX_FILE", index)
-            .args(["update-index", "--add", "--cacheinfo", &cacheinfo])
-            .output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(GraphError::GitCommandFailed);
-        }
+        // The base commit's own store entries are removed before the new
+        // subtree is bound, because a directory entry may not overlap the file
+        // entries the base contributed.
+        crate::bind_tree_entry_in_index(
+            || self.git_command(),
+            index,
+            crate::init::format_context::STORE_PATH,
+            "040000",
+            &store_root.to_hex(),
+        )
+        .map_err(|_| GraphError::GitCommandFailed)?;
         Ok(())
     }
 
@@ -4335,6 +4334,25 @@ pub enum RowIndexMutation {
     },
 }
 
+impl RowIndexMutation {
+    /// Removes a key from its canonical encoded form. The key must be present
+    /// in the pinned row map when the mutation is applied.
+    pub fn delete_canonical(key: &[u8]) -> Result<Self, GraphError> {
+        let key = crate::row_store::TypedKey::decode_canonical(key)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        Ok(Self::Delete { key })
+    }
+
+    /// Inserts a row from its canonical key and schema-independent field tuple.
+    /// The key must be absent from the pinned row map when the mutation is applied.
+    pub fn insert_canonical(key: &[u8], value: &[u8]) -> Result<Self, GraphError> {
+        let key = crate::row_store::TypedKey::decode_canonical(key)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let value = crate::row_store::RowValue::decode_canonical_fields(value.to_vec())
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        Ok(Self::Insert { key, value })
+    }
+}
 /// The measured outcome of one ORP-1 index maintenance pass.
 ///
 /// The object sets are disjoint by construction, so a caller can attribute new
@@ -6924,30 +6942,49 @@ mod persisted_orp_tests {
         fixture_git_object(directory, "tree", &tree)
     }
 
-    fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
-        let directory = tempfile::tempdir().expect("create capture repository");
-        let graph = capture_context_in(directory.path());
-        (directory, graph)
-    }
-
-    /// Builds the capture fixture context for a repository path, creating the
-    /// repository if it does not exist yet. Every fixture object is
-    /// content-addressed and the owner identity is fixed, so the same path
-    /// yields the same context in a killed child and in the restarting parent
-    /// that reclaims its pin namespace.
-    fn capture_context_in(root: &Path) -> NativeGraphContext {
-        let init = Command::new("git")
-            .current_dir(root)
-            .args(["init", "--quiet", "--template="])
-            .status()
-            .expect("initialize capture repository");
-        assert!(init.success());
-
-        let schema_bytes = b"sealed capture test schema";
-        let schema_digest: [u8; 32] = Sha256::digest(schema_bytes).into();
-        let chunk = fixture_git_object(root, "blob", schema_bytes);
+    fn fixture_schema_node(
+        directory: &Path,
+        relation_id: [u8; 16],
+        include_blob_field: bool,
+    ) -> (NativeOid, [u8; 32]) {
+        // Each schema descriptor has its own relation identity and field layout.
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
+        let field = |id: [u8; 16], name: &str, ty: Raw, role: u64| {
+            Raw::Array(vec![
+                uuid(id),
+                Raw::Text(name.to_owned()),
+                ty,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        let mut fields = vec![field(
+            [0x11; 16],
+            "id",
+            Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".to_owned())]),
+            0,
+        )];
+        if include_blob_field {
+            fields.push(field(
+                [0x22; 16],
+                "payload",
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".to_owned())]),
+                1,
+            ));
+        }
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid(relation_id)),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
+            (Raw::Int(3.into()), Raw::Array(fields)),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid fixture schema descriptor");
+        let schema_bytes = descriptor.encode().expect("canonical fixture schema bytes");
+        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let chunk = fixture_git_object(directory, "blob", &schema_bytes);
         let byte_root = fixture_git_node(
-            root,
+            directory,
             &NodeData::ByteIndex {
                 height: 0,
                 total_length: schema_bytes.len() as u64,
@@ -6959,17 +6996,54 @@ mod persisted_orp_tests {
             },
         );
         let schema_oid = fixture_git_node(
-            root,
+            directory,
             &NodeData::Schema {
                 encoded_length: schema_bytes.len() as u64,
                 schema_digest,
                 byte_root,
             },
         );
+        (schema_oid, schema_digest)
+    }
+
+    fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
+        let directory = tempfile::tempdir().expect("create capture repository");
+        let graph = capture_context_in(directory.path());
+        (directory, graph)
+    }
+    fn capture_test_context_with_blob_field() -> (tempfile::TempDir, NativeGraphContext) {
+        let directory = tempfile::tempdir().expect("create capture repository");
+        let graph = capture_context_in_with_blob_field(directory.path(), true);
+        (directory, graph)
+    }
+
+    /// Builds the capture fixture context for a repository path, creating the
+    /// repository if it does not exist yet. Every fixture object is
+    /// content-addressed and the owner identity is fixed, so the same path
+    /// yields the same context in a killed child and in the restarting parent
+    /// that reclaims its pin namespace.
+    fn capture_context_in(root: &Path) -> NativeGraphContext {
+        capture_context_in_with_blob_field(root, false)
+    }
+
+    fn capture_context_in_with_blob_field(
+        root: &Path,
+        include_blob_field: bool,
+    ) -> NativeGraphContext {
+        let init = Command::new("git")
+            .current_dir(root)
+            .args(["init", "--quiet", "--template="])
+            .status()
+            .expect("initialize capture repository");
+        assert!(init.success());
 
         let algorithm = GitHashAlgorithm::Sha1;
         let database_id = [0x31; 16];
         let relation_id = [0x32; 16];
+        // The schema descriptor binds relation identity and its complete field layout
+        // (Orna 1.1.0 Section 29).
+        let (schema_oid, schema_digest) =
+            fixture_schema_node(root, relation_id, include_blob_field);
         let primary_root = fixture_git_node(
             root,
             &NodeData::OrderedLeaf {
@@ -7969,11 +8043,12 @@ mod persisted_orp_tests {
         let second_relation = [0x42; 16];
         let algorithm = graph.algorithm;
         let schema_oid = original.schema().schema_oid().clone();
-        let schema_digest = *original.schema().schema_digest();
+        let (second_schema_oid, second_schema_digest) =
+            fixture_schema_node(directory.path(), second_relation, false);
         let second_primary = fixture_git_node(
             directory.path(),
             &NodeData::OrderedLeaf {
-                domain: rows_domain(second_relation, schema_digest),
+                domain: rows_domain(second_relation, second_schema_digest),
                 entries: Vec::new(),
             },
         );
@@ -7981,7 +8056,11 @@ mod persisted_orp_tests {
             CborValue::Text("relations".to_owned()),
             CborValue::Bytes(original.database_id().to_vec()),
         ]));
-        let relation_entry = |relation_id: [u8; 16], primary_root: &NativeOid| {
+        let relation_entry = |
+            relation_id: [u8; 16],
+            schema_oid: &NativeOid,
+            primary_root: &NativeOid,
+        | {
             OrderedLeafEntry {
                 key: TypedKey::Bytes(relation_id.to_vec())
                     .canonical_bytes()
@@ -7999,8 +8078,12 @@ mod persisted_orp_tests {
             &NodeData::OrderedLeaf {
                 domain: relation_domain,
                 entries: vec![
-                    relation_entry(*original.relation_id(), original.primary_root()),
-                    relation_entry(second_relation, &second_primary),
+                    relation_entry(
+                        *original.relation_id(),
+                        &schema_oid,
+                        original.primary_root(),
+                    ),
+                    relation_entry(second_relation, &second_schema_oid, &second_primary),
                 ],
             },
         );
@@ -8875,7 +8958,7 @@ mod persisted_orp_tests {
 
     #[test]
     fn prior_root_captured_blob_is_rejected_before_later_graph_reads() {
-        let (_directory, graph) = capture_test_context();
+        let (_directory, graph) = capture_test_context_with_blob_field();
         let capture_scope = graph.open_read_scope().expect("capture scope");
         let payload = b"captured OGB-2 payload on the earlier StoreRoot";
         let candidate = graph
@@ -8901,7 +8984,7 @@ mod persisted_orp_tests {
                 &source_version,
                 &[RowIndexMutation::Insert {
                     key: row_key.clone(),
-                    value: blob_value,
+                    value: blob_value.clone(),
                 }],
                 &capture_scope,
             )
@@ -8940,8 +9023,7 @@ mod persisted_orp_tests {
                 source_graph.row_snapshot.version(),
                 &[RowIndexMutation::Insert {
                     key: TypedKey::Text("later".to_owned()),
-                    value: RowValue::decode_canonical_fields(vec![0x80])
-                        .expect("canonical empty later row"),
+                    value: blob_value,
                 }],
                 &source_scope,
             )

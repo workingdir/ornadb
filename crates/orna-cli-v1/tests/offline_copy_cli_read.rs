@@ -22,7 +22,7 @@ use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_repository_v1::{
     AdmittedRow, KeyRange, NativeGraphContext, NativeObjectKind, NativeOid, Repository, TypedKey,
 };
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::RuntimeState;
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -205,11 +205,8 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
         .unwrap();
     }
 
-    let runtime_identity = RuntimeIdentity {
-        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
-        repository_id: [0x61; 16],
-    };
-    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+    let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
     let writer = state.acquire_lease([0x63; 16]).await.unwrap();
@@ -234,6 +231,7 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
             key,
             ordinal,
             true,
+            relation_id,
         )
         .await;
     }
