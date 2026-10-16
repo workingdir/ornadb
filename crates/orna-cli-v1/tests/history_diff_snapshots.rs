@@ -87,14 +87,17 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         &[(&capture, "image", 0x90)],
     )
     .await;
-    let after = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
-        .unwrap()
-        .trim()
-        .to_owned();
+    let after = commit_source_row_to_native_graph(
+        directory.path(),
+        &repository,
+        &before,
+        relation_id,
+        &format_context,
+        "image",
+    );
     assert_ne!(before, after, "publishing the Object row advanced HEAD");
     drop(bindings);
     drop(state);
-
 
     let relation = relation_hex(relation_id);
     let output = run_history(

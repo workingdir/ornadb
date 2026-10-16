@@ -21,7 +21,7 @@ use orna_repository_v1::{
     TypedKey,
 };
 use orna_runtime_v1::TableObjectId;
-use orna_value_v1::{BlobMetadata, Raw, Value, ROV3_BLOB_TAG};
+use orna_value_v1::{BlobMetadata, ROV3_BLOB_TAG, Raw, decode_canonical_storage_value};
 
 use std::collections::BTreeMap;
 
@@ -554,13 +554,13 @@ fn history_row(
     row: &AdmittedRow,
     fields: &orna_repository_v1::AdmittedRowFields,
 ) -> Result<HistoryRow, Diagnostic> {
-    let decoded = Value::decode(fields.canonical_fields()).map_err(|error| {
+    let decoded = decode_canonical_storage_value(fields.canonical_fields()).map_err(|error| {
         history_error(
             "Canonical row fields could not be decoded",
             format!("{error:?}"),
         )
     })?;
-    let Raw::Array(values) = decoded.raw() else {
+    let Raw::Array(values) = &decoded else {
         return Err(history_error(
             "Canonical row fields are not a tuple",
             "the admitted source decoder returned a non-array value",

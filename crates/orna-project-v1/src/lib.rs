@@ -595,7 +595,8 @@ fn admit_source_row_with_owner_fields_inner(
         return Err(ProjectLoadError::InvalidSourceRow);
     }
 
-    let canonical_fields = Value::new(Raw::Array(stored_fields))
+    let canonical_fields =
+        ContextValue::new_in_context(context, ValueFormat::Rov3, Raw::Array(stored_fields))
         .and_then(|value| value.encode())
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     schema

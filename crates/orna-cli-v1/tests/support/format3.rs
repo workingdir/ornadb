@@ -3,6 +3,7 @@
 //! `#[path = "support/format3.rs"] mod format3;`.
 
 use std::{
+    collections::BTreeSet,
     io::Write,
     path::Path,
     process::{Command, Stdio},
@@ -19,8 +20,9 @@ use tempfile::TempDir;
 use std::sync::Arc;
 
 use orna_value_v1::{
-    AvailabilityState, BlobResolver, ContentReference, Error as ValueError, Format3Context,
-    Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
+    AvailabilityState, BlobResolver, ContentReference, ContextValue, Error as ValueError,
+    Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, ROV3_BLOB_TAG,
+    ROV3_OVERFLOW_TAG, Raw, Snapshot, ValueFormat,
 };
 
 use orna_project_v1::ObjectIdentityManifest;
@@ -115,6 +117,163 @@ pub fn object_format3_repository(
     (directory, repository, relation_id, context)
 }
 
+/// Adds one admitted source row to the native Format-3 graph and commits a
+/// canonical graph snapshot. The ordinary source publication helper only
+/// stages its loose-row bytes; history reads the immutable native graph.
+pub fn commit_source_row_to_native_graph(
+    root: &Path,
+    repository: &Repository,
+    source_commit: &str,
+    relation_id: [u8; 16],
+    context: &Format3Context,
+    key: &str,
+) -> String {
+    let head = repository.head().unwrap().unwrap();
+    let fields = repository
+        .read_committed_file(&head, format!("Object/{key}.orna"), 1 << 20)
+        .unwrap();
+    let source_path = format!("{source_commit}:Object/{key}.orna");
+    let original_source = git_output(root, &["show", &source_path], None);
+    let format = repository
+        .open_pinned_format_context(head.as_str())
+        .unwrap();
+    let rows = format.load_row_map(relation_id).unwrap();
+    let schema_oid = rows.version().schema().schema_oid();
+    let schema_digest = *rows.version().schema().schema_digest();
+    let database_id = format.require_database_id().unwrap();
+
+    let raw_fields = ContextValue::decode_in_context(&fields, ValueFormat::Rov3, context).unwrap();
+    let mut dependency_oids = BTreeSet::new();
+    collect_row_dependencies(raw_fields.raw(), &mut dependency_oids);
+    let dependencies = dependency_oids
+        .iter()
+        .map(|oid| (oid.as_str(), "tree"))
+        .collect::<Vec<_>>();
+
+    let mut row_domain = vec![0x83, 0x64];
+    row_domain.extend_from_slice(b"rows");
+    append_cbor_bytes(&mut row_domain, &relation_id);
+    append_cbor_bytes(&mut row_domain, &schema_digest);
+    let key_bytes = TypedKey::Text(key.to_owned()).canonical_bytes().unwrap();
+    let mut row = vec![0x84, 0x01, 0x01];
+    row.extend_from_slice(&row_domain);
+    row.extend_from_slice(&[0x81, 0x82]);
+    row.extend_from_slice(&key_bytes);
+    row.extend_from_slice(&fields);
+    let row_root = native_fixture_node(root, &row, &dependencies);
+    let schema_oid_hex = schema_oid.to_hex();
+
+    let mut relation_domain = vec![0x82, 0x69];
+    relation_domain.extend_from_slice(b"relations");
+    append_cbor_bytes(&mut relation_domain, database_id.as_bytes());
+    let mut relation_map = vec![0x84, 0x01, 0x01];
+    relation_map.extend_from_slice(&relation_domain);
+    relation_map.extend_from_slice(&[0x81, 0x82]);
+    append_cbor_bytes(&mut relation_map, &relation_id);
+    relation_map.push(0x84);
+    append_cbor_bytes(&mut relation_map, schema_oid.as_bytes());
+    append_cbor_bytes(&mut relation_map, &git_oid_bytes(&row_root));
+    relation_map.extend_from_slice(&[0xf6, 0x01]);
+    let relation_map = native_fixture_node(
+        root,
+        &relation_map,
+        &[
+            (schema_oid_hex.as_str(), "tree"),
+            (row_root.as_str(), "tree"),
+        ],
+    );
+    let mut store_root = vec![0x83, 0x01, 0x00];
+    append_cbor_bytes(&mut store_root, &git_oid_bytes(&relation_map));
+    let store_root = native_fixture_node(root, &store_root, &[(relation_map.as_str(), "tree")]);
+
+    std::fs::write(root.join(format!("Object/{key}.orna")), &original_source).unwrap();
+    git(root, &["add", "--all"]);
+    let staged_tree = String::from_utf8(git_output(root, &["write-tree"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let entries = String::from_utf8(git_output(root, &["ls-tree", &staged_tree], None)).unwrap();
+    let old_orna_tree = String::from_utf8(git_output(
+        root,
+        &["rev-parse", &format!("{staged_tree}:.orna")],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let old_orna_entries =
+        String::from_utf8(git_output(root, &["ls-tree", &old_orna_tree], None)).unwrap();
+    let mut orna_entries = format!("040000 tree {store_root}\tstore\n");
+    for entry in old_orna_entries
+        .lines()
+        .filter(|entry| !entry.ends_with("\tstore"))
+    {
+        orna_entries.push_str(entry);
+        orna_entries.push('\n');
+    }
+    let orna_tree = git_tree(root, &orna_entries);
+    let mut root_entries = format!("040000 tree {orna_tree}\t.orna\n");
+    for entry in entries.lines().filter(|entry| !entry.ends_with("\t.orna")) {
+        root_entries.push_str(entry);
+        root_entries.push('\n');
+    }
+    let root_tree = git_tree(root, &root_entries);
+    let commit = String::from_utf8(git_output(
+        root,
+        &[
+            "commit-tree",
+            &root_tree,
+            "-p",
+            head.as_str(),
+            "-m",
+            "add native Object row",
+        ],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let head_ref = String::from_utf8(git_output(root, &["symbolic-ref", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(root, &["update-ref", &head_ref, &commit]);
+    git(root, &["reset", "--quiet", "--hard", &commit]);
+    commit
+}
+
+fn collect_row_dependencies(raw: &Raw, dependencies: &mut BTreeSet<String>) {
+    match raw {
+        Raw::Tag(ROV3_BLOB_TAG, payload) => {
+            if let Raw::Array(fields) = payload.as_ref()
+                && let Some(Raw::Bytes(oid)) = fields.get(4)
+            {
+                dependencies.insert(hex(oid));
+            }
+        }
+        Raw::Tag(ROV3_OVERFLOW_TAG, payload) => {
+            if let Raw::Array(fields) = payload.as_ref()
+                && let Some(Raw::Bytes(oid)) = fields.first()
+            {
+                dependencies.insert(hex(oid));
+            }
+        }
+        Raw::Array(values) => {
+            for value in values {
+                collect_row_dependencies(value, dependencies);
+            }
+        }
+        Raw::Map(entries) => {
+            for (key, value) in entries {
+                collect_row_dependencies(key, dependencies);
+                collect_row_dependencies(value, dependencies);
+            }
+        }
+        Raw::Tag(_, value) => collect_row_dependencies(value, dependencies),
+        Raw::Null | Raw::Bool(_) | Raw::Int(_) | Raw::Float(_) | Raw::Bytes(_) | Raw::Text(_) => {}
+    }
+}
+
 pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16]) {
     let (directory, repository, relation_id, _, _) =
         format3_repository_parts(media_source, "media");
@@ -189,8 +348,7 @@ fn format3_repository_parts(
     relation_map.extend_from_slice(&relation_domain);
     relation_map.push(0x81);
     relation_map.push(0x82);
-    append_cbor_bytes(
-        &mut relation_map,
+    relation_map.extend_from_slice(
         &TypedKey::Bytes(relation_id.to_vec())
             .canonical_bytes()
             .expect("the relation ID has a canonical typed key"),
@@ -250,6 +408,7 @@ fn format3_repository_parts(
         .trim()
         .to_owned();
     git(root, &["update-ref", &head_ref, &commit]);
+    git(root, &["reset", "--quiet", "--hard", &commit]);
 
     let repository = Repository::discover(root).unwrap();
     (
@@ -369,7 +528,7 @@ pub fn native_fixture_node(path: &Path, data: &[u8], dependencies: &[(&str, &str
         let refs = dependencies
             .iter()
             .map(|(oid, kind)| {
-                let mode = if *kind == "tree" { "040000" } else { "100644" };
+                let mode = if *kind == "tree" { "40000" } else { "100644" };
                 format!("{mode} {kind} {oid}\t{oid}\n")
             })
             .collect::<String>();
@@ -377,7 +536,7 @@ pub fn native_fixture_node(path: &Path, data: &[u8], dependencies: &[(&str, &str
     };
     let mut envelope = format!("100644 blob {data_oid}\tdata\n");
     if let Some(refs_oid) = refs_oid {
-        envelope.push_str(&format!("040000 tree {refs_oid}\trefs\n"));
+        envelope.push_str(&format!("40000 tree {refs_oid}\trefs\n"));
     }
     git_tree(path, &envelope)
 }
