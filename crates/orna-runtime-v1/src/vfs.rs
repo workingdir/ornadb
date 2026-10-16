@@ -12,16 +12,19 @@ use std::{
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 
-use orna_repository_v1::NativeObjectId;
+use orna_repository_v1::{
+    ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, RepositoryCaptureCapability,
+};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{
-    CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, RuntimeActivationContext,
-    RuntimeError, RuntimeQueryError, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, SafeDiagnostic, TableActivationCandidateValidator, TableActivationError,
-    TableMutation, ValidatedTableActivationCommit, WriterLease,
+    CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, ProtectedContentTransferEvidence,
+    RuntimeActivationContext, RuntimeError, RuntimeQueryError, RuntimeState,
+    RuntimeTableActivationSnapshot, RuntimeTableIdentity, SafeDiagnostic,
+    TableActivationCandidateValidator, TableActivationError, TableMutation,
+    ValidatedTableActivationCommit, WriterLease,
 };
 use orna_repository_v1::{CwdGeneration, ProtectedContentPin};
 
@@ -187,6 +190,45 @@ impl VfsRepositoryCache {
         target.rename_over(scratch, activate).await
     }
 
+    /// Commits a temporary Blob replacement through the owner of this view's
+    /// shared row transaction and projection epoch.
+    pub async fn commit_durable_blob_rename<S, A, AFut>(
+        &self,
+        target: &Arc<ManagedFile<S>>,
+        scratch: &TemporarySave<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        capture: &RepositoryCaptureCapability,
+        expected_identity: ContentIdentity,
+        media_type: &str,
+        suffix: Option<&str>,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        S: Send + Sync + 'static,
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, OrpBlobBinding) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
+    {
+        if !Arc::ptr_eq(&target.cache_epoch.generation, &self.epoch.generation) {
+            return Err(VfsSaveError::WrongRepositoryScope);
+        }
+        let result = target
+            .commit_durable_temporary_blob_rename(
+                scratch,
+                runtime,
+                save,
+                capture,
+                expected_identity,
+                media_type,
+                suffix,
+                admit,
+                faults,
+            )
+            .await;
+        result
+    }
+
     async fn has_current_projection<S>(&self, image: &VfsFileSnapshot<S>) -> bool {
         match image.pin.projection() {
             Some(projection) => projection.belongs_to(&self.epoch) && projection.is_current().await,
@@ -200,15 +242,18 @@ impl VfsRepositoryCache {
                 image,
                 unlinked: false,
             }),
+            operation: Mutex::new(()),
             cache_epoch: self.epoch.clone(),
         })
     }
 }
 
-/// A retained owner-issued immutable row-map snapshot.
+/// A retained owner-issued immutable row-map snapshot and any additional
+/// owner-issued resources needed to keep its generation readable.
 pub struct SnapshotPin<S> {
     snapshot: Arc<S>,
     projection: Arc<OnceLock<CacheProjection>>,
+    retention: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl<S> Clone for SnapshotPin<S> {
@@ -216,6 +261,7 @@ impl<S> Clone for SnapshotPin<S> {
         Self {
             snapshot: Arc::clone(&self.snapshot),
             projection: Arc::clone(&self.projection),
+            retention: self.retention.as_ref().map(Arc::clone),
         }
     }
 }
@@ -230,6 +276,23 @@ impl<S> SnapshotPin<S> {
         Self {
             projection: snapshot_projection_cell(&snapshot),
             snapshot,
+            retention: None,
+        }
+    }
+
+    /// Captures a row-map generation together with an owner-issued lease for
+    /// resources that must remain readable through that generation, such as
+    /// protected media references. Cloned pins and every VFS reader/cursor
+    /// derived from them share the lease; it is released after the last clone.
+    pub fn capture_with_retention<R>(snapshot: Arc<S>, retention: Arc<R>) -> Self
+    where
+        S: Any + Send + Sync + 'static,
+        R: Any + Send + Sync + 'static,
+    {
+        Self {
+            projection: snapshot_projection_cell(&snapshot),
+            snapshot,
+            retention: Some(retention),
         }
     }
 
@@ -241,6 +304,15 @@ impl<S> SnapshotPin<S> {
     /// Clones the pin for another handle that must remain on this version.
     pub fn clone_pin(&self) -> Self {
         self.clone()
+    }
+    /// Makes a provisional image pin over this row-map snapshot without
+    /// inheriting resource leases that belong only to the retired generation.
+    fn clone_without_retention(&self) -> Self {
+        Self {
+            snapshot: Arc::clone(&self.snapshot),
+            projection: Arc::clone(&self.projection),
+            retention: None,
+        }
     }
 
     pub fn projection(&self) -> Option<&CacheProjection> {
@@ -572,6 +644,7 @@ impl<S> DraftState<S> {
 /// activation path. Dropping or releasing the draft never accepts it.
 pub struct EditDraft<S> {
     state: Mutex<DraftState<S>>,
+    operation: Mutex<()>,
     max_file_bytes: usize,
 }
 
@@ -642,6 +715,7 @@ impl<S> ManagedFileStat<S> {
 /// image; open handles keep the immutable image captured when they opened.
 pub struct ManagedFile<S> {
     state: Mutex<ManagedFileState<S>>,
+    operation: Mutex<()>,
     cache_epoch: SharedCacheEpoch,
 }
 
@@ -688,7 +762,7 @@ impl<S> ManagedFile<S> {
         max_file_bytes: usize,
     ) -> TemporarySave<S> {
         let baseline = Arc::clone(&self.state.lock().await.image);
-        let draft = EditDraft::open(Arc::clone(&baseline), max_file_bytes);
+        let draft = Arc::new(EditDraft::open(Arc::clone(&baseline), max_file_bytes));
         // A typical editor temp starts empty; its commit baseline remains the
         // managed destination image captured above.
         draft
@@ -698,6 +772,7 @@ impl<S> ManagedFile<S> {
         TemporarySave {
             target: Arc::clone(self),
             baseline,
+            operation: Mutex::new(()),
             state: Mutex::new(TemporarySaveState {
                 draft,
                 synced_revision: None,
@@ -720,8 +795,9 @@ impl<S> ManagedFile<S> {
         TemporarySave {
             target: Arc::clone(self),
             baseline: Arc::clone(&baseline),
+            operation: Mutex::new(()),
             state: Mutex::new(TemporarySaveState {
-                draft: EditDraft::open(baseline, max_file_bytes),
+                draft: Arc::new(EditDraft::open(baseline, max_file_bytes)),
                 synced_revision: None,
                 applied: None,
             }),
@@ -745,7 +821,9 @@ impl<S> ManagedFile<S> {
             return Err(TemporaryRenameError::WrongDestination);
         }
 
+        let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
+        let _scratch_operation = scratch.operation.lock().await;
         let mut scratch_state = scratch.state.lock().await;
         if let Some((generation, handle)) = &scratch_state.applied {
             return Ok(TemporaryRenameOutcome::Applied {
@@ -850,6 +928,7 @@ impl<S> ManagedFile<S> {
         if !Arc::ptr_eq(&self.cache_epoch.generation, &baseline.epoch.generation) {
             return Err(TemporaryRenameError::WrongRepositoryScope);
         }
+        let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
         let reads_baseline =
             !destination.unlinked && Arc::ptr_eq(&destination.image, &baseline.image) && {
@@ -905,6 +984,7 @@ impl<S> ManagedFile<S> {
         F: FnOnce(ActivationCandidate<S>) -> Fut,
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
+        let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
         let (based_on_current, revision) = {
             let draft_state = draft.state.lock().await;
@@ -968,6 +1048,7 @@ impl<S> ManagedFile<S> {
         F: FnOnce(ActivationCandidate<S>) -> Fut,
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
+        let _operation = self.operation.lock().await;
         let mut destination = self.state.lock().await;
         if destination.unlinked {
             return Ok(UnlinkOutcome::AlreadyUnlinked);
@@ -1007,7 +1088,7 @@ pub enum UnlinkOutcome {
 }
 
 struct TemporarySaveState<S> {
-    draft: EditDraft<S>,
+    draft: Arc<EditDraft<S>>,
     synced_revision: Option<u64>,
     applied: Option<(u64, SnapshotReadHandle<S>)>,
 }
@@ -1018,11 +1099,13 @@ struct TemporarySaveState<S> {
 pub struct TemporarySave<S> {
     target: Arc<ManagedFile<S>>,
     baseline: Arc<VfsFileSnapshot<S>>,
+    operation: Mutex<()>,
     state: Mutex<TemporarySaveState<S>>,
 }
 
 impl<S> TemporarySave<S> {
     pub async fn write_at(&self, offset: u64, bytes: &[u8]) -> Result<(), EditDraftError> {
+        let _operation = self.operation.lock().await;
         let state = self.state.lock().await;
         if state.applied.is_some() {
             return Err(EditDraftError::AlreadyApplied);
@@ -1031,6 +1114,7 @@ impl<S> TemporarySave<S> {
     }
 
     pub async fn truncate(&self, length: u64) -> Result<(), EditDraftError> {
+        let _operation = self.operation.lock().await;
         let state = self.state.lock().await;
         if state.applied.is_some() {
             return Err(EditDraftError::AlreadyApplied);
@@ -1053,13 +1137,17 @@ impl<S> TemporarySave<S> {
         F: FnOnce(u64, Arc<[u8]>) -> Fut,
         Fut: Future<Output = Result<(), E>>,
     {
-        let mut state = self.state.lock().await;
-        if let Some((revision, _)) = &state.applied {
-            return Ok(*revision);
-        }
+        let _operation = self.operation.lock().await;
         let (revision, bytes) = {
+            let state = self.state.lock().await;
+            if let Some((revision, _)) = &state.applied {
+                return Ok(*revision);
+            }
             let draft = state.draft.state.lock().await;
             let revision = draft.revision;
+            if state.synced_revision == Some(revision) {
+                return Ok(revision);
+            }
             let bytes: Arc<[u8]> = Arc::from(
                 draft
                     .candidate
@@ -1068,11 +1156,8 @@ impl<S> TemporarySave<S> {
             );
             (revision, bytes)
         };
-        if state.synced_revision == Some(revision) {
-            return Ok(revision);
-        }
         persist(revision, bytes).await?;
-        state.synced_revision = Some(revision);
+        self.state.lock().await.synced_revision = Some(revision);
         Ok(revision)
     }
 }
@@ -1176,6 +1261,7 @@ impl<S> EditDraft<S> {
                 last_accepted: None,
                 retained_invalid: None,
             }),
+            operation: Mutex::new(()),
             max_file_bytes,
         }
     }
@@ -1203,6 +1289,7 @@ impl<S> EditDraft<S> {
             return Err(EditDraftError::FileTooLarge);
         }
 
+        let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
         let current_len = state
             .candidate
@@ -1231,6 +1318,7 @@ impl<S> EditDraft<S> {
         if length > self.max_file_bytes {
             return Err(EditDraftError::FileTooLarge);
         }
+        let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
         let current_len = state
             .candidate
@@ -1280,6 +1368,7 @@ impl<S> EditDraft<S> {
         F: FnOnce(ActivationCandidate<S>) -> Fut,
         Fut: Future<Output = Result<ActivationDecision<S>, E>>,
     {
+        let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
         let Some(bytes) = state.candidate.as_ref() else {
             if let Some((revision, image)) = &state.last_accepted
@@ -2210,10 +2299,8 @@ fn render_field_name(name: &str) -> Result<String, VfsPathError> {
 /// activation boundary. The table identity is repository-issued admission
 /// metadata; host paths never supply or override it.
 pub struct VfsTableRowReplacement {
-    mutation_id: [u8; 16],
+    mutation: TableMutation,
     table: RuntimeTableIdentity,
-    key: Vec<u8>,
-    value: Option<Vec<u8>>,
     content_pins: Vec<ProtectedContentPin>,
 }
 
@@ -2224,14 +2311,42 @@ impl VfsTableRowReplacement {
         key: Vec<u8>,
         value: Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
-        let mutation = TableMutation::new(mutation_id, table.table(), key.clone(), value.clone())?
+        let mutation = TableMutation::new(mutation_id, table.table(), key, value)?
             .with_table_object_id(table.object_id());
         Ok(Self {
-            mutation_id: mutation.id(),
+            mutation,
             table,
-            key: mutation.key().to_vec(),
-            value,
             content_pins: Vec::new(),
+        })
+    }
+
+    /// Wraps the complete mutation returned by the source producer's
+    /// `AdmittedSourceRow::into_mutation_and_bindings` with its owned field
+    /// pins. The pins must match the mutation's transfer evidence in order.
+    pub fn from_admitted_mutation(
+        table: RuntimeTableIdentity,
+        mutation: TableMutation,
+        content_pins: Vec<ProtectedContentPin>,
+    ) -> Result<Self, RuntimeError> {
+        if mutation.table() != table.table()
+            || mutation.table_object_id() != Some(table.object_id())
+            || mutation.value().is_none()
+            || mutation.is_insert()
+            || mutation.rekey_to().is_some()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let transfers = content_pins
+            .iter()
+            .map(|pin| ProtectedContentTransferEvidence::from_transfer(&pin.transfer_record()))
+            .collect::<Vec<_>>();
+        if transfers.as_slice() != mutation.protected_content_transfers() {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        Ok(Self {
+            mutation,
+            table,
+            content_pins,
         })
     }
 
@@ -2250,11 +2365,11 @@ impl VfsTableRowReplacement {
     }
 
     pub fn key(&self) -> &[u8] {
-        &self.key
+        self.mutation.key()
     }
 
     pub fn value(&self) -> Option<&[u8]> {
-        self.value.as_deref()
+        self.mutation.value()
     }
 
     /// Carries graph-issued native content pins with the saved row so the
@@ -2264,24 +2379,13 @@ impl VfsTableRowReplacement {
         mut self,
         pin: ProtectedContentPin,
     ) -> Result<Self, RuntimeError> {
+        self.mutation = self.mutation.with_protected_content_pin(&pin)?;
         self.content_pins.push(pin);
-        self.mutation()?;
         Ok(self)
     }
 
     pub fn mutation(&self) -> Result<TableMutation, RuntimeError> {
-        let mutation = TableMutation::new(
-            self.mutation_id,
-            self.table.table(),
-            self.key.clone(),
-            self.value.clone(),
-        )
-        .map(|mutation| mutation.with_table_object_id(self.table.object_id()))?;
-        self.content_pins
-            .iter()
-            .try_fold(mutation, |mutation, pin| {
-                mutation.with_protected_content_pin(pin)
-            })
+        Ok(self.mutation.clone())
     }
 }
 
@@ -2418,6 +2522,9 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
         save: VfsDurableSave,
         faults: &'a dyn FaultInjector,
     ) -> Result<Self, TableActivationError> {
+        if super::activation::runtime_activation_active(runtime) {
+            return Err(TableActivationError::Runtime(RuntimeError::AdminBusy));
+        }
         let writer = runtime
             .acquire_lease(save.owner_id)
             .await
@@ -2457,14 +2564,8 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
     }
 
     /// The admitted relation row this save is replacing, as read inside the
-    /// admission's own committed capture.
-    ///
-    /// A save that committed durably and then lost its acknowledgement (a
-    /// crash between the writer transaction's commit and the caller observing
-    /// the result) leaves exactly this row behind. The caller compares it with
-    /// the candidate before committing, so replaying such a save reports the
-    /// accepted outcome instead of committing the same mutation a second time
-    /// (VFS-008, VFS-021).
+    /// admission's own committed capture. It is checked against the captured
+    /// baseline before the replacement can be committed.
     pub fn admitted_row(&self) -> Result<Option<&[u8]>, RuntimeQueryError> {
         self.snapshot
             .query_exact(self.save.table.table(), &self.save.key)
@@ -2496,15 +2597,20 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
         &self,
         candidate: VfsSaveCandidate,
     ) -> Result<CwdCapture, TableActivationError> {
+        if super::activation::runtime_activation_active(self.runtime) {
+            return Err(TableActivationError::Runtime(RuntimeError::AdminBusy));
+        }
         let VfsSaveCandidate {
             replacement,
             mut validator,
         } = candidate;
         self.validate_replacement(&replacement)?;
-        let mutation = replacement
-            .mutation()
-            .map_err(TableActivationError::Runtime)?;
-        let mut content_pins = replacement.content_pins;
+        let VfsTableRowReplacement {
+            mutation,
+            content_pins,
+            ..
+        } = replacement;
+        let mut content_pins = content_pins;
         commit_vfs_table_activation(
             self.runtime,
             ValidatedTableActivationCommit {
@@ -2522,6 +2628,48 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
     }
 }
 
+/// Failure while streaming and protecting a replacement Blob.
+#[derive(Debug)]
+pub enum VfsBlobReplacementError {
+    Capture(GraphError),
+    IdentityMismatch {
+        expected: ContentIdentity,
+        actual: ContentIdentity,
+    },
+}
+
+impl std::fmt::Display for VfsBlobReplacementError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Capture(error) => write!(formatter, "Blob capture failed: {error}"),
+            Self::IdentityMismatch { expected, actual } => write!(
+                formatter,
+                "Blob identity mismatch: expected {expected:?}, captured {actual:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for VfsBlobReplacementError {}
+
+fn capture_vfs_blob_replacement(
+    capture: &RepositoryCaptureCapability,
+    bytes: &[u8],
+    expected: ContentIdentity,
+    media_type: &str,
+    suffix: Option<&str>,
+) -> Result<OrpBlobBinding, VfsBlobReplacementError> {
+    let candidate = capture
+        .capture_blob_candidate(bytes, expected.length())
+        .map_err(VfsBlobReplacementError::Capture)?;
+    let actual = candidate.content_identity();
+    if actual != expected {
+        return Err(VfsBlobReplacementError::IdentityMismatch { expected, actual });
+    }
+    capture
+        .accept_captured_blob(candidate, media_type, suffix)
+        .map_err(VfsBlobReplacementError::Capture)
+}
 /// Why a durable save was not admitted. Every variant is decided before the
 /// row store is touched except `Activation`, which the runtime refuses inside
 /// its own transaction.
@@ -2552,25 +2700,22 @@ pub enum VfsSaveError<E> {
     MissingBaseline,
     /// The temporary file belongs to a different managed destination.
     WrongDestination,
+    /// The target belongs to another runtime's projection/cache scope.
+    WrongRepositoryScope,
     /// The admitted row lookup failed before any candidate commit.
     AdmissionLookup(RuntimeQueryError),
-    /// The runtime refused the activation itself.
+    /// Repository capture failed before the shared row-transaction boundary.
+    BlobCapture(VfsBlobReplacementError),
     Activation(E),
 }
 
+#[derive(Debug)]
+enum VfsSaveAdmissionError {
+    BlobCapture(VfsBlobReplacementError),
+    Activation(TableActivationError),
+}
 impl<S: Send + Sync + 'static> ManagedFile<S> {
-    /// Adopts one complete VFS row-document save through the same durable
-    /// validation and transaction boundary the CLI uses, then publishes it to
-    /// the projection cache (ORNA-VFS-006, VFS-009, VFS-021).
-    ///
-    /// The row is committed to the runtime's own state database, so an accepted
-    /// save is visible to any reopen of that database and a rejected one is not
-    /// durably accepted at all. `admit` turns the candidate bytes into the
-    /// complete typed row replacement; this module never invents a second row
-    /// authority (VFS-002). Stale and rejected candidates retain their bytes and
-    /// diagnostic through the draft (VFS-009). `faults` is the commit-boundary
-    /// seam: crash recovery is exercised through the same runtime transaction a
-    /// normal save uses.
+    /// Saves an editor document through the durable shared-row transaction.
     pub async fn commit_durable_document_save<A, AFut>(
         self: &Arc<Self>,
         draft: &EditDraft<S>,
@@ -2583,7 +2728,99 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
-        let mut destination = self.state.lock().await;
+        if super::activation::runtime_activation_active(runtime) {
+            return Err(VfsSaveError::Activation(TableActivationError::Runtime(
+                RuntimeError::AdminBusy,
+            )));
+        }
+        let _operation = self.operation.lock().await;
+        let _draft_operation = draft.operation.lock().await;
+        self.commit_durable_save(
+            draft,
+            runtime,
+            save,
+            move |coordinates, bytes| async move {
+                admit(coordinates, bytes)
+                    .await
+                    .map_err(VfsSaveAdmissionError::Activation)
+            },
+            faults,
+        )
+        .await
+    }
+
+    /// Captures replacement bytes as a protected ORP Blob and admits the full
+    /// typed row through the same revision-checked transaction as document
+    /// saves. The caller receives the graph-issued binding so source admission
+    /// can bind its canonical Blob field and pin into one row mutation.
+    /// `media_type` and `suffix` must already be canonical MIME-1 annotation
+    /// values, as issued by the source schema.
+    pub async fn commit_durable_temporary_blob_rename<A, AFut>(
+        self: &Arc<Self>,
+        scratch: &TemporarySave<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        capture: &RepositoryCaptureCapability,
+        expected_identity: ContentIdentity,
+        media_type: &str,
+        suffix: Option<&str>,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, OrpBlobBinding) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
+    {
+        let result = self
+            .commit_durable_temporary_save(
+                scratch,
+                runtime,
+                save,
+                move |coordinates, bytes| async move {
+                    let binding = capture_vfs_blob_replacement(
+                        capture,
+                        &bytes,
+                        expected_identity,
+                        media_type,
+                        suffix,
+                    )
+                    .map_err(VfsSaveAdmissionError::BlobCapture)?;
+                    let candidate = admit(coordinates, bytes, binding)
+                        .await
+                        .map_err(VfsSaveAdmissionError::Activation)?;
+                    Ok(candidate)
+                },
+                faults,
+            )
+            .await;
+        result
+    }
+
+    /// Adopts one complete VFS row-document save through the same durable
+    /// validation and transaction boundary the CLI uses, then publishes it to
+    /// the projection cache (ORNA-VFS-006, VFS-009, VFS-021).
+    ///
+    /// The row is committed to the runtime's own state database, so an accepted
+    /// save is visible to any reopen of that database and a rejected one is not
+    /// durably accepted at all. `admit` turns the candidate bytes into the
+    /// complete typed row replacement; this module never invents a second row
+    /// authority (VFS-002). Stale and rejected candidates retain their bytes and
+    /// diagnostic through the draft (VFS-009). `faults` is the commit-boundary
+    /// seam: crash recovery is exercised through the same runtime transaction a
+    /// normal save uses.
+    async fn commit_durable_save<A, AFut>(
+        self: &Arc<Self>,
+        draft: &EditDraft<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, VfsSaveAdmissionError>>,
+    {
+        let destination = self.state.lock().await;
         let mut draft_state = draft.state.lock().await;
         if destination.unlinked || !Arc::ptr_eq(&destination.image, &draft_state.baseline) {
             let diagnostic = stale_baseline_diagnostic();
@@ -2623,10 +2860,51 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         // One shared image of the candidate bytes is handed to the caller and
         // published on acceptance, so no second copy is made at either end.
         let candidate_bytes: Arc<[u8]> = Arc::from(candidate.as_slice());
+        drop(draft_state);
+        drop(destination);
 
-        // Serialize admissions in this repository epoch and keep the epoch lock
-        // across admission and commit, so no projection observes a partially
-        // advanced generation. A failed or rejected save leaves it unchanged.
+        let admission = VfsSaveAdmission::<S>::begin(runtime, save, faults)
+            .await
+            .map_err(VfsSaveError::Activation)?;
+        // A repeated accepted rename is served from `scratch_state.applied`
+        // above. Matching replacement bytes alone cannot prove that another
+        // writer committed this save; baseline mismatches therefore fail closed.
+        let admitted_row = admission
+            .admitted_row()
+            .map_err(VfsSaveError::AdmissionLookup)?;
+        if admission
+            .expected_baseline_matches(admitted_row)
+            .is_some_and(|matches| !matches)
+        {
+            let diagnostic = stale_baseline_diagnostic();
+            draft
+                .state
+                .lock()
+                .await
+                .retain_retryable_conflict(revision, diagnostic);
+            return Err(VfsSaveError::Stale {
+                generation: *self.cache_epoch.generation.lock().await,
+                diagnostic,
+            });
+        }
+        let writer = admission.writer;
+        let coordinates = admission.coordinates();
+        let callback_bytes = Arc::clone(&candidate_bytes);
+        let candidate =
+            super::activation::with_activation_scope(runtime, writer, move || async move {
+                admit(coordinates, callback_bytes).await
+            })
+            .await
+            .map_err(|error| VfsSaveError::Activation(TableActivationError::Runtime(error)))?
+            .map_err(|error| match error {
+                VfsSaveAdmissionError::BlobCapture(error) => VfsSaveError::BlobCapture(error),
+                VfsSaveAdmissionError::Activation(error) => VfsSaveError::Activation(error),
+            })?;
+        admission
+            .validate_replacement(candidate.replacement())
+            .map_err(VfsSaveError::Activation)?;
+        // Admission callbacks may read or mutate the shared projection epoch.
+        // Acquire its lock only after that callback and baseline check finish.
         let mut cache_generation = self.cache_epoch.generation.lock().await;
         let next_generation = match cache_generation.checked_add(1) {
             Some(next) => next,
@@ -2636,55 +2914,29 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 )));
             }
         };
-        let admission = VfsSaveAdmission::<S>::begin(runtime, save, faults)
-            .await
-            .map_err(VfsSaveError::Activation)?;
-        let candidate = admit(admission.coordinates(), Arc::clone(&candidate_bytes))
-            .await
-            .map_err(VfsSaveError::Activation)?;
-        admission
-            .validate_replacement(candidate.replacement())
-            .map_err(VfsSaveError::Activation)?;
-        // A save that committed durably and then lost its acknowledgement (the
-        // process died between the writer transaction's commit and this caller
-        // observing the result) already holds exactly this candidate. Acting on
-        // that state is idempotent: the accepted image is published again
-        // without appending a second mutation or advancing the durable
-        // generation twice (VFS-008, VFS-021).
-        let admitted_row = admission
-            .admitted_row()
-            .map_err(VfsSaveError::AdmissionLookup)?;
-        let already_durable = admitted_row == candidate.replacement().value();
-        if admission
-            .expected_baseline_matches(admitted_row)
-            .is_some_and(|matches| !matches && !already_durable)
-        {
-            let diagnostic = stale_baseline_diagnostic();
-            draft_state.retain_retryable_conflict(revision, diagnostic);
-            return Err(VfsSaveError::Stale {
-                generation: *cache_generation,
-                diagnostic,
-            });
-        }
-        if !already_durable {
-            match admission.commit(candidate).await {
-                Err(TableActivationError::ValidationFailed(diagnostic)) => {
-                    draft_state.retain_rejection(revision, diagnostic);
-                    return Err(VfsSaveError::Rejected {
-                        generation: *cache_generation,
-                        diagnostic,
-                    });
-                }
-                Err(error) => return Err(VfsSaveError::Activation(error)),
-                Ok(_capture) => {}
+        match admission.commit(candidate).await {
+            Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                draft
+                    .state
+                    .lock()
+                    .await
+                    .retain_rejection(revision, diagnostic);
+                return Err(VfsSaveError::Rejected {
+                    generation: *cache_generation,
+                    diagnostic,
+                });
             }
+            Err(error) => return Err(VfsSaveError::Activation(error)),
+            Ok(_capture) => {}
         }
         {
-            // Mirror the temp-rename route: the accepted handle carries the
-            // candidate bytes, and the image new opens see carries the
-            // advanced projection (VFS-019).
+            // The runtime transaction has committed; now publish its accepted
+            // image under short-lived VFS state locks. Operation gates kept the
+            // destination and draft stable while those locks were released.
+            let mut destination = self.state.lock().await;
+            let mut draft_state = draft.state.lock().await;
             let accepted = Arc::new(VfsFileSnapshot::new(
-                draft_state.baseline.pin.clone_pin(),
+                draft_state.baseline.pin.clone_without_retention(),
                 Arc::clone(&candidate_bytes),
             ));
             let image = Arc::new(VfsFileSnapshot::with_projection(
@@ -2724,24 +2976,61 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
+        self.commit_durable_temporary_save(
+            scratch,
+            runtime,
+            save,
+            move |coordinates, bytes| async move {
+                admit(coordinates, bytes)
+                    .await
+                    .map_err(VfsSaveAdmissionError::Activation)
+            },
+            faults,
+        )
+        .await
+    }
+
+    async fn commit_durable_temporary_save<A, AFut>(
+        self: &Arc<Self>,
+        scratch: &TemporarySave<S>,
+        runtime: &RuntimeState,
+        save: VfsDurableSave,
+        admit: A,
+        faults: &dyn FaultInjector,
+    ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
+    where
+        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        AFut: Future<Output = Result<VfsSaveCandidate, VfsSaveAdmissionError>>,
+    {
         if !Arc::ptr_eq(self, &scratch.target) {
             return Err(VfsSaveError::WrongDestination);
         }
         if save.expected_baseline_row.is_none() {
             return Err(VfsSaveError::MissingBaseline);
         }
-        let mut scratch_state = scratch.state.lock().await;
-        if let Some((generation, handle)) = &scratch_state.applied {
-            return Ok(TemporaryRenameOutcome::Applied {
-                generation: *generation,
-                handle: handle.clone(),
-            });
+        if super::activation::runtime_activation_active(runtime) {
+            return Err(VfsSaveError::Activation(TableActivationError::Runtime(
+                RuntimeError::AdminBusy,
+            )));
         }
+        let _operation = self.operation.lock().await;
+        let _scratch_operation = scratch.operation.lock().await;
+        let draft = {
+            let scratch_state = scratch.state.lock().await;
+            if let Some((generation, handle)) = &scratch_state.applied {
+                return Ok(TemporaryRenameOutcome::Applied {
+                    generation: *generation,
+                    handle: handle.clone(),
+                });
+            }
+            Arc::clone(&scratch_state.draft)
+        };
+        let _draft_operation = draft.operation.lock().await;
         let outcome = self
-            .commit_durable_document_save(&scratch_state.draft, runtime, save, admit, faults)
+            .commit_durable_save(&draft, runtime, save, admit, faults)
             .await?;
         if let TemporaryRenameOutcome::Applied { generation, handle } = &outcome {
-            scratch_state.applied = Some((*generation, handle.clone()));
+            scratch.state.lock().await.applied = Some((*generation, handle.clone()));
         }
         Ok(outcome)
     }
@@ -2754,12 +3043,18 @@ mod tests {
         RuntimeIdentity, RuntimeState, RuntimeTableRows, TableActivationCandidateValidator,
         TableObjectId,
     };
-    use orna_repository_v1::{Repository, RuntimeGeneration};
+    use orna_repository_v1::{ProtectedContentTransfer, Repository, RuntimeGeneration};
+    use orna_value_v1::{Raw, SchemaDescriptor};
     use std::sync::{
         Mutex as TestMutex,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::{collections::BTreeMap, process::Command};
+    use std::{
+        collections::BTreeMap,
+        io::Write,
+        path::Path,
+        process::{Command, Stdio},
+    };
 
     fn fixture_image() -> Arc<VfsFileSnapshot<u64>> {
         let contents = include_str!("../tests/fixtures/publication-repository-main.orna");
@@ -2767,6 +3062,251 @@ mod tests {
             SnapshotPin::capture(Arc::new(7)),
             Arc::<[u8]>::from(contents.as_bytes()),
         ))
+    }
+
+    fn test_git(path: &Path, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?} succeeds"
+        );
+    }
+
+    fn test_git_output(path: &Path, args: &[&str], input: Option<&[u8]>) -> Vec<u8> {
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Some(input) = input {
+            child.stdin.take().unwrap().write_all(input).unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn test_git_object(path: &Path, kind: &str, bytes: &[u8]) -> String {
+        String::from_utf8(test_git_output(
+            path,
+            &["hash-object", "-w", "-t", kind, "--stdin"],
+            Some(bytes),
+        ))
+        .unwrap()
+        .trim()
+        .to_owned()
+    }
+
+    fn test_git_tree(path: &Path, entries: &str) -> String {
+        String::from_utf8(test_git_output(path, &["mktree"], Some(entries.as_bytes())))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn test_native_node(path: &Path, data: &[u8], dependencies: &[(&str, &str)]) -> String {
+        let data_oid = test_git_object(path, "blob", data);
+        let mut dependencies = dependencies.to_vec();
+        dependencies.sort_by_key(|(oid, _)| *oid);
+        let refs_oid = if dependencies.is_empty() {
+            None
+        } else {
+            let refs = dependencies
+                .iter()
+                .map(|(oid, kind)| {
+                    let mode = if *kind == "tree" { "040000" } else { "100644" };
+                    format!("{mode} {kind} {oid}\t{oid}\n")
+                })
+                .collect::<String>();
+            Some(test_git_tree(path, &refs))
+        };
+        let mut envelope = format!("100644 blob {data_oid}\tdata\n");
+        if let Some(refs_oid) = refs_oid {
+            envelope.push_str(&format!("040000 tree {refs_oid}\trefs\n"));
+        }
+        test_git_tree(path, &envelope)
+    }
+
+    fn append_fixture_cbor_head(output: &mut Vec<u8>, major: u8, value: usize) {
+        let prefix = major << 5;
+        match value {
+            0..=23 => output.push(prefix | value as u8),
+            24..=255 => output.extend_from_slice(&[prefix | 24, value as u8]),
+            _ => panic!("fixture CBOR value is unexpectedly large"),
+        }
+    }
+
+    fn append_fixture_cbor_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
+        append_fixture_cbor_head(output, 2, bytes.len());
+        output.extend_from_slice(bytes);
+    }
+
+    fn fixture_oid_bytes(oid: &str) -> Vec<u8> {
+        oid.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn format3_blob_repository() -> (tempfile::TempDir, Repository, [u8; 16]) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        test_git(root, &["init", "--quiet"]);
+        test_git(root, &["config", "user.email", "kieran@drewett.dev"]);
+        test_git(root, &["config", "user.name", "kierandrewett"]);
+        test_git(root, &["config", "commit.gpgsign", "false"]);
+
+        let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
+        let relation_id = [0x43; 16];
+        let database_uuid = "00000000-0000-4000-8000-000000000001";
+        let database =
+            format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
+        let source = b"capture transaction test schema";
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
+        let field = |id: [u8; 16], name: &str, ty: Raw, role: u8| {
+            Raw::Array(vec![
+                uuid(id),
+                Raw::Text(name.to_owned()),
+                ty,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        let schema_bytes = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid(relation_id)),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
+            (
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    field(
+                        [0x11; 16],
+                        "id",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]),
+                        0,
+                    ),
+                    field(
+                        [0x22; 16],
+                        "payload",
+                        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".into())]),
+                        1,
+                    ),
+                ]),
+            ),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap();
+        std::fs::create_dir_all(root.join(".orna/store")).unwrap();
+        std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
+        std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
+        std::fs::write(root.join("main.orna"), source).unwrap();
+        test_git(root, &["add", "--all"]);
+        test_git(root, &["commit", "--quiet", "-m", "format3 Blob fixture"]);
+
+        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let chunk_oid = test_git_object(root, "blob", &schema_bytes);
+        let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
+        append_fixture_cbor_head(&mut byte_index, 0, schema_bytes.len());
+        byte_index.extend_from_slice(&[0x81, 0x83]);
+        append_fixture_cbor_head(&mut byte_index, 0, schema_bytes.len());
+        append_fixture_cbor_bytes(&mut byte_index, &fixture_oid_bytes(&chunk_oid));
+        append_fixture_cbor_bytes(&mut byte_index, &schema_digest);
+        let byte_index_oid = test_native_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
+
+        let mut schema = vec![0x85, 0x01, 0x06];
+        append_fixture_cbor_head(&mut schema, 0, schema_bytes.len());
+        append_fixture_cbor_bytes(&mut schema, &schema_digest);
+        append_fixture_cbor_bytes(&mut schema, &fixture_oid_bytes(&byte_index_oid));
+        let schema_oid = test_native_node(root, &schema, &[(byte_index_oid.as_str(), "tree")]);
+
+        let mut row_domain = vec![0x83, 0x64];
+        row_domain.extend_from_slice(b"rows");
+        append_fixture_cbor_bytes(&mut row_domain, &relation_id);
+        append_fixture_cbor_bytes(&mut row_domain, &schema_digest);
+        let mut empty_rows = vec![0x84, 0x01, 0x01];
+        empty_rows.extend_from_slice(&row_domain);
+        empty_rows.push(0x80);
+        let row_root_oid = test_native_node(root, &empty_rows, &[]);
+
+        let mut relation_domain = vec![0x82, 0x69];
+        relation_domain.extend_from_slice(b"relations");
+        append_fixture_cbor_bytes(&mut relation_domain, &database_id);
+        let mut relation_map = vec![0x84, 0x01, 0x01];
+        relation_map.extend_from_slice(&relation_domain);
+        relation_map.extend_from_slice(&[0x81, 0x82]);
+        append_fixture_cbor_bytes(&mut relation_map, &relation_id);
+        relation_map.push(0x84);
+        append_fixture_cbor_bytes(&mut relation_map, &fixture_oid_bytes(&schema_oid));
+        append_fixture_cbor_bytes(&mut relation_map, &fixture_oid_bytes(&row_root_oid));
+        relation_map.extend_from_slice(&[0xf6, 0x00]);
+        let relation_map_oid = test_native_node(
+            root,
+            &relation_map,
+            &[
+                (schema_oid.as_str(), "tree"),
+                (row_root_oid.as_str(), "tree"),
+            ],
+        );
+
+        let mut store_root = vec![0x83, 0x01, 0x00];
+        append_fixture_cbor_bytes(&mut store_root, &fixture_oid_bytes(&relation_map_oid));
+        let store_root_oid =
+            test_native_node(root, &store_root, &[(relation_map_oid.as_str(), "tree")]);
+        let database_oid = test_git_object(root, "blob", database.as_bytes());
+        let source_oid = test_git_object(root, "blob", source);
+        let orna_tree = test_git_tree(
+            root,
+            &format!(
+                "100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_root_oid}\tstore\n"
+            ),
+        );
+        let root_tree = test_git_tree(
+            root,
+            &format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"),
+        );
+        let parent = String::from_utf8(test_git_output(root, &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let commit = String::from_utf8(test_git_output(
+            root,
+            &[
+                "commit-tree",
+                &root_tree,
+                "-p",
+                &parent,
+                "-m",
+                "format3 Blob graph fixture",
+            ],
+            None,
+        ))
+        .unwrap()
+        .trim()
+        .to_owned();
+        let head_ref = String::from_utf8(test_git_output(root, &["symbolic-ref", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_owned();
+        test_git(root, &["update-ref", &head_ref, &commit]);
+        let repository = Repository::discover(root).unwrap();
+        (temp, repository, relation_id)
     }
 
     fn rejected() -> SafeDiagnostic {
@@ -3290,6 +3830,7 @@ mod tests {
                 image,
                 unlinked: false,
             }),
+            operation: Mutex::new(()),
             cache_epoch: SharedCacheEpoch::default(),
         };
 
@@ -4106,6 +4647,7 @@ mod tests {
         table: String,
         object_id: TableObjectId,
         accepted: Vec<u8>,
+        expected_content_transfer: Option<ProtectedContentTransferEvidence>,
         cwd_generation: CwdGeneration,
     }
 
@@ -4131,6 +4673,21 @@ mod tests {
                 Ok(())
             } else {
                 Err(rejected())
+            }
+        }
+
+        fn validate_content_pins(
+            &mut self,
+            _: &RuntimeTableRows,
+            transfers: &[ProtectedContentTransfer],
+        ) -> bool {
+            match &self.expected_content_transfer {
+                Some(expected) => {
+                    transfers.len() == 1
+                        && ProtectedContentTransferEvidence::from_transfer(&transfers[0])
+                            == *expected
+                }
+                None => transfers.is_empty(),
             }
         }
     }
@@ -4184,6 +4741,7 @@ mod tests {
         )
         .with_expected_baseline_row(None);
         let identity_for_admit = identity.clone();
+        let accepted_for_validation = accepted_for_admit.clone();
         let applied = target
             .commit_durable_temporary_rename(
                 &scratch,
@@ -4202,7 +4760,8 @@ mod tests {
                         Box::new(DurableRenameValidator {
                             table: identity_for_admit.table().to_owned(),
                             object_id: identity_for_admit.object_id(),
-                            accepted: accepted_for_admit.clone(),
+                            accepted: accepted_for_validation.clone(),
+                            expected_content_transfer: None,
                             cwd_generation: cwd_for_admit.clone(),
                         }),
                     ))
@@ -4238,6 +4797,60 @@ mod tests {
         ));
         assert_eq!(state.pending().await.unwrap().len(), 1);
 
+        // A different writer may commit byte-identical row content. That is
+        // not evidence this temp save was already accepted: its captured
+        // baseline is still stale, and the scratch remains retryable.
+        let identical_scratch = target.begin_temporary_replacement(1 << 20).await;
+        identical_scratch
+            .write_at(0, &accepted_for_admit)
+            .await
+            .unwrap();
+        let identical_identity = identity.clone();
+        let identical_bytes = accepted_for_admit.clone();
+        let cwd_for_identical = cwd_generation.clone();
+        let identical = target
+            .commit_durable_temporary_rename(
+                &identical_scratch,
+                &state,
+                VfsDurableSave::new(
+                    [4; 16],
+                    cwd_generation.clone(),
+                    identity.clone(),
+                    key.clone(),
+                )
+                .with_expected_baseline_row(None),
+                move |coordinates, bytes| async move {
+                    let replacement = VfsTableRowReplacement::new(
+                        [12; 16],
+                        identical_identity.clone(),
+                        coordinates.key().to_vec(),
+                        Some(bytes.to_vec()),
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    Ok(VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(DurableRenameValidator {
+                            table: identical_identity.table().to_owned(),
+                            object_id: identical_identity.object_id(),
+                            accepted: identical_bytes,
+                            expected_content_transfer: None,
+                            cwd_generation: cwd_for_identical,
+                        }),
+                    ))
+                },
+                &crate::NoFault,
+            )
+            .await;
+        let Err(VfsSaveError::Stale { diagnostic, .. }) = identical else {
+            panic!("byte-identical content cannot acknowledge a stale temp save");
+        };
+        assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
+        assert_eq!(
+            identical_scratch.candidate_bytes().await.as_ref(),
+            accepted_for_admit
+        );
+        assert_eq!(state.pending().await.unwrap().len(), 1);
+
         let stale_scratch = target.begin_temporary_replacement(1 << 20).await;
         stale_scratch.write_at(0, &stale_fixture).await.unwrap();
         let stale_identity = identity.clone();
@@ -4267,6 +4880,7 @@ mod tests {
                             table: stale_identity.table().to_owned(),
                             object_id: stale_identity.object_id(),
                             accepted: stale_for_validation,
+                            expected_content_transfer: None,
                             cwd_generation: cwd_for_stale.clone(),
                         }),
                     ))
@@ -4311,6 +4925,7 @@ mod tests {
                             table: retry_identity.table().to_owned(),
                             object_id: retry_identity.object_id(),
                             accepted: retry_fixture,
+                            expected_content_transfer: None,
                             cwd_generation: cwd_for_retry.clone(),
                         }),
                     ))
@@ -4363,6 +4978,446 @@ mod tests {
         assert_eq!(
             snapshot.query_exact(identity.table(), &key).unwrap(),
             Some(stale_fixture.as_slice())
+        );
+    }
+
+    fn source_blob_mib_row(encoded_blob: &[u8]) -> Vec<u8> {
+        // Preserve the source row's Blob plus Float<MiB> tuple as one value.
+        let mut row = vec![0x84, 0x64, b'n', b'a', b'm', b'e'];
+        row.extend_from_slice(encoded_blob);
+        row.extend_from_slice(&[0x64, b's', b'i', b'z', b'e', 0xf9, 0x3e, 0x00]);
+        row
+    }
+
+    #[tokio::test]
+    async fn durable_blob_temp_rename_cas_commits_canonical_media_and_pin() {
+        const PIXEL: &[u8] = include_bytes!("../tests/fixtures/media/pixel.png");
+        let (_temp, repo, relation_id) = format3_blob_repository();
+        let capture = repo.capture_capability(relation_id).unwrap();
+        let runtime_identity = RuntimeIdentity {
+            database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+            repository_id: [0x61; 16],
+        };
+        let state = RuntimeState::open(&repo, runtime_identity, [0x62; 32])
+            .await
+            .unwrap();
+        let cache = state.vfs_repository_cache();
+        let retention = Arc::new(());
+        let retained = Arc::downgrade(&retention);
+        let target = cache
+            .managed_file(Arc::new(VfsFileSnapshot::new(
+                SnapshotPin::capture_with_retention(Arc::new(0_u64), retention),
+                Arc::<[u8]>::from(PIXEL),
+            )))
+            .await
+            .unwrap();
+        let old_handle = target.open_read().await;
+        let old_bytes = old_handle.read_at(0, old_handle.len() as usize);
+        let scratch = target.begin_temporary_replacement(1 << 20).await;
+        scratch.write_at(8, &[0xa5, 0x5a]).await.unwrap();
+        let mut sparse_hole = vec![0; 10];
+        sparse_hole[8..10].copy_from_slice(&[0xa5, 0x5a]);
+        assert_eq!(
+            scratch.candidate_bytes().await.as_ref(),
+            sparse_hole.as_slice()
+        );
+        scratch.truncate(16).await.unwrap();
+        sparse_hole.resize(16, 0);
+        assert_eq!(
+            scratch.candidate_bytes().await.as_ref(),
+            sparse_hole.as_slice()
+        );
+        scratch.truncate(5).await.unwrap();
+        assert_eq!(scratch.candidate_bytes().await.as_ref(), &[0; 5]);
+        scratch.truncate(0).await.unwrap();
+        let mut replacement_bytes = PIXEL.to_vec();
+        replacement_bytes.resize(PIXEL.len() + 4, 0);
+        scratch.write_at(0, PIXEL).await.unwrap();
+        scratch
+            .truncate(replacement_bytes.len() as u64)
+            .await
+            .unwrap();
+        assert_eq!(
+            scratch.candidate_bytes().await.as_ref(),
+            replacement_bytes.as_slice()
+        );
+        let scratch_for_persist = &scratch;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            scratch.fsync_scratch_with(|_, bytes| {
+                let expected_bytes = replacement_bytes.as_slice();
+                async move {
+                    assert_eq!(bytes.as_ref(), expected_bytes);
+                    assert_eq!(
+                        scratch_for_persist.candidate_bytes().await.as_ref(),
+                        expected_bytes
+                    );
+                    Ok::<_, ()>(())
+                }
+            }),
+        )
+        .await
+        .expect("scratch persistence must release its state mutex")
+        .unwrap();
+        let owner_id = [0x63; 16];
+        let table = RuntimeTableIdentity::new("media", TableObjectId::new(relation_id)).unwrap();
+        let table_for_checks = table.clone();
+        let key = b"image".to_vec();
+        let cwd_generation = repo.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        let pins_before = test_git_output(
+            repo.worktree(),
+            &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+            None,
+        );
+        assert_eq!(
+            target.open_read().await.read_at(0, old_bytes.len()),
+            old_bytes,
+            "scratch flush leaves new opens on the accepted image"
+        );
+        let initial_rows = state
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
+        assert_eq!(
+            initial_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+
+        let mut wrong_bytes = replacement_bytes.clone();
+        wrong_bytes[0] ^= 1;
+        let mismatch = cache
+            .commit_durable_blob_rename(
+                &target,
+                &scratch,
+                &state,
+                VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
+                    .with_expected_baseline_row(None),
+                &capture,
+                ContentIdentity::new(
+                    replacement_bytes.len() as u64,
+                    Sha256::digest(&wrong_bytes).into(),
+                )
+                .unwrap(),
+                "image/png",
+                Some("png"),
+                |_, _, _| async { panic!("identity mismatch must stop before row admission") },
+                &crate::NoFault,
+            )
+            .await;
+        assert!(matches!(
+            mismatch,
+            Err(VfsSaveError::BlobCapture(
+                VfsBlobReplacementError::IdentityMismatch { .. }
+            ))
+        ));
+        assert_eq!(
+            scratch.candidate_bytes().await.as_ref(),
+            replacement_bytes.as_slice()
+        );
+        let rejected_rows = state
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
+        assert_eq!(
+            rejected_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            test_git_output(
+                repo.worktree(),
+                &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+                None,
+            ),
+            pins_before,
+            "identity rejection removes its provisional graph pin"
+        );
+        // A changed candidate sequence makes corrected bytes retryable after
+        // the identity rejection was recorded for the previous sequence.
+        scratch.write_at(0, &wrong_bytes).await.unwrap();
+        scratch.write_at(0, &replacement_bytes).await.unwrap();
+        let replacement_for_flush = replacement_bytes.clone();
+        scratch
+            .fsync_scratch_with(move |_, bytes| async move {
+                assert_eq!(bytes.as_ref(), replacement_for_flush.as_slice());
+                Ok::<_, ()>(())
+            })
+            .await
+            .unwrap();
+
+        let expected_identity = ContentIdentity::new(
+            replacement_bytes.len() as u64,
+            Sha256::digest(&replacement_bytes).into(),
+        )
+        .unwrap();
+        let stale_table = table.clone();
+        let stale_table_name = stale_table.table().to_owned();
+        let stale_object_id = stale_table.object_id();
+        let stale_cwd_generation = cwd_generation.clone();
+        let stale = cache
+            .commit_durable_blob_rename(
+                &target,
+                &scratch,
+                &state,
+                VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
+                    .with_expected_baseline_row(Some(b"stale baseline".to_vec())),
+                &capture,
+                expected_identity,
+                "image/png",
+                None,
+                move |coordinates, _, encoded_blob| async move {
+                    let expected_content_transfer = ProtectedContentTransferEvidence::from_transfer(
+                        &encoded_blob.transfer_record(),
+                    );
+                    let row_value = source_blob_mib_row(encoded_blob.encoded_value());
+                    let pin = encoded_blob.into_pin();
+                    let mutation = TableMutation::new(
+                        [0x64; 16],
+                        stale_table.table(),
+                        coordinates.key().to_vec(),
+                        Some(row_value.clone()),
+                    )
+                    .map_err(TableActivationError::Runtime)?
+                    .with_table_object_id(stale_table.object_id())
+                    .with_protected_content_pin(&pin)
+                    .map_err(TableActivationError::Runtime)?;
+                    let replacement = VfsTableRowReplacement::from_admitted_mutation(
+                        stale_table,
+                        mutation,
+                        vec![pin],
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    Ok(VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(DurableRenameValidator {
+                            table: stale_table_name,
+                            object_id: stale_object_id,
+                            accepted: row_value,
+                            expected_content_transfer: Some(expected_content_transfer),
+                            cwd_generation: stale_cwd_generation,
+                        }),
+                    ))
+                },
+                &crate::NoFault,
+            )
+            .await;
+        let diagnostic = match stale {
+            Err(VfsSaveError::Stale { diagnostic, .. }) => diagnostic,
+            Err(error) => panic!("stale Blob temp rename returned another error: {error:?}"),
+            Ok(_) => panic!("stale Blob temp rename must retain its retryable candidate"),
+        };
+        assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
+        let stale_rows = state
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
+        assert_eq!(
+            stale_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
+            None
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            test_git_output(
+                repo.worktree(),
+                &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+                None,
+            ),
+            pins_before,
+            "stale rejection removes its provisional graph pin"
+        );
+
+        let cache_for_admit = cache;
+        let encoded_row = Arc::new(TestMutex::new(None));
+        let encoded_row_for_admit = Arc::clone(&encoded_row);
+        let save_table = table.clone();
+        let save_table_name = save_table.table().to_owned();
+        let save_object_id = save_table.object_id();
+        let save_cwd_generation = cwd_generation.clone();
+        let target_for_admit = Arc::clone(&target);
+        let scratch_for_admit = &scratch;
+        let state_for_admit = &state;
+        let nested_save =
+            VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone());
+        let nested_document_save =
+            VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
+                .with_expected_baseline_row(None);
+        let save_key = key.clone();
+        let replacement_for_admit = replacement_bytes.clone();
+        let saved = cache
+            .commit_durable_blob_rename(
+                &target,
+                &scratch,
+                &state,
+                VfsDurableSave::new(owner_id, cwd_generation, table, key.clone())
+                    .with_expected_baseline_row(None),
+                &capture,
+                expected_identity,
+                "image/png",
+                None,
+                move |coordinates, _, encoded_blob| async move {
+                    assert_eq!(cache_for_admit.generation().await, 0);
+                    assert_eq!(
+                        target_for_admit.open_read().await.read_at(0, PIXEL.len()),
+                        PIXEL
+                    );
+                    assert_eq!(
+                        scratch_for_admit.candidate_bytes().await.as_ref(),
+                        replacement_for_admit.as_slice()
+                    );
+                    assert_eq!(
+                        state_for_admit
+                            .committed_table_row("media", &save_key)
+                            .await
+                            .unwrap(),
+                        None
+                    );
+                    assert!(matches!(
+                        VfsSaveAdmission::<u64>::begin(
+                            state_for_admit,
+                            nested_save,
+                            &crate::NoFault,
+                        )
+                        .await,
+                        Err(TableActivationError::Runtime(RuntimeError::AdminBusy))
+                    ));
+                    let nested_draft = target_for_admit.open_draft(1 << 20).await;
+                    let nested_result = target_for_admit
+                        .commit_durable_document_save(
+                            &nested_draft,
+                            state_for_admit,
+                            nested_document_save,
+                            |_, _| async {
+                                Err::<VfsSaveCandidate, TableActivationError>(
+                                    TableActivationError::Runtime(RuntimeError::AdminBusy),
+                                )
+                            },
+                            &crate::NoFault,
+                        )
+                        .await;
+                    assert!(matches!(
+                        nested_result,
+                        Err(VfsSaveError::Activation(TableActivationError::Runtime(
+                            RuntimeError::AdminBusy
+                        )))
+                    ));
+                    let expected_content_transfer = ProtectedContentTransferEvidence::from_transfer(
+                        &encoded_blob.transfer_record(),
+                    );
+                    let row_value = source_blob_mib_row(encoded_blob.encoded_value());
+                    *encoded_row_for_admit.lock().unwrap() = Some(row_value.clone());
+                    let pin = encoded_blob.into_pin();
+                    let mutation = TableMutation::new(
+                        [0x65; 16],
+                        save_table.table(),
+                        coordinates.key().to_vec(),
+                        Some(row_value.clone()),
+                    )
+                    .map_err(TableActivationError::Runtime)?
+                    .with_table_object_id(save_table.object_id())
+                    .with_protected_content_pin(&pin)
+                    .map_err(TableActivationError::Runtime)?;
+                    let replacement = VfsTableRowReplacement::from_admitted_mutation(
+                        save_table,
+                        mutation,
+                        vec![pin],
+                    )
+                    .map_err(TableActivationError::Runtime)?;
+                    Ok(VfsSaveCandidate::new(
+                        replacement,
+                        Box::new(DurableRenameValidator {
+                            table: save_table_name,
+                            object_id: save_object_id,
+                            accepted: row_value,
+                            expected_content_transfer: Some(expected_content_transfer),
+                            cwd_generation: save_cwd_generation,
+                        }),
+                    ))
+                },
+                &crate::NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            saved,
+            TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+        assert_eq!(
+            target.open_read().await.read_at(0, replacement_bytes.len()),
+            replacement_bytes
+        );
+        assert_eq!(
+            old_handle.read_at(0, old_bytes.len()),
+            old_bytes,
+            "the already-open read handle remains pinned to its original image"
+        );
+        drop(scratch);
+        assert!(retained.upgrade().is_some());
+        drop(old_handle);
+        assert!(retained.upgrade().is_none());
+        let encoded_row = encoded_row.lock().unwrap().clone().unwrap();
+        let committed_rows = state
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
+        assert_eq!(
+            committed_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
+            Some(encoded_row.as_slice())
+        );
+        let pending = state.pending().await.unwrap();
+        let transfers = TableMutation::decode(pending.last().unwrap())
+            .unwrap()
+            .protected_content_transfers()
+            .to_vec();
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].content_identity(), expected_identity);
+        let protected_refs = test_git_output(
+            repo.worktree(),
+            &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+            None,
+        );
+        let protected_refs_text = String::from_utf8(protected_refs.clone()).unwrap();
+        assert_eq!(protected_refs_text.lines().count(), 1);
+        assert!(protected_refs_text.contains("/pending/"));
+        assert!(!protected_refs_text.contains("/scratch/"));
+
+        drop(target);
+        drop(state);
+        let reopened = RuntimeState::open(&repo, runtime_identity, [0x62; 32])
+            .await
+            .unwrap();
+        let reopened_rows = reopened
+            .begin_admitted_table_activation(std::slice::from_ref(&table_for_checks))
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened_rows
+                .query_exact(table_for_checks.table(), &key)
+                .unwrap(),
+            Some(encoded_row.as_slice())
+        );
+        let reopened_pending = reopened.pending().await.unwrap();
+        assert_eq!(
+            TableMutation::decode(reopened_pending.last().unwrap())
+                .unwrap()
+                .protected_content_transfers(),
+            transfers
+        );
+        assert_eq!(
+            test_git_output(
+                repo.worktree(),
+                &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
+                None,
+            ),
+            protected_refs
         );
     }
 }

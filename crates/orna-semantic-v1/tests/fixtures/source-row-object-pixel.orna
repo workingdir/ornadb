@@ -1,0 +1,1 @@
+{ payload: sys.blob.capture_file("root", "pixel.png", 4096), }
