@@ -840,6 +840,36 @@ pub fn restore_complete_copy(
 ) -> Result<CompleteCopyManifest, CompleteCopyError> {
     require_empty(destination)?;
     let manifest = read_complete_copy_manifest(archive)?;
+    restore_complete_copy_from_manifest(archive, destination, manifest)
+}
+
+/// Restores one recorded snapshot member as the copy's primary snapshot.
+/// Membership is checked from the manifest before any member bundle is opened.
+pub fn restore_complete_copy_at(
+    archive: &Path,
+    destination: &Path,
+    commit: &str,
+) -> Result<CompleteCopyManifest, CompleteCopyError> {
+    let mut manifest = read_complete_copy_manifest(archive)?;
+    let selected_index = manifest
+        .members
+        .iter()
+        .position(|member| member.commit.eq_ignore_ascii_case(commit))
+        .ok_or(CompleteCopyError::InvalidArchive(
+            "snapshot member is not recorded",
+        ))?;
+    let selected_commit = manifest.members[selected_index].commit.clone();
+    manifest.snapshot = selected_commit;
+    manifest.members.swap(0, selected_index);
+    require_empty(destination)?;
+    restore_complete_copy_from_manifest(archive, destination, manifest)
+}
+
+fn restore_complete_copy_from_manifest(
+    archive: &Path,
+    destination: &Path,
+    manifest: CompleteCopyManifest,
+) -> Result<CompleteCopyManifest, CompleteCopyError> {
     let parent = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -851,8 +881,7 @@ pub fn restore_complete_copy(
     let restored = staging.path();
 
     // The primary member is fetched first so the copy's own branch and HEAD
-    // name it; the remaining members are fetched into the same object database
-    // under their own bundle refs, so both snapshots are readable from one copy.
+    // name it; remaining members stay readable under their own bundle refs.
     fetch_bundle_into(
         &archive.join(&manifest.members[0].bundle),
         restored,
@@ -917,6 +946,11 @@ pub fn materialize_complete_copy(
     copy: &Path,
     manifest: &CompleteCopyManifest,
 ) -> Result<(), CompleteCopyError> {
+    if manifest.member(&manifest.snapshot).is_none() {
+        return Err(CompleteCopyError::InvalidArchive(
+            "snapshot member is not recorded",
+        ));
+    }
     // Superproject is materialised first: a checkout deletes and recreates the
     // directory at a gitlink path, so a dependency populated before this
     // step would be discarded. Dependencies are materialised afterwards, each
