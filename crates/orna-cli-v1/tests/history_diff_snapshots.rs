@@ -266,10 +266,19 @@ fn commit_metadata(directory: &Path, parent: &str, database: &str, message: &str
     let database_oid = git_object(directory, "blob", database.as_bytes());
     let store_oid = revision(directory, &format!("{parent}:.orna/store"));
     let source_oid = revision(directory, &format!("{parent}:main.orna"));
-    let orna_tree = git_tree(
-        directory,
-        &format!("100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_oid}\tstore\n"),
-    );
+    let old_orna_tree = revision(directory, &format!("{parent}:.orna"));
+    let old_orna_entries =
+        String::from_utf8(git_output(directory, &["ls-tree", &old_orna_tree], None)).unwrap();
+    let mut orna_entries =
+        format!("100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_oid}\tstore\n");
+    for entry in old_orna_entries
+        .lines()
+        .filter(|entry| !entry.ends_with("\tdatabase.orna") && !entry.ends_with("\tstore"))
+    {
+        orna_entries.push_str(entry);
+        orna_entries.push('\n');
+    }
+    let orna_tree = git_tree(directory, &orna_entries);
     let root_tree = git_tree(
         directory,
         &format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"),
