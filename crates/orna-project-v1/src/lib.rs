@@ -777,13 +777,13 @@ impl ProjectLoader {
                 read_committed_module(
                     repository,
                     commit,
-                    &snapshot.module_paths,
+                    &snapshot.source_paths,
                     logical_path,
                     total_bytes,
                     self.limits,
                 )
             },
-            |segments| resolve_committed_import(&snapshot.module_paths, segments),
+            |segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, total_bytes| {
                 if snapshot.has_format3_database {
                     Ok(Vec::new())
@@ -891,13 +891,13 @@ impl ProjectLoader {
                 read_private_candidate_module(
                     repository,
                     candidate,
-                    &snapshot.module_paths,
+                    &snapshot.source_paths,
                     logical_path,
                     total_bytes,
                     self.limits,
                 )
             },
-            |segments| resolve_committed_import(&snapshot.module_paths, segments),
+            |segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, total_bytes| {
                 if snapshot.has_format3_database {
                     Ok(Vec::new())
@@ -1570,7 +1570,7 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
 /// read. Git emits only leaf entries, so sibling ownership is reconstructed
 /// from every component rather than inferred from the mutable worktree.
 struct ValidatedSnapshotTree {
-    module_paths: BTreeSet<String>,
+    source_paths: BTreeSet<String>,
     row_paths: BTreeSet<String>,
     has_standard_gitlink: bool,
     has_format3_database: bool,
@@ -1614,7 +1614,7 @@ fn validate_snapshot_tree(
         entry.path().as_path() == Path::new(".orna/database.orna")
             && matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
     });
-    let mut module_paths = BTreeSet::new();
+    let mut source_paths = BTreeSet::new();
     let mut row_paths = BTreeSet::new();
     let mut module_owners = BTreeMap::<Vec<String>, String>::new();
     let mut siblings = BTreeMap::<PathBuf, BTreeMap<String, String>>::new();
@@ -1623,12 +1623,12 @@ fn validate_snapshot_tree(
             entry,
             &mut siblings,
             &mut module_owners,
-            &mut module_paths,
+            &mut source_paths,
             &mut row_paths,
         )?;
     }
     Ok(ValidatedSnapshotTree {
-        module_paths,
+        source_paths,
         row_paths,
         has_standard_gitlink,
         has_format3_database,
@@ -1639,7 +1639,7 @@ fn validate_committed_tree_entry(
     entry: CommittedTreeEntry,
     siblings: &mut BTreeMap<PathBuf, BTreeMap<String, String>>,
     module_owners: &mut BTreeMap<Vec<String>, String>,
-    module_paths: &mut BTreeSet<String>,
+    source_paths: &mut BTreeSet<String>,
     row_paths: &mut BTreeSet<String>,
 ) -> Result<(), ProjectLoadError> {
     let path = entry.path().as_path();
@@ -1685,11 +1685,11 @@ fn validate_committed_tree_entry(
     if !logical_path.ends_with(".orna") {
         return Ok(());
     }
+    source_paths.insert(logical_path.to_owned());
     if !is_module_source_logical(logical_path) {
         row_paths.insert(logical_path.to_owned());
         return Ok(());
     }
-    module_paths.insert(logical_path.to_owned());
     let namespace = namespace_for_path(logical_path)?;
     if namespace
         .first()
