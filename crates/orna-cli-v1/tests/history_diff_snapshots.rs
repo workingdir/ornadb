@@ -41,12 +41,12 @@ fn relation_hex(relation_id: [u8; 16]) -> String {
     output
 }
 
-/// The image row is newly published after `before`; its source-owned field
+/// The song row is newly published after `before`; its source-owned field
 /// tuple is decoded against the exact Object schema pinned by each endpoint.
 #[tokio::test]
 async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payloads() {
     let source = TempDir::new().unwrap();
-    for name in ["tone.wav", "pixel.png"] {
+    for name in ["tone.wav"] {
         std::fs::copy(
             Path::new(MEDIA_FIXTURES).join(name),
             source.path().join(name),
@@ -76,7 +76,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         .with_repository_capture_capability(capability);
 
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
-    let capture = format!("sys.blob.capture_file({root}, \"pixel.png\", 65536)");
+    let capture = format!("sys.blob.capture_file({root}, \"tone.wav\", 65536)");
     commit_source_captures(
         &repository,
         &state,
@@ -84,7 +84,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         &mut bindings,
         relation_id,
         &format_context,
-        &[(&capture, "image", 0x90)],
+        &[(&capture, "song", 0x90)],
     )
     .await;
     let after = commit_source_row_to_native_graph(
@@ -93,7 +93,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         &before,
         relation_id,
         &format_context,
-        "image",
+        "song",
     );
     assert_ne!(before, after, "publishing the Object row advanced HEAD");
     drop(bindings);
@@ -113,7 +113,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     let diff: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
     // The source fixture contains several candidate Object rows, but only the
-    // admitted image row is published in either native store endpoint.
+    // admitted song row is published in either native store endpoint.
     assert_eq!(
         diff["added"],
         serde_json::json!(1),
@@ -124,7 +124,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     let changes = diff["changes"].as_array().unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["change"], serde_json::json!("added"));
-    assert_eq!(changes[0]["key"], serde_json::json!("image"));
+    assert_eq!(changes[0]["key"], serde_json::json!("song"));
 
     // The comparison is a local read: neither side fetched a media payload.
     assert_eq!(
@@ -160,7 +160,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     let human = run_history(directory.path(), &[&relation, "--diff", &before, &after]);
     assert_eq!(human.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&human.stdout);
-    assert!(stdout.contains("added   image"), "human listing: {stdout}");
+    assert!(stdout.contains("added   song"), "human listing: {stdout}");
     assert!(
         stdout.contains("media payload bytes read: 0"),
         "human listing reports the cost: {stdout}"

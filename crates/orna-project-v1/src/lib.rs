@@ -518,7 +518,25 @@ fn admit_source_row_with_owner_fields_inner(
         return Err(ProjectLoadError::InvalidSourceRow);
     }
     let owner_field_names = owner_field_values.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
-    let mut reserved_field_names = blob_bindings.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+    let parsed_row = parse_row(source);
+    if !parsed_row.diagnostics.is_empty() {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let Expr::Record {
+        fields: parsed_fields, ..
+    } = parsed_row.value
+    else {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    };
+    let source_field_names = parsed_fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut reserved_field_names = blob_bindings
+        .iter()
+        .filter(|(name, _)| !source_field_names.contains(name.as_str()))
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
     reserved_field_names.extend(owner_field_names.iter().cloned());
     let lowered = lower_row_unit_with_owner_fields(&analysis, &input, &reserved_field_names)
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
