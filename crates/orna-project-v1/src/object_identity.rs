@@ -10,8 +10,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use num_bigint::BigInt;
 use orna_repository_v1::{GitCommitRef, Repository, Uuid};
-use orna_semantic_v1::{Analysis, ModuleInput, SymbolKind, TableAdmission, TableSchema, Type};
+use orna_semantic_v1::{
+    Analysis, ModuleInput, SourceUnitIdentity, SourceUnitMetadata, SymbolKind, TableAdmission,
+    TableSchema, Type,
+};
 use orna_syntax_v1::{Declaration, Pattern, TableMember, parse_module};
 use orna_value_v1::{Raw, SchemaDescriptor, Value};
 
@@ -25,6 +29,7 @@ const MANIFEST_VERSION: u64 = 1;
 pub enum ObjectKind {
     Table = 1,
     Field = 2,
+    Unit = 3,
 }
 
 impl ObjectKind {
@@ -32,6 +37,7 @@ impl ObjectKind {
         match raw {
             Raw::Int(value) if value.to_string() == "1" => Some(Self::Table),
             Raw::Int(value) if value.to_string() == "2" => Some(Self::Field),
+            Raw::Int(value) if value.to_string() == "3" => Some(Self::Unit),
             _ => None,
         }
     }
@@ -203,8 +209,15 @@ impl ObjectIdentityManifest {
         if active_identities != expected_identities {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
-        let descriptor =
-            build_source_descriptor(table_object_id, &field_object_ids, schema, admission)?;
+        let descriptor = build_source_descriptor(
+            table_object_id,
+            &field_object_ids,
+            schema,
+            admission,
+            analysis,
+            module_name,
+            self,
+        )?;
         Ok(SourceTableSchemaArtifact {
             module_name: module_name.to_owned(),
             source_path: source_path.to_owned(),
@@ -456,6 +469,9 @@ fn build_source_descriptor(
     field_ids: &BTreeMap<String, [u8; 16]>,
     schema: &TableSchema,
     admission: &TableAdmission,
+    analysis: &Analysis,
+    module_name: &str,
+    manifest: &ObjectIdentityManifest,
 ) -> Result<SchemaDescriptor, SourceTableSchemaError> {
     if !schema.conversions.is_empty()
         || !admission.computed.is_empty()
@@ -468,6 +484,42 @@ fn build_source_descriptor(
             .any(|name| !schema.fields.contains_key(name))
     {
         return Err(SourceTableSchemaError::InvalidSourceSchema);
+    }
+    let mut source_units = BTreeMap::<SourceUnitIdentity, (SourceUnitMetadata, [u8; 16])>::new();
+    for ty in schema.fields.values() {
+        collect_source_units(ty, analysis, module_name, manifest, &mut source_units)?;
+    }
+    let dimension_basis = source_units
+        .values()
+        .flat_map(|(unit, _)| unit.dimension_basis.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    let mut unit_ids = BTreeMap::new();
+    let mut definitions = BTreeMap::new();
+    for (identity, (unit, id)) in &source_units {
+        let exponents = dimension_basis
+            .iter()
+            .map(|dimension| {
+                Raw::Int(BigInt::from(
+                    unit.dimension_basis
+                        .get(dimension)
+                        .copied()
+                        .unwrap_or_default(),
+                ))
+            })
+            .collect();
+        let body = Raw::Array(vec![
+            Raw::Array(exponents),
+            source_unit_integer(&unit.scale.numerator)?,
+            source_unit_integer(&unit.scale.denominator)?,
+            source_unit_integer(&unit.offset.numerator)?,
+            source_unit_integer(&unit.offset.denominator)?,
+            Raw::Bool(unit.affine),
+        ]);
+        definitions.insert(
+            *id,
+            Raw::Array(vec![uuid_raw(id), Raw::Int(3.into()), body]),
+        );
+        unit_ids.insert(identity.clone(), *id);
     }
     let mut ids = BTreeSet::from([table_id]);
     if field_ids.values().any(|id| !ids.insert(*id)) {
@@ -506,7 +558,7 @@ fn build_source_descriptor(
             Raw::Array(vec![
                 uuid_raw(id),
                 Raw::Text(name.clone()),
-                source_type_node(ty)?,
+                source_type_node(ty, analysis, module_name, &unit_ids)?,
                 Raw::Int(role.into()),
                 Raw::Array(vec![Raw::Int(0.into())]),
             ]),
@@ -521,16 +573,90 @@ fn build_source_descriptor(
             Raw::Int(3.into()),
             Raw::Array(encoded_fields.into_iter().map(|(_, field)| field).collect()),
         ),
-        (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        (
+            Raw::Int(4.into()),
+            Raw::Array(definitions.into_values().collect()),
+        ),
     ]);
     SchemaDescriptor::new(raw).map_err(|_| SourceTableSchemaError::InvalidDescriptor)
+}
+
+fn source_unit_integer(value: &str) -> Result<Raw, SourceTableSchemaError> {
+    BigInt::parse_bytes(value.as_bytes(), 10)
+        .map(Raw::Int)
+        .ok_or(SourceTableSchemaError::InvalidSourceSchema)
 }
 
 fn uuid_raw(id: &[u8; 16]) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
 }
 
-fn source_type_node(ty: &Type) -> Result<Raw, SourceTableSchemaError> {
+fn source_unit_metadata<'a>(
+    analysis: &'a Analysis,
+    module_name: &str,
+    name: &str,
+) -> Result<&'a SourceUnitMetadata, SourceTableSchemaError> {
+    let (namespace, unit_name) = name.rsplit_once('.').unwrap_or((module_name, name));
+    let mut matches = analysis.source_units.values().filter(|unit| {
+        unit.identity.namespace.display() == namespace && unit.identity.name == unit_name
+    });
+    let unit = matches
+        .next()
+        .ok_or(SourceTableSchemaError::UnsupportedType)?;
+    if matches.next().is_some() || analysis.source_units.get(&unit.identity) != Some(unit) {
+        return Err(SourceTableSchemaError::InvalidSourceSchema);
+    }
+    Ok(unit)
+}
+
+fn collect_source_units(
+    ty: &Type,
+    analysis: &Analysis,
+    module_name: &str,
+    manifest: &ObjectIdentityManifest,
+    output: &mut BTreeMap<SourceUnitIdentity, (SourceUnitMetadata, [u8; 16])>,
+) -> Result<(), SourceTableSchemaError> {
+    match ty {
+        Type::Applied { base, arguments }
+            if matches!(base.as_str(), "Float" | "Decimal") && arguments.len() == 1 =>
+        {
+            let Type::Named(name) = &arguments[0] else {
+                return Err(SourceTableSchemaError::UnsupportedType);
+            };
+            let unit = source_unit_metadata(analysis, module_name, name)?;
+            let qualified_name = qualify(&unit.identity.namespace.display(), &unit.identity.name);
+            let id = *manifest
+                .id(ObjectKind::Unit, &qualified_name)
+                .ok_or(SourceTableSchemaError::MissingIdentity)?;
+            output.insert(unit.identity.clone(), (unit.clone(), id));
+            Ok(())
+        }
+        Type::List(element) | Type::Optional(element) => {
+            collect_source_units(element, analysis, module_name, manifest, output)
+        }
+        Type::Tuple(elements) => {
+            for element in elements {
+                collect_source_units(element, analysis, module_name, manifest, output)?;
+            }
+            Ok(())
+        }
+        Type::Record(fields) => {
+            for field in fields.values() {
+                collect_source_units(field, analysis, module_name, manifest, output)?;
+            }
+            Ok(())
+        }
+        Type::Applied { .. } => Err(SourceTableSchemaError::UnsupportedType),
+        _ => Ok(()),
+    }
+}
+
+fn source_type_node(
+    ty: &Type,
+    analysis: &Analysis,
+    module_name: &str,
+    unit_ids: &BTreeMap<SourceUnitIdentity, [u8; 16]>,
+) -> Result<Raw, SourceTableSchemaError> {
     let primitive = match ty {
         Type::Int => Some("Int"),
         Type::Decimal => Some("Decimal"),
@@ -548,18 +674,18 @@ fn source_type_node(ty: &Type) -> Result<Raw, SourceTableSchemaError> {
     match ty {
         Type::List(element) => Ok(Raw::Array(vec![
             Raw::Int(1.into()),
-            source_type_node(element)?,
+            source_type_node(element, analysis, module_name, unit_ids)?,
         ])),
         Type::Optional(element) => Ok(Raw::Array(vec![
             Raw::Int(2.into()),
-            source_type_node(element)?,
+            source_type_node(element, analysis, module_name, unit_ids)?,
         ])),
         Type::Tuple(elements) => Ok(Raw::Array(vec![
             Raw::Int(3.into()),
             Raw::Array(
                 elements
                     .iter()
-                    .map(source_type_node)
+                    .map(|element| source_type_node(element, analysis, module_name, unit_ids))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
         ])),
@@ -571,12 +697,28 @@ fn source_type_node(ty: &Type) -> Result<Raw, SourceTableSchemaError> {
                     .map(|(name, ty)| {
                         Ok(Raw::Array(vec![
                             Raw::Text(name.clone()),
-                            source_type_node(ty)?,
+                            source_type_node(ty, analysis, module_name, unit_ids)?,
                         ]))
                     })
                     .collect::<Result<Vec<_>, SourceTableSchemaError>>()?,
             ),
         ])),
+        Type::Applied { base, arguments }
+            if matches!(base.as_str(), "Float" | "Decimal") && arguments.len() == 1 =>
+        {
+            let Type::Named(name) = &arguments[0] else {
+                return Err(SourceTableSchemaError::UnsupportedType);
+            };
+            let unit = source_unit_metadata(analysis, module_name, name)?;
+            let unit_id = unit_ids
+                .get(&unit.identity)
+                .ok_or(SourceTableSchemaError::MissingIdentity)?;
+            Ok(Raw::Array(vec![
+                Raw::Int(7.into()),
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text(base.clone())]),
+                uuid_raw(unit_id),
+            ]))
+        }
         Type::Named(name) => {
             let name = match name.as_str() {
                 "Blob" | "std.BINARY_LARGE_OBJECT" => "Blob",
@@ -611,31 +753,36 @@ fn source_identity_keys(
             return Err(ObjectIdentityError::InvalidSource);
         }
         for item in &parsed.value.items {
-            if let Declaration::Table {
-                name,
-                keys: table_keys,
-                members,
-                ..
-            } = &item.declaration
-            {
-                let table = qualify(&namespace, name);
-                keys.push((ObjectKind::Table, table.clone()));
-                if table_keys.is_empty() {
-                    keys.push((ObjectKind::Field, format!("{table}.id")));
-                } else {
-                    for key in table_keys {
-                        if let Pattern::Name(name, _) = &key.pattern {
+            match &item.declaration {
+                Declaration::Unit { name, .. } => {
+                    keys.push((ObjectKind::Unit, qualify(&namespace, name)));
+                }
+                Declaration::Table {
+                    name,
+                    keys: table_keys,
+                    members,
+                    ..
+                } => {
+                    let table = qualify(&namespace, name);
+                    keys.push((ObjectKind::Table, table.clone()));
+                    if table_keys.is_empty() {
+                        keys.push((ObjectKind::Field, format!("{table}.id")));
+                    } else {
+                        for key in table_keys {
+                            if let Pattern::Name(name, _) = &key.pattern {
+                                keys.push((ObjectKind::Field, format!("{table}.{name}")));
+                            } else {
+                                return Err(ObjectIdentityError::InvalidSource);
+                            }
+                        }
+                    }
+                    for member in members {
+                        if let TableMember::Field { name, .. } = member {
                             keys.push((ObjectKind::Field, format!("{table}.{name}")));
-                        } else {
-                            return Err(ObjectIdentityError::InvalidSource);
                         }
                     }
                 }
-                for member in members {
-                    if let TableMember::Field { name, .. } = member {
-                        keys.push((ObjectKind::Field, format!("{table}.{name}")));
-                    }
-                }
+                _ => {}
             }
         }
     }
@@ -700,32 +847,116 @@ mod tests {
     fn manifest_reconciliation_persists_ids_and_retires_removed_declarations() {
         let source = ModuleInput::new(
             "main.orna",
-            "pub table Object(id: Str) { payload: Blob, size: Float, }",
+            include_str!("../tests/fixtures/vfs-blob-mib.orna"),
         );
         let first = ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), None).unwrap();
         let encoded = first.encode().unwrap();
         assert_eq!(ObjectIdentityManifest::decode(&encoded).unwrap(), first);
-        let payload_id = *first.id(ObjectKind::Field, "Object.payload").unwrap();
+        let payload_id = *first.id(ObjectKind::Field, "Media.payload").unwrap();
+        let unit_id = *first.id(ObjectKind::Unit, "MiB").unwrap();
         let stable =
             ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), Some(&first)).unwrap();
         assert_eq!(
-            stable.id(ObjectKind::Field, "Object.payload"),
+            stable.id(ObjectKind::Field, "Media.payload"),
             Some(&payload_id)
         );
+        assert_eq!(stable.id(ObjectKind::Unit, "MiB"), Some(&unit_id));
         let removed = ObjectIdentityManifest::reconcile(&[], Some(&stable)).unwrap();
-        assert!(removed.id(ObjectKind::Field, "Object.payload").is_none());
-        assert!(
-            removed
-                .records()
-                .iter()
-                .any(|record| record.qualified_name() == "Object.payload" && record.is_retired())
-        );
+        assert!(removed.id(ObjectKind::Field, "Media.payload").is_none());
+        assert!(removed.id(ObjectKind::Unit, "MiB").is_none());
+        assert!(removed.records().iter().any(|record| {
+            record.kind() == ObjectKind::Unit
+                && record.qualified_name() == "MiB"
+                && record.is_retired()
+        }));
         assert_eq!(
             ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(),
             removed
         );
     }
 
+    #[test]
+    fn source_quantity_schema_persists_basis_and_exact_ratio() {
+        let source = ModuleInput::new(
+            "main.orna",
+            include_str!("../tests/fixtures/vfs-blob-mib.orna"),
+        );
+        let analysis = orna_semantic_v1::analyze(std::slice::from_ref(&source));
+        assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+        let unit = analysis
+            .source_units
+            .values()
+            .find(|unit| unit.identity.name == "MiB")
+            .unwrap();
+        assert_eq!(
+            unit.dimension_basis.values().copied().collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(unit.scale.numerator, "1048576");
+        assert_eq!(unit.scale.denominator, "1");
+        assert_eq!(unit.offset.numerator, "0");
+        assert_eq!(unit.offset.denominator, "1");
+        assert!(!unit.affine);
+        assert_eq!(unit.provenance.logical_path, "main.orna");
+
+        let manifest =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), None).unwrap();
+        let schema = manifest
+            .source_table_schema(&analysis, "", "main.orna", "Media")
+            .unwrap();
+        let unit_id = *manifest.id(ObjectKind::Unit, "MiB").unwrap();
+        let Raw::Map(entries) = schema.descriptor.raw() else {
+            panic!("schema descriptor is a map");
+        };
+        let entry = |key: u64| {
+            entries
+                .iter()
+                .find(|(raw_key, _)| {
+                    matches!(raw_key, Raw::Int(value) if value == &BigInt::from(key))
+                })
+                .map(|(_, value)| value)
+                .unwrap()
+        };
+        let Raw::Array(fields) = entry(3) else {
+            panic!("schema fields are an array");
+        };
+        let size_field = fields
+            .iter()
+            .find(|field| {
+                matches!(field, Raw::Array(parts) if parts.get(1) == Some(&Raw::Text("size".into())))
+            })
+            .unwrap();
+        let Raw::Array(size_field) = size_field else {
+            panic!("size field is an array");
+        };
+        assert_eq!(
+            size_field[2],
+            Raw::Array(vec![
+                Raw::Int(7.into()),
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Float".into())]),
+                uuid_raw(&unit_id),
+            ])
+        );
+        let Raw::Array(definitions) = entry(4) else {
+            panic!("schema definitions are an array");
+        };
+        assert_eq!(
+            definitions,
+            &[Raw::Array(vec![
+                uuid_raw(&unit_id),
+                Raw::Int(3.into()),
+                Raw::Array(vec![
+                    Raw::Array(vec![Raw::Int(1.into())]),
+                    Raw::Int(1_048_576.into()),
+                    Raw::Int(1.into()),
+                    Raw::Int(0.into()),
+                    Raw::Int(1.into()),
+                    Raw::Bool(false),
+                ]),
+            ])]
+        );
+        SchemaDescriptor::decode(&schema.descriptor.encode().unwrap()).unwrap();
+    }
     #[test]
     fn oversized_worktree_manifest_is_rejected_before_reading() {
         let directory = tempfile::tempdir().unwrap();

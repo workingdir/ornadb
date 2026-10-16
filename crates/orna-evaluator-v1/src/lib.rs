@@ -15255,7 +15255,7 @@ mod tests {
         )
         .unwrap();
         let returned = ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap();
-        let page_row = indexed_row;
+        let page_row = indexed_row.clone();
         let parsed = orna_syntax_v1::parse_module(include_str!(
             "../tests/fixtures/context-result-owner.orna"
         ));
@@ -15275,7 +15275,7 @@ mod tests {
         )]);
         let arguments = BTreeMap::from([(
             String::from("blob"),
-            ContextValue::from_blob(&source_blob, ValueFormat::Rov3).unwrap(),
+            indexed_row.clone(),
         )]);
 
         let mut budget = StepBudget::new(Limits::default().max_steps);

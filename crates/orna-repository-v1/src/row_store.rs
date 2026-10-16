@@ -9,7 +9,7 @@ use std::{cmp::Ordering, collections::BTreeMap, fmt, ops::Range, sync::Arc};
 
 use sha2::{Digest, Sha256};
 
-use orna_value_v1::{BlobMetadata, MimeRegistry};
+use orna_value_v1::{BlobMetadata, MediaAnnotation};
 
 use crate::native_graph::{
     decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeGraphContext,
@@ -1544,9 +1544,11 @@ fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStor
         CborValue::Text(suffix) => Some(suffix.as_str()),
         _ => return Err(RowStoreError::InvalidCanonicalRowValue),
     };
-    let annotation = MimeRegistry::mime1()
-        .canonical_annotation(media_type, suffix)
+    let annotation = MediaAnnotation::new(media_type, suffix)
         .map_err(|_| RowStoreError::InvalidCanonicalRowValue)?;
+    if annotation.media_type() != media_type || annotation.suffix() != suffix {
+        return Err(RowStoreError::InvalidCanonicalRowValue);
+    }
     let descriptor = match descriptor {
         CborValue::Bytes(descriptor) => descriptor,
         _ => return Err(RowStoreError::InvalidCanonicalRowValue),
@@ -1706,6 +1708,45 @@ mod tests {
         .expect("coherent row-map version");
         let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty field tuple");
         AdmittedRow::issue(&version, TypedKey::Text("london".to_owned()), value)
+    }
+    fn encoded_blob_row(media_type: &str, suffix: Option<&str>) -> Vec<u8> {
+        let mut encoded = vec![0x81, 0xd9, 0xea, 0xcf, 0x85, 0x00, 0x58, 0x20];
+        encoded.extend_from_slice(&[0; 32]);
+        encoded.push(0x60 + media_type.len() as u8);
+        encoded.extend_from_slice(media_type.as_bytes());
+        if let Some(suffix) = suffix {
+            encoded.push(0x60 + suffix.len() as u8);
+            encoded.extend_from_slice(suffix.as_bytes());
+        } else {
+            encoded.push(0xf6);
+        }
+        encoded.push(0x54);
+        encoded.extend_from_slice(&[0x77; 20]);
+        encoded
+    }
+
+    #[test]
+    fn committed_blob_annotation_must_be_exactly_canonical_mime1() {
+        let valid = RowValue::decode_canonical_fields(encoded_blob_row("text/plain", None))
+            .expect("canonical annotation is admitted");
+        let base = admitted_row(8);
+        let row = AdmittedRow::issue(base.version(), TypedKey::Text("london".to_owned()), valid);
+        let metadata = row
+            .blob_metadata(0)
+            .expect("project canonical metadata")
+            .expect("Blob field");
+        assert_eq!(metadata.media_type(), "text/plain");
+        assert_eq!(metadata.suffix(), None);
+
+        for (media_type, suffix) in [("TEXT/PLAIN", None), ("text/plain", Some("txt"))] {
+            let encoded = encoded_blob_row(media_type, suffix);
+            assert!(
+                RowValue::decode_canonical_fields(encoded.clone()).is_err(),
+                "noncanonical annotation {media_type:?} {suffix:?} must fail row admission"
+            );
+            let fields = decode_canonical_fields_of(&encoded).expect("well-formed CBOR tuple");
+            assert!(decode_blob_field_metadata(&fields[0]).is_err());
+        }
     }
 
     #[test]
