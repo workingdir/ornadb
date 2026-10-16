@@ -9,13 +9,15 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+use num_bigint::BigInt;
+use num_traits::{One, Signed, ToPrimitive, Zero};
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
-use orna_value_v1::{Decimal, path_decode_key_components};
+use orna_value_v1::{Decimal, Raw, SchemaDescriptor, path_decode_key_components};
 use orna_syntax_v1::{
-    AssignmentOperator, AssignmentTarget, ControlKind, Declaration, Expr, FieldInitializer, Item,
-    LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan, Statement,
-    StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UseTail, Visibility,
-    parse_module_with_file,
+    AssignmentOperator, AssignmentTarget, ControlKind, Declaration, DimensionExpr, Expr,
+    FieldInitializer, Item, LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan,
+    Statement, StringSegment, SyntaxTree, TypeExpr, TypeMember, TypeRepresentation, UnitDefinition,
+    UseTail, Visibility, parse_module_with_file,
 };
 use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
@@ -24,6 +26,12 @@ use unicode_normalization::{UnicodeNormalization, is_nfc};
 mod repl;
 mod semantic_payload;
 mod system_api;
+mod object_identity;
+mod source_row;
+
+pub use object_identity::{ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectKind};
+
+pub use source_row::{LoweredRowUnit, lower_row_unit, lower_row_unit_with_owner_fields};
 
 pub use semantic_payload::{
     DeclarationExplicitness, LocalSourceOrigin, NamedSemanticParameter, SEMANTIC_PAYLOAD_DOMAIN,
@@ -1495,10 +1503,53 @@ pub struct AssertionPlan {
     pub dependencies: BTreeSet<String>,
     pub effects: EffectSummary,
 }
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SourceUnitIdentity {
+    pub namespace: Namespace,
+    pub name: String,
+}
+impl SourceUnitIdentity {
+    pub fn display(&self) -> String {
+        format!("{}.{}", self.namespace.display(), self.name)
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SourceDimensionIdentity {
+    pub namespace: Namespace,
+    pub name: String,
+}
+impl SourceDimensionIdentity {
+    pub fn display(&self) -> String {
+        format!("{}.{}", self.namespace.display(), self.name)
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUnitRational {
+    /// Canonical base-10 integer numerator.
+    pub numerator: String,
+    /// Canonical positive base-10 integer denominator.
+    pub denominator: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUnitProvenance {
+    pub logical_path: String,
+    pub span: SyntaxSpan,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceUnitMetadata {
+    pub identity: SourceUnitIdentity,
+    /// Exponents over declared base dimensions; never inferred from names.
+    pub dimension_basis: BTreeMap<SourceDimensionIdentity, i64>,
+    pub scale: SourceUnitRational,
+    pub offset: SourceUnitRational,
+    pub affine: bool,
+    pub provenance: SourceUnitProvenance,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Analysis {
     pub modules: BTreeMap<Namespace, ModuleHeader>,
     pub assertions: BTreeMap<Namespace, Vec<AssertionPlan>>,
+    pub source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
     pub diagnostics: Vec<Diagnostic>,
 }
 impl Analysis {
@@ -1506,6 +1557,493 @@ impl Analysis {
         self.diagnostics.is_empty()
     }
 }
+
+/// Failures while producing a source-owned table descriptor from checked
+/// semantics and already-issued identities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceTableSchemaError {
+    AnalysisFailed,
+    ModuleNotFound,
+    AmbiguousModule,
+    DeclarationNotFound,
+    NotTable,
+    MissingTableSchema,
+    MissingTableAdmission,
+    MissingIdentity,
+    IdentityMapMismatch,
+    DuplicateIdentity,
+    UnsupportedDefault,
+    UnsupportedComputed,
+    UnsupportedType,
+    InvalidSourceSchema,
+    InvalidDescriptor,
+}
+
+/// A table schema artifact owned by source semantic analysis.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceTableSchemaArtifact {
+    declaration_name: String,
+    table_id: [u8; 16],
+    descriptor: SchemaDescriptor,
+}
+
+impl SourceTableSchemaArtifact {
+    pub fn declaration_name(&self) -> &str {
+        &self.declaration_name
+    }
+
+    pub fn table_id(&self) -> &[u8; 16] {
+        &self.table_id
+    }
+
+    pub fn descriptor(&self) -> &SchemaDescriptor {
+        &self.descriptor
+    }
+}
+
+/// Builds a storage descriptor from one exact source declaration and its
+/// already-persisted object identities. This is a read-only operation: it
+/// never reconciles or creates identities.
+pub fn source_table_schema(
+    analysis: &Analysis,
+    manifest: &ObjectIdentityManifest,
+    module_name: &str,
+    declaration_name: &str,
+) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
+    let (table_schema, admission) =
+        source_table_schema_parts(analysis, module_name, declaration_name)?;
+    let table_name = source_table_qualified_name(module_name, declaration_name);
+    let table_id = *manifest
+        .id(ObjectKind::Table, &table_name)
+        .ok_or(SourceTableSchemaError::MissingIdentity)?;
+    let mut field_ids = BTreeMap::new();
+    for name in table_schema.fields.keys() {
+        let qualified_name = format!("{table_name}.{name}");
+        let id = *manifest
+            .id(ObjectKind::Column, &qualified_name)
+            .ok_or(SourceTableSchemaError::MissingIdentity)?;
+        field_ids.insert(name.clone(), id);
+    }
+    build_source_table_schema(
+        declaration_name,
+        table_id,
+        &field_ids,
+        table_schema,
+        admission,
+    )
+}
+
+/// Builds a storage descriptor from exact source semantics and IDs extracted
+/// from a pinned repository binding. The map must contain exactly one active
+/// committed field ID for every source schema field, including key fields.
+pub fn source_table_schema_with_ids(
+    analysis: &Analysis,
+    module_name: &str,
+    declaration_name: &str,
+    table_id: [u8; 16],
+    field_ids: &BTreeMap<String, [u8; 16]>,
+) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
+    let (table_schema, admission) =
+        source_table_schema_parts(analysis, module_name, declaration_name)?;
+    build_source_table_schema(
+        declaration_name,
+        table_id,
+        field_ids,
+        table_schema,
+        admission,
+    )
+}
+
+fn source_table_schema_parts<'a>(
+    analysis: &'a Analysis,
+    module_name: &str,
+    declaration_name: &str,
+) -> Result<(&'a TableSchema, &'a TableAdmission), SourceTableSchemaError> {
+    if !analysis.is_ok() {
+        return Err(SourceTableSchemaError::AnalysisFailed);
+    }
+    let mut module = None;
+    for (namespace, candidate) in &analysis.modules {
+        if namespace.display() == module_name && analysis.assertions.contains_key(namespace) {
+            if module.is_some() {
+                return Err(SourceTableSchemaError::AmbiguousModule);
+            }
+            module = Some(candidate);
+        }
+    }
+    let module = module.ok_or(SourceTableSchemaError::ModuleNotFound)?;
+    let symbol = module
+        .symbols
+        .get(declaration_name)
+        .ok_or(SourceTableSchemaError::DeclarationNotFound)?;
+    if symbol.kind != SymbolKind::Table {
+        return Err(SourceTableSchemaError::NotTable);
+    }
+    let table_schema = symbol
+        .table_schema
+        .as_ref()
+        .ok_or(SourceTableSchemaError::MissingTableSchema)?;
+    let admission = table_schema
+        .admission
+        .as_ref()
+        .ok_or(SourceTableSchemaError::MissingTableAdmission)?;
+    Ok((table_schema, admission))
+}
+
+fn source_table_qualified_name(module_name: &str, declaration_name: &str) -> String {
+    if module_name.is_empty() {
+        declaration_name.to_owned()
+    } else {
+        format!("{module_name}.{declaration_name}")
+    }
+}
+
+fn build_source_table_schema(
+    declaration_name: &str,
+    table_id: [u8; 16],
+    field_ids: &BTreeMap<String, [u8; 16]>,
+    table_schema: &TableSchema,
+    admission: &TableAdmission,
+) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
+    if !table_schema.conversions.is_empty() {
+        return Err(SourceTableSchemaError::UnsupportedType);
+    }
+    if !admission.computed.is_empty() {
+        return Err(SourceTableSchemaError::UnsupportedComputed);
+    }
+    if admission.private_required
+        || admission.keys.is_empty()
+        || admission.required.iter().any(|name| !table_schema.fields.contains_key(name))
+    {
+        return Err(SourceTableSchemaError::InvalidSourceSchema);
+    }
+    if field_ids.len() != table_schema.fields.len()
+        || table_schema
+            .fields
+            .keys()
+            .any(|name| !field_ids.contains_key(name))
+    {
+        return Err(SourceTableSchemaError::IdentityMapMismatch);
+    }
+
+    let mut identities = BTreeSet::from([table_id]);
+    for id in field_ids.values() {
+        if !identities.insert(*id) {
+            return Err(SourceTableSchemaError::DuplicateIdentity);
+        }
+    }
+
+    let mut key_names = BTreeSet::new();
+    let mut key_ids = Vec::with_capacity(admission.keys.len());
+    for (name, key_type) in &admission.keys {
+        if !key_names.insert(name.as_str()) {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        let field_type = table_schema
+            .fields
+            .get(name)
+            .ok_or(SourceTableSchemaError::InvalidSourceSchema)?;
+        if field_type != key_type {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        key_ids.push(
+            *field_ids
+                .get(name)
+                .ok_or(SourceTableSchemaError::IdentityMapMismatch)?,
+        );
+    }
+    if admission.automatic_key
+        && (admission.keys.len() != 1
+            || admission.keys[0].0 != "id"
+            || admission.keys[0].1 != Type::Int)
+    {
+        return Err(SourceTableSchemaError::InvalidSourceSchema);
+    }
+
+    let mut fields = Vec::with_capacity(table_schema.fields.len());
+    for (name, ty) in &table_schema.fields {
+        let is_automatic_id = admission.automatic_key && name == "id";
+        if !admission.required.contains(name) && !is_automatic_id {
+            return Err(SourceTableSchemaError::UnsupportedDefault);
+        }
+        let id = *field_ids
+            .get(name)
+            .ok_or(SourceTableSchemaError::IdentityMapMismatch)?;
+        let role = if key_names.contains(name.as_str()) { 0 } else { 1 };
+        fields.push((
+            id,
+            Raw::Array(vec![
+                source_schema_uuid(&id),
+                Raw::Text(name.clone()),
+                source_schema_type_node(ty)?,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ]),
+        ));
+    }
+    fields.sort_by_key(|(id, _)| *id);
+    let field_descriptors = fields
+        .into_iter()
+        .map(|(_, descriptor)| descriptor)
+        .collect();
+    let raw = Raw::Map(vec![
+        (Raw::Int(0.into()), Raw::Int(1.into())),
+        (Raw::Int(1.into()), source_schema_uuid(&table_id)),
+        (
+            Raw::Int(2.into()),
+            Raw::Array(key_ids.into_iter().map(|id| source_schema_uuid(&id)).collect()),
+        ),
+        (Raw::Int(3.into()), Raw::Array(field_descriptors)),
+        (Raw::Int(4.into()), Raw::Array(Vec::new())),
+    ]);
+    let descriptor =
+        SchemaDescriptor::new(raw).map_err(|_| SourceTableSchemaError::InvalidDescriptor)?;
+    Ok(SourceTableSchemaArtifact {
+        declaration_name: declaration_name.to_owned(),
+        table_id,
+        descriptor,
+    })
+}
+
+fn source_schema_uuid(id: &[u8; 16]) -> Raw {
+    Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
+}
+
+fn source_schema_type_node(ty: &Type) -> Result<Raw, SourceTableSchemaError> {
+    let primitive = match ty {
+        Type::Int => Some("Int"),
+        Type::Decimal => Some("Decimal"),
+        Type::Float => Some("Float"),
+        Type::Date => Some("Date"),
+        Type::Instant => Some("Instant"),
+        Type::Text => Some("Str"),
+        Type::Bool => Some("Bool"),
+        Type::Unit => Some("Unit"),
+        _ => None,
+    };
+    if let Some(name) = primitive {
+        return Ok(Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.into())]));
+    }
+    match ty {
+        Type::List(element) => Ok(Raw::Array(vec![
+            Raw::Int(1.into()),
+            source_schema_type_node(element)?,
+        ])),
+        Type::Optional(element) => Ok(Raw::Array(vec![
+            Raw::Int(2.into()),
+            source_schema_type_node(element)?,
+        ])),
+        Type::Tuple(elements) => Ok(Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Array(
+                elements
+                    .iter()
+                    .map(source_schema_type_node)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        ])),
+        Type::Record(fields) => Ok(Raw::Array(vec![
+            Raw::Int(4.into()),
+            Raw::Array(
+                fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        Ok(Raw::Array(vec![
+                            Raw::Text(name.clone()),
+                            source_schema_type_node(ty)?,
+                        ]))
+                    })
+                    .collect::<Result<Vec<_>, SourceTableSchemaError>>()?,
+            ),
+        ])),
+        Type::Range(element) => Ok(Raw::Array(vec![
+            Raw::Int(9.into()),
+            source_schema_type_node(element)?,
+        ])),
+        Type::Named(name) => {
+            let primitive = match name.as_str() {
+                "Blob" | "std.BINARY_LARGE_OBJECT" => "Blob",
+                "std.UUID" => "Uuid",
+                "std.TIME" => "TimeOfDay",
+                "std.DURATION" => "Duration",
+                _ => return Err(SourceTableSchemaError::UnsupportedType),
+            };
+            Ok(Raw::Array(vec![
+                Raw::Int(0.into()),
+                Raw::Text(primitive.into()),
+            ]))
+        }
+        _ => Err(SourceTableSchemaError::UnsupportedType),
+    }
+}
+
+#[cfg(test)]
+mod source_table_schema_tests {
+    use super::*;
+
+    fn descriptor_value(raw: &Raw, key: u64) -> &Raw {
+        let Raw::Map(entries) = raw else {
+            panic!("descriptor is not a map");
+        };
+        entries
+            .iter()
+            .find_map(|(candidate, value)| match candidate {
+                Raw::Int(candidate_key) if candidate_key.to_string() == key.to_string() => Some(value),
+                _ => None,
+            })
+            .expect("descriptor contains the requested key")
+    }
+
+    fn descriptor_field<'a>(raw: &'a Raw, name: &str) -> &'a [Raw] {
+        let Raw::Array(fields) = raw else {
+            panic!("descriptor field list is not an array");
+        };
+        fields
+            .iter()
+            .find_map(|field| match field {
+                Raw::Array(parts)
+                    if matches!(parts.get(1), Some(Raw::Text(field_name)) if field_name == name) =>
+                {
+                    Some(parts.as_slice())
+                }
+                _ => None,
+            })
+            .expect("descriptor contains the requested field")
+    }
+
+    #[test]
+    fn primitive_table_descriptor_uses_committed_manifest_ids() {
+        let input = ModuleInput::new(
+            "main.orna",
+            "pub table Contact(id: Int) { name: Str, active: Bool, }",
+        );
+        let analysis = analyze(std::slice::from_ref(&input));
+        assert!(analysis.is_ok());
+        let manifest = ObjectIdentityManifest::reconcile(std::slice::from_ref(&input), None)
+            .expect("writer-issued manifest");
+
+        let artifact = source_table_schema(&analysis, &manifest, "", "Contact")
+            .expect("source table descriptor");
+        assert_eq!(artifact.declaration_name(), "Contact");
+        assert_eq!(
+            artifact.table_id(),
+            manifest.id(ObjectKind::Table, "Contact").expect("table identity"),
+        );
+        assert_eq!(
+            descriptor_value(artifact.descriptor().raw(), 1),
+            &Raw::Tag(37, Box::new(Raw::Bytes(artifact.table_id().to_vec()))),
+        );
+        assert_eq!(
+            descriptor_value(artifact.descriptor().raw(), 2),
+            &Raw::Array(vec![Raw::Tag(
+                37,
+                Box::new(Raw::Bytes(
+                    manifest
+                        .id(ObjectKind::Column, "Contact.id")
+                        .expect("key identity")
+                        .to_vec(),
+                )),
+            )]),
+        );
+        let fields = descriptor_value(artifact.descriptor().raw(), 3);
+        let key = descriptor_field(fields, "id");
+        assert_eq!(
+            key[0],
+            Raw::Tag(
+                37,
+                Box::new(Raw::Bytes(
+                    manifest
+                        .id(ObjectKind::Column, "Contact.id")
+                        .expect("key identity")
+                        .to_vec(),
+                )),
+            ),
+        );
+        assert_eq!(key[2], Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]));
+        assert_eq!(key[3], Raw::Int(0.into()));
+        let name = descriptor_field(fields, "name");
+        assert_eq!(
+            name[0],
+            Raw::Tag(
+                37,
+                Box::new(Raw::Bytes(
+                    manifest
+                        .id(ObjectKind::Column, "Contact.name")
+                        .expect("field identity")
+                        .to_vec(),
+                )),
+            ),
+        );
+        assert_eq!(name[2], Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]));
+        assert_eq!(name[3], Raw::Int(1.into()));
+    }
+
+    #[test]
+    fn source_table_descriptor_maps_declared_portable_scalar_aliases() {
+        let input = ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Int) { blob: Blob, uuid: UUID, time: TIME, duration: DURATION, bytes: BYTES, }",
+        );
+        let analysis = analyze(std::slice::from_ref(&input));
+        assert!(analysis.is_ok());
+        let manifest = ObjectIdentityManifest::reconcile(std::slice::from_ref(&input), None)
+            .expect("writer-issued manifest");
+        let artifact = source_table_schema(&analysis, &manifest, "", "Media")
+            .expect("portable scalar table descriptor");
+        let fields = descriptor_value(artifact.descriptor().raw(), 3);
+
+        for (field_name, primitive) in [
+            ("blob", "Blob"),
+            ("uuid", "Uuid"),
+            ("time", "TimeOfDay"),
+            ("duration", "Duration"),
+            ("bytes", "Blob"),
+        ] {
+            assert_eq!(
+                descriptor_field(fields, field_name)[2],
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text(primitive.into())]),
+            );
+        }
+    }
+
+    #[test]
+    fn source_table_descriptor_rejects_missing_ids_and_unsupported_types() {
+        let input = ModuleInput::new(
+            "main.orna",
+            "pub table Contact(id: Int) { name: Str, }",
+        );
+        let analysis = analyze(std::slice::from_ref(&input));
+        assert!(analysis.is_ok());
+        assert_eq!(
+            source_table_schema(&analysis, &ObjectIdentityManifest::default(), "", "Contact"),
+            Err(SourceTableSchemaError::MissingIdentity),
+        );
+        assert_eq!(
+            source_table_schema_with_ids(
+                &analysis,
+                "",
+                "Contact",
+                [1; 16],
+                &BTreeMap::new(),
+            ),
+            Err(SourceTableSchemaError::IdentityMapMismatch),
+        );
+
+        let unsupported = ModuleInput::new(
+            "main.orna",
+            "pub table Contact(id: Int) { relation: Relation<Int>, }",
+        );
+        let unsupported_analysis = analyze(std::slice::from_ref(&unsupported));
+        assert!(unsupported_analysis.is_ok());
+        let manifest = ObjectIdentityManifest::reconcile(std::slice::from_ref(&unsupported), None)
+            .expect("writer-issued manifest");
+        assert_eq!(
+            source_table_schema(&unsupported_analysis, &manifest, "", "Contact"),
+            Err(SourceTableSchemaError::UnsupportedType),
+        );
+    }
+}
+
 /// Primitive row-unit input supplied by a project/repository adapter.
 ///
 /// The semantic crate deliberately does not depend on `orna-project-v1`.
@@ -1543,10 +2081,18 @@ impl RowUnitAdmission {
 /// This is schema admission only: it parses and type-checks the row expression,
 /// validates the encoded path key, and retains the existing assertion plans.
 /// Evaluation, persistence and assertion execution remain downstream concerns.
-pub fn admit_row_unit(
+pub fn admit_row_unit(analysis: &Analysis, input: &RowUnitInput<'_>) -> RowUnitAdmission {
+    admit_row_unit_with_owner_fields(analysis, input, &[])
+}
+
+/// Admits a row while reserving named stored fields for an authorized owner
+/// binding. Reserved fields must be declared stored fields and absent in source.
+pub fn admit_row_unit_with_owner_fields(
     analysis: &Analysis,
     input: &RowUnitInput<'_>,
+    owner_fields: &[String],
 ) -> RowUnitAdmission {
+    let owner_fields = owner_fields.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut result = RowUnitAdmission::default();
     if !analysis.is_ok() {
         result.diagnostics.extend(analysis.diagnostics.iter().cloned());
@@ -1628,6 +2174,21 @@ pub fn admit_row_unit(
         ));
         return result;
     };
+    if owner_fields.iter().any(|name| {
+        !admission.required.contains(*name)
+            || admission.keys.iter().any(|(key, _)| key == name)
+            || admission.computed.contains(*name)
+    }) {
+        result.diagnostics.push(diag(
+            DIAG_TYPE,
+            "owner-bound field is not a required stored field",
+        ));
+        return result;
+    }
+    let mut source_schema_fields = schema.fields.clone();
+    for name in &owner_fields {
+        source_schema_fields.remove(*name);
+    }
     let Some(decoded_key) = decode_row_key_path(input.key_path) else {
         result.diagnostics.push(diag(
             DIAG_BAD_PATH,
@@ -1694,21 +2255,31 @@ pub fn admit_row_unit(
                 "project row body cannot supply a computed field",
             ));
         }
+        if owner_fields.contains(field.name.as_str()) {
+            result.diagnostics.push(diag(
+                DIAG_TYPE,
+                "project row body cannot supply an owner-bound field",
+            ));
+        }
     }
     let mut inferred = Vec::new();
     let input_type = infer_table_row_input(
         &parsed.value,
-        &schema.fields,
+        &source_schema_fields,
         &Scope::default(),
         &BTreeMap::new(),
         &mut inferred,
+        true,
     );
     result.diagnostics.extend(inferred);
     if let Type::Record(fields) = input_type.ty {
         result.fields = fields;
     }
     for required in &admission.required {
-        if !key_names.contains(required.as_str()) && !seen.contains(required.as_str()) {
+        if !key_names.contains(required.as_str())
+            && !owner_fields.contains(required.as_str())
+            && !seen.contains(required.as_str())
+        {
             result
                 .diagnostics
                 .push(diag(DIAG_TYPE, "project row omits a required stored field"));
@@ -1716,6 +2287,7 @@ pub fn admit_row_unit(
     }
     result
 }
+
 
 /// Load and check caller-provided modules.  `sys` is a built-in namespace,
 /// while `std` remains absent unless an adapter supplies it separately; source
@@ -1742,6 +2314,7 @@ fn analyze_retaining_context(
         ..Analysis::default()
     };
     let mut parsed = Vec::new();
+    let mut source_unit_items = Vec::new();
     let mut siblings: BTreeMap<Vec<String>, BTreeMap<String, String>> = BTreeMap::new();
     for input in inputs {
         let Some(namespace) = namespace_for_path(&input.logical_path, &mut result.diagnostics)
@@ -1792,8 +2365,13 @@ fn analyze_retaining_context(
             &mut result.diagnostics,
         );
         result.modules.insert(namespace.clone(), header);
+        source_unit_items.extend(parse.value.items.iter().filter_map(|item| {
+            matches!(&item.declaration, Declaration::Dimension { .. } | Declaration::Unit { .. })
+                .then(|| (namespace.clone(), input.logical_path.clone(), item.clone()))
+        }));
         parsed.push((namespace, parse.value));
     }
+    result.source_units = analyze_source_units(&source_unit_items);
     let mut dependency_summaries = BTreeMap::new();
     let source_payload_enums = parsed
         .iter()
@@ -1871,6 +2449,299 @@ fn analyze_retaining_context(
         .diagnostics
         .sort_by(|a, b| a.code().cmp(b.code()).then(a.message().cmp(b.message())));
     (result, contexts)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UnitFraction {
+    numerator: BigInt,
+    denominator: BigInt,
+}
+impl UnitFraction {
+    fn new(mut numerator: BigInt, mut denominator: BigInt) -> Option<Self> {
+        if denominator.is_zero() {
+            return None;
+        }
+        if denominator.is_negative() {
+            numerator = -numerator;
+            denominator = -denominator;
+        }
+        if numerator.is_zero() {
+            return Some(Self { numerator, denominator: BigInt::one() });
+        }
+        let mut left = numerator.abs();
+        let mut right = denominator.clone();
+        while !right.is_zero() {
+            let remainder = &left % &right;
+            left = right;
+            right = remainder;
+        }
+        if !left.is_zero() {
+            numerator /= &left;
+            denominator /= left;
+        }
+        Some(Self { numerator, denominator })
+    }
+    fn one() -> Self {
+        Self { numerator: BigInt::one(), denominator: BigInt::one() }
+    }
+    fn zero() -> Self {
+        Self { numerator: BigInt::zero(), denominator: BigInt::one() }
+    }
+    fn multiply(&self, other: &Self) -> Option<Self> {
+        Self::new(&self.numerator * &other.numerator, &self.denominator * &other.denominator)
+    }
+    fn divide(&self, other: &Self) -> Option<Self> {
+        Self::new(&self.numerator * &other.denominator, &self.denominator * &other.numerator)
+    }
+    fn power(&self, exponent: i64) -> Option<Self> {
+        let magnitude = u32::try_from(exponent.unsigned_abs()).ok()?;
+        if magnitude > 100_000 {
+            return None;
+        }
+        if exponent < 0 {
+            Self::new(self.denominator.pow(magnitude), self.numerator.pow(magnitude))
+        } else {
+            Self::new(self.numerator.pow(magnitude), self.denominator.pow(magnitude))
+        }
+    }
+    fn public(&self) -> SourceUnitRational {
+        SourceUnitRational {
+            numerator: self.numerator.to_string(),
+            denominator: self.denominator.to_string(),
+        }
+    }
+    fn decimal(text: &str) -> Option<Self> {
+        let text = text.replace('_', "");
+        let exponent_index = text.find('e').or_else(|| text.find('E'));
+        let (mantissa, exponent) = exponent_index.map_or((text.as_str(), 0i64), |index| {
+            let (mantissa, exponent) = text.split_at(index);
+            (mantissa, exponent[1..].parse::<i64>().unwrap_or(i64::MAX))
+        });
+        if exponent == i64::MAX || exponent.unsigned_abs() > 1_000_000 {
+            return None;
+        }
+        let (negative, mantissa) = mantissa.strip_prefix('-').map_or((false, mantissa), |rest| (true, rest));
+        let mantissa = mantissa.strip_prefix('+').unwrap_or(mantissa);
+        let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        if whole.is_empty() && fraction.is_empty() {
+            return None;
+        }
+        let digits = format!("{whole}{fraction}");
+        let mut numerator = digits.parse::<BigInt>().ok()?;
+        if negative {
+            numerator = -numerator;
+        }
+        let decimal_exponent = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+        if decimal_exponent >= 0 {
+            if decimal_exponent > 1_000_000 { return None; }
+            numerator *= BigInt::from(10u8).pow(decimal_exponent as u32);
+            Self::new(numerator, BigInt::one())
+        } else {
+            let magnitude = decimal_exponent.unsigned_abs();
+            if magnitude > 1_000_000 { return None; }
+            Self::new(numerator, BigInt::from(10u8).pow(magnitude as u32))
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SourceDimensionDecl {
+    expression: Option<DimensionExpr>,
+}
+#[derive(Clone)]
+struct SourceUnitDecl {
+    identity: SourceUnitIdentity,
+    dimension: TypeExpr,
+    definition: UnitDefinition,
+    provenance: SourceUnitProvenance,
+}
+
+fn analyze_source_units(items: &[(Namespace, String, Item)]) -> BTreeMap<SourceUnitIdentity, SourceUnitMetadata> {
+    let mut dimensions = BTreeMap::new();
+    let mut units = BTreeMap::new();
+    let mut duplicate_dimensions = BTreeSet::new();
+    let mut duplicate_units = BTreeSet::new();
+    for (namespace, logical_path, item) in items {
+        match &item.declaration {
+            Declaration::Dimension { name, expression } => {
+                let identity = SourceDimensionIdentity { namespace: namespace.clone(), name: name.clone() };
+                if dimensions.insert(identity.clone(), SourceDimensionDecl { expression: expression.clone() }).is_some() {
+                    duplicate_dimensions.insert(identity);
+                }
+            }
+            Declaration::Unit { name, dimension, definition } => {
+                let identity = SourceUnitIdentity { namespace: namespace.clone(), name: name.clone() };
+                let declaration = SourceUnitDecl {
+                    identity: identity.clone(),
+                    dimension: dimension.clone(),
+                    definition: definition.clone(),
+                    provenance: SourceUnitProvenance { logical_path: logical_path.clone(), span: item.span.clone() },
+                };
+                if units.insert(identity.clone(), declaration).is_some() {
+                    duplicate_units.insert(identity);
+                }
+            }
+            _ => {}
+        }
+    }
+    for identity in duplicate_dimensions { dimensions.remove(&identity); }
+    for identity in duplicate_units { units.remove(&identity); }
+
+    let mut result = BTreeMap::new();
+    for declaration in units.values() {
+        let mut resolving_units = BTreeSet::new();
+        let Some(scale) = source_unit_scale(&declaration.identity, &units, &mut resolving_units) else { continue };
+        let (offset, affine) = match &declaration.definition {
+            UnitDefinition::Base => (UnitFraction::zero(), false),
+            UnitDefinition::Derived { offset, affine, .. } => {
+                let offset = match offset {
+                    Some(expression) => match source_numeric_value(expression) { Some(value) => value, None => continue },
+                    None => UnitFraction::zero(),
+                };
+                (offset, *affine)
+            }
+        };
+        let Some(dimension) = source_dimension_path(&declaration.dimension) else { continue };
+        let Some(dimension_identity) = source_dimension_identity(&declaration.identity.namespace, &dimension, &dimensions) else { continue };
+        let mut resolving_dimensions = BTreeSet::new();
+        let Some(dimension_basis) = source_dimension_basis(&dimension_identity, &dimensions, &mut resolving_dimensions) else { continue };
+        result.insert(declaration.identity.clone(), SourceUnitMetadata {
+            identity: declaration.identity.clone(),
+            dimension_basis,
+            scale: scale.public(),
+            offset: offset.public(),
+            affine,
+            provenance: declaration.provenance.clone(),
+        });
+    }
+    result
+}
+
+fn source_dimension_path(ty: &TypeExpr) -> Option<Vec<String>> {
+    match ty {
+        TypeExpr::Name { path, arguments, .. } if arguments.is_empty() => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn source_dimension_identity(namespace: &Namespace, path: &[String], dimensions: &BTreeMap<SourceDimensionIdentity, SourceDimensionDecl>) -> Option<SourceDimensionIdentity> {
+    let name = path.last()?.clone();
+    let candidate = if path.len() == 1 {
+        SourceDimensionIdentity { namespace: namespace.clone(), name: name.clone() }
+    } else {
+        SourceDimensionIdentity { namespace: Namespace(path[..path.len() - 1].to_vec()), name: name.clone() }
+    };
+    if dimensions.contains_key(&candidate) { return Some(candidate); }
+    let mut matches = dimensions.keys().filter(|identity| identity.name == name);
+    let identity = matches.next()?.clone();
+    matches.next().is_none().then_some(identity)
+}
+
+fn source_dimension_basis(identity: &SourceDimensionIdentity, dimensions: &BTreeMap<SourceDimensionIdentity, SourceDimensionDecl>, stack: &mut BTreeSet<SourceDimensionIdentity>) -> Option<BTreeMap<SourceDimensionIdentity, i64>> {
+    if !stack.insert(identity.clone()) { return None; }
+    let declaration = dimensions.get(identity)?;
+    let result = if let Some(expression) = &declaration.expression {
+        let mut result = BTreeMap::new();
+        for (index, (_, ty, exponent, _)) in expression.terms.iter().enumerate() {
+            let path = source_dimension_path(ty)?;
+            let target = source_dimension_identity(&identity.namespace, &path, dimensions)?;
+            let mut power = match exponent {
+                Some(exponent) => exponent.parse::<i64>().ok()?,
+                None => 1,
+            };
+            if index > 0 && expression.operators.get(index - 1).is_some_and(|operator| operator == "/") {
+                power = power.checked_neg()?;
+            }
+            let term = source_dimension_basis(&target, dimensions, stack)?;
+            for (axis, exponent) in term {
+                let combined = result.get(&axis).copied().unwrap_or(0i64).checked_add(exponent.checked_mul(power)?)?;
+                if combined == 0 { result.remove(&axis); } else { result.insert(axis, combined); }
+            }
+        }
+        result
+    } else {
+        BTreeMap::from([(identity.clone(), 1)])
+    };
+    stack.remove(identity);
+    Some(result)
+}
+
+fn source_unit_identity(namespace: &Namespace, name: &str, units: &BTreeMap<SourceUnitIdentity, SourceUnitDecl>) -> Option<SourceUnitIdentity> {
+    let candidate = SourceUnitIdentity { namespace: namespace.clone(), name: name.to_owned() };
+    if units.contains_key(&candidate) { return Some(candidate); }
+    let mut matches = units.keys().filter(|identity| identity.name == name);
+    let identity = matches.next()?.clone();
+    matches.next().is_none().then_some(identity)
+}
+
+fn source_unit_scale(identity: &SourceUnitIdentity, units: &BTreeMap<SourceUnitIdentity, SourceUnitDecl>, stack: &mut BTreeSet<SourceUnitIdentity>) -> Option<UnitFraction> {
+    if !stack.insert(identity.clone()) { return None; }
+    let declaration = units.get(identity)?;
+    let value = match &declaration.definition {
+        UnitDefinition::Base => Some(UnitFraction::one()),
+        UnitDefinition::Derived { value, .. } => source_scale_expression(value, &identity.namespace, units, stack),
+    };
+    stack.remove(identity);
+    value
+}
+
+fn source_numeric_value(expression: &Expr) -> Option<UnitFraction> {
+    match expression {
+        Expr::Literal { text, kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float, .. } => UnitFraction::decimal(text),
+        Expr::Group { inner, .. } => source_numeric_value(inner),
+        Expr::Unary { op, rhs, .. } if op == "+" || op == "-" => {
+            let mut value = source_numeric_value(rhs)?;
+            if op == "-" { value.numerator = -value.numerator; }
+            Some(value)
+        }
+        Expr::Binary { lhs, op, rhs, .. } if op == "+" || op == "-" || op == "*" || op == "/" => {
+            let left = source_numeric_value(lhs)?;
+            let right = source_numeric_value(rhs)?;
+            match op.as_str() {
+                "+" | "-" => {
+                    let sign = if op == "+" { BigInt::one() } else { -BigInt::one() };
+                    UnitFraction::new(&left.numerator * &right.denominator + sign * &right.numerator * &left.denominator, &left.denominator * &right.denominator)
+                }
+                "*" => left.multiply(&right),
+                "/" => left.divide(&right),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn source_scale_expression(expression: &Expr, namespace: &Namespace, units: &BTreeMap<SourceUnitIdentity, SourceUnitDecl>, stack: &mut BTreeSet<SourceUnitIdentity>) -> Option<UnitFraction> {
+    match expression {
+        Expr::Literal { text, kind: LiteralKind::Integer | LiteralKind::Decimal | LiteralKind::Float, .. } => UnitFraction::decimal(text),
+        Expr::Group { inner, .. } => source_scale_expression(inner, namespace, units, stack),
+        Expr::Name { text, .. } => {
+            let identity = source_unit_identity(namespace, text, units)?;
+            source_unit_scale(&identity, units, stack)
+        }
+        Expr::Field { base, name, .. } => {
+            let base = source_scale_expression(base, namespace, units, stack)?;
+            let identity = source_unit_identity(namespace, name, units)?;
+            base.multiply(&source_unit_scale(&identity, units, stack)?)
+        }
+        Expr::Unary { op, rhs, .. } if op == "+" || op == "-" => {
+            let mut value = source_scale_expression(rhs, namespace, units, stack)?;
+            if op == "-" { value.numerator = -value.numerator; }
+            Some(value)
+        }
+        Expr::Binary { lhs, op, rhs, .. } => {
+            if op == "^" {
+                let base = source_scale_expression(lhs, namespace, units, stack)?;
+                let exponent = source_numeric_value(rhs)?;
+                if exponent.denominator != BigInt::one() { return None; }
+                return base.power(exponent.numerator.to_i64()?);
+            }
+            let left = source_scale_expression(lhs, namespace, units, stack)?;
+            let right = source_scale_expression(rhs, namespace, units, stack)?;
+            match op.as_str() { "*" => left.multiply(&right), "/" => left.divide(&right), _ => None }
+        }
+        _ => None,
+    }
 }
 
 /// Function bodies may depend on inferred summaries declared later in their
@@ -15024,8 +15895,14 @@ fn infer_table_operation(
             inferred
         } else if insertion_like || update {
             row.map(|fields| {
-                let inferred =
-                    infer_table_row_input(&argument.value, fields, scope, local, diagnostics);
+                let inferred = infer_table_row_input(
+                    &argument.value,
+                    fields,
+                    scope,
+                    local,
+                    diagnostics,
+                    false,
+                );
                 if let Some(schema) = admission
                     && let Type::Record(supplied) = &inferred.ty
                 {
@@ -15134,7 +16011,8 @@ fn infer_table_row_input(
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> Inferred {
+    source_blob_values_are_external: bool,
+ ) -> Inferred {
     let inferred = if let Expr::Record {
         fields: supplied, ..
     } = expression
@@ -15143,7 +16021,16 @@ fn infer_table_row_input(
         let mut effects = EffectSummary::default();
         for field in supplied {
             let value = if let Some(expected) = fields.get(&field.name) {
-                infer_contextual(&field.value, expected, scope, local, diagnostics)
+                if source_blob_values_are_external
+                    && matches!(expected, Type::Named(name) if matches!(name.as_str(), "Blob" | "std.BINARY_LARGE_OBJECT"))
+                {
+                    Inferred {
+                        ty: expected.clone(),
+                        effects: EffectSummary::default(),
+                    }
+                } else {
+                    infer_contextual(&field.value, expected, scope, local, diagnostics)
+                }
             } else {
                 infer(&field.value, scope, local, diagnostics)
             };
@@ -24203,6 +25090,40 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_unit_analysis_retains_exact_source_basis_scale_and_provenance() {
+        let analysis = checked(&[ModuleInput::new(
+            "units/main.orna",
+            "pub dim Information; pub unit B : Information base; pub unit MiB : Information = 1048576.B; pub dim Temperature; pub unit K : Temperature base; pub unit C : Temperature = K offset 273.15 affine;",
+        )]);
+        assert!(analysis.is_ok(), "diagnostics: {:?}", analysis.diagnostics);
+
+        let mebibyte = &analysis.source_units[&SourceUnitIdentity {
+            namespace: Namespace(vec!["units".into()]),
+            name: "MiB".into(),
+        }];
+        assert_eq!(mebibyte.scale.numerator, "1048576");
+        assert_eq!(mebibyte.scale.denominator, "1");
+        assert_eq!(
+            mebibyte.dimension_basis.keys().next(),
+            Some(&SourceDimensionIdentity {
+                namespace: Namespace(vec!["units".into()]),
+                name: "Information".into(),
+            })
+        );
+        assert_eq!(mebibyte.dimension_basis.len(), 1);
+        assert_eq!(mebibyte.dimension_basis.values().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(mebibyte.provenance.logical_path, "units/main.orna");
+
+        let celsius = &analysis.source_units[&SourceUnitIdentity {
+            namespace: Namespace(vec!["units".into()]),
+            name: "C".into(),
+        }];
+        assert_eq!(celsius.offset.numerator, "5463");
+        assert_eq!(celsius.offset.denominator, "20");
+        assert!(celsius.affine);
+    }
 
     #[test]
     fn sparse_checkpoint_seeding_crosses_relation_window_boundaries() {

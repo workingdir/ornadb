@@ -21,8 +21,9 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor, Value};
+use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor};
 use sha2::{Digest, Sha256};
+
 
 pub const REPOSITORY_FORMAT: u8 = 3;
 pub const NODE_DATA_LIMIT: usize = 65_536;
@@ -174,13 +175,11 @@ impl PrivateRefCleanupOwner {
             .map_err(|_| GraphError::GitCommandFailed)?;
         if !output.status.success() {
             // A `cat-file` invocation that names one object reports an object
-            // that is absent locally. Name it, so a missing object is never an
-            // anonymous availability failure and stays distinguishable from a
-            // promised object (ORNA-GIT-002, ORNA-ROW-007).
+            // that is absent locally. Name it, and say whether a partial clone
+            // defers it, so a promised object is never an anonymous
+            // availability failure (ORNA-GIT-002, ORNA-ROW-007).
             return Err(match cat_file_object_id(args) {
-                Some(object_id) => GraphError::MissingObject {
-                    object_id: object_id.to_ascii_lowercase(),
-                },
+                Some(object_id) => absent_object_error(&self.repository, object_id),
                 None => GraphError::GitCommandFailed,
             });
         }
@@ -297,6 +296,56 @@ pub struct NativeGraphContext {
     schema_digest: [u8; 32],
     row_snapshot: crate::row_store::RowMapSnapshot,
     cancelled: Arc<AtomicBool>,
+}
+
+/// One schema-ordered field identity and its payload-free Blob projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedRowField {
+    field_id: [u8; 16],
+    blob_metadata: Option<BlobMetadata>,
+}
+
+impl AdmittedRowField {
+    pub const fn field_id(&self) -> &[u8; 16] {
+        &self.field_id
+    }
+
+    pub fn blob_metadata(&self) -> Option<&BlobMetadata> {
+        self.blob_metadata.as_ref()
+    }
+}
+
+/// Canonical ROV3 field tuple bound to one admitted row and schema generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedRowFields {
+    version: crate::row_store::RowMapVersion,
+    key: crate::row_store::TypedKey,
+    canonical_fields: Vec<u8>,
+    fields: Vec<AdmittedRowField>,
+}
+
+impl AdmittedRowFields {
+    pub fn version(&self) -> &crate::row_store::RowMapVersion {
+        &self.version
+    }
+
+    pub fn schema_generation(&self) -> &crate::row_store::SchemaGeneration {
+        self.version.schema()
+    }
+
+    pub fn key(&self) -> &crate::row_store::TypedKey {
+        &self.key
+    }
+
+    /// Complete canonical ROV3 field tuple in descriptor order.
+    pub fn canonical_fields(&self) -> &[u8] {
+        &self.canonical_fields
+    }
+
+    /// Field identities and Blob metadata in the same order as the tuple.
+    pub fn fields(&self) -> &[AdmittedRowField] {
+        &self.fields
+    }
 }
 
 /// Shared owner-issued graph and read-scope authority for one Blob capture
@@ -468,6 +517,10 @@ impl NativeGraphContext {
         }
         Ok(())
     }
+    /// Returns the immutable row-map identity this graph is pinned to.
+    pub(crate) fn row_map_version(&self) -> &crate::row_store::RowMapVersion {
+        self.row_snapshot.version()
+    }
 
     /// Opens the repository owner's fixed-budget read scope. Each range is
     /// limited to 8 MiB; object count and metadata limits are fixed here, not
@@ -483,6 +536,61 @@ impl NativeGraphContext {
             MAX_FULL_VERIFY_OBJECTS,
             MAX_FULL_METADATA_BYTES,
         )
+    }
+
+    /// Decodes the schema descriptor retained by this graph's sealed row map.
+    /// The caller cannot substitute an OID or bytes from another snapshot.
+    pub fn read_schema_descriptor(
+        &self,
+        scope: &RepositoryReadScope,
+    ) -> Result<SchemaDescriptor, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let schema_oid = version.schema().schema_oid();
+        let mut objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let node = self.read_native_node(schema_oid, scope, &mut objects)?;
+        let NodeData::Schema {
+            encoded_length,
+            schema_digest,
+            byte_root,
+        } = node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::Schema,
+                actual: node.kind(),
+            });
+        };
+        if schema_digest != self.schema_digest
+            || schema_digest != *version.schema().schema_digest()
+            || encoded_length > MAX_FULL_METADATA_BYTES
+        {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        objects.record_metadata(encoded_length)?;
+        let capacity = usize::try_from(encoded_length)
+            .map_err(|_| GraphError::InvalidLength(encoded_length))?;
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(capacity)
+            .map_err(|_| GraphError::ReadQuotaExceeded)?;
+        self.read_full_index_bytes(
+            &byte_root,
+            encoded_length,
+            None,
+            scope,
+            &mut objects,
+            &mut encoded,
+        )?;
+        if encoded.len() as u64 != encoded_length {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        SchemaDescriptor::decode(&encoded).map_err(|_| GraphError::NonCanonicalData)
     }
 
     /// Cancels every read scope opened from this repository graph context.
@@ -1036,6 +1144,95 @@ impl NativeGraphContext {
         Ok(projected)
     }
 
+    /// Decodes the complete canonical ROV3 tuple using the committed,
+    /// source-qualified descriptor and this graph's owner-issued read scope.
+    /// Overflow tuple bytes are structured metadata; Blob payload chunks are
+    /// never fetched by this operation.
+    pub fn decode_admitted_row_fields(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        binding: &crate::CommittedTableBinding,
+        scope: &RepositoryReadScope,
+    ) -> Result<AdmittedRowFields, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        if row.version() != version
+            || binding.snapshot_id() != &self.snapshot_id
+            || binding.relation_id() != version.relation_id()
+            || binding.schema_oid() != version.schema().schema_oid()
+            || binding.schema_digest() != version.schema().schema_digest()
+            || binding.module_name().is_none()
+            || binding.source_path().is_none()
+            || binding.declaration_name().is_none()
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+
+        let canonical_key = row
+            .key()
+            .canonical_bytes()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let canonical_fields = match row.value() {
+            crate::row_store::RowValue::Inline { encoded, .. } => {
+                scope.charge_structured_metadata_read(encoded.len() as u64)?;
+                encoded.clone()
+            }
+            crate::row_store::RowValue::Overflow(reference) => {
+                let root = reference
+                    .native_root()
+                    .ok_or(GraphError::UnsupportedRowValueForm)?;
+                let mut objects = ObjectBudget::new(
+                    scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
+                    scope.max_objects,
+                    Arc::clone(&scope.objects_used),
+                    scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
+                    Arc::clone(&scope.metadata_used),
+                );
+                self.verify_value_overflow(root, scope, &mut objects, &mut BTreeSet::new(), true)?
+                    .encoded_value
+                    .ok_or(GraphError::ContextMismatch)?
+            }
+        };
+
+        binding
+            .descriptor()
+            .validate_stored_row(*version.relation_id(), &canonical_key, &canonical_fields)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let CborValue::Array(values) = decode_canonical_cbor(&canonical_fields)? else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let field_ids = stored_field_object_ids(binding.descriptor())?;
+        if values.len() != field_ids.len() {
+            return Err(GraphError::NonCanonicalData);
+        }
+
+        let mut fields = Vec::with_capacity(values.len());
+        for (field_id, value) in field_ids.into_iter().zip(values) {
+            let blob_metadata = if matches!(&value, CborValue::Tag(60111, _)) {
+                let mut encoded = Vec::new();
+                CborValue::Array(vec![value]).encode(&mut encoded);
+                let single_field = crate::row_store::RowValue::decode_canonical_fields(encoded)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                crate::row_store::AdmittedRow::issue(version, row.key().clone(), single_field)
+                    .blob_metadata(0)
+                    .map_err(|_| GraphError::NonCanonicalData)?
+            } else {
+                None
+            };
+            fields.push(AdmittedRowField {
+                field_id,
+                blob_metadata,
+            });
+        }
+
+        Ok(AdmittedRowFields {
+            version: version.clone(),
+            key: row.key().clone(),
+            canonical_fields,
+            fields,
+        })
+    }
+
     fn decode_persisted_row_value(
         &self,
         encoded: Vec<u8>,
@@ -1047,14 +1244,14 @@ impl NativeGraphContext {
             CborValue::Tag(60113, payload) => {
                 let oid = overflow_tag_oid(payload, self.algorithm)?;
                 let verified =
-                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new())?;
+                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new(), false)?;
                 crate::row_store::RowValue::overflow(verified.reference)
             }
             CborValue::Array(_) => {
                 let mut overflow_oids = BTreeSet::new();
                 collect_overflow_oids(&value, self.algorithm, &mut overflow_oids)?;
                 for oid in overflow_oids {
-                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new())?;
+                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new(), false)?;
                 }
                 crate::row_store::RowValue::decode_canonical_fields(encoded)
                     .map_err(|_| GraphError::NonCanonicalData)?
@@ -1091,6 +1288,7 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
         objects: &mut ObjectBudget,
         active: &mut BTreeSet<NativeOid>,
+        retain_encoded: bool,
     ) -> Result<VerifiedValueOverflow, GraphError> {
         if !active.insert(oid.clone()) {
             return Err(GraphError::ContextMismatch);
@@ -1162,7 +1360,7 @@ impl NativeGraphContext {
                 match dependency_node {
                     NodeData::BlobDescriptor { .. } => {}
                     NodeData::ValueOverflow { .. } => {
-                        self.verify_value_overflow(&dependency, scope, objects, active)?;
+                        self.verify_value_overflow(&dependency, scope, objects, active, false)?;
                     }
                     other => {
                         return Err(GraphError::WrongNodeKind {
@@ -1183,6 +1381,7 @@ impl NativeGraphContext {
             Ok(VerifiedValueOverflow {
                 reference,
                 semantic_value: sov_value,
+                encoded_value: retain_encoded.then_some(encoded),
             })
         })();
         active.remove(oid);
@@ -1210,6 +1409,15 @@ impl NativeGraphContext {
                 {
                     return Err(GraphError::NonCanonicalData);
                 }
+                let Some(CborValue::Text(media_type)) = fields.get(2) else {
+                    return Err(GraphError::NonCanonicalData);
+                };
+                let suffix = match fields.get(3) {
+                    Some(CborValue::Null) => None,
+                    Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
+                    _ => return Err(GraphError::NonCanonicalData),
+                };
+                validate_canonical_mime1_annotation(media_type, suffix)?;
                 Ok(CborValue::Tag(
                     60112,
                     Box::new(CborValue::Array(fields.into_iter().take(4).collect())),
@@ -1218,7 +1426,7 @@ impl NativeGraphContext {
             CborValue::Tag(60113, payload) => {
                 let oid = overflow_tag_oid(&payload, self.algorithm)?;
                 Ok(self
-                    .verify_value_overflow(&oid, scope, objects, active)?
+                    .verify_value_overflow(&oid, scope, objects, active, false)?
                     .semantic_value)
             }
             CborValue::Array(values) => Ok(CborValue::Array(
@@ -1290,7 +1498,7 @@ impl NativeGraphContext {
                     .native_root()
                     .ok_or(GraphError::UnsupportedRowValueForm)?;
                 let verified =
-                    self.verify_value_overflow(root, scope, objects, &mut BTreeSet::new())?;
+                    self.verify_value_overflow(root, scope, objects, &mut BTreeSet::new(), false)?;
                 Ok(vec![verified.semantic_value])
             }
         }
@@ -1336,6 +1544,8 @@ impl NativeGraphContext {
         Ok(())
     }
 
+    // This full reader is used for schema descriptors and ORP overflow tuples;
+    // their chunk blobs are structured metadata, not OVB-2 media payload.
     fn read_full_index_bytes(
         &self,
         oid: &NativeOid,
@@ -1372,7 +1582,6 @@ impl NativeGraphContext {
                 if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
                     return Err(GraphError::InvalidByteIndex);
                 }
-                let reservation = scope.reserve_payload(entry.span_length)?;
                 let chunk = self.read_git_object(
                     NativeObjectKind::Blob,
                     &entry.target,
@@ -1385,11 +1594,11 @@ impl NativeGraphContext {
                 {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
+                scope.charge_structured_metadata_read(chunk.len() as u64)?;
                 output
                     .try_reserve(chunk.len())
                     .map_err(|_| GraphError::ReadQuotaExceeded)?;
                 output.extend_from_slice(&chunk);
-                reservation.commit(entry.span_length);
             } else {
                 self.read_full_index_bytes(
                     &entry.target,
@@ -1471,10 +1680,59 @@ impl NativeGraphContext {
         Ok(stats)
     }
 
+    /// The local availability class of one native object id for this graph's
+    /// repository, without fetching or hydrating it. `git` runs with lazy fetch
+    /// disabled; a payload a partial clone defers is classified as
+    /// `ObjectAvailability::Promised` through local promisor evidence, so it is
+    /// never conflated with an object the repository does not know at all
+    /// (ORNA-GIT-002). An unreadable or malformed object database is reported as
+    /// `ObjectAvailability::Unknown`, never as absence.
+    pub fn observe_object_availability(
+        &self,
+        scope: &RepositoryReadScope,
+        oid: &NativeOid,
+    ) -> Result<ObjectAvailability, GraphError> {
+        scope.authorize(self)?;
+        if oid.algorithm() != self.algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: self.algorithm.width(),
+                actual: oid.as_bytes().len(),
+            });
+        }
+        match self.git_object_kind(oid) {
+            Ok(kind) => {
+                // The owner context issues the observation result, so a kind
+                // the probe reports is validated against the repository's own
+                // object format before it is returned.
+                let observed = ObservedNativeObject {
+                    oid: oid.clone(),
+                    kind,
+                    availability: ObjectAvailability::Materialized,
+                };
+                let context = ValidatedRepositoryContext {
+                    algorithm: self.algorithm,
+                };
+                Ok(validate_observed_object(&context, &observed, kind)?.availability)
+            }
+            Err(GraphError::PromisedObjectNotMaterialized { .. }) => {
+                Ok(ObjectAvailability::Promised)
+            }
+            Err(GraphError::MissingObject { .. }) | Err(GraphError::UnknownObjectAvailability) => {
+                Ok(observed_object_availability(
+                    &self.repository,
+                    &oid.to_hex(),
+                ))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Lists the candidate ids that this repository cannot resolve, in input
     /// order. An id git can resolve is left out. An id of another object
     /// format is an error, not a missing object, and any other git failure is
-    /// returned as-is rather than reported as missing.
+    /// returned as-is rather than reported as missing. Absence and a payload
+    /// deferred by a partial clone are both unresolved here; use
+    /// [`Self::observe_object_availability`] to tell those two apart.
     pub fn unresolved_object_ids(
         &self,
         scope: &RepositoryReadScope,
@@ -1491,7 +1749,7 @@ impl NativeGraphContext {
             }
             match self.git_object_kind(candidate) {
                 Ok(_) => {}
-                Err(GraphError::UnknownObjectAvailability) => unresolved.push(candidate.clone()),
+                Err(error) if error.is_unresolved_object() => unresolved.push(candidate.clone()),
                 Err(error) => return Err(error),
             }
         }
@@ -1627,10 +1885,7 @@ impl NativeGraphContext {
         max_commits: usize,
         scope: &RepositoryReadScope,
     ) -> Result<Vec<RowRevision>, GraphError> {
-        scope.authorize(self)?;
-        if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
-            return Err(GraphError::ContextMismatch);
-        }
+        self.require_committed_row(row, scope)?;
         let descriptors: Vec<NativeObjectId> = row
             .value()
             .dependencies()
@@ -1706,6 +1961,7 @@ impl NativeGraphContext {
             owner_id,
             cancelled,
             bytes_used: Arc::new(AtomicU64::new(0)),
+            structured_metadata_bytes_read: Arc::new(AtomicU64::new(0)),
             payload_bytes_written: Arc::new(AtomicU64::new(0)),
             objects_used: Arc::new(AtomicU64::new(0)),
             metadata_used: Arc::new(AtomicU64::new(0)),
@@ -1828,11 +2084,7 @@ impl NativeGraphContext {
     ) -> Result<(), GraphError> {
         scope.authorize(self)?;
         let version = row.version();
-        if version.database_id() != &self.database_id
-            || version.relation_id() != self.row_snapshot.version().relation_id()
-            || version.store_root() != &self.store_root
-            || version.schema().schema_digest() != &self.schema_digest
-        {
+        if version != self.row_snapshot.version() {
             return Err(GraphError::ContextMismatch);
         }
         if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
@@ -2419,7 +2671,14 @@ impl NativeGraphContext {
         let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
         let entry = find_ordered_entry_with(&mut read_node, node, &domain, None, None, key)?;
         entry
-            .map(|entry| decode_candidate_blob_metadata(&entry.value, &candidate.transfer))
+            .map(|entry| {
+                decode_candidate_blob_metadata(
+                    &entry.value,
+                    &candidate.transfer,
+                    &candidate.media_type,
+                    candidate.suffix.as_deref(),
+                )
+            })
             .transpose()
     }
 
@@ -2889,9 +3148,7 @@ impl NativeGraphContext {
             .wait_with_output()
             .map_err(|_| GraphError::GitCommandFailed)?;
         if !output.status.success() {
-            return Err(GraphError::MissingObject {
-                object_id: hex.clone(),
-            });
+            return Err(absent_object_error(&self.repository, &hex));
         }
         if data.len() as u64 != size {
             return Err(GraphError::GitObjectMalformed);
@@ -2921,10 +3178,9 @@ impl NativeGraphContext {
             .output()
             .map_err(|_| GraphError::GitCommandFailed)?;
         if !output.status.success() {
-            return Err(if args.first() == Some(&"cat-file") {
-                GraphError::UnknownObjectAvailability
-            } else {
-                GraphError::GitCommandFailed
+            return Err(match cat_file_object_id(args) {
+                Some(object_id) => absent_object_error(&self.repository, object_id),
+                None => GraphError::GitCommandFailed,
             });
         }
         Ok(output.stdout)
@@ -3034,8 +3290,10 @@ impl NativeGraphContext {
     /// The store root is an OGS-1 tree, not a regular file, so the ordinary
     /// managed-file path cannot express it. This checks the supplied object is
     /// a real, fully decodable `StoreRoot` node first: a raw OID cannot be
-    /// planted at the store position. The caller keeps ownership of the index
-    /// file and of any later ref advancement.
+    /// planted at the store position. The base commit's own store entries are
+    /// removed before the new subtree is bound, because a directory entry may
+    /// not overlap the file entries the base contributed. The caller keeps
+    /// ownership of the index file and of any later ref advancement.
     pub(crate) fn pin_store_subtree_in_index(
         &self,
         index: &std::path::Path,
@@ -3062,20 +3320,17 @@ impl NativeGraphContext {
                 actual: node.kind(),
             });
         }
-        let cacheinfo = format!(
-            "040000,{},{}",
-            store_root.to_hex(),
-            crate::init::format_context::STORE_PATH
-        );
-        let output = self
-            .git_command()
-            .env("GIT_INDEX_FILE", index)
-            .args(["update-index", "--add", "--cacheinfo", &cacheinfo])
-            .output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(GraphError::GitCommandFailed);
-        }
+        // The base commit's own store entries are removed before the new
+        // subtree is bound, because a directory entry may not overlap the file
+        // entries the base contributed.
+        crate::bind_tree_entry_in_index(
+            || self.git_command(),
+            index,
+            crate::init::format_context::STORE_PATH,
+            "040000",
+            &store_root.to_hex(),
+        )
+        .map_err(|_| GraphError::GitCommandFailed)?;
         Ok(())
     }
 
@@ -3247,6 +3502,7 @@ pub struct RepositoryReadScope {
     owner_id: [u8; 16],
     cancelled: Arc<AtomicBool>,
     bytes_used: Arc<AtomicU64>,
+    structured_metadata_bytes_read: Arc<AtomicU64>,
     payload_bytes_written: Arc<AtomicU64>,
     objects_used: Arc<AtomicU64>,
     metadata_used: Arc<AtomicU64>,
@@ -3320,6 +3576,24 @@ impl RepositoryReadScope {
     /// metadata-only query reports zero while still having read the graph.
     pub fn payload_bytes_read(&self) -> u64 {
         self.bytes_used.load(AtomicOrdering::Acquire)
+    }
+    /// Cumulative bytes read from canonical inline/overflow ORP field tuples
+    /// and full structured descriptors. These are row/schema metadata, not
+    /// OVB-2 media payload.
+    pub fn structured_metadata_bytes_read(&self) -> u64 {
+        self.structured_metadata_bytes_read
+            .load(AtomicOrdering::Acquire)
+    }
+
+    fn charge_structured_metadata_read(&self, bytes: u64) -> Result<(), GraphError> {
+        self.structured_metadata_bytes_read
+            .fetch_update(
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+                |used| used.checked_add(bytes),
+            )
+            .map(|_| ())
+            .map_err(|_| GraphError::ReadQuotaExceeded)
     }
 
     /// Cumulative native Git objects this scope has charged to its owner,
@@ -4121,6 +4395,25 @@ pub enum RowIndexMutation {
     },
 }
 
+impl RowIndexMutation {
+    /// Removes a key from its canonical encoded form. The key must be present
+    /// in the pinned row map when the mutation is applied.
+    pub fn delete_canonical(key: &[u8]) -> Result<Self, GraphError> {
+        let key = crate::row_store::TypedKey::decode_canonical(key)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        Ok(Self::Delete { key })
+    }
+
+    /// Inserts a row from its canonical key and schema-independent field tuple.
+    /// The key must be absent from the pinned row map when the mutation is applied.
+    pub fn insert_canonical(key: &[u8], value: &[u8]) -> Result<Self, GraphError> {
+        let key = crate::row_store::TypedKey::decode_canonical(key)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let value = crate::row_store::RowValue::decode_canonical_fields(value.to_vec())
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        Ok(Self::Insert { key, value })
+    }
+}
 /// The measured outcome of one ORP-1 index maintenance pass.
 ///
 /// The object sets are disjoint by construction, so a caller can attribute new
@@ -5417,7 +5710,12 @@ pub(crate) fn load_format3_row_map(
             actual: schema_node.kind(),
         });
     };
-    reader.verify_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+    let schema_bytes = reader.read_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+    let descriptor =
+        SchemaDescriptor::decode(&schema_bytes).map_err(|_| GraphError::NonCanonicalData)?;
+    if schema_relation_id(&descriptor)? != relation_id {
+        return Err(GraphError::ContextMismatch);
+    }
 
 
     let rows_domain = canonical_domain(vec![
@@ -5460,6 +5758,28 @@ pub(crate) fn load_format3_row_map(
 
 
 
+
+fn schema_relation_id(schema: &SchemaDescriptor) -> Result<[u8; 16], GraphError> {
+    let relation_key = Raw::Int(1.into());
+    let Raw::Map(fields) = schema.raw() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let relation = fields
+        .iter()
+        .find(|(key, _)| key == &relation_key)
+        .map(|(_, value)| value)
+        .ok_or(GraphError::NonCanonicalData)?;
+    let Raw::Tag(37, relation) = relation else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let Raw::Bytes(bytes) = relation.as_ref() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| GraphError::NonCanonicalData)
+}
 
 fn canonical_domain(fields: Vec<CborValue>) -> Vec<u8> {
     canonical_value_bytes(&CborValue::Array(fields))
@@ -5680,6 +6000,36 @@ impl PinnedNativeGraphReader {
     }
 
 
+    fn read_full_byte_index(
+        &mut self,
+        root: &NativeObjectId,
+        expected_length: u64,
+        expected_digest: [u8; 32],
+    ) -> Result<Vec<u8>, GraphError> {
+        if expected_length > MAX_RANGE_METADATA_BYTES {
+            return Err(GraphError::MetadataQuotaExceeded);
+        }
+        let capacity =
+            usize::try_from(expected_length).map_err(|_| GraphError::MetadataQuotaExceeded)?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(capacity)
+            .map_err(|_| GraphError::MetadataQuotaExceeded)?;
+        let mut hasher = Sha256::new();
+        let (length, _) = self.walk_byte_index(
+            root,
+            None,
+            &mut hasher,
+            Some(&mut output),
+            Some(expected_length),
+        )?;
+        let digest: [u8; 32] = hasher.finalize().into();
+        if length != expected_length || digest != expected_digest {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        Ok(output)
+    }
+
     fn verify_full_byte_index(
         &mut self,
         root: &NativeObjectId,
@@ -5776,9 +6126,7 @@ impl PinnedNativeGraphReader {
             .map_err(|_| GraphError::GitCommandFailed)?;
         if !output.status.success() {
             return Err(match cat_file_object_id(args) {
-                Some(object_id) => GraphError::MissingObject {
-                    object_id: object_id.to_ascii_lowercase(),
-                },
+                Some(object_id) => absent_object_error(&self.repository, object_id),
                 None => GraphError::GitCommandFailed,
             });
         }
@@ -6653,30 +7001,49 @@ mod persisted_orp_tests {
         fixture_git_object(directory, "tree", &tree)
     }
 
-    fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
-        let directory = tempfile::tempdir().expect("create capture repository");
-        let graph = capture_context_in(directory.path());
-        (directory, graph)
-    }
-
-    /// Builds the capture fixture context for a repository path, creating the
-    /// repository if it does not exist yet. Every fixture object is
-    /// content-addressed and the owner identity is fixed, so the same path
-    /// yields the same context in a killed child and in the restarting parent
-    /// that reclaims its pin namespace.
-    fn capture_context_in(root: &Path) -> NativeGraphContext {
-        let init = Command::new("git")
-            .current_dir(root)
-            .args(["init", "--quiet", "--template="])
-            .status()
-            .expect("initialize capture repository");
-        assert!(init.success());
-
-        let schema_bytes = b"sealed capture test schema";
-        let schema_digest: [u8; 32] = Sha256::digest(schema_bytes).into();
-        let chunk = fixture_git_object(root, "blob", schema_bytes);
+    fn fixture_schema_node(
+        directory: &Path,
+        relation_id: [u8; 16],
+        include_blob_field: bool,
+    ) -> (NativeOid, [u8; 32]) {
+        // Each schema descriptor has its own relation identity and field layout.
+        let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
+        let field = |id: [u8; 16], name: &str, ty: Raw, role: u64| {
+            Raw::Array(vec![
+                uuid(id),
+                Raw::Text(name.to_owned()),
+                ty,
+                Raw::Int(role.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        let mut fields = vec![field(
+            [0x11; 16],
+            "id",
+            Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".to_owned())]),
+            0,
+        )];
+        if include_blob_field {
+            fields.push(field(
+                [0x22; 16],
+                "payload",
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Blob".to_owned())]),
+                1,
+            ));
+        }
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid(relation_id)),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid([0x11; 16])])),
+            (Raw::Int(3.into()), Raw::Array(fields)),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid fixture schema descriptor");
+        let schema_bytes = descriptor.encode().expect("canonical fixture schema bytes");
+        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let chunk = fixture_git_object(directory, "blob", &schema_bytes);
         let byte_root = fixture_git_node(
-            root,
+            directory,
             &NodeData::ByteIndex {
                 height: 0,
                 total_length: schema_bytes.len() as u64,
@@ -6688,17 +7055,54 @@ mod persisted_orp_tests {
             },
         );
         let schema_oid = fixture_git_node(
-            root,
+            directory,
             &NodeData::Schema {
                 encoded_length: schema_bytes.len() as u64,
                 schema_digest,
                 byte_root,
             },
         );
+        (schema_oid, schema_digest)
+    }
+
+    fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
+        let directory = tempfile::tempdir().expect("create capture repository");
+        let graph = capture_context_in(directory.path());
+        (directory, graph)
+    }
+    fn capture_test_context_with_blob_field() -> (tempfile::TempDir, NativeGraphContext) {
+        let directory = tempfile::tempdir().expect("create capture repository");
+        let graph = capture_context_in_with_blob_field(directory.path(), true);
+        (directory, graph)
+    }
+
+    /// Builds the capture fixture context for a repository path, creating the
+    /// repository if it does not exist yet. Every fixture object is
+    /// content-addressed and the owner identity is fixed, so the same path
+    /// yields the same context in a killed child and in the restarting parent
+    /// that reclaims its pin namespace.
+    fn capture_context_in(root: &Path) -> NativeGraphContext {
+        capture_context_in_with_blob_field(root, false)
+    }
+
+    fn capture_context_in_with_blob_field(
+        root: &Path,
+        include_blob_field: bool,
+    ) -> NativeGraphContext {
+        let init = Command::new("git")
+            .current_dir(root)
+            .args(["init", "--quiet", "--template="])
+            .status()
+            .expect("initialize capture repository");
+        assert!(init.success());
 
         let algorithm = GitHashAlgorithm::Sha1;
         let database_id = [0x31; 16];
         let relation_id = [0x32; 16];
+        // The schema descriptor binds relation identity and its complete field layout
+        // (Orna 1.1.0 Section 29).
+        let (schema_oid, schema_digest) =
+            fixture_schema_node(root, relation_id, include_blob_field);
         let primary_root = fixture_git_node(
             root,
             &NodeData::OrderedLeaf {
@@ -6869,6 +7273,27 @@ mod persisted_orp_tests {
         assert_eq!(loaded.version().primary_root(), &primary_root);
     }
 
+    #[test]
+    fn schema_relation_identity_is_read_from_descriptor() {
+        let relation_id = [0x42; 16];
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (
+                Raw::Int(1.into()),
+                Raw::Tag(37, Box::new(Raw::Bytes(relation_id.to_vec()))),
+            ),
+            (Raw::Int(2.into()), Raw::Array(Vec::new())),
+            (Raw::Int(3.into()), Raw::Array(Vec::new())),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid relation schema descriptor");
+
+        assert_eq!(
+            schema_relation_id(&descriptor).expect("extract relation identity"),
+            relation_id
+        );
+    }
+
     fn fixture_ref_exists(directory: &Path, reference: &str) -> bool {
         Command::new("git")
             .current_dir(directory)
@@ -6966,7 +7391,8 @@ mod persisted_orp_tests {
         array(&mut blob_reference, 5);
         uint(&mut blob_reference, 1);
         bytes(&mut blob_reference, &[0x55; 32]);
-        blob_reference.extend_from_slice(b"\x61x");
+        blob_reference.push(0x6A);
+        blob_reference.extend_from_slice(b"text/plain");
         null(&mut blob_reference);
         bytes(&mut blob_reference, descriptor_oid.as_bytes());
         let mut blob_fields = vec![0x81];
@@ -6984,7 +7410,8 @@ mod persisted_orp_tests {
         array(&mut malformed_oid_value, 5);
         uint(&mut malformed_oid_value, 1);
         bytes(&mut malformed_oid_value, &[0x55; 32]);
-        malformed_oid_value.extend_from_slice(b"\x61x");
+        malformed_oid_value.push(0x6A);
+        malformed_oid_value.extend_from_slice(b"text/plain");
         null(&mut malformed_oid_value);
         bytes(&mut malformed_oid_value, &[0x66; 19]);
         let mut malformed_oid_fields = vec![0x81];
@@ -7677,11 +8104,12 @@ mod persisted_orp_tests {
         let second_relation = [0x42; 16];
         let algorithm = graph.algorithm;
         let schema_oid = original.schema().schema_oid().clone();
-        let schema_digest = *original.schema().schema_digest();
+        let (second_schema_oid, second_schema_digest) =
+            fixture_schema_node(directory.path(), second_relation, false);
         let second_primary = fixture_git_node(
             directory.path(),
             &NodeData::OrderedLeaf {
-                domain: rows_domain(second_relation, schema_digest),
+                domain: rows_domain(second_relation, second_schema_digest),
                 entries: Vec::new(),
             },
         );
@@ -7689,7 +8117,11 @@ mod persisted_orp_tests {
             CborValue::Text("relations".to_owned()),
             CborValue::Bytes(original.database_id().to_vec()),
         ]));
-        let relation_entry = |relation_id: [u8; 16], primary_root: &NativeOid| {
+        let relation_entry = |
+            relation_id: [u8; 16],
+            schema_oid: &NativeOid,
+            primary_root: &NativeOid,
+        | {
             OrderedLeafEntry {
                 key: TypedKey::Bytes(relation_id.to_vec())
                     .canonical_bytes()
@@ -7707,8 +8139,12 @@ mod persisted_orp_tests {
             &NodeData::OrderedLeaf {
                 domain: relation_domain,
                 entries: vec![
-                    relation_entry(*original.relation_id(), original.primary_root()),
-                    relation_entry(second_relation, &second_primary),
+                    relation_entry(
+                        *original.relation_id(),
+                        &schema_oid,
+                        original.primary_root(),
+                    ),
+                    relation_entry(second_relation, &second_schema_oid, &second_primary),
                 ],
             },
         );
@@ -7961,6 +8397,110 @@ mod persisted_orp_tests {
         assert_eq!(metadata.media_type(), "text/plain");
         assert_eq!(metadata.suffix(), None);
         assert_eq!(scope.payload_bytes_read_for_test(), 0);
+    }
+
+    #[test]
+    fn candidate_row_annotation_must_be_the_admitted_canonical_pair() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"candidate annotation is bound to its pin";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+        let transfer = pin.transfer_record();
+        let identity = transfer.content_identity();
+
+        let stored_row = |media_type: &str, suffix: Option<&str>| {
+            let mut row = Vec::new();
+            array(&mut row, 1);
+            cbor_head(&mut row, 6, 60111);
+            array(&mut row, 5);
+            uint(&mut row, identity.length());
+            bytes(&mut row, &identity.sha256());
+            cbor_head(&mut row, 3, media_type.len() as u64);
+            row.extend_from_slice(media_type.as_bytes());
+            match suffix {
+                Some(suffix) => {
+                    cbor_head(&mut row, 3, suffix.len() as u64);
+                    row.extend_from_slice(suffix.as_bytes());
+                }
+                None => null(&mut row),
+            }
+            bytes(&mut row, transfer.descriptor_oid().as_bytes());
+            row
+        };
+
+        let admitted = decode_candidate_blob_metadata(
+            &stored_row("text/plain", None),
+            &transfer,
+            "text/plain",
+            None,
+        )
+        .expect("the admitted annotation binds the candidate row");
+        assert_eq!(admitted.media_type(), "text/plain");
+        assert_eq!(admitted.suffix(), None);
+        assert_eq!(admitted.content_identity(), identity);
+
+        let annotated = decode_candidate_blob_metadata(
+            &stored_row("audio/mpeg", Some("mp2")),
+            &transfer,
+            "audio/mpeg",
+            Some("mp2"),
+        )
+        .expect("a matching annotated pair binds the candidate row");
+        assert_eq!(annotated.media_type(), "audio/mpeg");
+        assert_eq!(annotated.suffix(), Some("mp2"));
+
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("TEXT/PLAIN", None),
+                &transfer,
+                "TEXT/PLAIN",
+                None,
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
+        // An explicit suffix equal to the type's default is parseable but not
+        // canonical MIME-1, so it cannot bind even when the pin admits it.
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("text/plain", Some("txt")),
+                &transfer,
+                "text/plain",
+                Some("txt"),
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("image/png", None),
+                &transfer,
+                "text/plain",
+                None,
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("audio/mpeg", Some("mp2")),
+                &transfer,
+                "text/plain",
+                None,
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
+        assert!(matches!(
+            decode_candidate_blob_metadata(
+                &stored_row("text/plain", None),
+                &transfer,
+                "text/plain",
+                Some("txt"),
+            ),
+            Err(GraphError::InvalidBlobAnnotation)
+        ));
     }
 
     #[test]
@@ -8471,8 +9011,119 @@ mod persisted_orp_tests {
     }
 
     #[test]
-    fn prior_root_captured_blob_is_rejected_before_later_graph_reads() {
+    fn foreign_root_row_is_rejected_before_graph_reads() {
         let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let foreign_root =
+            NativeObjectId::new(graph.algorithm, &[0x55; 20]).expect("foreign root OID");
+        let foreign_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            foreign_root.clone(),
+            admitted_version.schema().clone(),
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent foreign-root version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &foreign_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.resolve_row_node(&row, &foreign_root, &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
+    }
+
+    #[test]
+    fn schema_generation_mismatch_is_rejected_before_native_lookup() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let stale_schema = crate::row_store::SchemaGeneration::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.schema().schema_oid().clone(),
+            *admitted_version.schema().schema_digest(),
+            admitted_version
+                .schema()
+                .generation()
+                .checked_add(1)
+                .expect("fixture schema generation has room"),
+        );
+        let stale_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.store_root().clone(),
+            stale_schema,
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent stale schema version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &stale_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.resolve_row_node(&row, admitted_version.primary_root(), &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
+    }
+
+    #[test]
+    fn schema_generation_mismatch_is_rejected_before_row_history_lookup() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let stale_schema = crate::row_store::SchemaGeneration::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.schema().schema_oid().clone(),
+            *admitted_version.schema().schema_digest(),
+            admitted_version
+                .schema()
+                .generation()
+                .checked_add(1)
+                .expect("fixture schema generation has room"),
+        );
+        let stale_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.store_root().clone(),
+            stale_schema,
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent stale schema version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &stale_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.list_row_revisions(&row, "HEAD", 1, &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
+    }
+
+    #[test]
+    fn prior_root_captured_blob_is_rejected_before_later_graph_reads() {
+        let (_directory, graph) = capture_test_context_with_blob_field();
         let capture_scope = graph.open_read_scope().expect("capture scope");
         let payload = b"captured OGB-2 payload on the earlier StoreRoot";
         let candidate = graph
@@ -8498,7 +9149,7 @@ mod persisted_orp_tests {
                 &source_version,
                 &[RowIndexMutation::Insert {
                     key: row_key.clone(),
-                    value: blob_value,
+                    value: blob_value.clone(),
                 }],
                 &capture_scope,
             )
@@ -8537,8 +9188,7 @@ mod persisted_orp_tests {
                 source_graph.row_snapshot.version(),
                 &[RowIndexMutation::Insert {
                     key: TypedKey::Text("later".to_owned()),
-                    value: RowValue::decode_canonical_fields(vec![0x80])
-                        .expect("canonical empty later row"),
+                    value: blob_value,
                 }],
                 &source_scope,
             )
@@ -8822,6 +9472,206 @@ mod persisted_orp_tests {
         assert_eq!(rewrite.row_count(), 301);
         assert_eq!(rewrite_scope.payload_bytes_read(), 0);
     }
+
+    fn fixture_git_stdout(directory: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(args)
+            .output()
+            .expect("run fixture git command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git prints UTF-8")
+            .trim()
+            .to_owned()
+    }
+
+    /// Removes one loose object file, so its payload stops being local while
+    /// its id stays usable. The capture fixtures write with `git hash-object -w`
+    /// and never repack, so every fixture object is loose.
+    fn remove_loose_object(directory: &Path, oid: &NativeOid) -> bool {
+        let hex = oid.to_hex();
+        let path = directory
+            .join(".git")
+            .join("objects")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        if !path.is_file() {
+            return false;
+        }
+        std::fs::remove_file(path).expect("remove deferred loose object");
+        true
+    }
+
+    fn fixture_object_is_absent(directory: &Path, oid: &NativeOid) -> bool {
+        !Command::new("git")
+            .current_dir(directory)
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "-e", &oid.to_hex()])
+            .output()
+            .expect("probe fixture object")
+            .status
+            .success()
+    }
+
+    /// True when local promisor evidence proves the id reachable, using exactly
+    /// the walk `Repository::observe_git_object` performs. A configuration-only
+    /// repository never satisfies this.
+    fn fixture_promisor_evidence(directory: &Path, oid: &NativeOid) -> bool {
+        let promised = format!("?{}", oid.to_hex());
+        fixture_git_stdout(
+            directory,
+            &[
+                "rev-list",
+                "--objects",
+                "--missing=print",
+                "--no-object-names",
+                "--all",
+            ],
+        )
+        .lines()
+        .any(|line| line.eq_ignore_ascii_case(&promised))
+    }
+
+    /// Defers one object through local promisor evidence: a commit keeps the id
+    /// reachable, `origin` is a promisor remote, and the payload is removed.
+    /// No network access, clone or fetch is involved.
+    fn defer_object_through_a_promisor(directory: &Path, oid: &NativeOid) {
+        let entry = format!("040000 tree {}\tstore\n", oid.to_hex());
+        let mut child = Command::new("git")
+            .current_dir(directory)
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["mktree"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn fixture mktree");
+        child
+            .stdin
+            .take()
+            .expect("mktree stdin")
+            .write_all(entry.as_bytes())
+            .expect("write fixture tree entry");
+        let output = child.wait_with_output().expect("wait for fixture mktree");
+        assert!(
+            output.status.success(),
+            "git mktree failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let tree = String::from_utf8(output.stdout).expect("mktree prints UTF-8");
+        let commit = fixture_git_stdout(
+            directory,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit-tree",
+                tree.trim(),
+                "-m",
+                "deferred",
+            ],
+        );
+        fixture_git_stdout(
+            directory,
+            &["update-ref", "refs/heads/main", commit.as_str()],
+        );
+        fixture_git_stdout(directory, &["remote", "add", "origin", "."]);
+        fixture_git_stdout(directory, &["config", "remote.origin.promisor", "true"]);
+        fixture_git_stdout(
+            directory,
+            &["config", "remote.origin.partialclonefilter", "blob:none"],
+        );
+        fixture_git_stdout(directory, &["config", "extensions.partialClone", "origin"]);
+        assert!(
+            remove_loose_object(directory, oid),
+            "a deferred object must still be a loose object"
+        );
+    }
+
+    #[test]
+    fn partial_clone_object_availability_is_observed_without_hydration() {
+        let (directory, graph) = capture_test_context();
+        let store_root = graph.store_root().clone();
+        let scope = graph.open_read_scope().expect("availability scope");
+        assert_eq!(
+            graph
+                .observe_object_availability(&scope, &store_root)
+                .expect("observe a materialized store root"),
+            ObjectAvailability::Materialized
+        );
+
+        defer_object_through_a_promisor(directory.path(), &store_root);
+        assert!(fixture_object_is_absent(directory.path(), &store_root));
+        assert!(fixture_promisor_evidence(directory.path(), &store_root));
+
+        let promised_scope = graph.open_read_scope().expect("promised scope");
+        assert_eq!(
+            graph
+                .observe_object_availability(&promised_scope, &store_root)
+                .expect("observe a deferred object"),
+            ObjectAvailability::Promised
+        );
+        // Promisor configuration alone never promises an id nothing references.
+        let unreferenced = NativeOid::from_hex(graph.algorithm, &"2a".repeat(20))
+            .expect("valid unreferenced object id");
+        assert_eq!(
+            graph
+                .observe_object_availability(&promised_scope, &unreferenced)
+                .expect("observe an unreferenced object"),
+            ObjectAvailability::Unavailable
+        );
+        assert!(fixture_object_is_absent(directory.path(), &store_root));
+        assert_eq!(promised_scope.payload_bytes_read(), 0);
+    }
+
+    #[test]
+    fn a_deferred_node_reads_as_promised_and_never_as_an_unknown_missing_object() {
+        let (directory, graph) = capture_test_context();
+        let store_root = graph.store_root().clone();
+        defer_object_through_a_promisor(directory.path(), &store_root);
+
+        let scope = graph.open_read_scope().expect("deferred read scope");
+        let error = graph
+            .object_stats(&scope)
+            .expect_err("a deferred node cannot be read locally");
+        assert!(
+            matches!(
+                &error,
+                GraphError::PromisedObjectNotMaterialized { object_id }
+                    if *object_id == store_root.to_hex()
+            ),
+            "{error:?}"
+        );
+        assert_eq!(error.exit_code(), 3);
+        assert_eq!(scope.payload_bytes_read(), 0);
+        // The read named the deferred object without hydrating it.
+        assert!(fixture_object_is_absent(directory.path(), &store_root));
+
+        // The same read on an object nothing references, and no promisor remote
+        // configured, stays a plain missing object.
+        let (plain_directory, plain_graph) = capture_test_context();
+        let plain_root = plain_graph.store_root().clone();
+        assert!(remove_loose_object(plain_directory.path(), &plain_root));
+        let plain_scope = plain_graph.open_read_scope().expect("plain read scope");
+        let plain_error = plain_graph
+            .object_stats(&plain_scope)
+            .expect_err("an absent node cannot be read locally");
+        assert!(
+            matches!(
+                &plain_error,
+                GraphError::MissingObject { object_id } if *object_id == plain_root.to_hex()
+            ),
+            "{plain_error:?}"
+        );
+        assert_eq!(plain_error.exit_code(), 3);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -8888,6 +9738,13 @@ pub enum GraphError {
     },
     UnavailableObject,
     UnknownObjectAvailability,
+    /// A required native object is deferred by a partial clone. Local promisor
+    /// evidence proves the id is reachable through a promisor remote, but its
+    /// payload is not materialized. A read never fetches it implicitly, so this
+    /// state stays distinct from an unknown missing object (ORNA-GIT-002).
+    PromisedObjectNotMaterialized {
+        object_id: String,
+    },
     /// A `cat-file` read named one object that is absent from this repository.
     /// The id is carried so a payload read of an object an offline copy does
     /// not hold names what is missing instead of reporting an anonymous
@@ -8998,6 +9855,12 @@ impl fmt::Display for GraphError {
                 )
             }
             Self::UnknownObjectAvailability => f.write_str("native object availability is unknown"),
+            Self::PromisedObjectNotMaterialized { object_id } => {
+                write!(
+                    f,
+                    "native object {object_id} is promised by a partial clone, not materialized"
+                )
+            }
             Self::LegacyFormatReadOnly(format) => {
                 write!(f, "repository format {format} is reader-only")
             }
@@ -9017,6 +9880,35 @@ fn cat_file_object_id<'a>(args: &[&'a str]) -> Option<&'a str> {
     }
     let object_id = *args.last()?;
     (!object_id.starts_with('-')).then_some(object_id)
+}
+
+/// Maps this repository's local Git observation of one object id onto the
+/// graph's availability classification. Nothing is fetched or hydrated:
+/// `observe_git_object` runs git with lazy fetch disabled and proves a promised
+/// id through local promisor evidence only. An unreadable or malformed object
+/// database stays `Unknown` rather than being reported as absent.
+fn observed_object_availability(
+    repository: &crate::Repository,
+    object_id: &str,
+) -> ObjectAvailability {
+    match repository.observe_git_object(object_id) {
+        Ok(crate::GitObjectState::Materialized { .. }) => ObjectAvailability::Materialized,
+        Ok(crate::GitObjectState::Promised) => ObjectAvailability::Promised,
+        Ok(crate::GitObjectState::Unavailable) => ObjectAvailability::Unavailable,
+        Ok(crate::GitObjectState::Malformed) | Err(_) => ObjectAvailability::Unknown,
+    }
+}
+
+/// The error for one object id this repository cannot read locally. A partial
+/// clone that defers the payload is reported as promised, so it is never
+/// conflated with an object the repository does not know at all (ORNA-GIT-002).
+/// The id is always named.
+fn absent_object_error(repository: &crate::Repository, object_id: &str) -> GraphError {
+    let object_id = object_id.to_ascii_lowercase();
+    match observed_object_availability(repository, &object_id) {
+        ObjectAvailability::Promised => GraphError::PromisedObjectNotMaterialized { object_id },
+        _ => GraphError::MissingObject { object_id },
+    }
 }
 
 impl std::error::Error for GraphError {}
@@ -9052,6 +9944,7 @@ impl GraphError {
             Self::UnknownObjectAvailability
                 | Self::ObjectUnavailable
                 | Self::UnavailableObject
+                | Self::PromisedObjectNotMaterialized { .. }
                 | Self::MissingObject { .. }
                 | Self::MissingReference
         )
@@ -9326,6 +10219,51 @@ fn leaf_value_dependencies(
 struct VerifiedValueOverflow {
     reference: crate::row_store::ValueOverflowRef,
     semantic_value: CborValue,
+    encoded_value: Option<Vec<u8>>,
+}
+
+fn stored_field_object_ids(descriptor: &SchemaDescriptor) -> Result<Vec<[u8; 16]>, GraphError> {
+    let Raw::Map(schema) = descriptor.raw() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let fields_key = Raw::Int(3u8.into());
+    let Raw::Array(declared_fields) = schema
+        .iter()
+        .find_map(|(key, value)| (key == &fields_key).then_some(value))
+        .ok_or(GraphError::NonCanonicalData)?
+    else {
+        return Err(GraphError::NonCanonicalData);
+    };
+
+    let stored_role = Raw::Int(1u8.into());
+    let mut identities = Vec::new();
+    let mut unique = BTreeSet::new();
+    for field in declared_fields {
+        let Raw::Array(parts) = field else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let [identity, _, _, role, _flags] = parts.as_slice() else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        if role != &stored_role {
+            continue;
+        }
+        let Raw::Tag(37, identity) = identity else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let Raw::Bytes(identity) = identity.as_ref() else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let identity: [u8; 16] = identity
+            .as_slice()
+            .try_into()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        if !unique.insert(identity) {
+            return Err(GraphError::NonCanonicalData);
+        }
+        identities.push(identity);
+    }
+    Ok(identities)
 }
 
 /// Collects every OVB-2 Blob value reachable inside a canonical stored row
@@ -9367,6 +10305,7 @@ fn collect_blob_value_fields(
                 Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
                 _ => return Err(GraphError::NonCanonicalData),
             };
+            validate_canonical_mime1_annotation(media_type, suffix)?;
             let mut digest_bytes = [0u8; 32];
             digest_bytes.copy_from_slice(digest);
             let identity = crate::blob_store::ContentIdentity::new(*length, digest_bytes)
@@ -9420,6 +10359,8 @@ fn row_page_anchor(height: u8, key: &crate::row_store::TypedKey) -> Result<bool,
 fn decode_candidate_blob_metadata(
     encoded_row: &[u8],
     transfer: &ProtectedContentTransfer,
+    admitted_media_type: &str,
+    admitted_suffix: Option<&str>,
 ) -> Result<ProtectedBlobMetadata, GraphError> {
     let CborValue::Array(mut fields) = decode_canonical_cbor(encoded_row)? else {
         return Err(GraphError::NonCanonicalData);
@@ -9466,6 +10407,12 @@ fn decode_candidate_blob_metadata(
         CborValue::Text(suffix) => Some(suffix.clone()),
         _ => unreachable!("suffix variant checked above"),
     };
+    bind_candidate_blob_annotation(
+        media_type,
+        suffix.as_deref(),
+        admitted_media_type,
+        admitted_suffix,
+    )?;
     Ok(ProtectedBlobMetadata {
         content_identity: identity,
         media_type: media_type.clone(),
@@ -9516,6 +10463,39 @@ fn collect_overflow_oids(
     Ok(())
 }
 
+fn validate_canonical_mime1_annotation(
+    media_type: &str,
+    suffix: Option<&str>,
+) -> Result<(), GraphError> {
+    let annotation =
+        MediaAnnotation::new(media_type, suffix).map_err(|_| GraphError::InvalidBlobAnnotation)?;
+    if annotation.media_type() != media_type || annotation.suffix() != suffix {
+        return Err(GraphError::InvalidBlobAnnotation);
+    }
+    Ok(())
+}
+
+/// Binds the annotation of a candidate row to the annotation its pin was
+/// admitted with.
+///
+/// The transfer record carries content identity alone, so the row's own bytes
+/// are the only place a candidate annotation appears. Accepting whatever that
+/// row spells would let a candidate claim an annotation the pin never admitted,
+/// so the stored spelling must be canonical MIME-1 and must equal the admitted
+/// `(media_type, suffix)` pair exactly.
+fn bind_candidate_blob_annotation(
+    stored_media_type: &str,
+    stored_suffix: Option<&str>,
+    admitted_media_type: &str,
+    admitted_suffix: Option<&str>,
+) -> Result<(), GraphError> {
+    validate_canonical_mime1_annotation(stored_media_type, stored_suffix)?;
+    if stored_media_type != admitted_media_type || stored_suffix != admitted_suffix {
+        return Err(GraphError::InvalidBlobAnnotation);
+    }
+    Ok(())
+}
+
 pub(crate) fn row_fields_dependencies(value: &[u8]) -> Result<Vec<NativeDependency>, GraphError> {
     let parsed = decode_canonical_cbor(value)?;
     if !matches!(parsed, CborValue::Array(_) | CborValue::Tag(60113, _)) {
@@ -9552,6 +10532,15 @@ fn collect_row_dependencies(
             {
                 return Err(GraphError::NonCanonicalData);
             }
+            let Some(CborValue::Text(media_type)) = fields.get(2) else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            let suffix = match fields.get(3) {
+                Some(CborValue::Null) => None,
+                Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
+                _ => return Err(GraphError::NonCanonicalData),
+            };
+            validate_canonical_mime1_annotation(media_type, suffix)?;
             let CborValue::Bytes(oid_bytes) = fields.get(4).ok_or(GraphError::NonCanonicalData)?
             else {
                 return Err(GraphError::NonCanonicalData);

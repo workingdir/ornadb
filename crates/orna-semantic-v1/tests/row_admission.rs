@@ -1,9 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use orna_semantic_v1::{
-    admit_row_unit, analyze, Analysis, DIAG_ASSERTION_EFFECT, DIAG_BAD_PATH, DIAG_TYPE,
-    DIAG_UNRESOLVED, DIAG_UNSUPPORTED, ModuleInput, RowUnitInput,
+    Analysis, DIAG_ASSERTION_EFFECT, DIAG_BAD_PATH, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
+    ModuleInput, ObjectIdentityManifest, ObjectKind, RowUnitInput, admit_row_unit, analyze,
+    lower_row_unit, lower_row_unit_with_owner_fields,
 };
+use orna_value_v1::{Raw, Value};
 
 fn analysis_for(source: &str) -> Analysis {
     analyze(&[ModuleInput::new("contacts/main.orna", source)])
@@ -27,7 +29,10 @@ fn candidate<'a>(
 
 fn assert_code(admission: &orna_semantic_v1::RowUnitAdmission, code: &str) {
     assert!(
-        admission.diagnostics.iter().any(|diagnostic| diagnostic.code() == code),
+        admission
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == code),
         "expected {code}, got {:?}",
         admission.diagnostics
     );
@@ -45,9 +50,7 @@ fn assert_message(admission: &orna_semantic_v1::RowUnitAdmission, code: &str, me
 }
 
 fn contact_analysis() -> Analysis {
-    analysis_for(
-        include_str!("fixtures/contact-schema.orna"),
-    )
+    analysis_for(include_str!("fixtures/contact-schema.orna"))
 }
 
 #[test]
@@ -76,6 +79,79 @@ fn valid_schema_backed_row_unit_is_admitted() {
             ("name".to_owned(), orna_semantic_v1::Type::Text),
         ])
     );
+}
+
+#[test]
+fn three_source_rows_lower_to_distinct_canonical_keys_and_full_fields() {
+    let analysis = contact_analysis();
+    let rows = [
+        (
+            "ada",
+            "Ada Lovelace",
+            include_str!("fixtures/source-row-contact.orna"),
+        ),
+        (
+            "grace",
+            "Grace Hopper",
+            include_str!("fixtures/source-row-contact-grace.orna"),
+        ),
+        (
+            "alan",
+            "Alan Turing",
+            include_str!("fixtures/source-row-contact-alan.orna"),
+        ),
+    ];
+    let mut keys = BTreeSet::new();
+    for (key, name, source) in rows {
+        let key_path = [format!("{key}.orna")];
+        let logical_path = format!("contacts/Contact/{}", key_path[0]);
+        let row = candidate(&logical_path, "contacts/Contact", &key_path, source);
+        let lowered = lower_row_unit(&analysis, &row).expect("admitted source row lowers");
+
+        assert_eq!(lowered.owner, "contacts/Contact");
+        assert_eq!(
+            Value::decode(&lowered.canonical_key).unwrap().raw(),
+            &Raw::Text(key.to_owned()),
+        );
+        assert_eq!(
+            lowered.fields.get("name"),
+            Some(&Raw::Text(name.to_owned())),
+        );
+        assert!(
+            matches!(lowered.fields.get("emails"), Some(Raw::Array(values)) if values.iter().all(|value| matches!(value, Raw::Text(_))))
+        );
+        keys.insert(lowered.canonical_key);
+    }
+    assert_eq!(keys.len(), 3);
+}
+
+#[test]
+fn canonical_object_blob_row_keeps_source_size_for_owner_binding() {
+    let modules = [ModuleInput::new(
+        "main.orna",
+        include_str!("fixtures/source-row-object-schema.orna"),
+    )];
+    let analysis = analyze(&modules);
+    assert!(analysis.is_ok());
+    let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
+    let table_id = identities.id(ObjectKind::Table, "Object").unwrap();
+    let field_ids = ["Object.id", "Object.payload", "Object.size"]
+        .map(|name| *identities.id(ObjectKind::Column, name).unwrap());
+    assert!(field_ids.iter().all(|id| id != table_id));
+    let key_path = ["pixel.orna".to_owned()];
+    let source = include_str!("fixtures/source-row-object-pixel.orna");
+    let row = candidate("Object/pixel.orna", "Object", &key_path, source);
+
+    let owner_fields = ["size".to_owned()];
+    let lowered = lower_row_unit_with_owner_fields(&analysis, &row, &owner_fields)
+        .expect("Object source row leaves its MiB field to the authorized Blob owner");
+
+    assert_eq!(lowered.owner, "Object");
+    assert_eq!(
+        Value::decode(&lowered.canonical_key).unwrap().raw(),
+        &Raw::Text("pixel".into()),
+    );
+    assert!(lowered.fields.is_empty());
 }
 
 #[test]
@@ -198,16 +274,8 @@ fn row_unit_rejects_malformed_key_escape() {
     );
 }
 
-fn reading_candidate<'a>(
-    logical_path: &'a str,
-    key_path: &'a [String],
-) -> RowUnitInput<'a> {
-    candidate(
-        logical_path,
-        "contacts/Reading",
-        key_path,
-        "{ value: 1.5 }",
-    )
+fn reading_candidate<'a>(logical_path: &'a str, key_path: &'a [String]) -> RowUnitInput<'a> {
+    candidate(logical_path, "contacts/Reading", key_path, "{ value: 1.5 }")
 }
 
 #[test]
@@ -226,15 +294,11 @@ fn row_unit_rejects_missing_extra_ordered_and_mistyped_keys() {
 
     for key_path in cases {
         let logical_path = format!("contacts/Reading/{}", key_path.join("/"));
-        let admitted = admit_row_unit(
-            &analysis,
-            &reading_candidate(&logical_path, &key_path),
-        );
+        let admitted = admit_row_unit(&analysis, &reading_candidate(&logical_path, &key_path));
         assert!(!admitted.is_ok(), "unexpected admission for {key_path:?}");
         assert_code(&admitted, DIAG_TYPE);
     }
 }
-
 
 #[test]
 fn row_unit_rejects_wrong_unknown_and_missing_non_key_fields() {
