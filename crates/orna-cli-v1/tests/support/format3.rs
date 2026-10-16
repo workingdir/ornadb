@@ -10,7 +10,7 @@ use std::{
 
 use orna_conformance_v1::DurableTransactionalEvaluator;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::{Repository, TypedKey};
+use orna_repository_v1::Repository;
 use orna_runtime_v1::RuntimeState;
 use orna_storage_v1::LoosePath;
 use sha2::{Digest, Sha256};
@@ -189,12 +189,7 @@ fn format3_repository_parts(
     relation_map.extend_from_slice(&relation_domain);
     relation_map.push(0x81);
     relation_map.push(0x82);
-    append_cbor_bytes(
-        &mut relation_map,
-        &TypedKey::Bytes(relation_id.to_vec())
-            .canonical_bytes()
-            .expect("the relation ID has a canonical typed key"),
-    );
+    append_cbor_bytes(&mut relation_map, &relation_id);
     relation_map.push(0x84);
     append_cbor_bytes(&mut relation_map, &git_oid_bytes(&schema_oid));
     append_cbor_bytes(&mut relation_map, &git_oid_bytes(&row_root_oid));
