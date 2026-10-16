@@ -599,13 +599,10 @@ fn admit_source_row_with_owner_fields_inner(
         return Err(ProjectLoadError::InvalidSourceRow);
     }
 
-    let canonical_fields = ContextValue::new_in_context(
-        context,
-        ValueFormat::Rov3,
-        Raw::Array(stored_fields),
-    )
-    .and_then(|value| value.encode())
-    .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    let canonical_fields =
+        ContextValue::new_in_context(context, ValueFormat::Rov3, Raw::Array(stored_fields))
+            .and_then(|value| value.encode())
+            .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     schema
         .descriptor()
         .validate_stored_row(
@@ -2166,6 +2163,7 @@ mod source_row_admission_tests {
 #[cfg(test)]
 mod committed_loose_row_projection_tests {
     use super::*;
+    use orna_value_v1::Value;
     use std::{path::Path, process::Command};
 
     fn git(root: &Path, args: &[&str]) {
