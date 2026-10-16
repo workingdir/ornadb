@@ -4466,7 +4466,7 @@ mod graph_bridge_tests {
             .protect_captured_blob(candidate, &write_scope)
             .expect("verify and durably protect the OGB-2 closure");
         let binding = graph
-            .accept_protected_blob_pin_with_annotation(pin, "audio/wav", Some("wav"))
+            .accept_protected_blob_pin_with_annotation(pin, "audio/mpeg", Some("mp2"))
             .expect("accept the durable pin as an annotated ORP Blob binding");
         let identity = binding.content_identity();
         let descriptor_oid = binding.descriptor_oid().clone();
@@ -4537,8 +4537,8 @@ mod graph_bridge_tests {
         assert_eq!(key, TypedKey::UInt(7));
         assert_eq!(metadata.length(), identity.length());
         assert_eq!(metadata.sha256(), identity.sha256());
-        assert_eq!(metadata.media_type(), "audio/wav");
-        assert_eq!(metadata.suffix(), Some("wav"));
+        assert_eq!(metadata.media_type(), "audio/mpeg");
+        assert_eq!(metadata.suffix(), Some("mp2"));
         assert!(!metadata.is_hydrated(), "projection never holds the bytes");
         assert_eq!(
             scope.payload_bytes_read(),
@@ -4702,8 +4702,8 @@ mod graph_bridge_tests {
             relation_id,
             key,
             &payload,
-            "audio/wav",
-            Some("wav"),
+            "audio/mpeg",
+            Some("mp2"),
             false,
         );
         let source_repository = Repository::discover(source_root).expect("discover source");
@@ -4751,8 +4751,8 @@ mod graph_bridge_tests {
         assert_eq!(metadata.length(), payload.len() as u64);
         let expected_sha: [u8; 32] = Sha256::digest(&payload).into();
         assert_eq!(metadata.sha256(), expected_sha);
-        assert_eq!(metadata.media_type(), "audio/wav");
-        assert_eq!(metadata.suffix(), Some("wav"));
+        assert_eq!(metadata.media_type(), "audio/mpeg");
+        assert_eq!(metadata.suffix(), Some("mp2"));
         assert_eq!(metadata_scope.payload_bytes_read(), 0);
 
         let payload_scope = graph.open_read_scope().expect("payload scope");
