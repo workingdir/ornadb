@@ -25,7 +25,7 @@ use orna_semantic_v1::{
 };
 use orna_syntax_v1::{Declaration, Expr, parse_module, parse_row};
 use orna_value_v1::{
-    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, ValueFormat, ROV3_BLOB_TAG,
+    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat, ROV3_BLOB_TAG,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -530,6 +530,25 @@ fn admit_source_row_with_owner_fields_inner(
     if &descriptor_table_id != schema.table.table_object_id() {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
+    schema
+        .descriptor()
+        .validate_stored_key(*schema.table.table_object_id(), &lowered.canonical_key)
+        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    let mut key_fields = fields.iter().filter(|field| field.role == 0);
+    let is_text_primary_key = match (key_fields.next(), key_fields.next()) {
+        (Some(field), None) => field.is_text,
+        _ => false,
+    };
+    let mutation_key = if is_text_primary_key {
+        let key = Value::decode(&lowered.canonical_key)
+            .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+        let Raw::Text(key) = key.raw() else {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        };
+        key.as_bytes().to_vec()
+    } else {
+        lowered.canonical_key.clone()
+    };
     for field_name in &owner_field_names {
         if !fields
             .iter()
@@ -617,7 +636,7 @@ fn admit_source_row_with_owner_fields_inner(
     let mut mutation = TableMutation::insert(
         mutation_id,
         table_name.clone(),
-        lowered.canonical_key.clone(),
+        mutation_key,
         canonical_fields.clone(),
     )
     .map_err(|_| ProjectLoadError::InvalidSourceRow)?
@@ -643,6 +662,7 @@ struct SourceSchemaField {
     role: u64,
     is_blob: bool,
     is_optional_blob: bool,
+    is_text: bool,
 }
 
 fn source_schema_blob_optional(ty: &Raw) -> Option<bool> {
@@ -693,6 +713,12 @@ fn source_schema_fields(
             role,
             is_blob: blob_optional.is_some(),
             is_optional_blob: blob_optional == Some(true),
+            is_text: matches!(
+                ty,
+                Raw::Array(parts)
+                    if matches!(parts.as_slice(), [Raw::Int(kind), Raw::Text(name)]
+                        if kind.to_string() == "0" && name == "Str")
+            ),
         });
     }
     Ok((table_id, fields))
