@@ -541,7 +541,7 @@ impl NativeGraphContext {
 
     /// Decodes the schema descriptor retained by this graph's sealed row map.
     /// The caller cannot substitute an OID or bytes from another snapshot.
-    pub(crate) fn read_schema_descriptor(
+    pub fn read_schema_descriptor(
         &self,
         scope: &RepositoryReadScope,
     ) -> Result<SchemaDescriptor, GraphError> {
@@ -3229,8 +3229,10 @@ impl NativeGraphContext {
     /// The store root is an OGS-1 tree, not a regular file, so the ordinary
     /// managed-file path cannot express it. This checks the supplied object is
     /// a real, fully decodable `StoreRoot` node first: a raw OID cannot be
-    /// planted at the store position. The caller keeps ownership of the index
-    /// file and of any later ref advancement.
+    /// planted at the store position. The base commit's own store entries are
+    /// removed before the new subtree is bound, because a directory entry may
+    /// not overlap the file entries the base contributed. The caller keeps
+    /// ownership of the index file and of any later ref advancement.
     pub(crate) fn pin_store_subtree_in_index(
         &self,
         index: &std::path::Path,
@@ -3257,20 +3259,17 @@ impl NativeGraphContext {
                 actual: node.kind(),
             });
         }
-        let cacheinfo = format!(
-            "040000,{},{}",
-            store_root.to_hex(),
-            crate::init::format_context::STORE_PATH
-        );
-        let output = self
-            .git_command()
-            .env("GIT_INDEX_FILE", index)
-            .args(["update-index", "--add", "--cacheinfo", &cacheinfo])
-            .output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(GraphError::GitCommandFailed);
-        }
+        // The base commit's own store entries are removed before the new
+        // subtree is bound, because a directory entry may not overlap the file
+        // entries the base contributed.
+        crate::bind_tree_entry_in_index(
+            || self.git_command(),
+            index,
+            crate::init::format_context::STORE_PATH,
+            "040000",
+            &store_root.to_hex(),
+        )
+        .map_err(|_| GraphError::GitCommandFailed)?;
         Ok(())
     }
 
@@ -4335,6 +4334,25 @@ pub enum RowIndexMutation {
     },
 }
 
+impl RowIndexMutation {
+    /// Removes a key from its canonical encoded form. The key must be present
+    /// in the pinned row map when the mutation is applied.
+    pub fn delete_canonical(key: &[u8]) -> Result<Self, GraphError> {
+        let key = crate::row_store::TypedKey::decode_canonical(key)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        Ok(Self::Delete { key })
+    }
+
+    /// Inserts a row from its canonical key and schema-independent field tuple.
+    /// The key must be absent from the pinned row map when the mutation is applied.
+    pub fn insert_canonical(key: &[u8], value: &[u8]) -> Result<Self, GraphError> {
+        let key = crate::row_store::TypedKey::decode_canonical(key)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let value = crate::row_store::RowValue::decode_canonical_fields(value.to_vec())
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        Ok(Self::Insert { key, value })
+    }
+}
 /// The measured outcome of one ORP-1 index maintenance pass.
 ///
 /// The object sets are disjoint by construction, so a caller can attribute new
