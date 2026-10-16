@@ -44,10 +44,7 @@ fn compact_schema(table: [u8; 16]) -> SchemaDescriptor {
     SchemaDescriptor::new(OvbRaw::Map(vec![
         (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
         (OvbRaw::Int(1.into()), uuid(table)),
-        (
-            OvbRaw::Int(2.into()),
-            OvbRaw::Array(vec![uuid(*field.as_bytes())]),
-        ),
+        (OvbRaw::Int(2.into()), OvbRaw::Array(vec![uuid(*field.as_bytes())])),
         (
             OvbRaw::Int(3.into()),
             OvbRaw::Array(vec![OvbRaw::Array(vec![
@@ -89,19 +86,6 @@ fn compact_columns() -> Vec<u8> {
     .unwrap()
 }
 
-fn replace_parquet_metadata(bytes: &mut [u8], old: &str, new: &str) {
-    assert_eq!(old.len(), new.len());
-    let old = old.as_bytes();
-    let positions = bytes
-        .windows(old.len())
-        .enumerate()
-        .filter_map(|(index, window)| (window == old).then_some(index))
-        .collect::<Vec<_>>();
-    let [position] = positions.as_slice() else {
-        panic!("expected one compact Parquet metadata value for {old:?}, found {}", positions.len());
-    };
-    bytes[*position..*position + old.len()].copy_from_slice(new.as_bytes());
-}
 
 fn fingerprint_text(fingerprint: [u8; 32]) -> String {
     fingerprint
@@ -112,33 +96,59 @@ fn fingerprint_text(fingerprint: [u8; 32]) -> String {
 
 fn compact_segment(table_id: [u8; 16]) -> (Uuid, [u8; 32], CompactSegment) {
     const PARQUET: &str = "UEFSMRUGFRAVEBWRgLnnCkwVAhUAFQIVABUAFQASAAABAAAAAAAAABkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTwWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklAAYZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY8FkgmCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABaCARUUFkQVPgAWPBYCJggWSBQAABl8GAxvcm5hLnByb2ZpbGUYEmNvbXBhY3Qtc3RvcmFnZS12MQAYCm9ybmEudGFibGUYJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAYEm9ybmEuc2NoZW1hLnNoYTI1NhhANThhMDg5NzBhZGMyMzE4N2U5Nzk0NDVlOTNiODQzN2ExNjI3ZWUxMDk0ZjI2NTg5YTJlZmVmZWE4NTFiMmExZQAYD29ybmEuc2NoZW1hLm92YhiYAXBRQUJBZGdsVUFBQUFBQUFBQUFBQUFBQUFBQUFBQUVDZ2RnbFVBR1BBQUFBQUhBQWdBQUFBQUFBQUFFRGdZWFlKVkFCandBQUFBQndBSUFBQUFBQUFBQUJlQ0ptWHpBeE9HWXdNREF3TURBd01EQXdNRE15TURBd01EQXdNREF3TURBd01EQXhnZ0JqU1c1MEFJRUFCSUE9ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBWFFDQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAA3AIAAFBBUjE=";
+    use bytes::Bytes;
+    use parquet::file::{
+        metadata::{FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataWriter},
+        reader::{FileReader, SerializedFileReader},
+    };
+
     let schema = compact_schema(table_id);
     let fingerprint = compact_schema_fingerprint(&schema);
     let table = Uuid::from_bytes(table_id);
     let id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-    let old_table = Uuid::from_u64_pair(0, 1);
-    let old_schema = compact_schema(*old_table.as_bytes());
-    let old_fingerprint = compact_schema_fingerprint(&old_schema);
-    let old_schema_bytes = old_schema.encode().unwrap();
-    let new_schema_bytes = schema.encode().unwrap();
-    let mut bytes = base64::engine::general_purpose::STANDARD
+    let original = base64::engine::general_purpose::STANDARD
         .decode(PARQUET)
         .unwrap();
-    replace_parquet_metadata(
-        &mut bytes,
-        old_table.to_string().as_str(),
-        table.to_string().as_str(),
+    let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
+    let file = reader.metadata().file_metadata();
+    let metadata = FileMetaData::new(
+        1,
+        file.num_rows(),
+        file.created_by().map(str::to_owned),
+        Some(vec![
+            KeyValue::new("orna.profile".into(), Some("compact-storage-v1".into())),
+            KeyValue::new("orna.table".into(), Some(table.to_string())),
+            KeyValue::new(
+                "orna.schema.sha256".into(),
+                Some(fingerprint_text(fingerprint)),
+            ),
+            KeyValue::new(
+                "orna.schema.ovb".into(),
+                Some(base64::engine::general_purpose::STANDARD.encode(schema.encode().unwrap())),
+            ),
+            KeyValue::new(
+                "orna.columns.ovb".into(),
+                Some(base64::engine::general_purpose::STANDARD.encode(compact_columns())),
+            ),
+            KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
+        ]),
+        file.schema_descr_ptr(),
+        file.column_orders().cloned(),
     );
-    replace_parquet_metadata(
-        &mut bytes,
-        &fingerprint_text(old_fingerprint),
-        &fingerprint_text(fingerprint),
-    );
-    replace_parquet_metadata(
-        &mut bytes,
-        &base64::engine::general_purpose::STANDARD.encode(old_schema_bytes),
-        &base64::engine::general_purpose::STANDARD.encode(new_schema_bytes),
-    );
+    let metadata = ParquetMetaData::new(metadata, reader.metadata().row_groups().to_vec());
+    let mut footer = Vec::new();
+    ParquetMetaDataWriter::new(&mut footer, &metadata)
+        .finish()
+        .unwrap();
+    let footer_start = original.len()
+        - 8
+        - u32::from_le_bytes(
+            original[original.len() - 8..original.len() - 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+    let mut bytes = original[..footer_start].to_vec();
+    bytes.extend(footer);
     let segment = CompactSegment::new(
         id,
         CompactSegmentRole::Data,
@@ -425,7 +435,7 @@ async fn publish_recovers_compact_journal_without_receipt_before_tail_selection(
         "media",
         CanonicalValue::int(1.into()).encode().unwrap(),
         Some(
-            CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Int(1.into())]))
+            CanonicalValue::new(OvbRaw::Array(Vec::new()))
                 .unwrap()
                 .encode()
                 .unwrap(),
@@ -496,7 +506,7 @@ async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
         "media",
         CanonicalValue::int(1.into()).encode().unwrap(),
         Some(
-            CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Int(1.into())]))
+            CanonicalValue::new(OvbRaw::Array(Vec::new()))
                 .unwrap()
                 .encode()
                 .unwrap(),
