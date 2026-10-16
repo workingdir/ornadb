@@ -122,6 +122,15 @@ impl ReplTransactionEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.handle_table_effect_with_blob_bindings(callee, arguments, BTreeMap::new())
+    }
+
+    fn handle_table_effect_with_blob_bindings(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        mut prebound_blob_bindings: BTreeMap<String, OrpBlobBinding>,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
         let Expr::Field { base, name, .. } = callee else {
             return self.mutations.handle(callee, arguments);
         };
@@ -137,7 +146,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
                 let [input_row] = arguments else {
                     return self.mutations.handle(callee, arguments);
                 };
-                if !contains_blob_value(&schema, input_row) {
+                if !contains_blob_value(&schema, input_row) && prebound_blob_bindings.is_empty() {
                     return self.mutations.handle(callee, arguments);
                 }
                 let row = self.mutations.complete_insert_row(&table, input_row, false)?;
@@ -178,7 +187,8 @@ impl ReplTransactionEffectHandler<'_, '_> {
                     .format_context
                     .open_value_context(object_id.bytes())
                     .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
-                let (row_source, blob_bindings) = self.row_source(&schema, &row)?;
+                let (row_source, blob_bindings) =
+                    self.row_source(&schema, &row, &mut prebound_blob_bindings)?;
                 let admitted = admit_source_row(
                     self.scope.project,
                     projection.logical_path(),
@@ -250,6 +260,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
         &self,
         schema: &TableSchema,
         row: &CanonicalValue,
+        prebound_blob_bindings: &mut BTreeMap<String, OrpBlobBinding>,
     ) -> Result<(String, Vec<(String, OrpBlobBinding)>), EvaluationError> {
         let OvbRaw::Map(values) = row.raw() else {
             return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
@@ -278,11 +289,14 @@ impl ReplTransactionEffectHandler<'_, '_> {
             if let Some(blob) = blob_value(ty, raw) {
                 match blob {
                     Some(blob) => {
-                        let value_context = ContextValue::new(ValueFormat::Ovb2, blob.clone())
-                            .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
-                        let binding = self
-                            .bindings
-                            .accept_captured_blob_for_row(&value_context)?;
+                        let binding = match prebound_blob_bindings.remove(name) {
+                            Some(binding) => binding,
+                            None => {
+                                let value_context = ContextValue::new(ValueFormat::Ovb2, blob.clone())
+                                    .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+                                self.bindings.accept_captured_blob_for_row(&value_context)?
+                            }
+                        };
                         bindings.push((name.clone(), binding));
                     }
                     None => fields.push(format!("{name}: null")),
@@ -293,6 +307,9 @@ impl ReplTransactionEffectHandler<'_, '_> {
                     source_literal(ty, raw)?
                 ));
             }
+        }
+        if !prebound_blob_bindings.is_empty() {
+            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
         }
         let source = if fields.is_empty() {
             "{}\n".to_owned()
@@ -309,7 +326,7 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = self.bindings.handle(callee, arguments)? {
+        if let Some(value) = EffectHandler::handle(self.bindings, callee, arguments)? {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
@@ -321,9 +338,12 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = self
-            .bindings
-            .handle_with_budget(callee, arguments, budget)?
+        if let Some(value) = EffectHandler::handle_with_budget(
+            self.bindings,
+            callee,
+            arguments,
+            budget,
+        )?
         {
             return Ok(Some(value));
         }
@@ -337,9 +357,13 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = self
-            .bindings
-            .handle_registered_with_budget(operation, callee, arguments, budget)?
+        if let Some(value) = EffectHandler::handle_registered_with_budget(
+            self.bindings,
+            operation,
+            callee,
+            arguments,
+            budget,
+        )?
         {
             return Ok(Some(value));
         }
@@ -354,32 +378,293 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
         cancellation: Option<&orna_evaluator_v1::CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = self
-            .bindings
-            .handle_registered_with_cancellation_and_budget(
-                operation,
-                callee,
-                arguments,
-                budget,
-                cancellation,
-            )?
+        if let Some(value) = EffectHandler::handle_registered_with_cancellation_and_budget(
+            self.bindings,
+            operation,
+            callee,
+            arguments,
+            budget,
+            cancellation,
+        )?
         {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
     }
+
+    fn is_ovb2_binding(&self) -> bool {
+        true
+    }
+
+    fn ovb2_binding(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
+        Some(self)
+    }
+}
+
+impl ReplTransactionEffectHandler<'_, '_> {
+    fn canonical_arguments(
+        arguments: &[ContextValue],
+    ) -> Result<Vec<CanonicalValue>, EvaluationError> {
+        arguments
+            .iter()
+            .map(|value| {
+                if value.format() != ValueFormat::Ovb2 || value.context().is_some() {
+                    return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
+                }
+                CanonicalValue::new(value.raw().clone())
+                    .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))
+            })
+            .collect()
+    }
+
+    fn contextualize_canonical_result(
+        value: Option<CanonicalValue>,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        value
+            .map(|value| {
+                ContextValue::new(ValueFormat::Ovb2, value.raw().clone())
+                    .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))
+            })
+            .transpose()
+    }
+
+    fn handle_contextual_blob_insert(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        let Expr::Field { base, name, .. } = callee else {
+            return Ok(None);
+        };
+        if name != "insert" {
+            return Ok(None);
+        }
+        let Some(path) = expression_name_path(base) else {
+            return Ok(None);
+        };
+        let Some(table) = self.mutations.admitted_table_name(&path).map(str::to_owned) else {
+            return Ok(None);
+        };
+        let [input_row] = arguments else {
+            return Ok(None);
+        };
+        let schema = self.mutations.table(&table)?.clone();
+        if !contains_blob_raw(&schema, input_row.raw()) {
+            return Ok(None);
+        }
+        let OvbRaw::Map(input_fields) = input_row.raw() else {
+            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+        };
+        let mut sanitized_row = input_row.raw().clone();
+        let OvbRaw::Map(sanitized_fields) = &mut sanitized_row else {
+            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+        };
+        let mut blob_bindings = BTreeMap::new();
+        for (field, ty) in &schema.fields {
+            let Some((_, original)) = input_fields
+                .iter()
+                .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == field))
+            else {
+                continue;
+            };
+            let Some(Some(blob)) = blob_value(ty, original) else {
+                continue;
+            };
+            if !matches!(blob, OvbRaw::Tag(orna_value_v1::OVB2_BLOB_TAG, _)) {
+                return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
+            }
+            let value = ContextValue::new(ValueFormat::Ovb2, blob.clone())
+                .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))?;
+            let binding = self.bindings.accept_captured_blob_for_row(&value)
+                .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))?;
+            blob_bindings.insert(field.clone(), binding);
+            let Some((_, sanitized)) = sanitized_fields
+                .iter_mut()
+                .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == field))
+            else {
+                return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+            };
+            *sanitized = blob_placeholder(ty, original)?;
+        }
+        if blob_bindings.is_empty() {
+            return Ok(None);
+        }
+        let canonical_row = CanonicalValue::new(sanitized_row)
+            .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+        let result = self.handle_table_effect_with_blob_bindings(
+            callee,
+            &[canonical_row],
+            blob_bindings,
+        )?;
+        let Some(result) = result else {
+            return Ok(None);
+        };
+        let raw = restore_contextual_blob_values(&schema, result.raw(), input_row.raw())?;
+        ContextValue::new(ValueFormat::Ovb2, raw)
+            .map(Some)
+            .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))
+    }
+
+    fn handle_contextual_effect(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        if expression_name_path(callee).as_deref() == Some("sys.blob.capture_file") {
+            return Ovb2EffectHandler::handle(self.bindings, callee, arguments);
+        }
+        if let Some(value) = self.handle_contextual_blob_insert(callee, arguments)? {
+            return Ok(Some(value));
+        }
+        if arguments
+            .iter()
+            .any(|argument| contains_contextual_blob_value(argument.raw()))
+        {
+            return Ok(None);
+        }
+        let canonical_arguments = Self::canonical_arguments(arguments)?;
+        let value = EffectHandler::handle(self, callee, &canonical_arguments)?;
+        Self::contextualize_canonical_result(value)
+    }
+
+    fn handle_contextual_effect_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        if expression_name_path(callee).as_deref() == Some("sys.blob.capture_file") {
+            return Ovb2EffectHandler::handle_with_budget(
+                self.bindings,
+                callee,
+                arguments,
+                budget,
+            );
+        }
+        if let Some(value) = self.handle_contextual_blob_insert(callee, arguments)? {
+            return Ok(Some(value));
+        }
+        if arguments
+            .iter()
+            .any(|argument| contains_contextual_blob_value(argument.raw()))
+        {
+            return Ok(None);
+        }
+        let canonical_arguments = Self::canonical_arguments(arguments)?;
+        let value = EffectHandler::handle_with_budget(
+            self,
+            callee,
+            &canonical_arguments,
+            budget,
+        )?;
+        Self::contextualize_canonical_result(value)
+    }
+
+    fn handle_contextual_registered_effect(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+        cancellation: Option<&orna_evaluator_v1::CancellationToken>,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        if operation == "sys.blob.capture_file" {
+            return Ovb2EffectHandler::handle_registered_with_cancellation_and_budget(
+                self.bindings,
+                operation,
+                callee,
+                arguments,
+                budget,
+                cancellation,
+            );
+        }
+
+        if let Some(value) = self.handle_contextual_blob_insert(callee, arguments)? {
+            return Ok(Some(value));
+        }
+        let canonical_arguments = Self::canonical_arguments(arguments)?;
+        let value = EffectHandler::handle_registered_with_cancellation_and_budget(
+            self,
+            operation,
+            callee,
+            &canonical_arguments,
+            budget,
+            cancellation,
+        )?;
+        Self::contextualize_canonical_result(value)
+    }
+}
+
+impl Ovb2EffectHandler for ReplTransactionEffectHandler<'_, '_> {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle_contextual_effect(callee, arguments)
+    }
+
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle_contextual_effect_with_budget(callee, arguments, budget)
+    }
+
+    fn handle_registered_with_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle_contextual_registered_effect(operation, callee, arguments, budget, None)
+    }
+
+    fn handle_registered_with_cancellation_and_budget(
+        &mut self,
+        operation: &str,
+        callee: &Expr,
+        arguments: &[ContextValue],
+        budget: &mut StepBudget,
+        cancellation: Option<&orna_evaluator_v1::CancellationToken>,
+    ) -> Result<Option<ContextValue>, EvaluationError> {
+        self.handle_contextual_registered_effect(
+            operation,
+            callee,
+            arguments,
+            budget,
+            cancellation,
+        )
+    }
+}
+
+fn contains_contextual_blob_value(value: &OvbRaw) -> bool {
+    match value {
+        OvbRaw::Tag(orna_value_v1::OVB2_BLOB_TAG, _) => true,
+        OvbRaw::Tag(_, inner) => contains_contextual_blob_value(inner),
+        OvbRaw::Array(values) => values.iter().any(contains_contextual_blob_value),
+        OvbRaw::Map(values) => values.iter().any(|(key, value)| {
+            contains_contextual_blob_value(key) || contains_contextual_blob_value(value)
+        }),
+        _ => false,
+    }
 }
 
 fn contains_blob_value(schema: &TableSchema, row: &CanonicalValue) -> bool {
-    let OvbRaw::Map(values) = row.raw() else {
+    contains_blob_raw(schema, row.raw())
+}
+
+fn contains_blob_raw(schema: &TableSchema, row: &OvbRaw) -> bool {
+    let OvbRaw::Map(values) = row else {
         return false;
     };
     schema.fields.iter().any(|(name, ty)| {
         values.iter().any(|(key, value)| {
             matches!(key, OvbRaw::Text(field) if field == name)
-                && blob_value(ty, value).is_some_and(|value| {
-                    value.is_some_and(|value| matches!(value, OvbRaw::Tag(60_110 | 60_111 | 60_112, _)))
-                })
+                && blob_value(ty, value).is_some_and(|value| value.is_some())
         })
     })
 }
@@ -401,6 +686,50 @@ fn blob_value<'a>(ty: &Type, value: &'a OvbRaw) -> Option<Option<&'a OvbRaw>> {
         });
     }
     is_blob(ty).then_some(Some(value))
+}
+
+fn blob_placeholder(ty: &Type, _original: &OvbRaw) -> Result<OvbRaw, EvaluationError> {
+    let placeholder = OvbRaw::Bytes(Vec::new());
+    if matches!(ty, Type::Optional(_)) {
+        return Ok(OvbRaw::Tag(
+            60_013,
+            Box::new(OvbRaw::Array(vec![
+                OvbRaw::Int(BigInt::from(1)),
+                placeholder,
+            ])),
+        ));
+    }
+    Ok(placeholder)
+}
+
+fn restore_contextual_blob_values(
+    schema: &TableSchema,
+    output: &OvbRaw,
+    input: &OvbRaw,
+) -> Result<OvbRaw, EvaluationError> {
+    let (OvbRaw::Map(output_fields), OvbRaw::Map(input_fields)) = (output, input) else {
+        return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+    };
+    let mut restored = output_fields.clone();
+    for (field, ty) in &schema.fields {
+        let Some((_, original)) = input_fields
+            .iter()
+            .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == field))
+        else {
+            continue;
+        };
+        if !blob_value(ty, original).is_some_and(|value| value.is_some()) {
+            continue;
+        }
+        let Some((_, value)) = restored
+            .iter_mut()
+            .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == field))
+        else {
+            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+        };
+        *value = original.clone();
+    }
+    Ok(OvbRaw::Map(restored))
 }
 
 fn source_literal(ty: &Type, value: &OvbRaw) -> Result<String, EvaluationError> {
