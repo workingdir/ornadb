@@ -98,7 +98,7 @@ fn replace_parquet_metadata(bytes: &mut [u8], old: &str, new: &str) {
         .filter_map(|(index, window)| (window == old).then_some(index))
         .collect::<Vec<_>>();
     let [position] = positions.as_slice() else {
-        panic!("expected one compact Parquet metadata value");
+        panic!("expected one compact Parquet metadata value for {old:?}, found {}", positions.len());
     };
     bytes[*position..*position + old.len()].copy_from_slice(new.as_bytes());
 }
@@ -200,16 +200,77 @@ fn head(directory: &Path) -> String {
 /// Commits one captured media row durably without publishing it, so the next
 /// `orna publish` sees exactly one frozen runtime range.
 async fn commit_capture(
+    repository: &Repository,
+    source_commit: &orna_repository_v1::GitCommitRef,
     state: &RuntimeState,
     writer: WriterLease,
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
-    table_object_id: [u8; 16],
-    key: &[u8],
+    source_key: &str,
     ordinal: u8,
     insert_only: bool,
     relation_id: [u8; 16],
+    format_context: &orna_value_v1::Format3Context,
+    key_override: Option<&[u8]>,
 ) {
+    use orna_project_v1::{ProjectLoader, admit_source_row_with_owner_fields};
+
+    let loader = ProjectLoader::default();
+    let project = loader
+        .load_committed_snapshot(repository, source_commit)
+        .expect("load the committed source project");
+    let schema = loader
+        .resolve_committed_source_table_schema(repository, source_commit, TableObjectId::new(relation_id))
+        .expect("resolve the Object table from its committed identity");
+    let logical_path = format!("Object/{source_key}.orna");
+    let row = project
+        .loose_rows()
+        .iter()
+        .find(|row| row.logical_path() == logical_path)
+        .expect("the committed project contains this source Object row");
+
+    let value = evaluate_expression_ovb2_with_effects(
+        expression,
+        &Default::default(),
+        Limits::default(),
+        bindings,
+    )
+    .unwrap();
+    let blob_binding = bindings.accept_captured_blob_for_row(&value).unwrap();
+    let admitted = admit_source_row_with_owner_fields(
+        &project,
+        row.logical_path(),
+        row.source(),
+        &schema,
+        format_context,
+        vec![("payload".to_owned(), blob_binding)],
+        vec![],
+        [ordinal + 3; 16],
+    )
+    .expect("admit a complete source-owned row");
+    let (source_mutation, source_bindings, resolved_schema) =
+        admitted.into_mutation_and_bindings();
+    assert_eq!(resolved_schema.table_object_id(), TableObjectId::new(relation_id));
+    let key = key_override.unwrap_or_else(|| source_mutation.key()).to_vec();
+    let value = source_mutation
+        .value()
+        .expect("admitted source row has complete fields")
+        .to_vec();
+    let id = source_mutation.id();
+    let table = source_mutation.table().to_owned();
+    let mut mutation = if insert_only {
+        TableMutation::insert(id, table, key, value)
+    } else {
+        TableMutation::new(id, table, key, Some(value))
+    }
+    .expect("construct the admitted source row mutation")
+    .with_table_object_id(TableObjectId::new(relation_id));
+    for binding in &source_bindings {
+        mutation = mutation
+            .with_protected_content_pin(binding.pin())
+            .expect("retain the admitted Blob pin");
+    }
+
     let request_identity = RequestIdentity {
         session_id: [ordinal; 16],
         request_id: [ordinal + 1; 16],
@@ -229,26 +290,6 @@ async fn commit_capture(
         .await
         .unwrap();
     let context = state.begin_activation().await.unwrap();
-
-    let value = evaluate_expression_ovb2_with_effects(
-        expression,
-        &Default::default(),
-        Limits::default(),
-        bindings,
-    )
-    .unwrap();
-    let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let (id, key_bytes, row) = ([ordinal + 3; 16], key.to_vec(), Vec::new());
-    let mutation = if insert_only {
-        TableMutation::insert(id, "media", key_bytes, row)
-    } else {
-        TableMutation::new(id, "media", key_bytes, Some(row))
-    }
-    .unwrap()
-    .with_table_object_id(TableObjectId::new(relation_id))
-    .with_orp_blob_binding(binding)
-    .unwrap();
-    let mutation = mutation.with_table_object_id(TableObjectId::new(table_object_id));
     let committed = state
         .commit_table_request_activation(
             writer,
@@ -263,18 +304,21 @@ async fn commit_capture(
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
+    drop(source_bindings);
 }
 
 #[tokio::test]
 async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
-    let (directory, repository, relation_id) = empty_format3_repository();
-    let root_path = directory.path();
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),
         source.path().join("pixel.png"),
     )
     .unwrap();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(source.path());
+    let root_path = directory.path();
+    let source_commit = repository.head().unwrap().unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -295,15 +339,18 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
         .trim_end()
         .replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
     commit_capture(
+        &repository,
+        &source_commit,
         &state,
         writer,
         &mut bindings,
         &expression,
-        relation_id,
-        b"\xff",
+        "image",
         0xe0,
         true,
         relation_id,
+        &format_context,
+        Some(b"\xff"),
     )
     .await;
     let pending_before = state.pending_count().await.unwrap();
@@ -326,14 +373,11 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
     let error = String::from_utf8_lossy(&published.stderr);
     assert!(error.contains("E2300"), "typed CLI error: {error}");
     assert!(
-        error.contains("source row could not be admitted for publication"),
+        error.contains("source row path could not be resolved"),
         "source failure: {error}"
     );
     assert_eq!(head(root_path), head_before);
-    assert_eq!(
-        git_output(root_path, &["show-ref", "--head"], None),
-        refs_before
-    );
+    assert_eq!(git_output(root_path, &["show-ref", "--head"], None), refs_before);
     assert_eq!(
         std::fs::read(root_path.join(".git/index")).unwrap(),
         index_before
@@ -525,15 +569,16 @@ async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
 
 #[tokio::test]
 async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit() {
-    let (directory, repository, relation_id) = empty_format3_repository();
-    let root_path = directory.path();
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),
         source.path().join("pixel.png"),
     )
     .unwrap();
-
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(source.path());
+    let root_path = directory.path();
+    let source_commit = repository.head().unwrap().unwrap();
     // `orna publish` opens the runtime through the repository's own identity,
     // so the harness must commit under exactly that identity or the verb
     // reports an unavailable runtime for a repository it can see.
@@ -561,15 +606,18 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         .await
         .unwrap();
     commit_capture(
+        &repository,
+        &source_commit,
         &state,
         writer,
         &mut bindings,
         &expression,
-        relation_id,
-        b"image.orna",
+        "image",
         0xb0,
         true,
         relation_id,
+        &format_context,
+        None,
     )
     .await;
     let pending = state.pending_count().await.unwrap();
@@ -603,15 +651,18 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         .await
         .unwrap();
     commit_capture(
+        &repository,
+        &source_commit,
         &state,
         writer,
         &mut bindings,
         &expression,
-        relation_id,
-        b"image.orna",
+        "image",
         0xc0,
         false,
         relation_id,
+        &format_context,
+        None,
     )
     .await;
     let pending = state.pending_count().await.unwrap();
@@ -656,8 +707,16 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
 
 #[tokio::test]
 async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
-    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("pixel.png"),
+        source.path().join("pixel.png"),
+    )
+    .unwrap();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(source.path());
     let root_path = directory.path();
+    let source_commit = repository.head().unwrap().unwrap();
     let deleted_path = root_path.join("delete-me.orna");
     std::fs::write(&deleted_path, b"tracked before publication\n").unwrap();
     let rename_path = root_path.join("rename-source/original.orna");
@@ -673,13 +732,6 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         &["commit", "--quiet", "-m", "index reconciliation fixtures"],
     );
     git(root_path, &["rm", "--quiet", "delete-me.orna"]);
-    let source = TempDir::new().unwrap();
-
-    std::fs::copy(
-        Path::new(MEDIA_FIXTURES).join("pixel.png"),
-        source.path().join("pixel.png"),
-    )
-    .unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -698,15 +750,18 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         .await
         .unwrap();
     commit_capture(
+        &repository,
+        &source_commit,
         &state,
         writer,
         &mut bindings,
         &expression,
-        relation_id,
-        b"image",
+        "image",
         0xd0,
         true,
         relation_id,
+        &format_context,
+        None,
     )
     .await;
 
@@ -743,11 +798,8 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         &base_head,
         index,
         &freeze,
-        |mutation| {
-            let key = std::str::from_utf8(mutation.key())
-                .map_err(|_| orna_storage_v1::Error::InvalidKey)?
-                .to_owned();
-            orna_storage_v1::LoosePath::for_key(mutation.table(), &[key])
+        |_mutation| {
+            orna_storage_v1::LoosePath::for_key("Object", &["image".to_owned()])
         },
         "orna: interrupted publication",
     )
