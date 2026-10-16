@@ -11,7 +11,7 @@ use std::{
 };
 
 use num_bigint::BigInt;
-use orna_repository_v1::{GitCommitRef, Repository, Uuid};
+use orna_repository_v1::{GitCommitRef, Repository, RepositoryError, Uuid};
 use orna_semantic_v1::{
     Analysis, ModuleInput, SourceUnitIdentity, SourceUnitMetadata, SymbolKind, TableAdmission,
     TableSchema, Type,
@@ -115,6 +115,12 @@ pub enum ObjectIdentityError {
     InvalidSource,
     IdentityCollision,
     Io,
+}
+
+impl From<RepositoryError> for ObjectIdentityError {
+    fn from(_: RepositoryError) -> Self {
+        Self::Io
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -483,10 +489,12 @@ impl ObjectIdentityManifest {
         modules: &[ModuleInput],
         renames: &[ObjectIdentityRename],
     ) -> Result<Self, ObjectIdentityError> {
-        let previous = Self::read_worktree(repository)?;
-        let next = Self::reconcile_with_renames(modules, previous.as_ref(), renames)?;
-        next.write_worktree(repository)?;
-        Ok(next)
+        repository.with_coordination_lock(|| {
+            let previous = Self::read_worktree(repository)?;
+            let next = Self::reconcile_with_renames(modules, previous.as_ref(), renames)?;
+            next.write_worktree(repository)?;
+            Ok(next)
+        })
     }
 
     /// Atomically replaces the worktree manifest after explicit reconciliation.
@@ -834,6 +842,32 @@ fn apply_explicit_renames(
             record.qualified_name.clone_from(new_name);
         }
     }
+
+    let explicit_field_targets = renames
+        .iter()
+        .filter(|rename| rename.kind == ObjectKind::Field)
+        .map(|rename| rename.new_qualified_name.as_str())
+        .collect::<BTreeSet<_>>();
+    for rename in renames
+        .iter()
+        .filter(|rename| rename.kind == ObjectKind::Table)
+    {
+        let old_prefix = format!("{}.", rename.old_qualified_name);
+        let new_prefix = format!("{}.", rename.new_qualified_name);
+        for record in records.iter_mut().filter(|record| {
+            !record.retired
+                && record.kind == ObjectKind::Field
+                && record.qualified_name.starts_with(&old_prefix)
+        }) {
+            let target = format!("{new_prefix}{}", &record.qualified_name[old_prefix.len()..]);
+            if explicit_field_targets.contains(target.as_str()) {
+                continue;
+            }
+            if active.contains(&(ObjectKind::Field, target.clone())) {
+                record.qualified_name = target;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -940,6 +974,197 @@ mod tests {
     use super::*;
 
     #[test]
+    fn worktree_identity_reconciliation_is_locked_across_read_and_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let repository = Repository::discover(directory.path()).unwrap();
+        let original = ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Str) { payload: Blob, size: Int, }",
+        );
+        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
+            &repository,
+            std::slice::from_ref(&original),
+        )
+        .unwrap();
+        let table_id = *initial.id(ObjectKind::Table, "Media").unwrap();
+        let payload_id = *initial.id(ObjectKind::Field, "Media.payload").unwrap();
+        let renamed = ModuleInput::new(
+            "main.orna",
+            "pub table Archive(id: Str) { payload: Blob, size: Int, }",
+        );
+        let renames = [ObjectIdentityRename::new(
+            ObjectKind::Table,
+            "Media",
+            "Archive",
+        )];
+
+        let (locked_sender, locked_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let lock_repository = repository.clone();
+        let lock_holder = std::thread::spawn(move || {
+            lock_repository.with_coordination_lock(|| {
+                locked_sender
+                    .send(())
+                    .map_err(|_| ObjectIdentityError::Io)?;
+                release_receiver
+                    .recv()
+                    .map_err(|_| ObjectIdentityError::Io)?;
+                Ok::<(), ObjectIdentityError>(())
+            })
+        });
+        locked_receiver.recv().expect("coordination lock acquired");
+
+        let blocked = ObjectIdentityManifest::reconcile_and_write_worktree_with_renames(
+            &repository,
+            std::slice::from_ref(&renamed),
+            &renames,
+        );
+        release_sender.send(()).unwrap();
+        lock_holder
+            .join()
+            .expect("lock holder thread")
+            .expect("coordination lock callback");
+
+        assert_eq!(blocked, Err(ObjectIdentityError::Io));
+        assert_eq!(
+            ObjectIdentityManifest::read_worktree(&repository).unwrap(),
+            Some(initial)
+        );
+
+        let next = ObjectIdentityManifest::reconcile_and_write_worktree_with_renames(
+            &repository,
+            std::slice::from_ref(&renamed),
+            &renames,
+        )
+        .unwrap();
+        assert_eq!(next.id(ObjectKind::Table, "Archive"), Some(&table_id));
+        assert_eq!(
+            next.id(ObjectKind::Field, "Archive.payload"),
+            Some(&payload_id)
+        );
+        assert_eq!(
+            ObjectIdentityManifest::read_worktree(&repository).unwrap(),
+            Some(next)
+        );
+    }
+
+    #[test]
+    fn explicit_rename_mappings_reject_invalid_sources_and_targets() {
+        let media = ModuleInput::new("main.orna", "pub table Media(id: Str) { payload: Blob, }");
+        let archive =
+            ModuleInput::new("main.orna", "pub table Archive(id: Str) { payload: Blob, }");
+        let previous = ObjectIdentityManifest::reconcile(std::slice::from_ref(&media), None)
+            .expect("initial identities");
+
+        for rename in [
+            ObjectIdentityRename::new(ObjectKind::Table, "", "Archive"),
+            ObjectIdentityRename::new(ObjectKind::Table, "Media", ""),
+            ObjectIdentityRename::new(ObjectKind::Table, "Media", "Media"),
+            ObjectIdentityRename::new(ObjectKind::Table, "Missing", "Archive"),
+            ObjectIdentityRename::new(ObjectKind::Table, "Media", "Missing"),
+            ObjectIdentityRename::new(ObjectKind::Unit, "Media", "Archive"),
+        ] {
+            assert_eq!(
+                ObjectIdentityManifest::reconcile_with_renames(
+                    std::slice::from_ref(&media),
+                    Some(&previous),
+                    &[rename],
+                ),
+                Err(ObjectIdentityError::InvalidSource),
+            );
+        }
+
+        let retired_source =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&archive), Some(&previous))
+                .expect("old identity is retired after source deletion");
+        assert_eq!(
+            ObjectIdentityManifest::reconcile_with_renames(
+                std::slice::from_ref(&archive),
+                Some(&retired_source),
+                &[ObjectIdentityRename::new(
+                    ObjectKind::Table,
+                    "Media",
+                    "Archive"
+                )],
+            ),
+            Err(ObjectIdentityError::InvalidSource),
+        );
+    }
+
+    #[test]
+    fn explicit_rename_mappings_reject_source_target_and_existing_identity_collisions() {
+        let media = ModuleInput::new("main.orna", "pub table Media(id: Str) { payload: Blob, }");
+        let media_previous = ObjectIdentityManifest::reconcile(std::slice::from_ref(&media), None)
+            .expect("initial identities");
+        let destinations = ModuleInput::new(
+            "main.orna",
+            "pub table Archive(id: Str) { payload: Blob, }
+             pub table Backup(id: Str) { payload: Blob, }",
+        );
+
+        assert_eq!(
+            ObjectIdentityManifest::reconcile_with_renames(
+                std::slice::from_ref(&destinations),
+                Some(&media_previous),
+                &[
+                    ObjectIdentityRename::new(ObjectKind::Table, "Media", "Archive"),
+                    ObjectIdentityRename::new(ObjectKind::Table, "Media", "Backup"),
+                ],
+            ),
+            Err(ObjectIdentityError::IdentityCollision),
+        );
+
+        let sources = ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Str) { payload: Blob, }
+             pub table Clip(id: Str) { payload: Blob, }",
+        );
+        let sources_previous =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&sources), None)
+                .expect("source identities");
+        let archive =
+            ModuleInput::new("main.orna", "pub table Archive(id: Str) { payload: Blob, }");
+        assert_eq!(
+            ObjectIdentityManifest::reconcile_with_renames(
+                std::slice::from_ref(&archive),
+                Some(&sources_previous),
+                &[
+                    ObjectIdentityRename::new(ObjectKind::Table, "Media", "Archive"),
+                    ObjectIdentityRename::new(ObjectKind::Table, "Clip", "Archive"),
+                ],
+            ),
+            Err(ObjectIdentityError::IdentityCollision),
+        );
+
+        let existing_destinations = ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Str) { payload: Blob, }
+             pub table Archive(id: Str) { payload: Blob, }",
+        );
+        let existing_previous =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&existing_destinations), None)
+                .expect("existing destination identity");
+        assert_eq!(
+            ObjectIdentityManifest::reconcile_with_renames(
+                std::slice::from_ref(&archive),
+                Some(&existing_previous),
+                &[ObjectIdentityRename::new(
+                    ObjectKind::Table,
+                    "Media",
+                    "Archive"
+                )],
+            ),
+            Err(ObjectIdentityError::IdentityCollision),
+        );
+    }
+
+    #[test]
     fn manifest_reconciliation_persists_ids_and_retires_removed_declarations() {
         let source = ModuleInput::new(
             "main.orna",
@@ -969,6 +1194,73 @@ mod tests {
             ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(),
             removed
         );
+    }
+    #[test]
+    fn table_rename_cascades_child_field_identities() {
+        let original = ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Str) { payload: Blob, size: Int, }",
+        );
+        let previous = ObjectIdentityManifest::reconcile(std::slice::from_ref(&original), None)
+            .expect("initial identities");
+        let payload_id = *previous.id(ObjectKind::Field, "Media.payload").unwrap();
+        let size_id = *previous.id(ObjectKind::Field, "Media.size").unwrap();
+        let renamed = ModuleInput::new(
+            "main.orna",
+            "pub table Archive(id: Str) { payload: Blob, size: Int, }",
+        );
+
+        let next = ObjectIdentityManifest::reconcile_with_renames(
+            std::slice::from_ref(&renamed),
+            Some(&previous),
+            &[ObjectIdentityRename::new(
+                ObjectKind::Table,
+                "Media",
+                "Archive",
+            )],
+        )
+        .expect("table rename identities");
+
+        assert_eq!(
+            next.id(ObjectKind::Field, "Archive.payload"),
+            Some(&payload_id)
+        );
+        assert_eq!(next.id(ObjectKind::Field, "Archive.size"), Some(&size_id));
+        assert!(next.id(ObjectKind::Field, "Media.payload").is_none());
+        assert!(next.id(ObjectKind::Field, "Media.size").is_none());
+    }
+
+    #[test]
+    fn explicit_field_rename_overrides_table_field_cascade() {
+        let original = ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Str) { payload: Blob, size: Int, }",
+        );
+        let previous = ObjectIdentityManifest::reconcile(std::slice::from_ref(&original), None)
+            .expect("initial identities");
+        let payload_id = *previous.id(ObjectKind::Field, "Media.payload").unwrap();
+        let size_id = *previous.id(ObjectKind::Field, "Media.size").unwrap();
+        let renamed = ModuleInput::new(
+            "main.orna",
+            "pub table Archive(id: Str) { content: Blob, size: Int, }",
+        );
+
+        let next = ObjectIdentityManifest::reconcile_with_renames(
+            std::slice::from_ref(&renamed),
+            Some(&previous),
+            &[
+                ObjectIdentityRename::new(ObjectKind::Table, "Media", "Archive"),
+                ObjectIdentityRename::new(ObjectKind::Field, "Media.payload", "Archive.content"),
+            ],
+        )
+        .expect("table and explicit field rename identities");
+
+        assert_eq!(
+            next.id(ObjectKind::Field, "Archive.content"),
+            Some(&payload_id)
+        );
+        assert_eq!(next.id(ObjectKind::Field, "Archive.size"), Some(&size_id));
+        assert!(next.id(ObjectKind::Field, "Media.payload").is_none());
     }
 
     #[test]
@@ -1018,7 +1310,10 @@ mod tests {
 
         assert_eq!(renamed.id(ObjectKind::Table, "Archive"), Some(&table_id));
         assert_eq!(renamed.id(ObjectKind::Field, "Archive.key"), Some(&key_id));
-        assert_eq!(renamed.id(ObjectKind::Field, "Archive.size"), Some(&size_id));
+        assert_eq!(
+            renamed.id(ObjectKind::Field, "Archive.size"),
+            Some(&size_id)
+        );
         assert_eq!(renamed.id(ObjectKind::Unit, "MiB"), Some(&unit_id));
         assert!(renamed.records().iter().any(|record| {
             record.kind() == ObjectKind::Field
@@ -1035,7 +1330,10 @@ mod tests {
         )
         .expect("identity survives a normal subsequent reconciliation");
         assert_eq!(unchanged.id(ObjectKind::Table, "Archive"), Some(&table_id));
-        assert_eq!(unchanged.id(ObjectKind::Field, "Archive.key"), Some(&key_id));
+        assert_eq!(
+            unchanged.id(ObjectKind::Field, "Archive.key"),
+            Some(&key_id)
+        );
 
         let field_reintroduced = ModuleInput::new(
             "main.orna",
@@ -1047,11 +1345,16 @@ mod tests {
             Some(&roundtrip),
         )
         .expect("reintroduced field receives a fresh identity");
-        let new_field_id = reintroduced.id(ObjectKind::Field, "Archive.payload").unwrap();
+        let new_field_id = reintroduced
+            .id(ObjectKind::Field, "Archive.payload")
+            .unwrap();
         assert_ne!(new_field_id, &removed_field_id);
-        assert!(reintroduced.records().iter().any(|record| {
-            record.id() == &removed_field_id && record.is_retired()
-        }));
+        assert!(
+            reintroduced
+                .records()
+                .iter()
+                .any(|record| { record.id() == &removed_field_id && record.is_retired() })
+        );
     }
 
     #[test]
