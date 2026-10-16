@@ -601,6 +601,23 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
         )
         .await
         .unwrap();
+    let tail = runtime.begin_activation().await.unwrap();
+    runtime
+        .commit_table_activation(
+            lease,
+            &tail,
+            &[TableMutation::new(
+                [108; 16],
+                "Contact",
+                b"tail row".to_vec(),
+                Some(b"tail row".to_vec()),
+            )
+            .unwrap()],
+            [109; 32],
+            &orna_runtime_v1::NoFault,
+        )
+        .await
+        .unwrap();
     repository
         .publish_compact_repository_boundary(plan(&repository, &freeze))
         .unwrap();
@@ -619,6 +636,14 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
         .await
         .unwrap();
     assert_eq!(receipt.commit(), pending.commit());
+    assert_eq!(
+        runtime
+            .persisted_compact_publication_receipt(&pending)
+            .await
+            .unwrap(),
+        Some(receipt.clone())
+    );
+    runtime.validate_recovery().await.unwrap();
 
     fs::write(
         temp.path().join("ordinary.txt"),
@@ -632,7 +657,8 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
     );
     let branch_head = repository.head().unwrap().unwrap();
     assert_ne!(branch_head, *pending.commit());
-    assert!(runtime.pending().await.unwrap().is_empty());
+    let branch_index = repository.index_generation().unwrap();
+    assert_eq!(runtime.pending().await.unwrap().len(), 1);
     assert_eq!(
         RuntimePublicationCoordinator::recover_compact_validated(
             &repository,
@@ -640,10 +666,20 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
             &CompactOvbProfile::new(profile()).unwrap(),
             &publication_identity(),
         )
-        .await,
-        Err(orna_storage_v1::Error::RefConflict)
+        .await
+        .unwrap(),
+        Some(branch_index.clone())
     );
     assert_eq!(repository.head().unwrap(), Some(branch_head));
-    assert!(repository.read_publication_journal().unwrap().is_some());
-    assert!(runtime.pending().await.unwrap().is_empty());
+    assert_eq!(repository.index_generation().unwrap(), branch_index);
+    assert!(repository.read_publication_journal().unwrap().is_none());
+    assert_eq!(runtime.pending().await.unwrap().len(), 1);
+    assert_eq!(
+        runtime
+            .persisted_compact_publication_receipt(&pending)
+            .await
+            .unwrap(),
+        Some(receipt)
+    );
+    runtime.validate_recovery().await.unwrap();
 }
