@@ -1337,29 +1337,19 @@ fn project_runtime_mutation(
         .value()
         .map(|bytes| {
             let row_key = rekey_to.as_deref().unwrap_or(key.as_slice());
-            let fields = match ContextValue::decode_in_context(
+            let decoded = ContextValue::decode_in_context(
                 bytes,
                 ValueFormat::Rov3,
                 value_context,
-            ) {
-                Ok(value) if matches!(value.raw(), Raw::Array(_)) => bytes.to_vec(),
-                Ok(_) => return Err(Error::RepositoryUnavailable),
-                Err(_) => {
-                    // Legacy OVB2 mutation values remain readable. ROV3 values
-                    // are decoded under their committed repository context.
-                    if bytes.first().is_some_and(|byte| byte >> 5 == 4) {
-                        bytes.to_vec()
-                    } else {
-                        if schema.stored_field_count != 1 {
-                            return Err(Error::RepositoryUnavailable);
-                        }
-                        let mut fields = Vec::with_capacity(bytes.len() + 1);
-                        fields.push(0x81);
-                        fields.extend_from_slice(bytes);
-                        fields
-                    }
-                }
+            )
+            .map_err(|error| {
+                eprintln!("projection: decode ROV3 row relation={relation_id:?}: {error:?}");
+                Error::RepositoryUnavailable
+            })?;
+            let Raw::Array(_) = decoded.raw() else {
+                return Err(Error::RepositoryUnavailable);
             };
+            let fields = bytes.to_vec();
             schema
                 .descriptor
                 .validate_stored_row(relation_id, row_key, &fields)
