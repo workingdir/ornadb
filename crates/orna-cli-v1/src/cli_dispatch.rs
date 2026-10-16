@@ -116,6 +116,9 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             ref mountpoint,
             ref selector,
         } => cli_mount::run_mount(&parsed.endpoint, mountpoint, selector),
+        Command::MountCwd { ref mountpoint } => {
+            cli_mount::run_mount_cwd(&parsed.endpoint, mountpoint)
+        }
         Command::MountStatus { json } => cli_mount::run_mount_status(&parsed.endpoint, json),
         Command::Unmount { ref mountpoint } => cli_mount::run_unmount(&parsed.endpoint, mountpoint),
         Command::Diff(ref arguments) => run_git_diff(arguments),
