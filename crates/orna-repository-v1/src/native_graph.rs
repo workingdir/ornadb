@@ -6924,7 +6924,8 @@ mod persisted_orp_tests {
         array(&mut blob_reference, 5);
         uint(&mut blob_reference, 1);
         bytes(&mut blob_reference, &[0x55; 32]);
-        blob_reference.extend_from_slice(b"\x61x");
+        blob_reference.push(0x6A);
+        blob_reference.extend_from_slice(b"text/plain");
         null(&mut blob_reference);
         bytes(&mut blob_reference, descriptor_oid.as_bytes());
         let mut blob_fields = vec![0x81];
@@ -6942,7 +6943,8 @@ mod persisted_orp_tests {
         array(&mut malformed_oid_value, 5);
         uint(&mut malformed_oid_value, 1);
         bytes(&mut malformed_oid_value, &[0x55; 32]);
-        malformed_oid_value.extend_from_slice(b"\x61x");
+        malformed_oid_value.push(0x6A);
+        malformed_oid_value.extend_from_slice(b"text/plain");
         null(&mut malformed_oid_value);
         bytes(&mut malformed_oid_value, &[0x66; 19]);
         let mut malformed_oid_fields = vec![0x81];
