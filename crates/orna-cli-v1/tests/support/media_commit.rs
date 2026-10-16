@@ -28,9 +28,28 @@ pub async fn commit_capture(
     insert_only: bool,
     relation_id: [u8; 16],
 ) {
+    commit_capture_for_table(
+        repository, state, writer, bindings, expression, "media", key, ordinal, insert_only,
+        relation_id,
+    )
+    .await;
+}
+
+pub async fn commit_capture_for_table(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    table_name: &str,
+    key: &str,
+    ordinal: u8,
+    insert_only: bool,
+    relation_id: [u8; 16],
+) {
     commit_capture_inner(
         repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
-        true,
+        table_name, true,
     )
     .await;
 }
@@ -50,7 +69,7 @@ pub async fn commit_capture_pending(
 ) {
     commit_capture_inner(
         repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
-        false,
+        "media", false,
     )
     .await;
 }
@@ -65,6 +84,7 @@ async fn commit_capture_inner(
     ordinal: u8,
     insert_only: bool,
     relation_id: [u8; 16],
+    table_name: &str,
     publish: bool,
 ) {
     let request_identity = RequestIdentity {
@@ -97,9 +117,9 @@ async fn commit_capture_inner(
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
     let (id, key_bytes, row) = ([ordinal + 3; 16], key.as_bytes().to_vec(), Vec::new());
     let mutation = if insert_only {
-        TableMutation::insert(id, "media", key_bytes, row)
+        TableMutation::insert(id, table_name, key_bytes, row)
     } else {
-        TableMutation::new(id, "media", key_bytes, Some(row))
+        TableMutation::new(id, table_name, key_bytes, Some(row))
     }
     .unwrap()
     .with_table_object_id(TableObjectId::new(relation_id))
