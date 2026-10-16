@@ -2564,6 +2564,7 @@ fn analyze_source_units(items: &[(Namespace, String, Item)]) -> BTreeMap<SourceU
     for (namespace, logical_path, item) in items {
         match &item.declaration {
             Declaration::Dimension { name, expression } => {
+                let identity = SourceDimensionIdentity { namespace: namespace.clone(), name: name.clone() };
                 if dimensions.insert(identity.clone(), SourceDimensionDecl { expression: expression.clone() }).is_some() {
                     duplicate_dimensions.insert(identity);
                 }
@@ -2601,8 +2602,9 @@ fn analyze_source_units(items: &[(Namespace, String, Item)]) -> BTreeMap<SourceU
             }
         };
         let Some(dimension) = source_dimension_path(&declaration.dimension) else { continue };
+        let Some(dimension_identity) = source_dimension_identity(&declaration.identity.namespace, &dimension, &dimensions) else { continue };
         let mut resolving_dimensions = BTreeSet::new();
-        let Some(dimension_basis) = source_dimension_basis(&dimension, &dimensions, &mut resolving_dimensions) else { continue };
+        let Some(dimension_basis) = source_dimension_basis(&dimension_identity, &dimensions, &mut resolving_dimensions) else { continue };
         result.insert(declaration.identity.clone(), SourceUnitMetadata {
             identity: declaration.identity.clone(),
             dimension_basis,
