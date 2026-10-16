@@ -16,7 +16,9 @@ use crate::native_graph::{
 };
 use crate::row_store::RowMapSnapshot;
 use crate::{Repository, RepositoryError};
-use orna_value_v1::{Raw, SchemaDescriptor};
+use orna_value_v1::{
+    Format3Context, GitHash as ValueGitHash, Raw, SchemaDescriptor, Snapshot as ValueSnapshot,
+};
 
 use super::DatabaseId;
 
@@ -603,6 +605,39 @@ impl RepositoryFormatContext {
             rows.clone(),
         )
         .map_err(|_| FormatContextError::GraphContextInvalid)
+    }
+
+    /// Opens a snapshot-pinned format-3 value context for one relation.
+    ///
+    /// The graph-backed resolver stays bound to this repository context's
+    /// exact commit, schema and store roots rather than the workspace HEAD.
+    pub fn open_value_context(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<Format3Context, FormatContextError> {
+        self.require_format3()?;
+        let database_id = self.require_database_id()?;
+        let rows = self.load_row_map(relation_id)?;
+        let graph = std::sync::Arc::new(self.open_native_graph(&rows)?);
+        let scope = graph
+            .open_read_scope()
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        let capability = RepositoryCaptureCapability::new(graph, scope)
+            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        let algorithm = repository_hash_algorithm(&self.repository)?;
+        let commit = NativeOid::from_hex(algorithm, self.snapshot.commit.as_str())
+            .map_err(|_| FormatContextError::SnapshotInvalid)?;
+        let pin = ValueSnapshot::Commit {
+            database: *database_id.as_bytes(),
+            algorithm: match algorithm {
+                GitHashAlgorithm::Sha1 => ValueGitHash::Sha1,
+                GitHashAlgorithm::Sha256 => ValueGitHash::Sha256,
+            },
+            oid: commit.as_bytes().to_vec(),
+        };
+        capability
+            .value_context(pin)
+            .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
     /// Resolves the committed descriptor selected by its authenticated table ID.

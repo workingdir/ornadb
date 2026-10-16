@@ -21,7 +21,12 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor};
+use orna_value_v1::{
+    AvailabilityState, BlobMetadata, BlobResolver, ContentReference, Error as ValueError,
+    Format3Context, Format3Quota, GitHash, MediaAnnotation,
+    NativeOid as ValueNativeOid, OwnerLifetime, Raw, SchemaDescriptor,
+    Snapshot as ValueSnapshot,
+};
 use sha2::{Digest, Sha256};
 
 
@@ -419,6 +424,102 @@ impl RepositoryCaptureCapability {
             .protect_captured_blob(candidate, &self.scope)?;
         self.graph
             .accept_protected_blob_pin_with_annotation(pin, media_type, suffix)
+    }
+}
+
+impl RepositoryCaptureCapability {
+    /// Issues value-layer authority for this graph's exact repository snapshot.
+    pub(crate) fn value_context(&self, pin: ValueSnapshot) -> Result<Format3Context, ValueError> {
+        let version = self.graph.row_snapshot.version();
+        let schema_root = ValueNativeOid::from_bytes(version.schema().schema_oid().as_bytes())?;
+        let store_root = ValueNativeOid::from_bytes(self.graph.store_root.as_bytes())?;
+        let git_hash = match self.graph.algorithm {
+            GitHashAlgorithm::Sha1 => GitHash::Sha1,
+            GitHashAlgorithm::Sha256 => GitHash::Sha256,
+        };
+        let resolver: Arc<dyn BlobResolver> = Arc::new(RepositoryValueResolver {
+            graph: Arc::clone(&self.graph),
+            scope: self.scope.clone(),
+            pin: pin.clone(),
+        });
+        let quota = Format3Quota::new(MAX_RANGE_READ_BYTES, 0)?;
+        Format3Context::from_persisted(
+            self.graph.database_id,
+            pin,
+            git_hash,
+            schema_root,
+            store_root,
+            AvailabilityState::Available,
+            OwnerLifetime::new(self.graph.owner_id),
+            quota,
+            resolver,
+        )
+    }
+}
+
+struct RepositoryValueResolver {
+    graph: Arc<NativeGraphContext>,
+    scope: RepositoryReadScope,
+    pin: ValueSnapshot,
+}
+
+impl BlobResolver for RepositoryValueResolver {
+    fn read_range(
+        &self,
+        reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>, ValueError> {
+        let context = reference.context();
+        let schema_oid = self.graph.row_snapshot.version().schema().schema_oid();
+        if context.pin() != &self.pin
+            || context.database_uuid() != self.graph.database_id
+            || context.owner().id() != self.graph.owner_id
+            || context.schema_root().as_bytes() != schema_oid.as_bytes()
+            || context.store_root().as_bytes() != self.graph.store_root.as_bytes()
+        {
+            return Err(ValueError::InvalidContext);
+        }
+        let descriptor_oid = NativeOid::new(
+            self.graph.algorithm,
+            reference.descriptor_oid().as_bytes(),
+        )
+        .map_err(graph_error_to_value_error)?;
+        let identity = crate::blob_store::ContentIdentity::new(
+            reference.identity().length(),
+            reference.identity().sha256(),
+        )
+        .map_err(|_| ValueError::InvalidValue)?;
+        let admitted = AdmittedBlobReference {
+            context: self.graph.identity,
+            database_id: self.graph.database_id,
+            owner_id: self.graph.owner_id,
+            snapshot_id: self.graph.snapshot_id,
+            descriptor_oid,
+            identity,
+        };
+        let end = offset.checked_add(length).ok_or(ValueError::InvalidRange)?;
+        let range = self
+            .graph
+            .read_blob_range(&admitted, offset..end, &self.scope)
+            .map_err(graph_error_to_value_error)?;
+        Ok(range.bytes)
+    }
+}
+
+fn graph_error_to_value_error(error: GraphError) -> ValueError {
+    match error {
+        GraphError::InvalidRange => ValueError::InvalidRange,
+        GraphError::ReadQuotaExceeded
+        | GraphError::MetadataQuotaExceeded
+        | GraphError::InventoryQuotaExceeded => ValueError::QuotaExceeded,
+        GraphError::ReadCancelled => ValueError::Cancelled,
+        GraphError::ContentIdentityMismatch
+        | GraphError::ChunkDigestMismatch
+        | GraphError::GitObjectHashMismatch => ValueError::ContentDigestMismatch,
+        GraphError::InvalidOidWidth { .. } | GraphError::MalformedOid => ValueError::InvalidOid,
+        GraphError::ContextMismatch => ValueError::InvalidContext,
+        _ => ValueError::ContentUnavailable,
     }
 }
 
