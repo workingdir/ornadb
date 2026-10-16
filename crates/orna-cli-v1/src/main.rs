@@ -25,10 +25,12 @@ use cli_args::{
 };
 use cli_dispatch::execute;
 use repl::{AnsiColor, write_styled, write_styled_display};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{self, BufReader, IsTerminal, Write as _};
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2126,6 +2128,7 @@ struct ReplTransactions {
     session_id: [u8; 16],
     state: Option<RuntimeState>,
     lease: Option<WriterLease>,
+    host_bindings: Rc<RefCell<Option<SysHostBindingRegistry>>>,
 }
 
 fn repl_transactions(
@@ -2210,6 +2213,7 @@ fn repl_transactions(
         session_id: cli_request_nonce().to_be_bytes(),
         state: None,
         lease: None,
+        host_bindings: Rc::new(RefCell::new(None)),
     })
 }
 
@@ -2308,6 +2312,7 @@ fn repl_session_error(error: &ReplError) -> Diagnostic {
 /// HEAD, or refs.
 struct ReplSnapshotSessionLoader<'a> {
     repository: Option<&'a orna_repository_v1::Repository>,
+    host_bindings: Rc<RefCell<Option<SysHostBindingRegistry>>>,
 }
 
 impl ReplSnapshotSessionLoader<'_> {
@@ -2329,12 +2334,12 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
         &self,
         target: repl::SnapshotTarget,
     ) -> Result<AdmittedReplSession, Self::Error> {
-        match target {
+        let session = match target {
             repl::SnapshotTarget::Cwd => {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load(self.repository()?)
                     .map_err(|_| ())?;
-                Self::admit(&project)
+                Self::admit(&project)?
             }
             repl::SnapshotTarget::Head => {
                 let repository = self.repository()?;
@@ -2342,7 +2347,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)
+                Self::admit(&project)?
             }
             repl::SnapshotTarget::Ref(reference) => {
                 let repository = self.repository()?;
@@ -2350,9 +2355,11 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)
+                Self::admit(&project)?
             }
-        }
+        };
+        self.host_bindings.borrow_mut().take();
+        Ok(session)
     }
 }
 
@@ -2375,17 +2382,25 @@ fn run_repl_input(
     if current_commit != transactions.commit || !transactions.format_context.supports_writes() {
         return Err("ORNA-REPL-EFFECT".to_owned());
     }
-    let mut filesystem = FilesystemProvider::with_limits(65_536, 16)
-        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-    filesystem
-        .allow_root(repository.worktree())
-        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-    let capability = repository
-        .capture_capability(transactions.capture_relation_id)
-        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
-        .with_filesystem_provider(filesystem)
-        .with_repository_capture_capability(capability);
+    let mut host_bindings = transactions.host_bindings.borrow_mut();
+    if host_bindings.is_none() {
+        let mut filesystem = FilesystemProvider::with_limits(65_536, 16)
+            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+        filesystem
+            .allow_root(repository.worktree())
+            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+        let capability = repository
+            .capture_capability(transactions.capture_relation_id)
+            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+        *host_bindings = Some(
+            SysHostBindingRegistry::new(EnvironmentProvider::default())
+                .with_filesystem_provider(filesystem)
+                .with_repository_capture_capability(capability),
+        );
+    }
+    let bindings = host_bindings
+        .as_mut()
+        .expect("host bindings initialized");
     if transactions.state.is_none() {
         let state = transactions
             .runtime
@@ -2431,10 +2446,11 @@ fn run_repl_input(
     };
     let (value, successor, activation) = transactions
         .authority
-        .evaluate_staged_repl_transaction(session, staged, &scope, &mut bindings)
+        .evaluate_staged_repl_transaction(session, staged, &scope, bindings)
         .map_err(repl_application_error)?;
     if activation.mutations().is_empty() {
-        return Err("ORNA-REPL-EFFECT".to_owned());
+        *session = successor;
+        return Ok(value);
     }
     let activation = activation
         .stage_for_request(&transactions.authority, snapshot.context(), request)
@@ -2559,6 +2575,11 @@ fn run_repl(
     let mut runtime = repl_session(endpoint)?;
     let color_enabled = color_mode.stdout_enabled();
     let repository = runtime.repository.as_ref();
+    let host_bindings = runtime
+        .transactions
+        .as_ref()
+        .map(|transactions| transactions.host_bindings.clone())
+        .unwrap_or_else(|| Rc::new(RefCell::new(None)));
     let mut transactions = runtime.transactions.as_mut();
     let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
         run_repl_input(repository, transactions.as_deref_mut(), session, source)
@@ -2576,6 +2597,7 @@ fn run_repl(
     let stdout = io::stdout();
     let loader = ReplSnapshotSessionLoader {
         repository: runtime.repository.as_ref(),
+        host_bindings,
     };
     repl::run_with_snapshot_loader_and_color_and_submitter(
         &mut BufReader::new(stdin.lock()),
@@ -3551,6 +3573,7 @@ mod tests {
         assert_eq!(repository.worktree(), directory.path());
         let loader = ReplSnapshotSessionLoader {
             repository: Some(repository),
+            host_bindings: Rc::new(RefCell::new(None)),
         };
         for (target, expected) in [
             (repl::SnapshotTarget::Cwd, "7 : Int"),
@@ -3702,14 +3725,19 @@ mod tests {
             .repository
             .as_ref()
             .expect("opened project repository remains session authority");
+        let host_bindings = Rc::new(RefCell::new(Some(SysHostBindingRegistry::new(
+            EnvironmentProvider::default(),
+        ))));
         let loader = ReplSnapshotSessionLoader {
             repository: Some(repository),
+            host_bindings: host_bindings.clone(),
         };
         let mut session = repl::SnapshotSessionLoader::load_snapshot(
             &loader,
             repl::SnapshotTarget::Ref("snapshot".into()),
         )
         .expect("selected snapshot project is admitted");
+        assert!(host_bindings.borrow().is_none());
 
         assert!(
             std::process::Command::new("git")
@@ -3759,6 +3787,7 @@ mod tests {
         let mut runtime = repl_session(&endpoint).expect("core-only remote REPL session");
         let loader = ReplSnapshotSessionLoader {
             repository: runtime.repository.as_ref(),
+            host_bindings: Rc::new(RefCell::new(None)),
         };
         let mut input = b":at HEAD\n:at snapshot\n:quit\n".as_slice();
         let mut output = Vec::new();
