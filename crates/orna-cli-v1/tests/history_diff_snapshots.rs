@@ -86,6 +86,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         "song",
         0x80,
         true,
+        relation_id,
     )
     .await;
     let before = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
@@ -103,6 +104,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         "image",
         0x90,
         true,
+        relation_id,
     )
     .await;
     let after = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
