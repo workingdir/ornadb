@@ -309,6 +309,9 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if let Some(value) = self.bindings.handle(callee, arguments)? {
+            return Ok(Some(value));
+        }
         self.handle_table_effect(callee, arguments)
     }
 
@@ -318,7 +321,13 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        self.mutations.handle_with_budget(callee, arguments, budget)
+        if let Some(value) = self
+            .bindings
+            .handle_with_budget(callee, arguments, budget)?
+        {
+            return Ok(Some(value));
+        }
+        self.handle_table_effect(callee, arguments)
     }
 
     fn handle_registered_with_budget(
