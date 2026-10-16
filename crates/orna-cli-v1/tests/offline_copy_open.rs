@@ -63,11 +63,11 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     }
     let expected_payloads = [
         (
-            TypedKey::Bytes(b"song".to_vec()),
+            TypedKey::Text("song".to_owned()),
             std::fs::read(source.path().join("tone.wav")).unwrap(),
         ),
         (
-            TypedKey::Bytes(b"image".to_vec()),
+            TypedKey::Text("image".to_owned()),
             std::fs::read(source.path().join("pixel.png")).unwrap(),
         ),
     ];
@@ -105,6 +105,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         "song",
         0x80,
         true,
+        relation_id,
     )
     .await;
     commit_capture(
