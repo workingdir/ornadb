@@ -622,7 +622,8 @@ impl TypedKey {
         Ok(output)
     }
 
-    pub(crate) fn decode_canonical(bytes: &[u8]) -> Result<Self, RowStoreError> {
+    /// Decodes the canonical typed-key encoding used by format-3 row maps.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, RowStoreError> {
         if bytes.len() > KEY_CANONICAL_LIMIT {
             return Err(RowStoreError::KeyTooLarge(bytes.len()));
         }
@@ -633,6 +634,7 @@ impl TypedKey {
         }
         Ok(key)
     }
+
 
     fn from_cbor(value: CborValue) -> Result<Self, RowStoreError> {
         match value {
