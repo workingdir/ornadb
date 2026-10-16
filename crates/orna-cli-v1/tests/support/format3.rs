@@ -107,6 +107,12 @@ pub fn object_format3_repository(
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, source).unwrap();
     }
+    // The graph fixture commits through `commit-tree`, so the worktree still
+    // holds the placeholder `.orna/store/data` written before it. Restore the
+    // committed store before staging, or this commit would write that
+    // placeholder back over the real store root and every row-map read would
+    // fail with `NonCanonicalData`.
+    git(root, &["checkout", "HEAD", "--", ".orna/store"]);
     git(root, &["add", "--all"]);
     git(root, &["commit", "--quiet", "-m", "add source Object rows"]);
     let commit = repository.head().unwrap().unwrap();
