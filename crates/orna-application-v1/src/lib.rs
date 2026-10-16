@@ -8,7 +8,7 @@
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, Ovb2EffectHandler,
     PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget, SysHostBindingRegistry, invoke_named,
     invoke_named_with_effects, reference_standard_profile, reference_standard_sources,
 };

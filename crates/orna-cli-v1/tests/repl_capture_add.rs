@@ -3,7 +3,9 @@ use std::{
     process::{Child, ChildStdout, Command, Output, Stdio},
 };
 
+use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_runtime_v1::RuntimeState;
+use orna_semantic_v1::{Catalogue, ModuleInput};
 use orna_value_v1::{ContextValue, Raw, Value, ValueFormat};
 
 const MUSIC_SOURCE: &str = r#"pub table media(id: Str) {
@@ -247,6 +249,48 @@ async fn repl_capture_candidate_is_reclaimed_after_crash_and_runtime_reopen() {
     drop(state);
 }
 
+#[test]
+fn repl_user_main_module_wins_over_the_root_main_alias() {
+    let modules = [
+        ModuleInput::new("main.orna", "pub fn add(value: Int) = value + 10;"),
+        ModuleInput::new("main/main.orna", "pub fn add(value: Int) = value + 1;"),
+    ];
+    let mut session = AdmittedReplSession::from_catalogue(
+        &modules,
+        Catalogue::authoritative_core(),
+        std::iter::empty::<(String, String)>(),
+        Limits::default(),
+    )
+    .expect("root and user main modules are admitted");
+
+    assert!(session.submit("main.add(1)").is_err());
+    session.submit("use main;").expect("user main module is importable");
+    let value = session
+        .submit("main.add(1)")
+        .expect("user main function is callable")
+        .expect("function returns a value");
+    assert_eq!(value.raw(), &Raw::Int(2.into()));
+}
+#[test]
+fn repl_root_main_alias_targets_root_namespace_without_user_main() {
+    let modules = [ModuleInput::new(
+        "main.orna",
+        "pub fn add(value: Int) = value + 1;",
+    )];
+    let mut session = AdmittedReplSession::from_catalogue(
+        &modules,
+        Catalogue::authoritative_core(),
+        std::iter::empty::<(String, String)>(),
+        Limits::default(),
+    )
+    .expect("root module is admitted");
+
+    let value = session
+        .submit("main.add(1)")
+        .expect("root main alias resolves the public root function")
+        .expect("function returns a value");
+    assert_eq!(value.raw(), &Raw::Int(2.into()));
+}
 #[path = "support/format3.rs"]
 mod format3;
 use format3::*;
