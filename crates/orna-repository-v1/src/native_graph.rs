@@ -10790,6 +10790,16 @@ fn direct_blob_reference_count(value: &CborValue) -> Result<usize, GraphError> {
     match value {
         CborValue::Tag(60111, _) => Ok(1),
         CborValue::Tag(60113, _) => Ok(0),
+        CborValue::Tag(60013, payload) => {
+            let CborValue::Array(fields) = payload.as_ref() else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            match fields.as_slice() {
+                [CborValue::Unsigned(0)] => Ok(0),
+                [CborValue::Unsigned(1), value] => direct_blob_reference_count(value),
+                _ => Err(GraphError::NonCanonicalData),
+            }
+        },
         CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
         CborValue::Array(values) => values.iter().try_fold(0usize, |count, value| {
             count
@@ -11375,5 +11385,18 @@ mod option_value_tests {
         )])
         .encode(&mut some);
         assert_eq!(row_fields_dependencies(&some).unwrap().len(), 1);
+    }
+    #[test]
+    fn direct_blob_reference_count_traverses_option_some_values() {
+        assert_eq!(direct_blob_reference_count(&option_none()).unwrap(), 0);
+        let references = (0..33)
+            .map(|_| {
+                CborValue::Tag(
+                    60013,
+                    Box::new(CborValue::Array(vec![CborValue::Unsigned(1), rov3_blob(vec![0x44; 20])])),
+                )
+            })
+            .collect();
+        assert_eq!(direct_blob_reference_count(&CborValue::Array(references)).unwrap(), 33);
     }
 }
