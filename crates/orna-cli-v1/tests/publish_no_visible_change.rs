@@ -303,6 +303,7 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
         b"\xff",
         0xe0,
         true,
+        relation_id,
     )
     .await;
     let pending_before = state.pending_count().await.unwrap();
