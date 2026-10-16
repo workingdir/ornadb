@@ -70,6 +70,10 @@ release gate has passed.
 - USER state is principal-scoped and typed. Local peer authentication supplies
   the principal; optimistic revision conflicts and invalid expected types fail
   closed. State values use the canonical ORV5 value representation.
+- The system API exposes publication metadata as typed records. `sys.Storage` and
+  `sys.MaintenanceJob` include pending and published row and byte counts.
+  `sys.PublicationPolicy` declares the size and age limits. Its schema supports
+  field access under Orna 1.1.0 Section 29.
 - The Inspector exposes immutable invocation epochs, eight closed projections,
   redacted-by-default records, privilege checks, and sequence-addressable
   traces. Local SQLite inspection is narrower and stores only bounded,
