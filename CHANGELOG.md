@@ -9,6 +9,8 @@ been published.
 - Source identity reconciliation accepts explicit rename mappings and preserves
   existing IDs across authorized name changes. Unassisted renames remain
   delete-plus-create, and retired IDs are never reused.
+- The `mv` CLI command renames committed tables and retains their table and
+  child-field IDs in uncommitted source and identity-manifest changes.
 
 ## 1.0.0 — release inventory (publication pending)
 

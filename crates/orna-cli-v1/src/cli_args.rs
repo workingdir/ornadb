@@ -65,6 +65,10 @@ pub(super) enum Command {
         remote: String,
         branch: Option<String>,
     },
+    Mv {
+        old: String,
+        new: String,
+    },
     SemanticLegend {
         format: LegendFormat,
         limit: Option<usize>,
@@ -364,6 +368,18 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 ));
             }
             Command::Push { remote, branch }
+        }
+        Some("mv") => {
+            let old = words.next().ok_or_else(|| {
+                Diagnostic::usage("E1001", "`mv` needs a source name", "use `mv OLD NEW`")
+            })?;
+            let new = words.next().ok_or_else(|| {
+                Diagnostic::usage("E1001", "`mv` needs a target name", "use `mv OLD NEW`")
+            })?;
+            Command::Mv {
+                old: old.to_owned(),
+                new: new.to_owned(),
+            }
         }
         Some("history") => Command::History(words.by_ref().map(str::to_owned).collect()),
         Some("query") => Command::Query(words.by_ref().map(str::to_owned).collect()),
@@ -729,6 +745,37 @@ mod tests {
                 "unsupported value for `status --format`",
                 "choose `human`, `short`, or `json` after `status --format`"
             )
+        );
+    }
+
+    #[test]
+    fn parser_accepts_exact_mv_source_and_target() {
+        assert_eq!(
+            parse_cli(&args(&["mv", "Media", "Archive"]))
+                .expect("mv parses")
+                .command,
+            Command::Mv {
+                old: "Media".into(),
+                new: "Archive".into(),
+            }
+        );
+        assert_eq!(
+            parse_cli(&args(&["mv"]))
+                .expect_err("missing source is rejected")
+                .code,
+            "E1001"
+        );
+        assert_eq!(
+            parse_cli(&args(&["mv", "Media"]))
+                .expect_err("missing target is rejected")
+                .code,
+            "E1001"
+        );
+        assert_eq!(
+            parse_cli(&args(&["mv", "Media", "Archive", "Extra"]))
+                .expect_err("extra arguments are rejected")
+                .code,
+            "E1003"
         );
     }
 
