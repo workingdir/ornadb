@@ -878,6 +878,14 @@ impl HistoricalFormatContext {
         self.context.load_row_map(relation_id)
     }
 
+    /// Opens a value context bound to this historical snapshot and relation.
+    pub fn open_value_context(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<Format3Context, FormatContextError> {
+        self.context.open_value_context(relation_id)
+    }
+
     /// Resolves the committed descriptor selected by relation ID without
     /// claiming a source binding.
     pub fn resolve_committed_table_by_relation_id(
