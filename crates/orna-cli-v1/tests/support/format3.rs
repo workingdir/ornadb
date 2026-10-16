@@ -153,6 +153,34 @@ pub async fn publish_media_row(
         .await
         .expect("the explicit publication boundary succeeds");
 }
+/// Publishes every source row by its canonical mutation key and committed path.
+pub async fn publish_source_rows(
+    repository: &Repository,
+    state: &RuntimeState,
+    paths_by_key: &std::collections::BTreeMap<Vec<u8>, LoosePath>,
+) {
+    let checkpoint = state
+        .latest_checkpoint()
+        .await
+        .unwrap()
+        .expect("source rows leave a committed checkpoint");
+    DurableTransactionalEvaluator::default()
+        .publish_pending(
+            repository,
+            state,
+            [0x96; 16],
+            &checkpoint,
+            |mutation| {
+                paths_by_key
+                    .get(mutation.key())
+                    .expect("each source mutation has a committed path")
+                    .clone()
+            },
+            "orna: publish source rows",
+        )
+        .await
+        .expect("the explicit source publication boundary succeeds");
+}
 
 pub fn capture_failure(
     bindings: &mut SysHostBindingRegistry,
