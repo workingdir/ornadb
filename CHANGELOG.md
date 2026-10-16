@@ -106,6 +106,10 @@ release gate has passed.
 - Format-3 committed Blob rows require exact canonical MIME-1 media types and
   suffixes. Readers reject noncanonical stored annotations instead of
   normalizing them during metadata projection or SOV-3 conversion.
+- A prepared Blob row binds its stored annotation to the annotation its pin was
+  admitted with. The candidate metadata lookup rejects a row whose spelling is
+  not canonical MIME-1, or that differs from the admitted pair, so a transfer
+  record cannot report an annotation the pin never admitted.
 - Product selection retains standard-library snapshots through `orna.std/9`.
   The pre-1.0 V10 `std/cli.orna` source and V9-to-V10 upgrade constructor are
   retired; a stored V10 revision can only be verified when supplied directly
