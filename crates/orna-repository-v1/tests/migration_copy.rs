@@ -4,7 +4,8 @@ mod test_support;
 use std::{fs, path::Path, process::Command};
 
 use orna_repository_v1::{
-    MigrationAnnotationDefaults, MigrationContinuityRecord, Repository, migration_copy,
+    LegacyAnnotationCandidate, LegacyAnnotationInventory, MigrationAnnotationDefaults,
+    MigrationContinuityRecord, Repository, migration_copy,
 };
 use tempfile::TempDir;
 
@@ -312,4 +313,309 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
         "legacy annotation migration is a new semantic coordinate"
     );
     assert!(!copy.annotation_defaults().payload_inspected());
+}
+#[test]
+fn populated_format2_dirty_workspace_is_preserved_in_copy() {
+    let source = TempDir::new().unwrap();
+    init_repository(source.path());
+    fs::write(
+        source.path().join("main.orna"),
+        include_str!("fixtures/git-repository-main.orna"),
+    )
+    .unwrap();
+    fs::write(
+        source.path().join("tracked.txt"),
+        b"format-2 committed bytes\n",
+    )
+    .unwrap();
+    fs::create_dir_all(source.path().join(".orna")).unwrap();
+    fs::write(
+        source.path().join(".orna/format.orna"),
+        include_str!("fixtures/format-context/format-2.orna"),
+    )
+    .unwrap();
+    fs::write(
+        source.path().join(".orna/database.orna"),
+        include_str!("fixtures/format-context/database-sidecar.orna"),
+    )
+    .unwrap();
+    git_output(source.path(), &["add", "."]);
+    git_output(source.path(), &["commit", "-m", "format-2 source"]);
+
+    let dependency = TempDir::new().unwrap();
+    init_repository(dependency.path());
+    fs::write(
+        dependency.path().join("dependency.txt"),
+        b"committed dependency\n",
+    )
+    .unwrap();
+    git_output(dependency.path(), &["add", "."]);
+    git_output(dependency.path(), &["commit", "-m", "dependency source"]);
+    let dependency_url = dependency.path().to_str().unwrap();
+    let added = Command::new("git")
+        .current_dir(source.path())
+        .args(["-c", "protocol.file.allow=always", "submodule", "add"])
+        .arg(dependency_url)
+        .arg("dependencies/example")
+        .output()
+        .unwrap();
+    assert!(
+        added.status.success(),
+        "git submodule add: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    git_output(source.path(), &["commit", "-am", "record dependency"]);
+    let source_head = git_text(source.path(), &["rev-parse", "HEAD"]);
+
+    fs::write(source.path().join("tracked.txt"), b"staged bytes\n").unwrap();
+    git_output(source.path(), &["add", "tracked.txt"]);
+    fs::write(source.path().join("tracked.txt"), b"unstaged bytes\n").unwrap();
+    fs::write(source.path().join("new-source.txt"), b"untracked source\n").unwrap();
+    let submodule = source.path().join("dependencies/example");
+    fs::write(submodule.join("dependency.txt"), b"staged dependency\n").unwrap();
+    git_output(&submodule, &["add", "dependency.txt"]);
+    fs::write(submodule.join("dependency.txt"), b"unstaged dependency\n").unwrap();
+    fs::write(submodule.join("local.txt"), b"untracked dependency\n").unwrap();
+
+    let repository = Repository::discover(source.path()).unwrap();
+    let source_submodule_status = git_output(
+        &submodule,
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+    let source_submodule_stage = git_output(&submodule, &["show", ":dependency.txt"]);
+    let source_gitlink_stage = git_output(
+        source.path(),
+        &["ls-files", "--stage", "--", "dependencies/example"],
+    );
+    let source_format_bytes = git_output(
+        source.path(),
+        &["show", &format!("{source_head}:.orna/format.orna")],
+    );
+    assert_ne!(
+        include_bytes!("fixtures/format-context/format-2.orna").as_slice(),
+        include_bytes!("fixtures/format-context/format-1.orna").as_slice()
+    );
+    assert_eq!(
+        source_format_bytes,
+        include_bytes!("fixtures/format-context/format-2.orna")
+    );
+    let source_status = git_output(
+        source.path(),
+        &["status", "--porcelain=v2", "--untracked-files=all"],
+    );
+    let committed_bytes = git_output(
+        source.path(),
+        &["show", &format!("{source_head}:tracked.txt")],
+    );
+    let committed_format_bytes = source_format_bytes.clone();
+    let destination_parent = TempDir::new().unwrap();
+    let destination = destination_parent.path().join("migrated");
+    let annotation_inventory =
+        LegacyAnnotationInventory::Present(vec![LegacyAnnotationCandidate::new(
+            b"unlabeled-source-row".to_vec(),
+            None,
+            None,
+        )]);
+    assert!(annotation_inventory.is_available());
+    assert_eq!(annotation_inventory.rows()[0].annotation_media_type(), None);
+    assert_eq!(annotation_inventory.rows()[0].suffix(), None);
+    let defaults = annotation_inventory.annotation_defaults().unwrap();
+    let continuity = MigrationContinuityRecord::new(Vec::new()).unwrap();
+    let copy = migration_copy::prepare_format3_migration(
+        &repository,
+        &destination,
+        continuity.clone(),
+        defaults,
+    )
+    .unwrap();
+
+    assert_eq!(
+        git_output(
+            source.path(),
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        source_status
+    );
+    assert_eq!(
+        git_output(
+            &submodule,
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        source_submodule_status
+    );
+    assert_eq!(
+        git_output(&submodule, &["show", ":dependency.txt"]),
+        source_submodule_stage
+    );
+    assert_eq!(
+        git_output(
+            source.path(),
+            &["ls-files", "--stage", "--", "dependencies/example"]
+        ),
+        source_gitlink_stage
+    );
+    assert_eq!(
+        fs::read(source.path().join("tracked.txt")).unwrap(),
+        b"unstaged bytes\n"
+    );
+    assert_eq!(
+        fs::read(submodule.join("dependency.txt")).unwrap(),
+        b"unstaged dependency\n"
+    );
+    assert_eq!(
+        fs::read(submodule.join("local.txt")).unwrap(),
+        b"untracked dependency\n"
+    );
+
+    assert_eq!(copy.source_format_number(), 2);
+    assert_eq!(format!("{:?}", copy.source_format()), "Legacy2");
+    assert_eq!(
+        copy.candidate_journal().migration_continuity(),
+        Some(&continuity)
+    );
+    assert_eq!(
+        copy.candidate_journal().migration_annotation_defaults(),
+        Some(defaults)
+    );
+    assert_eq!(copy.continuity(), &continuity);
+    let legacy_format_entry = copy
+        .candidate_journal()
+        .entries()
+        .iter()
+        .find(|entry| entry.path().as_path() == Path::new(".orna/format.orna"))
+        .unwrap();
+    assert_eq!(
+        legacy_format_entry.expected(),
+        Some(b"format 2\n".as_slice())
+    );
+    assert_eq!(legacy_format_entry.next(), None);
+    assert_eq!(
+        git_output(
+            copy.destination(),
+            &["show", &format!("{}:.orna/format.orna", source_head)]
+        ),
+        committed_format_bytes
+    );
+    let migration_record = git_output(
+        copy.destination(),
+        &[
+            "show",
+            &format!(
+                "{}:.orna/migration.json",
+                copy.candidate_journal().new_head().as_str()
+            ),
+        ],
+    );
+    let migration_record = String::from_utf8(migration_record).unwrap();
+    assert!(migration_record.contains("source_format: 2"));
+    assert!(migration_record.contains("annotation_default_format: \"MIME-1\""));
+    assert!(migration_record.contains("annotation_default_entries: 1"));
+    assert!(migration_record.contains("payload_inspected: false"));
+    assert!(migration_record.contains("continuity_predecessors: 0"));
+    let copy_submodule = copy.destination().join("dependencies/example");
+    assert_eq!(
+        git_output(&copy_submodule, &["show", ":dependency.txt"]),
+        source_submodule_stage
+    );
+    assert_eq!(
+        git_output(
+            copy.destination(),
+            &["ls-files", "--stage", "--", "dependencies/example"]
+        ),
+        source_gitlink_stage
+    );
+    assert_eq!(migrated_head.as_str(), source_head);
+    assert_eq!(copy.source_commit().as_str(), source_head);
+    assert_eq!(
+        migrated
+            .open_format_context()
+            .unwrap()
+            .repository_format_number(),
+        2,
+        "the old commit remains readable under its recorded format"
+    );
+    assert_eq!(
+        git_output(
+            copy.destination(),
+            &["show", &format!("{}:tracked.txt", migrated_head.as_str())]
+        ),
+        committed_bytes,
+        "the old committed blob keeps its byte identity in the copy"
+    );
+    assert_eq!(
+        git_output(copy.destination(), &["show", ":tracked.txt"]),
+        b"staged bytes\n"
+    );
+    assert_eq!(
+        fs::read(copy.destination().join("tracked.txt")).unwrap(),
+        b"unstaged bytes\n"
+    );
+    assert_eq!(
+        fs::read(copy.destination().join("new-source.txt")).unwrap(),
+        b"untracked source\n"
+    );
+    assert_eq!(
+        fs::read(
+            copy.destination()
+                .join("dependencies/example/dependency.txt")
+        )
+        .unwrap(),
+        b"unstaged dependency\n"
+    );
+    assert_eq!(
+        fs::read(copy.destination().join("dependencies/example/local.txt")).unwrap(),
+        b"untracked dependency\n"
+    );
+    assert_eq!(copy.source_index_generation(), &source_index);
+    assert_eq!(copy.annotation_defaults(), defaults);
+    assert_eq!(
+        copy.annotation_defaults().entry_count(),
+        1,
+        "legacy annotation migration is a new semantic coordinate"
+    );
+    assert!(!copy.annotation_defaults().payload_inspected());
+    // MIGRATION.md items 5 and 20-23: metadata-derived unlabeled-row defaults
+    // are a new interpretation coordinate, distinct from unchanged raw bytes.
+    let recovered = migration_copy::prepare_format3_migration(
+        &repository,
+        &destination,
+        continuity.clone(),
+        defaults,
+    )
+    .unwrap();
+    assert_eq!(
+        recovered.candidate_journal().new_head(),
+        copy.candidate_journal().new_head()
+    );
+    assert_eq!(recovered.source_index_generation(), &source_index);
+    assert_eq!(
+        git_output(&submodule, &["show", ":dependency.txt"]),
+        source_submodule_stage
+    );
+    assert_eq!(
+        git_output(
+            source.path(),
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        source_status
+    );
+
+    // Simulate an incomplete/stale destination: recovery must refuse modified
+    // prepared-copy contents rather than silently adopting them.
+    fs::write(
+        copy.destination().join(".orna/migration.json"),
+        b"partial migration record\n",
+    )
+    .unwrap();
+    assert!(
+        migration_copy::prepare_format3_migration(&repository, &destination, continuity, defaults,)
+            .is_err()
+    );
+    assert_eq!(
+        git_output(
+            source.path(),
+            &["status", "--porcelain=v2", "--untracked-files=all"]
+        ),
+        source_status
+    );
 }
