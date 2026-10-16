@@ -71,6 +71,8 @@ release gate has passed.
   through host FUSE as a read-only view (`ro,nodev,nosuid,noexec`), pinned to
   the selected commit. `orna unmount DIR` releases its kernel mount and view
   record; `orna mount DIR --at SELECTOR` attaches a record-only snapshot view.
+- Committed snapshot loading preserves nested module import candidates while
+  keeping format-3 row documents out of loose-row source discovery.
 - USER state is principal-scoped and typed. Local peer authentication supplies
   the principal; optimistic revision conflicts and invalid expected types fail
   closed. State values use the canonical ORV5 value representation.
