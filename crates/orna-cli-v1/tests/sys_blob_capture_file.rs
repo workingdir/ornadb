@@ -1,7 +1,5 @@
 use std::{
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -9,10 +7,10 @@ use std::{
 };
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::Repository;
+use orna_project_v1::ProjectLoader;
 use orna_runtime_v1::{
     FaultInjector, FaultPoint, RequestIdentity, RequestState, RuntimeError, RuntimeIdentity,
-    RuntimeState, TableMutation, TerminalOutcome,
+    RuntimeState, TableMutation, TableObjectId, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{
@@ -20,15 +18,26 @@ use orna_value_v1::{
     Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
     ValueFormat,
 };
-use sha2::{Digest, Sha256};
-use tempfile::TempDir;
 
 #[tokio::test]
 async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let (directory, repository, relation_id) = empty_format3_repository();
+    let commit = repository.head().unwrap().unwrap();
+    let source_table = ProjectLoader::default()
+        .resolve_committed_source_table_schema(
+            &repository,
+            &commit,
+            TableObjectId::new(relation_id),
+        )
+        .unwrap();
+    assert_eq!(source_table.binding().module_name(), Some(""));
+    assert_eq!(source_table.binding().source_path(), Some("main.orna"));
+    assert_eq!(source_table.binding().declaration_name(), Some("media"));
+    let media_table_id = *source_table.binding().table_object_id();
+    assert_eq!(media_table_id, relation_id);
     let root = directory.path();
-    let payload = b"{\"source\":\"cli\"}";
-    std::fs::write(root.join("note.wav"), payload).unwrap();
+    let payload = include_bytes!("fixtures/media/tone.wav");
+    std::fs::write(root.join("tone.wav"), payload).unwrap();
     let head_before_capture = git_output(root, &["rev-parse", "HEAD"], None);
 
     let runtime_identity = RuntimeIdentity {
@@ -59,7 +68,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap();
     let context = state.begin_activation().await.unwrap();
 
-    let capability = repository.capture_capability(relation_id).unwrap();
+    let capability = repository.capture_capability(media_table_id).unwrap();
 
     let mut filesystem = FilesystemProvider::with_limits(65_536, 16).unwrap();
     filesystem.allow_root(root).unwrap();
@@ -68,9 +77,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .with_repository_capture_capability(capability);
     let media_root = format!("{:?}", root.to_string_lossy().as_ref());
     let source = include_str!("fixtures/media/import-song-annotation.orna")
-        .replace("__MEDIA_ROOT__", &media_root)
-        .replace("\"audio/wav\"", "\"audio/mp4\"")
-        .replace("\"note\"", "\"m4b\"");
+        .replace("__MEDIA_ROOT__", &media_root);
     let value = evaluate_expression_ovb2_with_effects(
         &source,
         &Default::default(),
@@ -80,13 +87,20 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     .unwrap_or_else(|error| panic!("authored capture annotation failed: {}", error.code()));
 
     assert_eq!(value.format(), ValueFormat::Ovb2);
+    assert!(
+        value.context().is_none(),
+        "portable OVB-2 results carry no owner context"
+    );
     let blob = value.blob().unwrap();
     assert_eq!(blob.read_to_end().unwrap(), payload);
     assert_eq!(blob.media_type(), "audio/mp4");
     assert_eq!(blob.suffix(), Some("m4b"));
 
     let round_trip = ContextValue::decode(&value.encode().unwrap(), ValueFormat::Ovb2).unwrap();
+    assert_eq!(round_trip.format(), ValueFormat::Ovb2);
+    assert!(round_trip.context().is_none());
     let round_trip_blob = round_trip.blob().unwrap();
+    assert_eq!(round_trip_blob.content_identity(), blob.content_identity());
     assert_eq!(round_trip_blob.read_to_end().unwrap(), payload);
     assert_eq!(round_trip_blob.media_type(), "audio/mp4");
     assert_eq!(round_trip_blob.suffix(), Some("m4b"));
@@ -94,14 +108,14 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     // Capture finishes with only owner-scoped scratch state. It has not
     // inserted a runtime row or created a public commit.
     assert_eq!(
-        state
-            .committed_table_row("captures", b"capture.json")
-            .await
-            .unwrap(),
+        state.committed_table_row("media", b"song").await.unwrap(),
         None
     );
     assert!(state.pending().await.unwrap().is_empty());
-    assert_eq!(git_output(root, &["rev-parse", "HEAD"], None), head_before_capture);
+    assert_eq!(
+        git_output(root, &["rev-parse", "HEAD"], None),
+        head_before_capture
+    );
 
     // The authored annotation survives OVB-2 evaluation and row conversion.
     let annotated = value;
@@ -184,24 +198,19 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         hex(transfer.pin_id())
     );
     assert_eq!(
-        state
-            .committed_table_row("captures", b"capture.json")
-            .await
-            .unwrap(),
+        state.committed_table_row("media", b"song").await.unwrap(),
         None
     );
-    assert_eq!(git_output(root, &["rev-parse", "HEAD"], None), head_before_capture);
+    assert_eq!(
+        git_output(root, &["rev-parse", "HEAD"], None),
+        head_before_capture
+    );
 
-    let mutation = TableMutation::insert(
-        [0x58; 16],
-        "captures",
-        b"capture.json".to_vec(),
-        Vec::new(),
-    )
-    .unwrap()
-    .with_orp_blob_binding(binding)
-    .unwrap();
-    std::fs::remove_file(root.join("note.wav")).unwrap();
+    let mutation = TableMutation::insert(media_table_id, "media", b"song".to_vec(), Vec::new())
+        .unwrap()
+        .with_orp_blob_binding(binding)
+        .unwrap();
+    std::fs::remove_file(root.join("tone.wav")).unwrap();
     let competing_context = state.begin_activation().await.unwrap();
     state
         .commit_table_activation(
@@ -229,10 +238,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         Err(RuntimeError::StaleCapture { .. })
     ));
     assert_eq!(
-        state
-            .committed_table_row("captures", b"capture.json")
-            .await
-            .unwrap(),
+        state.committed_table_row("media", b"song").await.unwrap(),
         None
     );
     assert_eq!(
@@ -260,7 +266,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
     let committed_value = state
-        .committed_table_row("captures", b"capture.json")
+        .committed_table_row("media", b"song")
         .await
         .unwrap()
         .unwrap();
@@ -276,13 +282,18 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         decoded_mutation.protected_content_transfers()[0].content_identity(),
         transfer.content_identity()
     );
-    assert!(Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &pin_ref])
-        .current_dir(root)
-        .status()
-        .unwrap()
-        .success());
-    assert_eq!(git_output(root, &["rev-parse", "HEAD"], None), head_before_capture);
+    assert!(
+        Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &pin_ref])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        git_output(root, &["rev-parse", "HEAD"], None),
+        head_before_capture
+    );
 
     let failed_payload = b"must not be acknowledged before flush";
     std::fs::write(root.join("flush.json"), failed_payload).unwrap();
@@ -296,7 +307,9 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         &mut bindings,
     )
     .unwrap();
-    let failed_binding = bindings.accept_captured_blob_for_row(&failed_value).unwrap();
+    let failed_binding = bindings
+        .accept_captured_blob_for_row(&failed_value)
+        .unwrap();
     let failed_transfer = failed_binding.transfer_record();
     let failed_pin_ref = format!(
         "refs/orna/pins/{}/pending/{}",
@@ -322,15 +335,11 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .await
         .unwrap();
     let failed_context = state.begin_activation().await.unwrap();
-    let failed_mutation = TableMutation::insert(
-        [0x64; 16],
-        "captures",
-        b"flush.json".to_vec(),
-        Vec::new(),
-    )
-    .unwrap()
-    .with_orp_blob_binding(failed_binding)
-    .unwrap();
+    let failed_mutation =
+        TableMutation::insert([0x64; 16], "captures", b"flush.json".to_vec(), Vec::new())
+            .unwrap()
+            .with_orp_blob_binding(failed_binding)
+            .unwrap();
     assert_eq!(
         state
             .commit_table_request_activation(
@@ -367,22 +376,21 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
             .state,
         RequestState::Running
     );
-    assert!(Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &failed_pin_ref])
-        .current_dir(root)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &failed_pin_ref])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
 
     drop(state);
     let state = RuntimeState::open(&repository, runtime_identity, [0x53; 32])
         .await
         .unwrap();
     assert_eq!(
-        state
-            .committed_table_row("captures", b"capture.json")
-            .await
-            .unwrap(),
+        state.committed_table_row("media", b"song").await.unwrap(),
         Some(expected_row_value)
     );
     assert_eq!(
@@ -393,13 +401,18 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         None
     );
     assert_eq!(state.pending().await.unwrap().len(), 2);
-    assert!(Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &failed_pin_ref])
-        .current_dir(root)
-        .status()
-        .unwrap()
-        .success());
-    assert_eq!(git_output(root, &["rev-parse", "HEAD"], None), head_before_capture);
+    assert!(
+        Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &failed_pin_ref])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        git_output(root, &["rev-parse", "HEAD"], None),
+        head_before_capture
+    );
 
     std::fs::write(root.join("capture.json"), payload).unwrap();
     assert_eq!(
