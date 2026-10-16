@@ -171,12 +171,11 @@ pub async fn publish_source_rows(
             [0x96; 16],
             &checkpoint,
             |mutation| {
-                paths_by_key
+                Ok(paths_by_key
                     .get(mutation.key())
                     .expect("each source mutation has a committed path")
-                    .clone()
+                    .clone())
             },
-            "orna: publish source rows",
         )
         .await
         .expect("the explicit source publication boundary succeeds");
