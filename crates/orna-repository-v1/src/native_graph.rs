@@ -1497,6 +1497,23 @@ impl NativeGraphContext {
         active: &mut BTreeSet<NativeOid>,
     ) -> Result<CborValue, GraphError> {
         match value {
+            CborValue::Tag(60013, payload) => {
+                let CborValue::Array(mut fields) = *payload else {
+                    return Err(GraphError::NonCanonicalData);
+                };
+                match fields.as_slice() {
+                    [CborValue::Unsigned(0)] => {
+                        Ok(CborValue::Tag(60013, Box::new(CborValue::Array(fields))))
+                    }
+                    [CborValue::Unsigned(1), _] => {
+                        let value = fields.pop().ok_or(GraphError::NonCanonicalData)?;
+                        let value = self.to_sov_value(value, scope, objects, active)?;
+                        fields[1] = value;
+                        Ok(CborValue::Tag(60013, Box::new(CborValue::Array(fields))))
+                    }
+                    _ => Err(GraphError::NonCanonicalData),
+                }
+            }
             CborValue::Tag(60111, payload) => {
                 let CborValue::Array(fields) = *payload else {
                     return Err(GraphError::NonCanonicalData);
@@ -10367,14 +10384,23 @@ fn stored_field_object_ids(descriptor: &SchemaDescriptor) -> Result<Vec<[u8; 16]
     Ok(identities)
 }
 
-/// Collects every OVB-2 Blob value reachable inside a canonical stored row
-/// value, in the order the value holds them.
-///
-/// A row's fields are not named here: the annotation is chosen by matching a
-/// Blob value's own recorded content identity against the descriptor the row
-/// references, so the value is the sole authority. An empty dependency list on
-/// such a value is kept, because the two encodings carry the same annotation
-/// and identity and the caller detects the ambiguity.
+/// Reads the payload of a canonical Orna option value.
+fn option_payload_value(value: &CborValue) -> Result<Option<&CborValue>, GraphError> {
+    let CborValue::Tag(60013, payload) = value else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let CborValue::Array(fields) = payload.as_ref() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    match fields.as_slice() {
+        [CborValue::Unsigned(0)] => Ok(None),
+        [CborValue::Unsigned(1), value] => Ok(Some(value)),
+        _ => Err(GraphError::NonCanonicalData),
+    }
+}
+
+/// Collects normalized Blob metadata reachable inside a canonical stored row.
+/// Option None contributes nothing; Some recursively visits its value.
 fn collect_blob_value_fields(
     value: &CborValue,
     output: &mut Vec<(
@@ -10383,6 +10409,10 @@ fn collect_blob_value_fields(
     )>,
 ) -> Result<(), GraphError> {
     match value {
+        CborValue::Tag(60013, _) => match option_payload_value(value)? {
+            None => Ok(()),
+            Some(value) => collect_blob_value_fields(value, output),
+        },
         CborValue::Tag(60112, payload) => {
             let CborValue::Array(fields) = payload.as_ref() else {
                 return Err(GraphError::NonCanonicalData);
@@ -10543,6 +10573,11 @@ fn collect_overflow_oids(
     output: &mut BTreeSet<NativeOid>,
 ) -> Result<(), GraphError> {
     match value {
+        CborValue::Tag(60013, _) => {
+            if let Some(value) = option_payload_value(value)? {
+                collect_overflow_oids(value, algorithm, output)?;
+            }
+        }
         CborValue::Tag(60113, payload) => {
             output.insert(overflow_tag_oid(payload, algorithm)?);
         }
@@ -10615,6 +10650,11 @@ fn collect_row_dependencies(
     dependencies: &mut BTreeMap<NativeObjectId, NativeObjectKind>,
 ) -> Result<(), GraphError> {
     match value {
+        CborValue::Tag(60013, _) => {
+            if let Some(value) = option_payload_value(value)? {
+                collect_row_dependencies(value, dependencies)?;
+            }
+        }
         CborValue::Tag(60111, payload) => {
             let CborValue::Array(fields) = payload.as_ref() else {
                 return Err(GraphError::NonCanonicalData);
@@ -10908,7 +10948,7 @@ impl<'a> CborReader<'a> {
                 Ok(CborValue::Map(entries))
             }
             6 => {
-                if !matches!(length, 60110..=60113) {
+                if !matches!(length, 60013 | 60110..=60113) {
                     return Err(GraphError::NonCanonicalData);
                 }
                 Ok(CborValue::Tag(length, Box::new(self.value()?)))
@@ -11224,5 +11264,65 @@ fn head(output: &mut Vec<u8>, major: u8, value: u64) {
             output.push(base | 27);
             output.extend_from_slice(&value.to_be_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod option_value_tests {
+    use super::*;
+
+    fn rov3_blob(descriptor: Vec<u8>) -> CborValue {
+        CborValue::Tag(
+            60111,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(7),
+                CborValue::Bytes(vec![0x22; 32]),
+                CborValue::Text("audio/mpeg".into()),
+                CborValue::Null,
+                CborValue::Bytes(descriptor),
+            ])),
+        )
+    }
+
+    fn option_none() -> CborValue {
+        CborValue::Tag(60013, Box::new(CborValue::Array(vec![CborValue::Unsigned(0)])))
+    }
+
+    #[test]
+    fn optional_blob_metadata_traversal_handles_none_and_some() {
+        let mut metadata = Vec::new();
+        collect_blob_value_fields(&option_none(), &mut metadata).unwrap();
+        assert!(metadata.is_empty());
+
+        let blob_metadata = CborValue::Tag(
+            60112,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(7),
+                CborValue::Bytes(vec![0x22; 32]),
+                CborValue::Text("audio/mpeg".into()),
+                CborValue::Null,
+            ])),
+        );
+        let option_some = CborValue::Tag(
+            60013,
+            Box::new(CborValue::Array(vec![CborValue::Unsigned(1), blob_metadata])),
+        );
+        collect_blob_value_fields(&option_some, &mut metadata).unwrap();
+        assert_eq!(metadata.len(), 1);
+    }
+
+    #[test]
+    fn optional_blob_row_dependencies_handle_none_and_some() {
+        let mut none = Vec::new();
+        CborValue::Array(vec![option_none()]).encode(&mut none);
+        assert!(row_fields_dependencies(&none).unwrap().is_empty());
+
+        let mut some = Vec::new();
+        CborValue::Array(vec![CborValue::Tag(
+            60013,
+            Box::new(CborValue::Array(vec![CborValue::Unsigned(1), rov3_blob(vec![0x44; 20])])),
+        )])
+        .encode(&mut some);
+        assert_eq!(row_fields_dependencies(&some).unwrap().len(), 1);
     }
 }

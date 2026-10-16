@@ -1348,6 +1348,7 @@ fn project_runtime_mutation(
                 Error::RepositoryUnavailable
             })?;
             let Raw::Array(_) = decoded.raw() else {
+                eprintln!("projection: ROV3 row is not an array relation={relation_id:?}");
                 return Err(Error::RepositoryUnavailable);
             };
             let fields = bytes.to_vec();
@@ -1470,10 +1471,14 @@ fn build_frozen_publication_store_root(
             );
         }
         if let Some(value) = row.next {
-            operations.push(
-                RowIndexMutation::insert_canonical(&key, &value)
-                    .map_err(|_| Error::RepositoryUnavailable)?,
-            );
+            operations.push(RowIndexMutation::insert_canonical(&key, &value).map_err(
+                |error| {
+                    eprintln!(
+                        "projection: insert row relation={relation_id:?}: {error:?}"
+                    );
+                    Error::RepositoryUnavailable
+                },
+            )?);
         }
     }
 
