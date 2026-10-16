@@ -1508,7 +1508,7 @@ impl NativeGraphContext {
                     [CborValue::Unsigned(1), _] => {
                         let value = fields.pop().ok_or(GraphError::NonCanonicalData)?;
                         let value = self.to_sov_value(value, scope, objects, active)?;
-                        fields[1] = value;
+                        fields.push(value);
                         Ok(CborValue::Tag(60013, Box::new(CborValue::Array(fields))))
                     }
                     _ => Err(GraphError::NonCanonicalData),
