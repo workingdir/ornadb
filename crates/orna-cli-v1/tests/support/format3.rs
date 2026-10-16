@@ -11,8 +11,8 @@ use std::{
 
 use orna_conformance_v1::DurableTransactionalEvaluator;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::{Repository, TypedKey};
-use orna_runtime_v1::RuntimeState;
+use orna_repository_v1::{AdmittedRow, KeyRange, Repository, TypedKey};
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState, RuntimeTableIdentity, TableObjectId};
 use orna_storage_v1::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -36,6 +36,89 @@ pub fn hex(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+/// The identity `orna publish` derives for a repository: the metadata's
+/// database id, a rotated-and-salted repository id, and both concatenated as
+/// the initial digest. This repeats `cli_publish.rs::runtime_identity`, so a
+/// harness that opens the runtime must use exactly this identity. A harness
+/// that opens the runtime under any other identity leaves the verb unable to
+/// see its rows, and the verb refuses the state database as another runtime's.
+pub fn cli_runtime_identity(repository: &Repository) -> (RuntimeIdentity, [u8; 32]) {
+    let metadata = orna_repository_v1::inspect_metadata(repository)
+        .unwrap()
+        .expect("the fixture records repository metadata");
+    let database_id = *metadata.database_id().as_bytes();
+    let mut repository_id = database_id;
+    for (index, byte) in repository_id.iter_mut().enumerate() {
+        let rotation = u32::try_from(index % 7 + 1).expect("bounded rotation");
+        let salt = u8::try_from(index).expect("fixed identity length");
+        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
+    }
+    if repository_id == [0; 16] {
+        repository_id[0] = 1;
+    }
+    let mut initial_digest = [0; 32];
+    initial_digest[..16].copy_from_slice(&database_id);
+    initial_digest[16..].copy_from_slice(&repository_id);
+    (
+        RuntimeIdentity {
+            database_id,
+            repository_id,
+        },
+        initial_digest,
+    )
+}
+
+/// Reads one admitted relation's committed rows at the published `HEAD`, by the
+/// relation's committed identity.
+///
+/// The runtime stores an admitted mutation under
+/// `TableMutation::table_storage_key(table, object_id)`, so a name-keyed read
+/// misses every row whose mutation carried its admitted table object id. This
+/// is the identity-keyed read, not a second key form.
+pub async fn committed_admitted_rows(
+    state: &RuntimeState,
+    table: &str,
+    relation_id: [u8; 16],
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let identity = RuntimeTableIdentity::new(table, TableObjectId::new(relation_id))
+        .expect("the fixture table admits a committed identity");
+    state
+        .read_admitted_table_at_head(&identity)
+        .await
+        .expect("the published HEAD answers the admitted relation")
+        .rows()
+        .to_vec()
+}
+
+/// Reads one admitted relation's committed rows from the published store, the
+/// same reader the query and history verbs use: the format context's relation
+/// row map, then the native graph's bounded range read.
+pub fn committed_store_rows(repository: &Repository, relation_id: [u8; 16]) -> Vec<AdmittedRow> {
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the relation row map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the native graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    graph
+        .range_rows(&KeyRange::new(None, None, 16).expect("key range"), &scope)
+        .expect("read the committed rows")
+}
+
+/// The logical key bytes a store row carries: the text a `Str` key spells, or
+/// the bytes an opaque key holds.
+pub fn logical_key_bytes(key: &TypedKey) -> Vec<u8> {
+    match key {
+        TypedKey::Text(text) => text.as_bytes().to_vec(),
+        TypedKey::Bytes(bytes) => bytes.clone(),
+        other => other.canonical_bytes().expect("a canonical logical key"),
+    }
 }
 
 /// Publishes one committed media row through the explicit publication
