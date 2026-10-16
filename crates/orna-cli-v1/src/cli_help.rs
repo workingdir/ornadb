@@ -14,6 +14,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  explain CODE",
     "Repository and maintenance commands:",
     "  init [DIRECTORY]",
+    "  mv TABLE NEW_NAME              rename a table in its existing module namespace",
     "  status [--porcelain|--short|--format human|short|json]",
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",
@@ -78,6 +79,11 @@ mod tests {
     fn help_groups_orna_work_and_repository_maintenance() {
         assert_eq!(HELP_LINES[0], "Orna commands:");
         assert!(HELP_LINES.contains(&"Repository and maintenance commands:"));
+        assert!(
+            HELP_LINES
+                .iter()
+                .any(|line| line.starts_with("  mv ") && line.contains("table"))
+        );
         assert!(HELP_LINES.contains(&"  fetch [REMOTE] [BRANCH]"));
         assert!(HELP_LINES.contains(&"  diff [GIT_DIFF_ARGS...]"));
         assert!(HELP_LINES.contains(&"  log [GIT_LOG_ARGS...]"));
