@@ -140,8 +140,12 @@ pub async fn commit_source_captures(
     assert!(!captures.is_empty());
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
-    let project = loader.load_committed_snapshot(repository, &commit).expect("load the committed source project");
-    let schema = loader.resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id)).expect("resolve the Object table from its committed identity manifest");
+    let project = loader
+        .load_committed_snapshot(repository, &commit)
+        .expect("load the committed source project");
+    let schema = loader
+        .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
+        .expect("resolve the Object table from its committed identity manifest");
     assert_eq!(schema.declaration_name(), "Object");
     assert_eq!(schema.table_object_id(), TableObjectId::new(relation_id));
     let mut mutations = Vec::with_capacity(captures.len());
@@ -149,25 +153,82 @@ pub async fn commit_source_captures(
     let mut retained_sources = Vec::with_capacity(captures.len());
     for (expression, key, ordinal) in captures {
         let logical_path = format!("Object/{key}.orna");
-        let row = project.loose_rows().iter().find(|row| row.logical_path() == logical_path).expect("the committed project contains this source Object row");
-        let value = evaluate_expression_ovb2_with_effects(expression, &Default::default(), Limits::default(), bindings).expect("capture the source payload");
-        let blob_binding = bindings.accept_captured_blob_for_row(&value).expect("accept the captured Blob for this row");
-        let admitted = admit_source_row_with_owner_fields(&project, row.logical_path(), row.source(), &schema, format_context, vec![("payload".to_owned(), blob_binding)], vec![], [ordinal.wrapping_add(3); 16]).expect("admit a source-bound full Object row");
+        let row = project
+            .loose_rows()
+            .iter()
+            .find(|row| row.logical_path() == logical_path)
+            .expect("the committed project contains this source Object row");
+        let value = evaluate_expression_ovb2_with_effects(
+            expression,
+            &Default::default(),
+            Limits::default(),
+            bindings,
+        )
+        .expect("capture the source payload");
+        let blob_binding = bindings
+            .accept_captured_blob_for_row(&value)
+            .expect("accept the captured Blob for this row");
+        let admitted = admit_source_row_with_owner_fields(
+            &project,
+            row.logical_path(),
+            row.source(),
+            &schema,
+            format_context,
+            vec![("payload".to_owned(), blob_binding)],
+            vec![],
+            [ordinal.wrapping_add(3); 16],
+        )
+        .expect("admit a source-bound full Object row");
         let (mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
-        assert_eq!(resolved_schema.table_object_id(), TableObjectId::new(relation_id));
+        assert_eq!(
+            resolved_schema.table_object_id(),
+            TableObjectId::new(relation_id)
+        );
         assert_eq!(mutation.table(), "Object");
-        assert_eq!(mutation.table_object_id(), Some(TableObjectId::new(relation_id)));
+        assert_eq!(
+            mutation.table_object_id(),
+            Some(TableObjectId::new(relation_id))
+        );
         assert!(mutation.value().is_some_and(|value| !value.is_empty()));
-        paths_by_key.insert(key.to_string(), LoosePath::for_key("Object", &[key.to_string()]));
+        paths_by_key.insert(
+            key.to_string(),
+            LoosePath::for_key("Object", &[key.to_string()]),
+        );
         retained_sources.push(source_bindings);
         mutations.push(mutation);
     }
-    let request_identity = RequestIdentity { session_id: [0x91; 16], request_id: [0x92; 16] };
+    let request_identity = RequestIdentity {
+        session_id: [0x91; 16],
+        request_id: [0x92; 16],
+    };
     let fingerprint = [0x93; 32];
-    let (_, admission) = state.reserve_request_with_admission(request_identity, fingerprint).await.unwrap();
-    state.start_request_with_owner_and_admission(request_identity, fingerprint, writer, admission.expect("admission capability")).await.unwrap();
+    let (_, admission) = state
+        .reserve_request_with_admission(request_identity, fingerprint)
+        .await
+        .unwrap();
+    state
+        .start_request_with_owner_and_admission(
+            request_identity,
+            fingerprint,
+            writer,
+            admission.expect("admission capability"),
+        )
+        .await
+        .unwrap();
     let context = state.begin_activation().await.unwrap();
-    let committed = state.commit_table_request_activation(writer, request_identity, fingerprint, &context, &mutations, [0x94; 32], TerminalOutcome::new(vec![0x95]).unwrap(), &NoFault).await.unwrap();
+    let committed = state
+        .commit_table_request_activation(
+            writer,
+            request_identity,
+            fingerprint,
+            &context,
+            &mutations,
+            [0x94; 32],
+            TerminalOutcome::new(vec![0x95]).unwrap(),
+            &NoFault,
+        )
+        .await
+        .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
     crate::format3::publish_source_rows(repository, state, &paths_by_key).await;
     drop(retained_sources);
