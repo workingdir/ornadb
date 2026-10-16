@@ -1,0 +1,4 @@
+fn entry(blob: Blob) {
+  sys.test.replace_blob(blob);
+  sys.test.consume_blob(sys.Storage | filter(value => value == blob) | one())
+}

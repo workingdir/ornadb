@@ -1,0 +1,4 @@
+{
+  path: "nested/worker.js",
+  value: "ok",
+}
