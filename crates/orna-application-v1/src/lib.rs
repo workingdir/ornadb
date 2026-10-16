@@ -13,6 +13,7 @@ use orna_evaluator_v1::{
     invoke_named_with_effects, reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
+use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
 use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
     LiveEvalResponse, LiveEvalTransaction,
@@ -336,7 +337,7 @@ impl ApplicationAuthority {
         application: &AdmittedApplication,
         arguments: &Environment,
     ) -> Result<StagedActivation, ApplicationError> {
-        self.evaluate_staged_with_source_rows(application, arguments, Vec::new())
+        self.evaluate_staged_with_source_rows_inner(application, arguments, Vec::new(), None)
     }
 
     /// Evaluates admitted source while consuming project-admitted loose rows
@@ -347,6 +348,17 @@ impl ApplicationAuthority {
         application: &AdmittedApplication,
         arguments: &Environment,
         source_rows: Vec<AdmittedSourceRow>,
+        value_context: &Format3Context,
+    ) -> Result<StagedActivation, ApplicationError> {
+        self.evaluate_staged_with_source_rows_inner(application, arguments, source_rows, Some(value_context))
+    }
+
+    fn evaluate_staged_with_source_rows_inner(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        source_rows: Vec<AdmittedSourceRow>,
+        value_context: Option<&Format3Context>,
     ) -> Result<StagedActivation, ApplicationError> {
         let tables = application_table_schemas(application);
         let table_object_ids = application_table_object_ids(application);
@@ -358,7 +370,8 @@ impl ApplicationAuthority {
                     application.limits,
                 );
         for row in source_rows {
-            handler.record_admitted_source_row(row)?;
+            let value_context = value_context.ok_or(ApplicationError::InvalidTableMetadata)?;
+            handler.record_admitted_source_row(row, value_context)?;
         }
         let value = invoke_named_with_effects(
             &application.entry,
@@ -1137,6 +1150,7 @@ impl SourceMutationEffectHandler {
     pub fn record_admitted_source_row(
         &mut self,
         row: AdmittedSourceRow,
+        value_context: &Format3Context,
     ) -> Result<(), ApplicationError> {
         let (mutation, bindings, schema) = row.into_mutation_and_bindings();
         let table_name = schema.declaration_name().to_owned();
@@ -1205,7 +1219,7 @@ impl SourceMutationEffectHandler {
         if transfers.len() != bindings.len() {
             return Err(ApplicationError::InvalidTableMetadata);
         }
-        let fields = CanonicalValue::decode(canonical_fields)
+        let fields = ContextValue::decode_in_context(canonical_fields, ValueFormat::Rov3, value_context)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         let OvbRaw::Array(fields) = fields.raw() else {
             return Err(ApplicationError::InvalidTableMetadata);
@@ -1222,8 +1236,12 @@ impl SourceMutationEffectHandler {
                 .iter()
                 .position(|expected| *expected == field_object_id)
                 .ok_or(ApplicationError::InvalidTableMetadata)?;
-            let encoded_blob = CanonicalValue::decode(&encoded_value)
-                .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+            let encoded_blob = ContextValue::decode_in_context(
+                &encoded_value,
+                ValueFormat::Rov3,
+                value_context,
+            )
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
             let transfer = pin.transfer_record();
             let transfer_evidence = transfers
                 .iter()
