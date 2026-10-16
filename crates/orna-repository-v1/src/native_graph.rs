@@ -21,7 +21,7 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_value_v1::{BlobMetadata, MediaAnnotation, SchemaDescriptor};
+use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor};
 use sha2::{Digest, Sha256};
 
 
@@ -300,6 +300,56 @@ pub struct NativeGraphContext {
     cancelled: Arc<AtomicBool>,
 }
 
+/// One schema-ordered field identity and its payload-free Blob projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedRowField {
+    field_id: [u8; 16],
+    blob_metadata: Option<BlobMetadata>,
+}
+
+impl AdmittedRowField {
+    pub const fn field_id(&self) -> &[u8; 16] {
+        &self.field_id
+    }
+
+    pub fn blob_metadata(&self) -> Option<&BlobMetadata> {
+        self.blob_metadata.as_ref()
+    }
+}
+
+/// Canonical ROV3 field tuple bound to one admitted row and schema generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedRowFields {
+    version: crate::row_store::RowMapVersion,
+    key: crate::row_store::TypedKey,
+    canonical_fields: Vec<u8>,
+    fields: Vec<AdmittedRowField>,
+}
+
+impl AdmittedRowFields {
+    pub fn version(&self) -> &crate::row_store::RowMapVersion {
+        &self.version
+    }
+
+    pub fn schema_generation(&self) -> &crate::row_store::SchemaGeneration {
+        self.version.schema()
+    }
+
+    pub fn key(&self) -> &crate::row_store::TypedKey {
+        &self.key
+    }
+
+    /// Complete canonical ROV3 field tuple in descriptor order.
+    pub fn canonical_fields(&self) -> &[u8] {
+        &self.canonical_fields
+    }
+
+    /// Field identities and Blob metadata in the same order as the tuple.
+    pub fn fields(&self) -> &[AdmittedRowField] {
+        &self.fields
+    }
+}
+
 /// Shared owner-issued graph and read-scope authority for one Blob capture
 /// pipeline. Clones share the graph owner and the scope's cumulative quotas.
 #[derive(Clone, Debug)]
@@ -468,6 +518,10 @@ impl NativeGraphContext {
             return Err(GraphError::ContentIdentityMismatch);
         }
         Ok(())
+    }
+    /// Returns the immutable row-map identity this graph is pinned to.
+    pub(crate) fn row_map_version(&self) -> &crate::row_store::RowMapVersion {
+        self.row_snapshot.version()
     }
 
     /// Opens the repository owner's fixed-budget read scope. Each range is
@@ -1092,6 +1146,95 @@ impl NativeGraphContext {
         Ok(projected)
     }
 
+    /// Decodes the complete canonical ROV3 tuple using the committed,
+    /// source-qualified descriptor and this graph's owner-issued read scope.
+    /// Overflow tuple bytes are structured metadata; Blob payload chunks are
+    /// never fetched by this operation.
+    pub fn decode_admitted_row_fields(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        binding: &crate::CommittedTableBinding,
+        scope: &RepositoryReadScope,
+    ) -> Result<AdmittedRowFields, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        if row.version() != version
+            || binding.snapshot_id() != &self.snapshot_id
+            || binding.relation_id() != version.relation_id()
+            || binding.schema_oid() != version.schema().schema_oid()
+            || binding.schema_digest() != version.schema().schema_digest()
+            || binding.module_name().is_none()
+            || binding.source_path().is_none()
+            || binding.declaration_name().is_none()
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+
+        let canonical_key = row
+            .key()
+            .canonical_bytes()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let canonical_fields = match row.value() {
+            crate::row_store::RowValue::Inline { encoded, .. } => {
+                scope.charge_structured_metadata_read(encoded.len() as u64)?;
+                encoded.clone()
+            }
+            crate::row_store::RowValue::Overflow(reference) => {
+                let root = reference
+                    .native_root()
+                    .ok_or(GraphError::UnsupportedRowValueForm)?;
+                let mut objects = ObjectBudget::new(
+                    scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
+                    scope.max_objects,
+                    Arc::clone(&scope.objects_used),
+                    scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
+                    Arc::clone(&scope.metadata_used),
+                );
+                self.verify_value_overflow(root, scope, &mut objects, &mut BTreeSet::new(), true)?
+                    .encoded_value
+                    .ok_or(GraphError::ContextMismatch)?
+            }
+        };
+
+        binding
+            .descriptor()
+            .validate_stored_row(*version.relation_id(), &canonical_key, &canonical_fields)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let CborValue::Array(values) = decode_canonical_cbor(&canonical_fields)? else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let field_ids = stored_field_object_ids(binding.descriptor())?;
+        if values.len() != field_ids.len() {
+            return Err(GraphError::NonCanonicalData);
+        }
+
+        let mut fields = Vec::with_capacity(values.len());
+        for (field_id, value) in field_ids.into_iter().zip(values) {
+            let blob_metadata = if matches!(&value, CborValue::Tag(60111, _)) {
+                let mut encoded = Vec::new();
+                CborValue::Array(vec![value]).encode(&mut encoded);
+                let single_field = crate::row_store::RowValue::decode_canonical_fields(encoded)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                crate::row_store::AdmittedRow::issue(version, row.key().clone(), single_field)
+                    .blob_metadata(0)
+                    .map_err(|_| GraphError::NonCanonicalData)?
+            } else {
+                None
+            };
+            fields.push(AdmittedRowField {
+                field_id,
+                blob_metadata,
+            });
+        }
+
+        Ok(AdmittedRowFields {
+            version: version.clone(),
+            key: row.key().clone(),
+            canonical_fields,
+            fields,
+        })
+    }
+
     fn decode_persisted_row_value(
         &self,
         encoded: Vec<u8>,
@@ -1103,14 +1246,14 @@ impl NativeGraphContext {
             CborValue::Tag(60113, payload) => {
                 let oid = overflow_tag_oid(payload, self.algorithm)?;
                 let verified =
-                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new())?;
+                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new(), false)?;
                 crate::row_store::RowValue::overflow(verified.reference)
             }
             CborValue::Array(_) => {
                 let mut overflow_oids = BTreeSet::new();
                 collect_overflow_oids(&value, self.algorithm, &mut overflow_oids)?;
                 for oid in overflow_oids {
-                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new())?;
+                    self.verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new(), false)?;
                 }
                 crate::row_store::RowValue::decode_canonical_fields(encoded)
                     .map_err(|_| GraphError::NonCanonicalData)?
@@ -1147,6 +1290,7 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
         objects: &mut ObjectBudget,
         active: &mut BTreeSet<NativeOid>,
+        retain_encoded: bool,
     ) -> Result<VerifiedValueOverflow, GraphError> {
         if !active.insert(oid.clone()) {
             return Err(GraphError::ContextMismatch);
@@ -1218,7 +1362,7 @@ impl NativeGraphContext {
                 match dependency_node {
                     NodeData::BlobDescriptor { .. } => {}
                     NodeData::ValueOverflow { .. } => {
-                        self.verify_value_overflow(&dependency, scope, objects, active)?;
+                        self.verify_value_overflow(&dependency, scope, objects, active, false)?;
                     }
                     other => {
                         return Err(GraphError::WrongNodeKind {
@@ -1239,6 +1383,7 @@ impl NativeGraphContext {
             Ok(VerifiedValueOverflow {
                 reference,
                 semantic_value: sov_value,
+                encoded_value: retain_encoded.then_some(encoded),
             })
         })();
         active.remove(oid);
@@ -1283,7 +1428,7 @@ impl NativeGraphContext {
             CborValue::Tag(60113, payload) => {
                 let oid = overflow_tag_oid(&payload, self.algorithm)?;
                 Ok(self
-                    .verify_value_overflow(&oid, scope, objects, active)?
+                    .verify_value_overflow(&oid, scope, objects, active, false)?
                     .semantic_value)
             }
             CborValue::Array(values) => Ok(CborValue::Array(
@@ -1355,7 +1500,7 @@ impl NativeGraphContext {
                     .native_root()
                     .ok_or(GraphError::UnsupportedRowValueForm)?;
                 let verified =
-                    self.verify_value_overflow(root, scope, objects, &mut BTreeSet::new())?;
+                    self.verify_value_overflow(root, scope, objects, &mut BTreeSet::new(), false)?;
                 Ok(vec![verified.semantic_value])
             }
         }
@@ -1401,6 +1546,8 @@ impl NativeGraphContext {
         Ok(())
     }
 
+    // This full reader is used for schema descriptors and ORP overflow tuples;
+    // their chunk blobs are structured metadata, not OVB-2 media payload.
     fn read_full_index_bytes(
         &self,
         oid: &NativeOid,
@@ -1437,7 +1584,6 @@ impl NativeGraphContext {
                 if entry.span_length > crate::blob_store::GEAR_MAXIMUM as u64 {
                     return Err(GraphError::InvalidByteIndex);
                 }
-                let reservation = scope.reserve_payload(entry.span_length)?;
                 let chunk = self.read_git_object(
                     NativeObjectKind::Blob,
                     &entry.target,
@@ -1450,11 +1596,11 @@ impl NativeGraphContext {
                 {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
+                scope.charge_structured_metadata_read(chunk.len() as u64)?;
                 output
                     .try_reserve(chunk.len())
                     .map_err(|_| GraphError::ReadQuotaExceeded)?;
                 output.extend_from_slice(&chunk);
-                reservation.commit(entry.span_length);
             } else {
                 self.read_full_index_bytes(
                     &entry.target,
@@ -1692,10 +1838,7 @@ impl NativeGraphContext {
         max_commits: usize,
         scope: &RepositoryReadScope,
     ) -> Result<Vec<RowRevision>, GraphError> {
-        scope.authorize(self)?;
-        if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
-            return Err(GraphError::ContextMismatch);
-        }
+        self.require_committed_row(row, scope)?;
         let descriptors: Vec<NativeObjectId> = row
             .value()
             .dependencies()
@@ -1771,6 +1914,7 @@ impl NativeGraphContext {
             owner_id,
             cancelled,
             bytes_used: Arc::new(AtomicU64::new(0)),
+            structured_metadata_bytes_read: Arc::new(AtomicU64::new(0)),
             payload_bytes_written: Arc::new(AtomicU64::new(0)),
             objects_used: Arc::new(AtomicU64::new(0)),
             metadata_used: Arc::new(AtomicU64::new(0)),
@@ -1893,11 +2037,7 @@ impl NativeGraphContext {
     ) -> Result<(), GraphError> {
         scope.authorize(self)?;
         let version = row.version();
-        if version.database_id() != &self.database_id
-            || version.relation_id() != self.row_snapshot.version().relation_id()
-            || version.store_root() != &self.store_root
-            || version.schema().schema_digest() != &self.schema_digest
-        {
+        if version != self.row_snapshot.version() {
             return Err(GraphError::ContextMismatch);
         }
         if self.lookup_row(row.key(), scope)?.as_ref() != Some(row) {
@@ -3319,6 +3459,7 @@ pub struct RepositoryReadScope {
     owner_id: [u8; 16],
     cancelled: Arc<AtomicBool>,
     bytes_used: Arc<AtomicU64>,
+    structured_metadata_bytes_read: Arc<AtomicU64>,
     payload_bytes_written: Arc<AtomicU64>,
     objects_used: Arc<AtomicU64>,
     metadata_used: Arc<AtomicU64>,
@@ -3392,6 +3533,24 @@ impl RepositoryReadScope {
     /// metadata-only query reports zero while still having read the graph.
     pub fn payload_bytes_read(&self) -> u64 {
         self.bytes_used.load(AtomicOrdering::Acquire)
+    }
+    /// Cumulative bytes read from canonical inline/overflow ORP field tuples
+    /// and full structured descriptors. These are row/schema metadata, not
+    /// OVB-2 media payload.
+    pub fn structured_metadata_bytes_read(&self) -> u64 {
+        self.structured_metadata_bytes_read
+            .load(AtomicOrdering::Acquire)
+    }
+
+    fn charge_structured_metadata_read(&self, bytes: u64) -> Result<(), GraphError> {
+        self.structured_metadata_bytes_read
+            .fetch_update(
+                AtomicOrdering::AcqRel,
+                AtomicOrdering::Acquire,
+                |used| used.checked_add(bytes),
+            )
+            .map(|_| ())
+            .map_err(|_| GraphError::ReadQuotaExceeded)
     }
 
     /// Cumulative native Git objects this scope has charged to its owner,
@@ -5473,15 +5632,9 @@ pub(crate) fn load_format3_row_map(
     let relation = reader
         .find_ordered_entry(&relation_map, &relations_domain, &relation_key)?
         .ok_or(GraphError::ContextMismatch)?;
-    let (schema_oid, primary_root, secondary_root, row_count) =
+    let (schema_oid, primary_root, _secondary_root, row_count) =
         decode_relation_value(&relation.value, algorithm)?;
-
-    // The current profile does not define a complete secondary-domain tuple
-    // beyond requiring ORP-1 pages. Do not silently admit an unrecognized
-    // index domain against this row root.
-    if secondary_root.is_some() {
-        return Err(GraphError::InvalidDomain);
-    }
+    // The secondary OID is parsed but never dereferenced by primary admission.
 
     let schema_node = reader.read_native_node(&schema_oid)?;
     let NodeData::Schema {
@@ -5495,7 +5648,13 @@ pub(crate) fn load_format3_row_map(
             actual: schema_node.kind(),
         });
     };
-    reader.verify_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+    let schema_bytes = reader.read_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+    let descriptor =
+        SchemaDescriptor::decode(&schema_bytes).map_err(|_| GraphError::NonCanonicalData)?;
+    if schema_relation_id(&descriptor)? != relation_id {
+        return Err(GraphError::ContextMismatch);
+    }
+
 
     let rows_domain = canonical_domain(vec![
         CborValue::Text("rows".to_owned()),
@@ -5533,6 +5692,31 @@ pub(crate) fn load_format3_row_map(
     authority.update(row_count.to_be_bytes());
     crate::row_store::RowMapSnapshot::issue_lazy(version, authority.finalize().into())
         .map_err(|_| GraphError::ContextMismatch)
+}
+
+
+
+
+fn schema_relation_id(schema: &SchemaDescriptor) -> Result<[u8; 16], GraphError> {
+    let relation_key = Raw::Int(1.into());
+    let Raw::Map(fields) = schema.raw() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let relation = fields
+        .iter()
+        .find(|(key, _)| key == &relation_key)
+        .map(|(_, value)| value)
+        .ok_or(GraphError::NonCanonicalData)?;
+    let Raw::Tag(37, relation) = relation else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let Raw::Bytes(bytes) = relation.as_ref() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| GraphError::NonCanonicalData)
 }
 
 fn canonical_domain(fields: Vec<CborValue>) -> Vec<u8> {
@@ -5587,6 +5771,7 @@ impl PinnedNativeGraphReader {
             metadata_bytes: 0,
         }
     }
+
 
     fn validate_map_root(
         &mut self,
@@ -5752,6 +5937,37 @@ impl PinnedNativeGraphReader {
         Ok(output)
     }
 
+
+    fn read_full_byte_index(
+        &mut self,
+        root: &NativeObjectId,
+        expected_length: u64,
+        expected_digest: [u8; 32],
+    ) -> Result<Vec<u8>, GraphError> {
+        if expected_length > MAX_RANGE_METADATA_BYTES {
+            return Err(GraphError::MetadataQuotaExceeded);
+        }
+        let capacity =
+            usize::try_from(expected_length).map_err(|_| GraphError::MetadataQuotaExceeded)?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(capacity)
+            .map_err(|_| GraphError::MetadataQuotaExceeded)?;
+        let mut hasher = Sha256::new();
+        let (length, _) = self.walk_byte_index(
+            root,
+            None,
+            &mut hasher,
+            Some(&mut output),
+            Some(expected_length),
+        )?;
+        let digest: [u8; 32] = hasher.finalize().into();
+        if length != expected_length || digest != expected_digest {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        Ok(output)
+    }
+
     fn verify_full_byte_index(
         &mut self,
         root: &NativeObjectId,
@@ -5759,7 +5975,7 @@ impl PinnedNativeGraphReader {
         expected_digest: [u8; 32],
     ) -> Result<(), GraphError> {
         let mut hasher = Sha256::new();
-        let (length, _) = self.walk_byte_index(root, None, &mut hasher)?;
+        let (length, _) = self.walk_byte_index(root, None, &mut hasher, None, None)?;
         let digest: [u8; 32] = hasher.finalize().into();
         if length != expected_length || digest != expected_digest {
             return Err(GraphError::ContentIdentityMismatch);
@@ -5772,6 +5988,8 @@ impl PinnedNativeGraphReader {
         oid: &NativeObjectId,
         expected_height: Option<u8>,
         hasher: &mut Sha256,
+        mut output: Option<&mut Vec<u8>>,
+        output_limit: Option<u64>,
     ) -> Result<(u64, u8), GraphError> {
         let node = self.read_native_node(oid)?;
         let NodeData::ByteIndex {
@@ -5806,9 +6024,24 @@ impl PinnedNativeGraphReader {
                     return Err(GraphError::ChunkDigestMismatch);
                 }
                 hasher.update(&chunk);
+                if let Some(output) = output.as_deref_mut() {
+                    let next_len = output
+                        .len()
+                        .checked_add(chunk.len())
+                        .ok_or(GraphError::MetadataQuotaExceeded)?;
+                    if output_limit.is_none_or(|limit| next_len as u64 > limit) {
+                        return Err(GraphError::MetadataQuotaExceeded);
+                    }
+                    output.extend_from_slice(&chunk);
+                }
             } else {
-                let (child_length, child_height) =
-                    self.walk_byte_index(&entry.target, Some(height - 1), hasher)?;
+                let (child_length, child_height) = self.walk_byte_index(
+                    &entry.target,
+                    Some(height - 1),
+                    hasher,
+                    output.as_deref_mut(),
+                    output_limit,
+                )?;
                 if child_length != entry.span_length || child_height + 1 != height {
                     return Err(GraphError::InvalidByteIndex);
                 }
@@ -6825,6 +7058,124 @@ mod persisted_orp_tests {
         )
         .expect("issue graph context after verifying fixture schema");
         graph
+    }
+
+    #[test]
+    fn load_format3_row_map_keeps_secondary_root_opaque() {
+        let (directory, graph) = capture_test_context();
+        let version = graph.row_snapshot.version();
+        let relation_id = *version.relation_id();
+        let database_id = *version.database_id();
+        let algorithm = graph.algorithm;
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (
+                Raw::Int(1.into()),
+                Raw::Tag(37, Box::new(Raw::Bytes(relation_id.to_vec()))),
+            ),
+            (Raw::Int(2.into()), Raw::Array(Vec::new())),
+            (Raw::Int(3.into()), Raw::Array(Vec::new())),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid relation schema descriptor");
+        let schema_bytes = descriptor.encode().expect("canonical schema bytes");
+        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_chunk = fixture_git_object(directory.path(), "blob", &schema_bytes);
+        let schema_byte_root = fixture_git_node(
+            directory.path(),
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: schema_bytes.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: schema_bytes.len() as u64,
+                    target: schema_chunk,
+                    chunk_sha256: Some(schema_digest),
+                }],
+            },
+        );
+        let schema_root = fixture_git_node(
+            directory.path(),
+            &NodeData::Schema {
+                encoded_length: schema_bytes.len() as u64,
+                schema_digest,
+                byte_root: schema_byte_root.clone(),
+            },
+        );
+        let primary_root = fixture_git_node(
+            directory.path(),
+            &NodeData::OrderedLeaf {
+                domain: rows_domain(relation_id, schema_digest),
+                entries: Vec::new(),
+            },
+        );
+        // This schema node is distinct from the selected schema and is not a
+        // secondary map. The primary-only loader must leave its OID opaque.
+        let secondary_root = fixture_git_node(
+            directory.path(),
+            &NodeData::Schema {
+                encoded_length: 0,
+                schema_digest,
+                byte_root: schema_byte_root,
+            },
+        );
+
+        let relations_domain = canonical_domain(vec![
+            CborValue::Text("relations".to_owned()),
+            CborValue::Bytes(database_id.to_vec()),
+        ]);
+        let relation_map = fixture_git_node(
+            directory.path(),
+            &NodeData::OrderedLeaf {
+                domain: relations_domain,
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .expect("canonical relation key"),
+                    value: canonical_value_bytes(&CborValue::Array(vec![
+                        CborValue::Bytes(schema_root.as_bytes().to_vec()),
+                        CborValue::Bytes(primary_root.as_bytes().to_vec()),
+                        CborValue::Bytes(secondary_root.as_bytes().to_vec()),
+                        CborValue::Unsigned(0),
+                    ])),
+                }],
+            },
+        );
+        let store_root = fixture_git_node(
+            directory.path(),
+            &NodeData::StoreRoot { relation_map },
+        );
+
+        let loaded = load_format3_row_map(
+            &graph.repository,
+            algorithm,
+            store_root,
+            database_id,
+            graph.snapshot_id,
+            relation_id,
+        )
+        .expect("load the primary map without traversing the secondary root");
+        assert_eq!(loaded.version().primary_root(), &primary_root);
+    }
+
+    #[test]
+    fn schema_relation_identity_is_read_from_descriptor() {
+        let relation_id = [0x42; 16];
+        let descriptor = SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (
+                Raw::Int(1.into()),
+                Raw::Tag(37, Box::new(Raw::Bytes(relation_id.to_vec()))),
+            ),
+            (Raw::Int(2.into()), Raw::Array(Vec::new())),
+            (Raw::Int(3.into()), Raw::Array(Vec::new())),
+            (Raw::Int(4.into()), Raw::Array(Vec::new())),
+        ]))
+        .expect("valid relation schema descriptor");
+
+        assert_eq!(
+            schema_relation_id(&descriptor).expect("extract relation identity"),
+            relation_id
+        );
     }
 
     fn fixture_ref_exists(directory: &Path, reference: &str) -> bool {
@@ -8535,6 +8886,117 @@ mod persisted_orp_tests {
     }
 
     #[test]
+    fn foreign_root_row_is_rejected_before_graph_reads() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let foreign_root =
+            NativeObjectId::new(graph.algorithm, &[0x55; 20]).expect("foreign root OID");
+        let foreign_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            foreign_root.clone(),
+            admitted_version.schema().clone(),
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent foreign-root version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &foreign_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.resolve_row_node(&row, &foreign_root, &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
+    }
+
+    #[test]
+    fn schema_generation_mismatch_is_rejected_before_native_lookup() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let stale_schema = crate::row_store::SchemaGeneration::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.schema().schema_oid().clone(),
+            *admitted_version.schema().schema_digest(),
+            admitted_version
+                .schema()
+                .generation()
+                .checked_add(1)
+                .expect("fixture schema generation has room"),
+        );
+        let stale_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.store_root().clone(),
+            stale_schema,
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent stale schema version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &stale_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.resolve_row_node(&row, admitted_version.primary_root(), &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
+    }
+
+    #[test]
+    fn schema_generation_mismatch_is_rejected_before_row_history_lookup() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let admitted_version = graph.row_snapshot.version();
+        let stale_schema = crate::row_store::SchemaGeneration::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.schema().schema_oid().clone(),
+            *admitted_version.schema().schema_digest(),
+            admitted_version
+                .schema()
+                .generation()
+                .checked_add(1)
+                .expect("fixture schema generation has room"),
+        );
+        let stale_version = crate::row_store::RowMapVersion::issue(
+            *admitted_version.database_id(),
+            *admitted_version.relation_id(),
+            admitted_version.store_root().clone(),
+            stale_schema,
+            admitted_version.primary_root().clone(),
+            admitted_version.generation(),
+            Some(0),
+        )
+        .expect("consistent stale schema version");
+        let row = crate::row_store::AdmittedRow::issue(
+            &stale_version,
+            TypedKey::Text("foreign".to_owned()),
+            RowValue::decode_canonical_fields(vec![0x80]).expect("canonical row value"),
+        );
+
+        let reads_before = scope.objects_read_for_test();
+        assert!(matches!(
+            graph.list_row_revisions(&row, "HEAD", 1, &scope),
+            Err(GraphError::ContextMismatch)
+        ));
+        assert_eq!(scope.objects_read_for_test(), reads_before);
+    }
+
+    #[test]
     fn prior_root_captured_blob_is_rejected_before_later_graph_reads() {
         let (_directory, graph) = capture_test_context();
         let capture_scope = graph.open_read_scope().expect("capture scope");
@@ -9390,6 +9852,51 @@ fn leaf_value_dependencies(
 struct VerifiedValueOverflow {
     reference: crate::row_store::ValueOverflowRef,
     semantic_value: CborValue,
+    encoded_value: Option<Vec<u8>>,
+}
+
+fn stored_field_object_ids(descriptor: &SchemaDescriptor) -> Result<Vec<[u8; 16]>, GraphError> {
+    let Raw::Map(schema) = descriptor.raw() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let fields_key = Raw::Int(3u8.into());
+    let Raw::Array(declared_fields) = schema
+        .iter()
+        .find_map(|(key, value)| (key == &fields_key).then_some(value))
+        .ok_or(GraphError::NonCanonicalData)?
+    else {
+        return Err(GraphError::NonCanonicalData);
+    };
+
+    let stored_role = Raw::Int(1u8.into());
+    let mut identities = Vec::new();
+    let mut unique = BTreeSet::new();
+    for field in declared_fields {
+        let Raw::Array(parts) = field else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let [identity, _, _, role, _flags] = parts.as_slice() else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        if role != &stored_role {
+            continue;
+        }
+        let Raw::Tag(37, identity) = identity else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let Raw::Bytes(identity) = identity.as_ref() else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let identity: [u8; 16] = identity
+            .as_slice()
+            .try_into()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        if !unique.insert(identity) {
+            return Err(GraphError::NonCanonicalData);
+        }
+        identities.push(identity);
+    }
+    Ok(identities)
 }
 
 /// Collects every OVB-2 Blob value reachable inside a canonical stored row
