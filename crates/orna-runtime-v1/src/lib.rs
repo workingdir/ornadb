@@ -36,7 +36,7 @@ use orna_foundation_v1::{SYS_CHECKPOINT_TABLE_ID, SYS_FAILURE_TABLE_ID};
 use orna_repository_v1::{
     CommittedTreeEntryKind, CompactPublicationPending, CompactRuntimeReceipt, ContentIdentity,
     CwdGeneration, GitCommitRef, GitHashAlgorithm, NativeOid, OrpBlobBinding, ProtectedContentPin,
-    ProtectedContentTransfer, Repository, RuntimeOwnerLock,
+    ProtectedContentTransfer, Repository, RepositoryError, RuntimeOwnerLock,
 };
 use orna_stream_v1::{
     AssertionDiagnosticCode, AssertionDiagnosticDetail, AssertionOwnerKind,
@@ -4355,9 +4355,18 @@ impl RuntimeState {
             .runtime_paths()
             .ensure_exists()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let runtime_owner_lock = repository
-            .acquire_runtime_owner_lock(*Uuid::new_v4().as_bytes())
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let runtime_owner_lock =
+            match repository.acquire_runtime_owner_lock(*Uuid::new_v4().as_bytes()) {
+                Ok(owner_lock) => Some(owner_lock),
+                // The owner lock is the takeover lock that reclaims a departed
+                // owner's protected pins. It says nothing about the state
+                // database or the writer lease, so a second live runtime in the
+                // same worktree opens as a secondary participant instead of
+                // refusing every verb that needs the runtime. Reclamation stays
+                // with the owner that holds the lock.
+                Err(RepositoryError::RepositoryBusy) => None,
+                Err(_) => return Err(RuntimeError::StorageUnavailable),
+            };
         let graph_repository_id = current_graph_repository_id(repository, identity.database_id)?;
         Self::open_path_with_graph_repository_id(
             &repository.runtime_paths().state_db(),
@@ -4369,7 +4378,7 @@ impl RuntimeState {
                     .runtime_paths()
                     .compact_runtime_receipt_public_key(),
             ),
-            Some(runtime_owner_lock),
+            runtime_owner_lock,
         )
         .await
     }
