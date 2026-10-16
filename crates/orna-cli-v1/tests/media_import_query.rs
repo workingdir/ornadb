@@ -1932,6 +1932,30 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
     let all = query_json(directory.path(), &[&relation]);
     assert_eq!(all["blobs"].as_u64(), Some(3), "three committed rows: {all}");
     assert_eq!(all["media_payload_bytes_read"], 0);
+    // The indexed half-open range is applied before the MIME predicate and
+    // presentation limit. `image` is the first candidate but does not match;
+    // `note` must survive `--limit 1`, while the exclusive upper key `song`
+    // is outside the range.
+    let bounded_filtered = query_json(
+        directory.path(),
+        &[
+            &relation,
+            "--from",
+            "text:image",
+            "--until",
+            "text:song",
+            "--kind",
+            "audio/mp4",
+            "--limit",
+            "1",
+        ],
+    );
+    assert_eq!(bounded_filtered["rows"], 2);
+    assert_eq!(bounded_filtered["plan"]["candidates"], 2);
+    assert_eq!(bounded_filtered["plan"]["matched"], 1);
+    assert_eq!(bounded_filtered["blobs"], 1);
+    assert_eq!(bounded_filtered["listings"][0]["key"], "note");
+    assert_eq!(bounded_filtered["media_payload_bytes_read"], 0);
 
     // `--kind` selects the canonical media type the authored annotation binds.
     let wavs = query_json(directory.path(), &[&relation, "--kind", "audio/wav"]);
