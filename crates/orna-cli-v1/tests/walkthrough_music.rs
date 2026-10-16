@@ -72,6 +72,8 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let song_root = TempDir::new().unwrap();
     let original = include_bytes!("fixtures/media/tone.wav");
     std::fs::write(song_root.path().join("recording.mp3"), original).unwrap();
+    let cover_bytes = include_bytes!("fixtures/media/pixel.png");
+    std::fs::write(song_root.path().join("cover.png"), cover_bytes).unwrap();
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
     let project = loader.load_committed_snapshot(&repository, &commit).unwrap();
@@ -102,6 +104,16 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
         &mut bindings,
     ).unwrap();
     let content = bindings.accept_captured_blob_for_row(&captured).unwrap();
+    let cover_capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"cover.png\", 65536), \"image/png\")"
+    );
+    let captured_cover = evaluate_expression_ovb2_with_effects(
+        &cover_capture,
+        &Default::default(),
+        Limits::default(),
+        &mut bindings,
+    ).unwrap();
+    let cover = bindings.accept_captured_blob_for_row(&captured_cover).unwrap();
     let value_context = format3_context_for_database(&commit, *schema.database_id());
     assert_eq!(content.transfer_record().database_id(), schema.database_id());
     ContextValue::decode_in_context(content.encoded_value(), ValueFormat::Rov3, &value_context)
@@ -109,10 +121,10 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let admitted = admit_source_row(
         &project,
         "music/london.orna",
-        r#"{ title: "Live in London", artist: "Kieran", cover: null, }"#,
+        r#"{ title: "Live in London", artist: "Kieran", }"#,
         &schema,
         &value_context,
-        vec![("content".to_owned(), content)],
+        vec![("content".to_owned(), content), ("cover".to_owned(), cover)],
         [0x31; 16],
     ).expect("the Music row admits the captured Blob in its named content field");
     assert_eq!(admitted.mutation().key(), b"london");
@@ -150,14 +162,20 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let report: serde_json::Value = serde_json::from_slice(&query.stdout).unwrap();
     assert_eq!(report["media_payload_bytes_read"], 0);
     let listings = report["listings"].as_array().unwrap();
-    assert_eq!(listings.len(), 1);
+    assert_eq!(listings.len(), 2);
     let listing = listings.iter()
         .find(|item| item["key"] == "london" && item["media_type"] == "audio/mpeg")
         .unwrap_or_else(|| panic!("Music.content is listed with its stored audio annotation: {report}"));
+    let cover_listing = listings.iter()
+        .find(|item| item["key"] == "london" && item["media_type"] == "image/png")
+        .unwrap_or_else(|| panic!("Music.cover is listed with its stored image annotation: {report}"));
     assert_eq!(listing["media_type"], "audio/mpeg");
     assert_eq!(listing["length"], original.len() as u64);
     let expected_sha: [u8; 32] = Sha256::digest(original).into();
     assert_eq!(listing["sha256"], hex(&expected_sha));
+    assert_eq!(cover_listing["length"], cover_bytes.len() as u64);
+    let expected_cover_sha: [u8; 32] = Sha256::digest(cover_bytes).into();
+    assert_eq!(cover_listing["sha256"], hex(&expected_cover_sha));
 
     // WALKTHROUGH §7's explicit hints alter metadata, not the raw content identity.
     let script = b"export const answer = 42;\n";
@@ -206,18 +224,23 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].key(), &orna_repository_v1::TypedKey::Text("london".to_owned()));
     let blob_fields = rows[0].blob_fields().expect("Music row carries Blob metadata");
-    assert_eq!(blob_fields.len(), 1);
-    assert_eq!(blob_fields[0].1.sha256(), expected_sha);
+    assert_eq!(blob_fields.len(), 2);
+    assert!(blob_fields.iter().any(|(_, metadata)| metadata.sha256() == expected_sha));
+    assert!(blob_fields.iter().any(|(_, metadata)| metadata.sha256() == expected_cover_sha));
     let format = copied.open_format_context().unwrap();
     let row_map = format.load_row_map(relation_id).unwrap();
     let graph = format.open_native_graph(&row_map).unwrap();
     let scope = graph.open_read_scope().unwrap();
     let row = graph.lookup_row(rows[0].key(), &scope).unwrap().unwrap();
-    let descriptor = row.value().dependencies().into_iter()
-        .find(|dependency| dependency.kind() == orna_repository_v1::NativeObjectKind::Tree)
-        .unwrap().oid().clone();
-    let reference = graph.admit_blob_reference(&row, &descriptor, &scope).unwrap();
-    let actual = graph.read_blob_range(&reference, 0..original.len() as u64, &scope).unwrap().bytes().to_vec();
+    let dependencies = row.value().dependencies();
+    let stored = dependencies.iter().find_map(|dependency| {
+        if dependency.kind() != orna_repository_v1::NativeObjectKind::Tree {
+            return None;
+        }
+        let stored = graph.read_stored_blob_value(&row, dependency.oid(), &scope).ok()?;
+        (stored.annotation().media_type() == "audio/mpeg").then_some(stored)
+    }).expect("Music.content retains its stored annotated reference");
+    let actual = graph.read_blob_range(stored.reference(), 0..original.len() as u64, &scope).unwrap().bytes().to_vec();
     assert_eq!(actual, original);
     assert_eq!(Sha256::digest(actual).as_slice(), expected_sha);
 

@@ -612,7 +612,12 @@ fn admit_source_row_with_owner_fields_inner(
             if !matches!(decoded.raw(), Raw::Tag(ROV3_BLOB_TAG, _)) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
-            stored_fields.push(decoded.into_raw());
+            let encoded_blob = decoded.into_raw();
+            stored_fields.push(if field.is_optional_blob {
+                Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(1.into()), encoded_blob])))
+            } else {
+                encoded_blob
+            });
             retained_bindings.push(SourceBlobFieldBinding {
                 field_object_id: field.id,
                 encoded_value,
