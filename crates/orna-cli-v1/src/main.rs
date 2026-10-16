@@ -32,14 +32,18 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use orna_application_v1::ApplicationAuthority;
+use orna_application_v1::{ApplicationAuthority, ApplicationError, ReplTransactionScope};
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
 };
-use orna_evaluator_v1::{Environment, Limits};
-use orna_foundation_v1::{OvbRaw, Value};
-use orna_runtime_v1::{RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState};
+use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
+use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
+use orna_runtime_v1::{
+    RequestIdentity, RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState,
+    RuntimeTableIdentity, TableObjectId, WriterLease,
+};
+use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -2106,12 +2110,127 @@ fn run_pure_invocation(
 struct ReplRuntime {
     repository: Option<orna_repository_v1::Repository>,
     session: AdmittedReplSession,
+    transactions: Option<ReplTransactions>,
+}
+
+struct ReplTransactions {
+    project: orna_project_v1::LoadedProject,
+    commit: orna_repository_v1::GitCommitRef,
+    format_context: orna_repository_v1::RepositoryFormatContext,
+    authority: ApplicationAuthority,
+    runtime: tokio::runtime::Runtime,
+    identity: RuntimeIdentity,
+    initial_digest: [u8; 32],
+    tables: Vec<RuntimeTableIdentity>,
+    capture_relation_id: [u8; 16],
+    session_id: [u8; 16],
+    state: Option<RuntimeState>,
+    lease: Option<WriterLease>,
+}
+
+fn repl_transactions(
+    repository: &orna_repository_v1::Repository,
+    workspace_project: &orna_project_v1::LoadedProject,
+) -> Option<ReplTransactions> {
+    let (commit, format_context) = repository
+        .open_pinned_format_context_with_commit("HEAD")
+        .ok()?;
+    if !format_context.supports_writes() || format_context.final_format_capability().is_err() {
+        return None;
+    }
+    let project = orna_project_v1::ProjectLoader::default()
+        .load_committed_snapshot(repository, &commit)
+        .ok()?;
+    if !same_repl_project_inputs(workspace_project, &project) {
+        return None;
+    }
+    let catalogue = semantic_catalogue(&project).ok()?;
+    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    if !analysis.is_ok() {
+        return None;
+    }
+    let mut table_names = Vec::new();
+    for module in analysis.modules.values() {
+        for (name, symbol) in &module.symbols {
+            if symbol.kind == orna_semantic_v1::SymbolKind::Table
+                && symbol
+                    .table_schema
+                    .as_ref()
+                    .is_some_and(|schema| schema.admission.is_some())
+            {
+                table_names.push(name.clone());
+            }
+        }
+    }
+    if table_names.is_empty()
+        || table_names.iter().collect::<BTreeSet<_>>().len() != table_names.len()
+    {
+        return None;
+    }
+    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, &commit)
+        .ok()?;
+    let mut tables = Vec::with_capacity(table_names.len());
+    for name in table_names {
+        let mut matching = identities.records().iter().filter(|record| {
+            record.kind() == orna_project_v1::ObjectKind::Table
+                && !record.is_retired()
+                && record.qualified_name().rsplit('.').next() == Some(name.as_str())
+        });
+        let record = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        tables.push(
+            RuntimeTableIdentity::new(
+                name,
+                TableObjectId::new(*record.id()),
+            )
+            .ok()?,
+        );
+    }
+    let capture_relation_id = tables.first()?.object_id().bytes();
+    let (identity, initial_digest) = runtime_identity(repository).ok()?;
+    if format_context.require_database_id().ok()?.as_bytes() != &identity.database_id {
+        return None;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    Some(ReplTransactions {
+        project,
+        commit,
+        format_context,
+        authority: ApplicationAuthority::new(catalogue, Limits::default()),
+        runtime,
+        identity,
+        initial_digest,
+        tables,
+        capture_relation_id,
+        session_id: cli_request_nonce().to_be_bytes(),
+        state: None,
+        lease: None,
+    })
+}
+
+fn same_repl_project_inputs(
+    workspace: &orna_project_v1::LoadedProject,
+    committed: &orna_project_v1::LoadedProject,
+) -> bool {
+    workspace.modules() == committed.modules()
+        && workspace.identities() == committed.identities()
+        && workspace.loose_rows() == committed.loose_rows()
+        && workspace.standard_profile() == committed.standard_profile()
+        && workspace.standard_sources() == committed.standard_sources()
+        && workspace.standard_runtime_modules() == committed.standard_runtime_modules()
+        && workspace.has_standard_imports() == committed.has_standard_imports()
+        && workspace.standard_modules() == committed.standard_modules()
 }
 
 fn repl_runtime(
     repository: Option<orna_repository_v1::Repository>,
 ) -> Result<ReplRuntime, Diagnostic> {
-    let session = if let Some(repository) = &repository {
+    let (session, transactions) = if let Some(repository) = &repository {
         let project = orna_project_v1::ProjectLoader::default()
             .load(repository)
             .map_err(|_| {
@@ -2121,16 +2240,19 @@ fn repl_runtime(
                     "fix the project module graph and source boundaries, then run check again",
                 )
             })?;
-        AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
-            .map_err(|error| repl_session_error(&error))?
+        let session = AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
+            .map_err(|error| repl_session_error(&error))?;
+        let transactions = repl_transactions(repository, &project);
+        (session, transactions)
     } else {
         // Preserve the core-only REPL when the current directory has no Git
         // repository or the endpoint is not local.
-        AdmittedReplSession::new(Limits::default())
+        (AdmittedReplSession::new(Limits::default()), None)
     };
     Ok(ReplRuntime {
         repository,
         session,
+        transactions,
     })
 }
 
@@ -2234,16 +2356,144 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
     }
 }
 
+fn run_repl_input(
+    repository: Option<&orna_repository_v1::Repository>,
+    transactions: Option<&mut ReplTransactions>,
+    session: &mut AdmittedReplSession,
+    source: &str,
+) -> Result<Option<CanonicalValue>, String> {
+    let staged = match session.stage_activation(source) {
+        Ok(staged) => staged,
+        Err(_) => return session.submit(source).map_err(|error| error.code().to_owned()),
+    };
+    let (Some(repository), Some(transactions)) = (repository, transactions) else {
+        return Err("ORNA-REPL-EFFECT".to_owned());
+    };
+    let (current_commit, _) = repository
+        .open_pinned_format_context_with_commit("HEAD")
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    if current_commit != transactions.commit || !transactions.format_context.supports_writes() {
+        return Err("ORNA-REPL-EFFECT".to_owned());
+    }
+    let mut filesystem = FilesystemProvider::with_limits(65_536, 16)
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    filesystem
+        .allow_root(repository.worktree())
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let capability = repository
+        .capture_capability(transactions.capture_relation_id)
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    if transactions.state.is_none() {
+        let state = transactions
+            .runtime
+            .block_on(RuntimeState::open(
+                repository,
+                transactions.identity,
+                transactions.initial_digest,
+            ))
+            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+        transactions.state = Some(state);
+    }
+    if transactions.lease.is_none() {
+        let lease = transactions
+            .runtime
+            .block_on(
+                transactions
+                    .state
+                    .as_ref()
+                    .expect("runtime state initialized")
+                    .acquire_lease(invocation_owner_id(transactions.identity)),
+            )
+            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+        transactions.lease = Some(lease);
+    }
+    let state = transactions
+        .state
+        .as_ref()
+        .expect("runtime state initialized");
+    let snapshot = transactions
+        .runtime
+        .block_on(state.begin_admitted_table_activation(&transactions.tables))
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let request = RequestIdentity {
+        session_id: transactions.session_id,
+        request_id: cli_request_nonce().to_be_bytes(),
+    };
+    let scope = ReplTransactionScope {
+        project: &transactions.project,
+        repository,
+        format_context: &transactions.format_context,
+        runtime_context: snapshot.context(),
+        request,
+    };
+    let (value, successor, activation) = transactions
+        .authority
+        .evaluate_staged_repl_transaction(session, staged, &scope, &mut bindings)
+        .map_err(repl_application_error)?;
+    if activation.mutations().is_empty() {
+        return Err("ORNA-REPL-EFFECT".to_owned());
+    }
+    let activation = activation
+        .stage_for_request(&transactions.authority, snapshot.context(), request)
+        .map_err(repl_application_error)?;
+    transactions
+        .runtime
+        .block_on(state.commit_table_activation(
+            transactions.lease.expect("runtime writer lease initialized"),
+            activation.context(),
+            activation.mutations(),
+            activation.next_digest(),
+            activation.faults(),
+        ))
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    *session = successor;
+    Ok(value)
+}
+
+fn repl_application_error(error: ApplicationError) -> String {
+    match error {
+        ApplicationError::Parse(codes) | ApplicationError::Semantic(codes) => codes
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "ORNA-REPL-SEMANTIC".to_owned()),
+        ApplicationError::Evaluation(code)
+        | ApplicationError::EffectRejected(code)
+        | ApplicationError::SourceEffectFailed(code) => code,
+        ApplicationError::UnadmittedTable(_) => "ORNA-EVAL-TABLE-UNADMITTED".to_owned(),
+        _ => "ORNA-REPL-EFFECT".to_owned(),
+    }
+}
+
 fn run_repl_submission<W: io::Write>(
     session: &mut AdmittedReplSession,
     source: &str,
     writer: &mut W,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
+    let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
+        session.submit(source).map_err(|error| error.code().to_owned())
+    };
+    run_repl_submission_with(session, source, writer, color_enabled, &mut submitter)
+}
+
+fn run_repl_submission_with<W, S>(
+    session: &mut AdmittedReplSession,
+    source: &str,
+    writer: &mut W,
+    color_enabled: bool,
+    submitter: &mut S,
+) -> Result<(), Diagnostic>
+where
+    W: io::Write,
+    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, String>,
+{
     if source.trim() == ":quit" {
         return Ok(());
     }
-    match session.submit(source) {
+    match submitter(session, source) {
         Ok(Some(value)) => {
             let rendered = repl::inspect(&value);
             let (result, ty) = rendered
@@ -2274,8 +2524,8 @@ fn run_repl_submission<W: io::Write>(
             Ok(())
         }
         Ok(None) => Ok(()),
-        Err(error) => {
-            let diagnostic = diagnostic_documentation(error.code()).map_or_else(
+        Err(code) => {
+            let diagnostic = diagnostic_documentation(&code).map_or_else(
                 || {
                     Diagnostic::unavailable(
                         "REPL expression could not be evaluated",
@@ -2308,12 +2558,18 @@ fn run_repl(
     }
     let mut runtime = repl_session(endpoint)?;
     let color_enabled = color_mode.stdout_enabled();
+    let repository = runtime.repository.as_ref();
+    let mut transactions = runtime.transactions.as_mut();
+    let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
+        run_repl_input(repository, transactions.as_deref_mut(), session, source)
+    };
     if let Some(source) = expression {
-        return run_repl_submission(
+        return run_repl_submission_with(
             &mut runtime.session,
             source,
             &mut io::stdout().lock(),
             color_enabled,
+            &mut submitter,
         );
     }
     let stdin = io::stdin();
@@ -2321,11 +2577,12 @@ fn run_repl(
     let loader = ReplSnapshotSessionLoader {
         repository: runtime.repository.as_ref(),
     };
-    repl::run_with_snapshot_loader_and_color(
+    repl::run_with_snapshot_loader_and_color_and_submitter(
         &mut BufReader::new(stdin.lock()),
         &mut stdout.lock(),
         &mut runtime.session,
         &loader,
+        &mut submitter,
         color_enabled,
     )
     .map_err(|_| {
