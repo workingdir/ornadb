@@ -833,6 +833,7 @@ pub struct PublicationJournal {
     base_index_tree: Option<IndexTreeRef>,
     runtime_intent_id: Option<[u8; 16]>,
     compact_manifest: Option<CompactManifestWitness>,
+    store_root: Option<IndexTreeRef>,
     migration_continuity: Option<MigrationContinuityRecord>,
     migration_annotation_defaults: Option<MigrationAnnotationDefaults>,
     entries: Vec<PublicationJournalEntry>,
@@ -896,6 +897,7 @@ impl PublicationJournal {
             base_index_tree,
             runtime_intent_id: None,
             compact_manifest: None,
+            store_root: None,
             migration_continuity: None,
             migration_annotation_defaults: None,
             entries,
@@ -940,6 +942,25 @@ impl PublicationJournal {
     pub fn compact_manifest(&self) -> Option<&CompactManifestWitness> {
         self.compact_manifest.as_ref()
     }
+    /// Binds the format-3 store tree selected for index reconciliation and
+    /// candidate recovery. Older journal versions remain store-root-free.
+    pub fn with_store_root(mut self, store_root: &NativeOid) -> Result<Self, RepositoryError> {
+        let store_root = store_root.to_hex();
+        if self.store_root.is_some()
+            || self.stage != PublicationJournalStage::Prepared
+            || store_root.len() != self.new_head.as_str().len()
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        self.store_root = Some(IndexTreeRef(store_root));
+        self.wire_version = self.wire_version.max(8);
+        self.binding_version = self.binding_version.max(8);
+        Ok(self)
+    }
+
+    pub fn store_root(&self) -> Option<&IndexTreeRef> {
+        self.store_root.as_ref()
+    }
 
     /// Binds the complete stream/checkpoint predecessor inventory to an
     /// explicit legacy-format migration journal. This promotes only that
@@ -955,8 +976,8 @@ impl PublicationJournal {
             return Err(RepositoryError::InvalidFormatMigration);
         }
         self.migration_continuity = Some(continuity);
-        self.wire_version = 6;
-        self.binding_version = 6;
+        self.wire_version = self.wire_version.max(6);
+        self.binding_version = self.binding_version.max(6);
         Ok(self)
     }
 
@@ -987,8 +1008,8 @@ impl PublicationJournal {
             return Err(RepositoryError::InvalidFormatMigration);
         }
         self.migration_annotation_defaults = Some(defaults);
-        self.wire_version = 7;
-        self.binding_version = 7;
+        self.wire_version = self.wire_version.max(7);
+        self.binding_version = self.binding_version.max(7);
         Ok(self)
     }
 
@@ -1108,7 +1129,15 @@ impl PublicationJournal {
             }
             None => bytes.push(0),
         }
-        if self.wire_version >= 6 {
+        if self.wire_version >= 8 {
+            match &self.migration_continuity {
+                Some(continuity) => {
+                    bytes.push(1);
+                    continuity.encode(&mut bytes)?;
+                }
+                None => bytes.push(0),
+            }
+        } else if self.wire_version >= 6 {
             self.migration_continuity
                 .as_ref()
                 .ok_or(RepositoryError::InvalidPublicationJournal)?
@@ -1116,11 +1145,26 @@ impl PublicationJournal {
         } else if self.migration_continuity.is_some() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
-        if self.wire_version >= 7 {
+        if self.wire_version >= 8 {
+            match &self.migration_annotation_defaults {
+                Some(defaults) => {
+                    bytes.push(1);
+                    defaults.encode(&mut bytes)?;
+                }
+                None => bytes.push(0),
+            }
+            put_optional_string(
+                &mut bytes,
+                self.store_root.as_ref().map(IndexTreeRef::as_str),
+            )?;
+        } else if self.wire_version >= 7 {
             self.migration_annotation_defaults
                 .ok_or(RepositoryError::InvalidPublicationJournal)?
                 .encode(&mut bytes)?;
-        } else if self.migration_annotation_defaults.is_some() {
+            if self.store_root.is_some() {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+        } else if self.migration_annotation_defaults.is_some() || self.store_root.is_some() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         bytes.push(self.stage.code());
@@ -1159,7 +1203,7 @@ impl PublicationJournal {
         }
         let mut cursor = JOURNAL_MAGIC.len();
         let version = take_byte(bytes, &mut cursor)?;
-        if version != 5 && version != 6 && version != 7 {
+        if version != 5 && version != 6 && version != 7 && version != 8 {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let old_head =
@@ -1183,13 +1227,32 @@ impl PublicationJournal {
             )?),
             _ => return Err(RepositoryError::InvalidPublicationJournal),
         };
-        let migration_continuity = if version >= 6 {
+        let migration_continuity = if version >= 8 {
+            match take_byte(bytes, &mut cursor)? {
+                0 => None,
+                1 => Some(MigrationContinuityRecord::decode(bytes, &mut cursor)?),
+                _ => return Err(RepositoryError::InvalidPublicationJournal),
+            }
+        } else if version >= 6 {
             Some(MigrationContinuityRecord::decode(bytes, &mut cursor)?)
         } else {
             None
         };
-        let migration_annotation_defaults = if version >= 7 {
+        let migration_annotation_defaults = if version >= 8 {
+            match take_byte(bytes, &mut cursor)? {
+                0 => None,
+                1 => Some(MigrationAnnotationDefaults::decode(bytes, &mut cursor)?),
+                _ => return Err(RepositoryError::InvalidPublicationJournal),
+            }
+        } else if version >= 7 {
             Some(MigrationAnnotationDefaults::decode(bytes, &mut cursor)?)
+        } else {
+            None
+        };
+        let store_root = if version >= 8 {
+            take_optional_string(bytes, &mut cursor)?
+                .map(|value| IndexTreeRef::from_verified_tree(value, object_id_length))
+                .transpose()?
         } else {
             None
         };
@@ -1234,6 +1297,7 @@ impl PublicationJournal {
             base_index_tree,
             runtime_intent_id,
             compact_manifest,
+            store_root,
             migration_continuity,
             migration_annotation_defaults,
             entries,
@@ -2132,6 +2196,55 @@ pub struct Repository {
     runtime: RuntimePaths,
 }
 
+/// Binds a candidate tree entry at its exact index position.
+///
+/// A regular entry keeps the ordinary `--cacheinfo` path. A tree entry cannot:
+/// Git refuses a directory entry that overlaps the file entries a base commit
+/// already contributed under the same path, and a `--cacheinfo` directory entry
+/// is re-expanded from the worktree. The base's entries are removed first, then
+/// the subtree is bound leaf by leaf with `read-tree --prefix`, which reproduces
+/// the tree exactly for later index and tree reads.
+pub(crate) fn bind_tree_entry_in_index(
+    mut git: impl FnMut() -> Command,
+    index: &Path,
+    path: &str,
+    mode: &str,
+    object: &str,
+) -> Result<(), RepositoryError> {
+    if mode != "040000" {
+        let cacheinfo = format!("{mode},{object},{path}");
+        let mut update = git();
+        update
+            .env("GIT_INDEX_FILE", index)
+            .args(["update-index", "--add", "--cacheinfo", &cacheinfo]);
+        run_command(update)?;
+        return Ok(());
+    }
+    let mut listed = git();
+    listed
+        .env("GIT_INDEX_FILE", index)
+        .args(["ls-files", "-z", "--", path]);
+    let output = run_command(listed)?;
+    for stale in output.stdout.split(|byte| *byte == 0) {
+        if stale.is_empty() {
+            continue;
+        }
+        let stale =
+            std::str::from_utf8(stale).map_err(|_| RepositoryError::GitOperationFailed)?;
+        let mut remove = git();
+        remove
+            .env("GIT_INDEX_FILE", index)
+            .args(["update-index", "--force-remove", "--", stale]);
+        run_command(remove)?;
+    }
+    let prefix = format!("{path}/");
+    let mut bind = git();
+    bind.env("GIT_INDEX_FILE", index)
+        .args(["read-tree", "--prefix", &prefix, object]);
+    run_command(bind)?;
+    Ok(())
+}
+
 impl Repository {
     /// Discovers the Git worktree containing `path` and resolves the *per
     /// worktree* local runtime directory using `git rev-parse --git-path`.
@@ -2332,11 +2445,47 @@ impl Repository {
         changes: &[ManagedFileChange],
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
+        self.build_private_commit_inner(expected_head, changes, None, message)
+    }
+
+    /// Builds a private candidate from managed file changes and a validated
+    /// format-3 store root, without changing the behavior of file-only callers.
+    pub fn build_private_commit_with_store_root(
+        &self,
+        expected_head: &GitCommitRef,
+        changes: &[ManagedFileChange],
+        graph: &NativeGraphContext,
+        store_root: &NativeOid,
+        message: &str,
+    ) -> Result<PrivateCommit, RepositoryError> {
+        self.build_private_commit_inner(
+            expected_head,
+            changes,
+            Some((graph, store_root)),
+            message,
+        )
+    }
+
+    fn build_private_commit_inner(
+        &self,
+        expected_head: &GitCommitRef,
+        changes: &[ManagedFileChange],
+        store_projection: Option<(&NativeGraphContext, &NativeOid)>,
+        message: &str,
+    ) -> Result<PrivateCommit, RepositoryError> {
         if changes.is_empty() {
             return Err(RepositoryError::NoManagedPaths);
         }
         if message.is_empty() || message.contains('\0') {
             return Err(RepositoryError::InvalidCommitMessage);
+        }
+        if let Some((graph, store_root)) = store_projection
+            && store_root.algorithm() != graph.algorithm()
+        {
+            return Err(RepositoryError::Graph(GraphError::InvalidOidWidth {
+                expected: graph.algorithm().width(),
+                actual: store_root.as_bytes().len(),
+            }));
         }
         let _lock = self.acquire_coordination_lock()?;
         let actual = self.head()?.ok_or(RepositoryError::UnbornHead)?;
@@ -2403,6 +2552,11 @@ impl Repository {
                         .arg(change.path.as_path());
                     self.run(update)?;
                 }
+            }
+            if let Some((graph, store_root)) = store_projection {
+                graph
+                    .pin_store_subtree_in_index(&index, store_root)
+                    .map_err(RepositoryError::Graph)?;
             }
 
             let mut write_tree = self.command();
@@ -2641,22 +2795,27 @@ impl Repository {
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let result = (|| {
             for path in paths {
-                let mut update = self.command();
-                update.env("GIT_INDEX_FILE", &candidate_index);
-                if let Some((mode, object)) = self.candidate_tree_entry(candidate, path)? {
-                    let cacheinfo = format!(
-                        "{mode},{object},{}",
-                        path.as_path()
-                            .to_str()
-                            .ok_or(RepositoryError::UnsafeManagedPath)?
-                    );
-                    update.args(["update-index", "--add", "--cacheinfo", &cacheinfo]);
-                } else {
-                    update
-                        .args(["update-index", "--force-remove", "--"])
-                        .arg(path.as_path());
+                let encoded = path
+                    .as_path()
+                    .to_str()
+                    .ok_or(RepositoryError::UnsafeManagedPath)?;
+                match self.candidate_tree_entry(candidate, path)? {
+                    Some((mode, object)) => bind_tree_entry_in_index(
+                        || self.command(),
+                        &candidate_index,
+                        encoded,
+                        &mode,
+                        &object,
+                    )?,
+                    None => {
+                        let mut update = self.command();
+                        update
+                            .env("GIT_INDEX_FILE", &candidate_index)
+                            .args(["update-index", "--force-remove", "--"])
+                            .arg(path.as_path());
+                        self.run(update)?;
+                    }
                 }
-                self.run(update)?;
             }
             fs::File::open(&candidate_index)
                 .and_then(|file| file.sync_all())
@@ -3028,11 +3187,7 @@ impl Repository {
                 return Err(RepositoryError::PublicationPending);
             }
         }
-        let paths = journal
-            .entries()
-            .iter()
-            .map(|entry| entry.path.clone())
-            .collect::<Vec<_>>();
+        let paths = self.publication_index_paths(candidate, journal)?;
         self.ensure_atomic_index_install_supported()?;
         let index = self.git_path("index")?;
         let base_index = self.capture_index_for_expected(expected_index, &index)?;
@@ -3170,11 +3325,7 @@ impl Repository {
                     tree: self.index_tree_from_file(&index)?,
                 };
                 let _reconciled = if current.tree() == expected_index.tree() {
-                    let paths = journal
-                        .entries()
-                        .iter()
-                        .map(|entry| entry.path.clone())
-                        .collect::<Vec<_>>();
+                    let paths = self.publication_index_paths(&candidate, &journal)?;
                     let base_index =
                         fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
                     self.reconcile_published_index_locked(
@@ -3184,7 +3335,7 @@ impl Repository {
                         &base_index,
                         &git_lock,
                     )?
-                } else if self.index_entries_match_candidate(&candidate, journal.entries())? {
+                } else if self.index_entries_match_candidate(&candidate, &journal)? {
                     current
                 } else {
                     return Err(RepositoryError::StaleIndex {
@@ -3253,7 +3404,7 @@ impl Repository {
             &tree_expression,
         ])?)?;
         let candidate = PrivateCommit { tree, commit };
-        if !self.candidate_entries_match_journal(&candidate, journal.entries())? {
+        if !self.candidate_entries_match_journal(&candidate, journal)? {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         if journal.compact_manifest().is_some() {
@@ -5995,29 +6146,82 @@ impl Repository {
         let kind = fields.next().unwrap_or_default();
         let object = String::from_utf8(fields.next().unwrap_or_default().to_vec())
             .map_err(|_| RepositoryError::GitOperationFailed)?;
-        if kind != b"blob" || fields.next().is_some() {
+        if kind == b"blob" {
+            if fields.next().is_some() {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
+        } else if path.as_path() == Path::new(".orna/store")
+            && kind == b"tree"
+            && mode == "040000"
+        {
+            if fields.next().is_some() {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            IndexTreeRef::from_verified_tree(object.clone(), self.native_object_id_length()?)?;
+        } else {
             return Err(RepositoryError::GitOperationFailed);
         }
-        GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
         Ok(Some((mode, object)))
+    }
+
+    fn committed_store_tree_path(
+        &self,
+        candidate: &PrivateCommit,
+        journal: &PublicationJournal,
+    ) -> Result<Option<ManagedPath>, RepositoryError> {
+        let store_path = ManagedPath::new(".orna/store")?;
+        if journal
+            .entries()
+            .iter()
+            .any(|entry| &entry.path == &store_path)
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        match (
+            journal.store_root(),
+            self.candidate_tree_entry(candidate, &store_path)?,
+        ) {
+            (Some(expected), Some((mode, object)))
+                if mode == "040000" && object == expected.as_str() => Ok(Some(store_path)),
+            (None, Some((mode, _))) if mode == "040000" => Ok(Some(store_path)),
+            (None, None) => Ok(None),
+            _ => Err(RepositoryError::InvalidPublicationJournal),
+        }
+    }
+
+    fn publication_index_paths(
+        &self,
+        candidate: &PrivateCommit,
+        journal: &PublicationJournal,
+    ) -> Result<Vec<ManagedPath>, RepositoryError> {
+        let mut paths = journal
+            .entries()
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        if let Some(store_path) = self.committed_store_tree_path(candidate, journal)? {
+            paths.push(store_path);
+        }
+        Ok(paths)
     }
 
     fn index_entries_match_candidate(
         &self,
         candidate: &PrivateCommit,
-        entries: &[PublicationJournalEntry],
+        journal: &PublicationJournal,
     ) -> Result<bool, RepositoryError> {
-        for entry in entries {
+        for path in self.publication_index_paths(candidate, journal)? {
             let mut command = self.command();
             command
                 .args(["ls-files", "--stage", "-z", "--"])
-                .arg(entry.path.as_path());
+                .arg(path.as_path());
             let output = self.run(command)?.stdout;
             let records = output
                 .split(|byte| *byte == 0)
                 .filter(|record| !record.is_empty())
                 .collect::<Vec<_>>();
-            let expected = self.candidate_tree_entry(candidate, &entry.path)?;
+            let expected = self.candidate_tree_entry(candidate, &path)?;
             match (expected, records.as_slice()) {
                 (None, []) => {}
                 (Some((mode, object)), [record]) => {
@@ -6027,7 +6231,7 @@ impl Repository {
                         .ok_or(RepositoryError::GitOperationFailed)?;
                     let metadata = &record[..tab];
                     let encoded_path = &record[tab + 1..];
-                    if encoded_path != entry.path.as_path().as_os_str().as_encoded_bytes() {
+                    if encoded_path != path.as_path().as_os_str().as_encoded_bytes() {
                         return Ok(false);
                     }
                     let mut fields = metadata.split(|byte| *byte == b' ');
@@ -6047,17 +6251,17 @@ impl Repository {
         }
         Ok(true)
     }
-
-    /// Verifies that recovery's persisted loose-file intent is exactly the
-    /// content committed by the private publication candidate. Without this
-    /// binding, a malformed journal could reconcile the index to one blob and
-    /// materialise different bytes after the ref-advance crash boundary.
+    /// Verifies recovery's persisted file intents and optional store-root
+    /// tree witness against the private publication candidate. This prevents
+    /// recovery from reconciling the index to a different file or store tree
+    /// after the ref-advance crash boundary.
     fn candidate_entries_match_journal(
         &self,
         candidate: &PrivateCommit,
-        entries: &[PublicationJournalEntry],
+        journal: &PublicationJournal,
     ) -> Result<bool, RepositoryError> {
-        for entry in entries {
+        let _store_path = self.committed_store_tree_path(candidate, journal)?;
+        for entry in journal.entries() {
             match (
                 entry.next(),
                 self.candidate_tree_entry(candidate, &entry.path)?,
@@ -6115,8 +6319,26 @@ impl Repository {
     }
 
     fn is_reachable_from_ref(&self, snapshot: &GitCommitRef) -> Result<bool, RepositoryError> {
-        let refs = self.git(["for-each-ref", "--format=%(refname)"])?;
-        for reference in refs.lines().filter(|reference| !reference.is_empty()) {
+        // A ref need not name a commit: the internal `refs/orna/pins/*`
+        // publication pins name trees. Ancestry is only defined between
+        // commits, so a ref that cannot peel to a commit is skipped rather than
+        // failing the resolution of a snapshot that is otherwise valid
+        // (`orna export DEST --at SELECTOR` freezes and verifies the selected
+        // snapshot closure).
+        let refs = self.git([
+            "for-each-ref",
+            "--format=%(objecttype)%00%(*objecttype)%00%(refname)",
+        ])?;
+        for line in refs.lines().filter(|line| !line.is_empty()) {
+            let mut fields = line.split('\0');
+            let object_type = fields.next().unwrap_or_default();
+            let peeled_type = fields.next().unwrap_or_default();
+            let Some(reference) = fields.next().filter(|reference| !reference.is_empty()) else {
+                continue;
+            };
+            if object_type != "commit" && peeled_type != "commit" {
+                continue;
+            }
             let mut command = self.command();
             command.args(["merge-base", "--is-ancestor", snapshot.as_str(), reference]);
             let output = command
