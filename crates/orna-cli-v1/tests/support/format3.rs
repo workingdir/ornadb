@@ -196,17 +196,7 @@ pub fn capture_failure(
 }
 
 pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
-    let (directory, repository, relation_id) =
-        format3_repository(include_str!("../fixtures/media/empty-media-main.orna"));
-    let root = repository.worktree();
-    for key in ["image", "song", "clip"] {
-        let path = root.join("media").join(format!("{key}.orna"));
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, "{ content: null, }\n").unwrap();
-    }
-    git(root, &["add", "--all"]);
-    git(root, &["commit", "--quiet", "-m", "add media source rows"]);
-    (directory, repository, relation_id)
+    format3_repository(include_str!("../fixtures/media/empty-media-main.orna"))
 }
 /// Creates an Object project, its canonical identity manifest, source rows, and
 /// matching native descriptor roots in one committed repository.

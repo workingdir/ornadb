@@ -8,7 +8,7 @@
 
 use crate::format3::current_format3_context;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_project_v1::{ProjectLoader, admit_source_row_with_owner_fields};
+use orna_project_v1::{ProjectLoader, admit_source_row, admit_source_row_with_owner_fields};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TableObjectId,
@@ -69,23 +69,16 @@ async fn commit_capture_inner(
     relation_id: [u8; 16],
     publish: bool,
 ) {
-    let relative_path = format!("media/{key}.orna");
-    let root = repository.worktree();
-    let source_path = root.join(&relative_path);
-    assert!(source_path.is_file(), "the source row is committed before RuntimeState opens");
+    let logical_path = format!("media/{key}.orna");
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
     let project = loader
         .load_committed_snapshot(repository, &commit)
-        .expect("load the committed media source row");
+        .expect("load the committed media project");
     let schema = loader
         .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
         .expect("resolve the media table from its committed identity manifest");
-    let source_row = project
-        .loose_rows()
-        .iter()
-        .find(|row| row.logical_path() == relative_path)
-        .expect("the committed project contains the media source row");
+    let source = format!("{{ content: {expression}, }}\n");
     let format_context = current_format3_context(repository);
 
     let request_identity = RequestIdentity {
@@ -116,14 +109,13 @@ async fn commit_capture_inner(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let admitted = admit_source_row_with_owner_fields(
+    let admitted = admit_source_row(
         &project,
-        source_row.logical_path(),
-        source_row.source(),
+        &logical_path,
+        &source,
         &schema,
         &format_context,
         vec![("content".to_owned(), binding)],
-        vec![],
         [ordinal + 3; 16],
     )
     .expect("admit a source-owned media row with its Blob binding");
