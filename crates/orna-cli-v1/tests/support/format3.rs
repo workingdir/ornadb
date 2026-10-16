@@ -176,6 +176,7 @@ pub async fn publish_source_rows(
                     .expect("each source mutation has a committed path")
                     .clone())
             },
+            "orna: publish source rows",
         )
         .await
         .expect("the explicit source publication boundary succeeds");
