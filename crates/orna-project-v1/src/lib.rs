@@ -34,8 +34,9 @@ mod unicode16;
 mod object_identity;
 
 pub use object_identity::{
-    ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectKind,
-    SourceTableSchemaArtifact, SourceTableSchemaError, OBJECT_IDENTITY_MANIFEST_PATH,
+    ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectIdentityRename,
+    ObjectKind, SourceTableSchemaArtifact, SourceTableSchemaError,
+    OBJECT_IDENTITY_MANIFEST_PATH,
 };
 
 pub use attachments::{
