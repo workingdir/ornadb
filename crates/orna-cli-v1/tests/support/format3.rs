@@ -10,11 +10,14 @@ use std::{
 
 use orna_conformance_v1::DurableTransactionalEvaluator;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::Repository;
-use orna_runtime_v1::RuntimeState;
+use orna_repository_v1::{AdmittedRow, KeyRange, Repository, TypedKey};
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState, RuntimeTableIdentity, TableObjectId};
 use orna_storage_v1::LoosePath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+
+use orna_project_v1::ObjectIdentityManifest;
+use orna_semantic_v1::{ModuleInput, analyze};
 
 pub fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -24,6 +27,89 @@ pub fn hex(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+/// The identity `orna publish` derives for a repository: the metadata's
+/// database id, a rotated-and-salted repository id, and both concatenated as
+/// the initial digest. This repeats `cli_publish.rs::runtime_identity`, so a
+/// harness that opens the runtime must use exactly this identity. A harness
+/// that opens the runtime under any other identity leaves the verb unable to
+/// see its rows, and the verb refuses the state database as another runtime's.
+pub fn cli_runtime_identity(repository: &Repository) -> (RuntimeIdentity, [u8; 32]) {
+    let metadata = orna_repository_v1::inspect_metadata(repository)
+        .unwrap()
+        .expect("the fixture records repository metadata");
+    let database_id = *metadata.database_id().as_bytes();
+    let mut repository_id = database_id;
+    for (index, byte) in repository_id.iter_mut().enumerate() {
+        let rotation = u32::try_from(index % 7 + 1).expect("bounded rotation");
+        let salt = u8::try_from(index).expect("fixed identity length");
+        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
+    }
+    if repository_id == [0; 16] {
+        repository_id[0] = 1;
+    }
+    let mut initial_digest = [0; 32];
+    initial_digest[..16].copy_from_slice(&database_id);
+    initial_digest[16..].copy_from_slice(&repository_id);
+    (
+        RuntimeIdentity {
+            database_id,
+            repository_id,
+        },
+        initial_digest,
+    )
+}
+
+/// Reads one admitted relation's committed rows at the published `HEAD`, by the
+/// relation's committed identity.
+///
+/// The runtime stores an admitted mutation under
+/// `TableMutation::table_storage_key(table, object_id)`, so a name-keyed read
+/// misses every row whose mutation carried its admitted table object id. This
+/// is the identity-keyed read, not a second key form.
+pub async fn committed_admitted_rows(
+    state: &RuntimeState,
+    table: &str,
+    relation_id: [u8; 16],
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let identity = RuntimeTableIdentity::new(table, TableObjectId::new(relation_id))
+        .expect("the fixture table admits a committed identity");
+    state
+        .read_admitted_table_at_head(&identity)
+        .await
+        .expect("the published HEAD answers the admitted relation")
+        .rows()
+        .to_vec()
+}
+
+/// Reads one admitted relation's committed rows from the published store, the
+/// same reader the query and history verbs use: the format context's relation
+/// row map, then the native graph's bounded range read.
+pub fn committed_store_rows(repository: &Repository, relation_id: [u8; 16]) -> Vec<AdmittedRow> {
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the relation row map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the native graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    graph
+        .range_rows(&KeyRange::new(None, None, 16).expect("key range"), &scope)
+        .expect("read the committed rows")
+}
+
+/// The logical key bytes a store row carries: the text a `Str` key spells, or
+/// the bytes an opaque key holds.
+pub fn logical_key_bytes(key: &TypedKey) -> Vec<u8> {
+    match key {
+        TypedKey::Text(text) => text.as_bytes().to_vec(),
+        TypedKey::Bytes(bytes) => bytes.clone(),
+        other => other.canonical_bytes().expect("a canonical logical key"),
+    }
 }
 
 /// Publishes one committed media row through the explicit publication
@@ -73,6 +159,10 @@ pub fn capture_failure(
 }
 
 pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
+    format3_repository("pub table media(id: Str) { content: Blob, }\n")
+}
+
+pub fn format3_repository(media_source: &str) -> (TempDir, Repository, [u8; 16]) {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
     git(root, &["init", "--quiet"]);
@@ -81,23 +171,31 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     git(root, &["config", "commit.gpgsign", "false"]);
 
     let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
-    let relation_id = [0x43; 16];
     let database_uuid = "00000000-0000-4000-8000-000000000001";
     let database =
         format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-    let schema_source = include_bytes!("../fixtures/reference-project/main.orna");
+    let modules = [ModuleInput::new("main.orna", media_source)];
+    let analysis = analyze(&modules);
+    let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
+    let manifest_bytes = identities.encode().unwrap();
+    let table = identities
+        .source_table_schema(&analysis, "", "main.orna", "media")
+        .unwrap();
+    let relation_id = *table.table_object_id();
+    let schema_source = table.descriptor().encode().unwrap();
     std::fs::create_dir_all(root.join(".orna/store")).unwrap();
     std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
+    std::fs::write(root.join(".orna/object-identities.cbor"), &manifest_bytes).unwrap();
     std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
-    std::fs::write(root.join("main.orna"), schema_source).unwrap();
+    std::fs::write(root.join("main.orna"), media_source).unwrap();
     git(root, &["add", "--all"]);
     git(
         root,
         &["commit", "--quiet", "-m", "format3 capture fixture"],
     );
 
-    let schema_digest: [u8; 32] = Sha256::digest(schema_source).into();
-    let chunk_oid = git_object(root, "blob", schema_source);
+    let schema_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    let chunk_oid = git_object(root, "blob", &schema_source);
     let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
     append_cbor_head(&mut byte_index, 0, schema_source.len());
     byte_index.push(0x81);
@@ -149,11 +247,12 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     let store_root_oid =
         native_fixture_node(root, &store_root, &[(relation_map_oid.as_str(), "tree")]);
     let database_oid = git_object(root, "blob", database.as_bytes());
-    let source_oid = git_object(root, "blob", schema_source);
+    let manifest_oid = git_object(root, "blob", &manifest_bytes);
+    let source_oid = git_object(root, "blob", media_source.as_bytes());
     let orna_tree = git_tree(
         root,
         &format!(
-            "100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_root_oid}\tstore\n"
+            "100644 blob {database_oid}\tdatabase.orna\n100644 blob {manifest_oid}\tobject-identities.cbor\n040000 tree {store_root_oid}\tstore\n"
         ),
     );
     let root_tree = git_tree(

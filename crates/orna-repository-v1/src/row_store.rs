@@ -9,11 +9,11 @@ use std::{cmp::Ordering, collections::BTreeMap, fmt, ops::Range, sync::Arc};
 
 use sha2::{Digest, Sha256};
 
-use orna_value_v1::{BlobMetadata, MimeRegistry};
+use orna_value_v1::{BlobMetadata, MediaAnnotation};
 
 use crate::native_graph::{
-    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeObjectId,
-    NativeObjectKind, MAX_REFS, NODE_DATA_LIMIT,
+    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeGraphContext,
+    NativeObjectId, NativeObjectKind, RepositoryReadScope, MAX_REFS, NODE_DATA_LIMIT,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
@@ -175,7 +175,7 @@ impl KeyRange {
         if lower_inclusive
             .as_ref()
             .zip(upper_exclusive.as_ref())
-            .is_some_and(|(lower, upper)| lower >= upper)
+            .is_some_and(|(lower, upper)| !lower.same_key_type(upper) || lower >= upper)
         {
             return Err(RowStoreError::InvalidKeyRange);
         }
@@ -481,21 +481,58 @@ impl RowMapSnapshot {
             .entries
             .as_ref()
             .ok_or(RowStoreError::PersistedLookupRequiresGraphContext)?;
-        Ok(entries
+        let start = range.lower_inclusive.as_ref().map_or(0, |lower| {
+            entries.partition_point(|entry| entry.key < *lower)
+        });
+        Ok(entries[start..]
             .iter()
-            .filter(|entry| {
+            .take_while(|entry| {
                 range
-                    .lower_inclusive
+                    .upper_exclusive
                     .as_ref()
-                    .map_or(true, |lower| entry.key >= *lower)
-                    && range
-                        .upper_exclusive
-                        .as_ref()
-                        .map_or(true, |upper| entry.key < *upper)
+                    .map_or(true, |upper| entry.key < *upper)
             })
             .take(range.limit)
             .map(|entry| AdmittedRow::from_entry(&self.version, entry))
             .collect())
+    }
+
+    /// Reads a bounded range from a persisted snapshot through its matching
+    /// repository graph context. The graph remains the only decoder: it checks
+    /// the admitted schema domain on each traversed page before exposing rows.
+    pub fn range_with_graph_context(
+        &self,
+        context: &NativeGraphContext,
+        scope: &RepositoryReadScope,
+        range: &KeyRange,
+    ) -> Result<Vec<AdmittedRow>, RowStoreError> {
+        let version = &self.version;
+        if context.row_map_version() != version {
+            return Err(RowStoreError::BoundaryMismatch);
+        }
+
+        let row_count = version.row_count.ok_or(RowStoreError::RowCountMismatch)?;
+        let mut authority = Sha256::new();
+        authority.update(b"orna.repository.orp.snapshot-authority.v1\0");
+        authority.update(context.database_id());
+        authority.update(context.snapshot_id());
+        authority.update(version.store_root.as_bytes());
+        authority.update(version.relation_id);
+        authority.update(version.primary_root.as_bytes());
+        authority.update(context.schema_digest());
+        authority.update(row_count.to_be_bytes());
+        let expected_authority: [u8; 32] = authority.finalize().into();
+        if version.database_id() != context.database_id()
+            || version.schema().database_id() != context.database_id()
+            || version.schema().schema_digest() != context.schema_digest()
+            || self.authority != expected_authority
+        {
+            return Err(RowStoreError::BoundaryMismatch);
+        }
+
+        context
+            .range_rows(range, scope)
+            .map_err(RowStoreError::from)
     }
 }
 
@@ -557,6 +594,25 @@ pub enum TypedKey {
 }
 
 impl TypedKey {
+    fn same_key_type(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null)
+            | (Self::Bool(_), Self::Bool(_))
+            | (Self::Int(_), Self::Int(_))
+            | (Self::UInt(_), Self::UInt(_))
+            | (Self::Text(_), Self::Text(_))
+            | (Self::Bytes(_), Self::Bytes(_)) => true,
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| left.same_key_type(right))
+            }
+            _ => false,
+        }
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, RowStoreError> {
         let mut output = Vec::new();
         encode_key(self, &mut output)?;
@@ -968,6 +1024,72 @@ impl OrderedRowMap {
             .binary_search_by(|entry| entry.key.cmp(key))
             .ok()
             .map(|index| &self.entries[index]))
+    }
+    /// Iterates a bounded key range directly over the existing leaf pages.
+    /// The cursor seeks to the first page and entry at or after the inclusive
+    /// lower bound, and never clones rows or scans pages before that position.
+    pub fn range<'a>(&'a self, range: &'a KeyRange) -> impl Iterator<Item = &'a RowEntry> + 'a {
+        let page_index = range.lower_inclusive.as_ref().map_or(0, |lower| {
+            self.pages.partition_point(|page| {
+                page.entries()
+                    .last()
+                    .is_some_and(|entry| entry.key < *lower)
+            })
+        });
+        let entry_index = range
+            .lower_inclusive
+            .as_ref()
+            .and_then(|lower| {
+                self.pages
+                    .get(page_index)
+                    .map(|page| page.entries().partition_point(|entry| entry.key < *lower))
+            })
+            .unwrap_or(0);
+        OrderedRowRange {
+            pages: &self.pages,
+            page_index,
+            entry_index,
+            upper_exclusive: range.upper_exclusive(),
+            remaining: range.limit(),
+        }
+    }
+}
+
+struct OrderedRowRange<'a> {
+    pages: &'a [RowPage],
+    page_index: usize,
+    entry_index: usize,
+    upper_exclusive: Option<&'a TypedKey>,
+    remaining: usize,
+}
+
+impl<'a> Iterator for OrderedRowRange<'a> {
+    type Item = &'a RowEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        loop {
+            let page = self.pages.get(self.page_index)?;
+            let entries = page.entries();
+            if self.entry_index == entries.len() {
+                self.page_index += 1;
+                self.entry_index = 0;
+                continue;
+            }
+            let entry = &entries[self.entry_index];
+            self.entry_index += 1;
+            if self
+                .upper_exclusive
+                .is_some_and(|upper| entry.key >= *upper)
+            {
+                self.remaining = 0;
+                return None;
+            }
+            self.remaining -= 1;
+            return Some(entry);
+        }
     }
 }
 
@@ -1422,9 +1544,11 @@ fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStor
         CborValue::Text(suffix) => Some(suffix.as_str()),
         _ => return Err(RowStoreError::InvalidCanonicalRowValue),
     };
-    let annotation = MimeRegistry::mime1()
-        .canonical_annotation(media_type, suffix)
+    let annotation = MediaAnnotation::new(media_type, suffix)
         .map_err(|_| RowStoreError::InvalidCanonicalRowValue)?;
+    if annotation.media_type() != media_type || annotation.suffix() != suffix {
+        return Err(RowStoreError::InvalidCanonicalRowValue);
+    }
     let descriptor = match descriptor {
         CborValue::Bytes(descriptor) => descriptor,
         _ => return Err(RowStoreError::InvalidCanonicalRowValue),
@@ -1521,7 +1645,9 @@ impl fmt::Display for RowStoreError {
                 f,
                 "row range limit {limit} is outside 1..={MAX_ROW_RANGE_LIMIT}"
             ),
-            Self::InvalidKeyRange => f.write_str("row range lower bound is not below upper bound"),
+            Self::InvalidKeyRange => {
+                f.write_str("row range bounds must share one logical key type and be ordered")
+            }
             Self::RowsNotStrictlyOrdered => {
                 f.write_str("admitted row keys are not strictly logically ordered")
             }
@@ -1582,6 +1708,164 @@ mod tests {
         .expect("coherent row-map version");
         let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty field tuple");
         AdmittedRow::issue(&version, TypedKey::Text("london".to_owned()), value)
+    }
+    fn encoded_blob_row(media_type: &str, suffix: Option<&str>) -> Vec<u8> {
+        let mut encoded = vec![0x81, 0xd9, 0xea, 0xcf, 0x85, 0x00, 0x58, 0x20];
+        encoded.extend_from_slice(&[0; 32]);
+        encoded.push(0x60 + media_type.len() as u8);
+        encoded.extend_from_slice(media_type.as_bytes());
+        if let Some(suffix) = suffix {
+            encoded.push(0x60 + suffix.len() as u8);
+            encoded.extend_from_slice(suffix.as_bytes());
+        } else {
+            encoded.push(0xf6);
+        }
+        encoded.push(0x54);
+        encoded.extend_from_slice(&[0x77; 20]);
+        encoded
+    }
+
+    #[test]
+    fn committed_blob_annotation_must_be_exactly_canonical_mime1() {
+        let valid = RowValue::decode_canonical_fields(encoded_blob_row("text/plain", None))
+            .expect("canonical annotation is admitted");
+        let base = admitted_row(8);
+        let row = AdmittedRow::issue(base.version(), TypedKey::Text("london".to_owned()), valid);
+        let metadata = row
+            .blob_metadata(0)
+            .expect("project canonical metadata")
+            .expect("Blob field");
+        assert_eq!(metadata.media_type(), "text/plain");
+        assert_eq!(metadata.suffix(), None);
+
+        for (media_type, suffix) in [("TEXT/PLAIN", None), ("text/plain", Some("txt"))] {
+            let encoded = encoded_blob_row(media_type, suffix);
+            assert!(
+                RowValue::decode_canonical_fields(encoded.clone()).is_err(),
+                "noncanonical annotation {media_type:?} {suffix:?} must fail row admission"
+            );
+            let fields = decode_canonical_fields_of(&encoded).expect("well-formed CBOR tuple");
+            assert!(decode_blob_field_metadata(&fields[0]).is_err());
+        }
+    }
+
+    #[test]
+    fn materialized_range_seeks_across_page_boundary_and_keeps_snapshot_pin() {
+        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
+        let version = RowMapVersion::issue(
+            [0x11; 16],
+            [0x22; 16],
+            oid(0x55),
+            schema,
+            oid(0x66),
+            8,
+            Some(600),
+        )
+        .expect("coherent row-map version");
+        let boundary = RowMapBoundary::new([0x11; 16], oid(0x55), [0x44; 32], [0x22; 16]);
+        let mut builder = RowMapBuilder::new(boundary);
+        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
+        for key in 0..600 {
+            builder
+                .insert(TypedKey::Int(key), value.clone())
+                .expect("insert ordered row");
+        }
+        let map = builder.build().expect("build paged row map");
+        assert!(map.pages().len() > 1, "fixture must span row pages");
+        let first_page_last_key = map.pages()[0]
+            .entries()
+            .last()
+            .expect("nonempty first page")
+            .key()
+            .clone();
+        let start = match first_page_last_key {
+            TypedKey::Int(value) => value,
+            _ => unreachable!("test keys are integers"),
+        };
+        let entries = map.entries().to_vec();
+        let snapshot = RowMapSnapshot::issue(version.clone(), [0x77; 32], entries)
+            .expect("seal materialized snapshot");
+        let range = KeyRange::new(
+            Some(TypedKey::Int(start)),
+            Some(TypedKey::Int(start + 4)),
+            3,
+        )
+        .expect("valid page-crossing range");
+
+        let rows = snapshot.range(&range).expect("read bounded range");
+        assert_eq!(
+            rows.iter()
+                .map(AdmittedRow::key)
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                TypedKey::Int(start),
+                TypedKey::Int(start + 1),
+                TypedKey::Int(start + 2),
+            ]
+        );
+        let cursor_range = KeyRange::new(
+            Some(TypedKey::Int(start)),
+            Some(TypedKey::Int(start + 4)),
+            10,
+        )
+        .expect("valid cursor interval");
+        assert_eq!(
+            map.range(&cursor_range)
+                .map(|entry| entry.key().clone())
+                .collect::<Vec<_>>(),
+            [
+                TypedKey::Int(start),
+                TypedKey::Int(start + 1),
+                TypedKey::Int(start + 2),
+                TypedKey::Int(start + 3),
+            ]
+        );
+        assert!(rows.iter().all(|row| row.version() == &version));
+    }
+
+    #[test]
+    fn key_range_rejects_bounds_from_different_typed_key_domains() {
+        assert!(matches!(
+            KeyRange::new(Some(TypedKey::Int(1)), Some(TypedKey::UInt(2)), 1),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
+        assert!(matches!(
+            KeyRange::new(
+                Some(TypedKey::Tuple(vec![
+                    TypedKey::Text("id".into()),
+                    TypedKey::Int(1)
+                ])),
+                Some(TypedKey::Tuple(vec![
+                    TypedKey::Text("id".into()),
+                    TypedKey::UInt(2)
+                ])),
+                1,
+            ),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
+    }
+
+    #[test]
+    fn lazy_snapshot_range_requires_graph_context_instead_of_empty_result() {
+        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
+        let version = RowMapVersion::issue(
+            [0x11; 16],
+            [0x22; 16],
+            oid(0x55),
+            schema,
+            oid(0x66),
+            8,
+            Some(1),
+        )
+        .expect("coherent row-map version");
+        let snapshot = RowMapSnapshot::issue_lazy(version, [0x77; 32])
+            .expect("seal persisted snapshot without materializing rows");
+        let range = KeyRange::new(None, None, 1).expect("valid bounded range");
+        assert!(matches!(
+            snapshot.range(&range),
+            Err(RowStoreError::PersistedLookupRequiresGraphContext)
+        ));
     }
 
     #[test]
