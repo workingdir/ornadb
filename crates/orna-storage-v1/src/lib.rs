@@ -1263,47 +1263,6 @@ fn committed_projection_schema(
 /// key must already be canonical. Stored-field arrays pass through byte-exact,
 /// while a scalar is wrapped byte-exactly only for a one-field committed
 /// schema. The descriptor comes from the row map at the pinned expected head.
-fn projection_schema_diagnostic(schema: &CommittedProjectionSchema) -> String {
-    let declared_fields = match schema_descriptor_entry(&schema.descriptor, 3) {
-        Ok(OvbRaw::Array(fields)) => fields
-            .iter()
-            .map(|field| match field {
-                OvbRaw::Array(parts) => {
-                    format!("({:?}, {:?}, {:?})", parts.get(1), parts.get(2), parts.get(3))
-                }
-                other => format!("malformed({other:?})"),
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
-        _ => "unavailable".to_owned(),
-    };
-    let key_types = match (
-        schema_descriptor_entry(&schema.descriptor, 2),
-        schema_descriptor_entry(&schema.descriptor, 3),
-    ) {
-        (Ok(OvbRaw::Array(key_ids)), Ok(OvbRaw::Array(fields))) => key_ids
-            .iter()
-            .map(|key_id| {
-                fields
-                    .iter()
-                    .find_map(|field| {
-                        let OvbRaw::Array(parts) = field else {
-                            return None;
-                        };
-                        (parts.first() == Some(key_id)).then(|| parts.get(2)).flatten()
-                    })
-                    .map(|ty| format!("{ty:?}"))
-                    .unwrap_or_else(|| "unavailable".to_owned())
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
-        _ => "unavailable".to_owned(),
-    };
-    format!(
-        "text_primary_key={}, stored_field_count={}, declared_fields(name,type,role)=[{}], key_types=[{}]",
-        schema.text_primary_key, schema.stored_field_count, declared_fields, key_types
-    )
-}
 
 fn project_runtime_mutation(
     schema: &CommittedProjectionSchema,
@@ -1323,13 +1282,7 @@ fn project_runtime_mutation(
         schema
             .descriptor
             .validate_stored_key(relation_id, &key)
-            .map_err(|error| {
-                eprintln!(
-                    "projection: validate_stored_key relation={relation_id:?}: {error:?}; {}",
-                    projection_schema_diagnostic(schema)
-                );
-                Error::RepositoryUnavailable
-            })?;
+            .map_err(|_| Error::RepositoryUnavailable)?;
         Ok(key)
     };
     let key = project_key(mutation.key())?;
@@ -1371,13 +1324,7 @@ fn project_runtime_mutation(
             schema
                 .descriptor
                 .validate_stored_row(relation_id, row_key, &fields)
-                .map_err(|error| {
-                    eprintln!(
-                        "projection: validate_stored_row relation={relation_id:?}: {error:?}; {}",
-                        projection_schema_diagnostic(schema)
-                    );
-                    Error::RepositoryUnavailable
-                })?;
+                .map_err(|_| Error::RepositoryUnavailable)?;
             Ok(fields)
         })
         .transpose()?;
@@ -1395,10 +1342,7 @@ fn build_frozen_publication_store_root(
 ) -> Result<(NativeGraphContext, NativeOid), Error> {
     let format = repository
         .open_format_context_at_selector(expected_head.as_str())
-        .map_err(|error| {
-            eprintln!("projection: open_format_context_at_selector: {error:?}");
-            Error::RepositoryUnavailable
-        })?;
+        .map_err(|_| Error::RepositoryUnavailable)?;
     if format.repository_format() != RepositoryFormat::Format3 {
         return Err(Error::RepositoryUnavailable);
     }
@@ -1409,45 +1353,25 @@ fn build_frozen_publication_store_root(
     for mutation in mutations {
         let relation_id = mutation
             .table_object_id()
-            .ok_or_else(|| {
-                eprintln!("projection: mutation missing table object id");
-                Error::RepositoryUnavailable
-            })?
+            .ok_or(Error::RepositoryUnavailable)?
             .bytes();
         if !relation_bases.contains_key(&relation_id) {
             let rows = format
                 .load_row_map(relation_id)
-                .map_err(|error| {
-                    eprintln!("projection: load_row_map: {error:?}");
-                    Error::RepositoryUnavailable
-                })?;
+                .map_err(|_| Error::RepositoryUnavailable)?;
             let graph = format
                 .open_native_graph(&rows)
-                .map_err(|error| {
-                    eprintln!("projection: open_native_graph: {error:?}");
-                    Error::RepositoryUnavailable
-                })?;
+                .map_err(|_| Error::RepositoryUnavailable)?;
             let scope = graph
                 .open_read_scope()
                 .map_err(|_| Error::RepositoryUnavailable)?;
             let descriptor = graph
                 .read_schema_descriptor(&scope)
-                .map_err(|error| {
-                    eprintln!("projection: read_schema_descriptor: {error:?}");
-                    Error::RepositoryUnavailable
-                })?;
-            let schema = committed_projection_schema(descriptor).map_err(|error| {
-                eprintln!("projection: committed_projection_schema: {error:?}");
-                error
-            })?;
-            eprintln!(
-                "projection: committed schema relation={relation_id:?}: {}",
-                projection_schema_diagnostic(&schema)
-            );
-            let value_context = format.open_value_context(relation_id).map_err(|error| {
-                eprintln!("projection: open_value_context: {error:?}");
-                Error::RepositoryUnavailable
-            })?;
+                .map_err(|_| Error::RepositoryUnavailable)?;
+            let schema = committed_projection_schema(descriptor)?;
+            let value_context = format
+                .open_value_context(relation_id)
+                .map_err(|_| Error::RepositoryUnavailable)?;
             relation_bases.insert(relation_id, (rows, graph, schema, value_context));
         }
         let (_, _, schema, value_context) = relation_bases
@@ -1512,10 +1436,7 @@ fn build_frozen_publication_store_root(
             Some(
                 graph
                     .maintain_row_index(&operations, &scope)
-                    .map_err(|error| {
-                        eprintln!("projection: maintain_row_index relation={relation_id:?}: {error:?}");
-                        Error::RepositoryUnavailable
-                    })?,
+                    .map_err(|_| Error::RepositoryUnavailable)?,
             )
         };
         relation_candidates.push((rows, graph, maintenance));
@@ -1537,16 +1458,7 @@ fn build_frozen_publication_store_root(
         .collect::<Vec<_>>();
     let store_root = base_graph
         .maintain_relations_rows(&candidates, &scope)
-        .map_err(|error| {
-            eprintln!(
-                "projection: maintain_relations_rows relations={:?}: {error:?}",
-                relation_candidates
-                    .iter()
-                    .map(|(rows, _, _)| *rows.version().relation_id())
-                    .collect::<Vec<_>>()
-            );
-            Error::RepositoryUnavailable
-        })?;
+        .map_err(|_| Error::RepositoryUnavailable)?;
     let (_, graph, _) = relation_candidates.swap_remove(0);
     Ok((graph, store_root))
 }

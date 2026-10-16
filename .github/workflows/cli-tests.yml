@@ -34,3 +34,19 @@ jobs:
 
       - name: Test the orna-cli-v1 integration suite
         run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture
+  repository-v1-lib-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Test the orna-repository-v1 library suite
+        env:
+          CARGO_BUILD_JOBS: 2
+          RUST_TEST_THREADS: 2
+        run: cargo test --locked -p orna-repository-v1 --lib --no-fail-fast -- --nocapture
