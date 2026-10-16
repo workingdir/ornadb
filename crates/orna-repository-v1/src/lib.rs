@@ -31,8 +31,8 @@ mod blob_store;
 mod compact;
 pub mod complete_copy;
 mod init;
-mod mount;
 pub mod migration_copy;
+mod mount;
 mod native_graph;
 pub mod offline_copy;
 pub mod publication_describe;
@@ -43,7 +43,6 @@ pub(crate) mod test_support;
 mod transport;
 
 pub use blob_store::ContentIdentity;
-pub use orna_value_v1::BlobMetadata;
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry,
@@ -66,9 +65,10 @@ pub use native_graph::{
     AdmittedBlobReference, AdmittedRowField, AdmittedRowFields, CapturedBlobCandidate,
     GitHashAlgorithm, GraphError, IndexMaintenance, NativeGraphContext, NativeObjectKind,
     NativeOid, OrpBlobBinding, OrpGraphCandidate, ProtectedBlobMetadata, ProtectedContentPin,
-    ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification,
-    RepositoryCaptureCapability, RepositoryReadScope, RowIndexMutation, VerifiedBlobRange,
+    ProtectedContentTransfer, Pub3ReleaseReceipt, RangeVerification, RepositoryCaptureCapability,
+    RepositoryReadScope, RowIndexMutation, VerifiedBlobRange,
 };
+pub use orna_value_v1::BlobMetadata;
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
 };
@@ -707,7 +707,11 @@ impl MigrationAnnotationDefaults {
 
     fn encode(self, bytes: &mut Vec<u8>) -> Result<(), RepositoryError> {
         bytes.push(1); // annotation-defaults record version
-        put_u32(bytes, usize::try_from(self.entry_count).map_err(|_| RepositoryError::InvalidFormatMigration)?)?;
+        put_u32(
+            bytes,
+            usize::try_from(self.entry_count)
+                .map_err(|_| RepositoryError::InvalidFormatMigration)?,
+        )?;
         bytes.push(u8::from(self.payload_inspected));
         if bytes.len() > MAX_JOURNAL_BYTES {
             return Err(RepositoryError::InvalidPublicationJournal);
@@ -725,7 +729,8 @@ impl MigrationAnnotationDefaults {
             1 => true,
             _ => return Err(RepositoryError::InvalidPublicationJournal),
         };
-        let defaults = Self::new(entry_count).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+        let defaults =
+            Self::new(entry_count).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
         if payload_inspected != defaults.payload_inspected {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
@@ -2214,9 +2219,12 @@ pub(crate) fn bind_tree_entry_in_index(
     if mode != "040000" {
         let cacheinfo = format!("{mode},{object},{path}");
         let mut update = git();
-        update
-            .env("GIT_INDEX_FILE", index)
-            .args(["update-index", "--add", "--cacheinfo", &cacheinfo]);
+        update.env("GIT_INDEX_FILE", index).args([
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &cacheinfo,
+        ]);
         run_command(update)?;
         return Ok(());
     }
@@ -2229,8 +2237,7 @@ pub(crate) fn bind_tree_entry_in_index(
         if stale.is_empty() {
             continue;
         }
-        let stale =
-            std::str::from_utf8(stale).map_err(|_| RepositoryError::GitOperationFailed)?;
+        let stale = std::str::from_utf8(stale).map_err(|_| RepositoryError::GitOperationFailed)?;
         let mut remove = git();
         remove
             .env("GIT_INDEX_FILE", index)
@@ -2458,12 +2465,7 @@ impl Repository {
         store_root: &NativeOid,
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
-        self.build_private_commit_inner(
-            expected_head,
-            changes,
-            Some((graph, store_root)),
-            message,
-        )
+        self.build_private_commit_inner(expected_head, changes, Some((graph, store_root)), message)
     }
 
     fn build_private_commit_inner(
@@ -2713,7 +2715,8 @@ impl Repository {
             write_tree
                 .env("GIT_INDEX_FILE", &index)
                 .args(["write-tree"]);
-            let tree = self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
+            let tree =
+                self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
 
             let mut commit_tree = self.command();
             commit_tree.args([
@@ -6203,9 +6206,7 @@ impl Repository {
                 return Err(RepositoryError::GitOperationFailed);
             }
             GitCommitRef::from_verified_commit(object.clone(), self.native_object_id_length()?)?;
-        } else if path.as_path() == Path::new(".orna/store")
-            && kind == b"tree"
-            && mode == "040000"
+        } else if path.as_path() == Path::new(".orna/store") && kind == b"tree" && mode == "040000"
         {
             if fields.next().is_some() {
                 return Err(RepositoryError::GitOperationFailed);
@@ -6235,7 +6236,10 @@ impl Repository {
             self.candidate_tree_entry(candidate, &store_path)?,
         ) {
             (Some(expected), Some((mode, object)))
-                if mode == "040000" && object == expected.as_str() => Ok(Some(store_path)),
+                if mode == "040000" && object == expected.as_str() =>
+            {
+                Ok(Some(store_path))
+            }
             (None, Some((mode, _))) if mode == "040000" => Ok(Some(store_path)),
             (None, None) => Ok(None),
             _ => Err(RepositoryError::InvalidPublicationJournal),
@@ -6497,6 +6501,21 @@ impl Repository {
     /// name it as a transport ref. `None` for a detached `HEAD`.
     pub fn checked_out_branch(&self) -> Result<Option<String>, RepositoryError> {
         self.current_branch()
+    }
+
+    /// Runs a repository operation while the worktree coordination lock is held.
+    ///
+    /// The lock is acquired before invoking the callback and released on return,
+    /// including when the callback fails or panics.
+    pub fn with_coordination_lock<T, E>(
+        &self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<RepositoryError>,
+    {
+        let _lock = self.acquire_coordination_lock().map_err(E::from)?;
+        operation()
     }
 
     fn acquire_coordination_lock(&self) -> Result<CoordinationLock, RepositoryError> {
@@ -6996,7 +7015,8 @@ fn persist_runtime_owner_state(
     if current == [0; 16] || departed.len() > RUNTIME_OWNER_CHAIN_MAX_ENTRIES {
         return Err(RepositoryError::LocalStateUnavailable);
     }
-    let count = u32::try_from(departed.len()).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    let count =
+        u32::try_from(departed.len()).map_err(|_| RepositoryError::LocalStateUnavailable)?;
     let mut bytes = Vec::with_capacity(28 + departed.len() * 16);
     bytes.extend_from_slice(RUNTIME_OWNER_STATE_MAGIC);
     bytes.extend_from_slice(&current);
@@ -7008,7 +7028,9 @@ fn persist_runtime_owner_state(
         }
         bytes.extend_from_slice(owner);
     }
-    let parent = path.parent().ok_or(RepositoryError::LocalStateUnavailable)?;
+    let parent = path
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
     let temporary = parent.join("runtime-owner-state.next");
     match fs::symlink_metadata(&temporary) {
         Ok(metadata) if metadata.file_type().is_file() => {
@@ -7064,15 +7086,13 @@ impl RuntimeOwnerLock {
         let mut reclaimed = 0usize;
         for owner in &self.departed_owners {
             let accepted = accepted_by_owner.get(owner).unwrap_or(&empty);
-            let count = match native_graph::reclaim_dead_owner_pin_refs(
-                &self.repository,
-                *owner,
-                accepted,
-            ) {
-                Ok(count) => count,
-                Err(native_graph::GraphError::PublicationNotTerminal) => return Ok(None),
-                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
-            };
+            let count =
+                match native_graph::reclaim_dead_owner_pin_refs(&self.repository, *owner, accepted)
+                {
+                    Ok(count) => count,
+                    Err(native_graph::GraphError::PublicationNotTerminal) => return Ok(None),
+                    Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+                };
             reclaimed = reclaimed
                 .checked_add(count)
                 .ok_or(RepositoryError::LocalStateUnavailable)?;
@@ -7098,12 +7118,8 @@ impl RuntimeOwnerLock {
         if self.repository.read_publication_journal()?.is_some() {
             return Err(RepositoryError::PublicationPending);
         }
-        native_graph::reclaim_dead_owner_pin_refs(
-            &self.repository,
-            dead_owner,
-            accepted_pending,
-        )
-        .map_err(|_| RepositoryError::LocalStateUnavailable)
+        native_graph::reclaim_dead_owner_pin_refs(&self.repository, dead_owner, accepted_pending)
+            .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
 }
 

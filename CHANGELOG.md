@@ -4,6 +4,14 @@ This file is the user-facing inventory for the OrnaDB source tree. It is not a
 Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
+## Unreleased
+
+- Source identity reconciliation accepts explicit rename mappings and preserves
+  existing IDs across authorized name changes. Unassisted renames remain
+  delete-plus-create, and retired IDs are never reused.
+- The `mv` CLI command renames committed tables and retains their table and
+  child-field IDs in uncommitted source and identity-manifest changes.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
