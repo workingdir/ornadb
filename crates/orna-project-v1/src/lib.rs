@@ -25,7 +25,7 @@ use orna_semantic_v1::{
 };
 use orna_syntax_v1::{Declaration, Expr, parse_module, parse_row};
 use orna_value_v1::{
-    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, ValueFormat,
+    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat,
     ROV3_BLOB_TAG,
 };
 use unicode_normalization::UnicodeNormalization;
@@ -597,8 +597,8 @@ fn admit_source_row_with_owner_fields_inner(
 
     let canonical_fields =
         ContextValue::new_in_context(context, ValueFormat::Rov3, Raw::Array(stored_fields))
-        .and_then(|value| value.encode())
-        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+            .and_then(|value| value.encode())
+            .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     schema
         .descriptor()
         .validate_stored_row(
