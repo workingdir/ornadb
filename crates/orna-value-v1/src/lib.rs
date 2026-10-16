@@ -4312,7 +4312,12 @@ impl SchemaDescriptor {
     }
 }
 
-fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
+/// Decodes one canonical CBOR value stored in a repository row.
+///
+/// Unlike [`Value::decode`], this preserves repository-profile tags such as
+/// stored ROV-3 Blob references. Callers must validate the value against its
+/// authenticated row schema before treating it as an admitted value.
+pub fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
     let mut reader = Reader::new(bytes);
     let raw = reader.raw(0)?;
     if reader.at != bytes.len() {
