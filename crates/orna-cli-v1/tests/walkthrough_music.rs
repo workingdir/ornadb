@@ -109,12 +109,13 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let admitted = admit_source_row(
         &project,
         "music/london.orna",
-        "{ title: \"Live in London\", artist: \"Kieran\", cover: null, }\n",
+        r#"{ title: "Live in London", artist: "Kieran", cover: null, }"#,
         &schema,
         &value_context,
         vec![("content".to_owned(), content)],
         [0x31; 16],
     ).expect("the Music row admits the captured Blob in its named content field");
+    assert_eq!(admitted.mutation().key(), b"london");
 
     // The admitted-row path resolves the field name against the committed descriptor,
     // checks its Blob type, and retains the field pin through staging and commit.
@@ -151,7 +152,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let listings = report["listings"].as_array().unwrap();
     assert_eq!(listings.len(), 1);
     let listing = listings.iter()
-        .find(|item| item["key"] == "flondon" && item["media_type"] == "audio/mpeg")
+        .find(|item| item["key"] == "london" && item["media_type"] == "audio/mpeg")
         .unwrap_or_else(|| panic!("Music.content is listed with its stored audio annotation: {report}"));
     assert_eq!(listing["media_type"], "audio/mpeg");
     assert_eq!(listing["length"], original.len() as u64);
@@ -203,7 +204,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let copied = Repository::discover(&restored).unwrap();
     let rows = committed_store_rows(&copied, relation_id);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].key(), &orna_repository_v1::TypedKey::Text("flondon".to_owned()));
+    assert_eq!(rows[0].key(), &orna_repository_v1::TypedKey::Text("london".to_owned()));
     let blob_fields = rows[0].blob_fields().expect("Music row carries Blob metadata");
     assert_eq!(blob_fields.len(), 1);
     assert_eq!(blob_fields[0].1.sha256(), expected_sha);

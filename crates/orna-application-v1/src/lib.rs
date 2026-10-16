@@ -1152,6 +1152,7 @@ impl SourceMutationEffectHandler {
         row: AdmittedSourceRow,
         value_context: &Format3Context,
     ) -> Result<(), ApplicationError> {
+        let canonical_key = row.canonical_key().to_vec();
         let (mutation, bindings, schema) = row.into_mutation_and_bindings();
         let table_name = schema.declaration_name().to_owned();
         let table_object_id = schema.table_object_id();
@@ -1175,7 +1176,7 @@ impl SourceMutationEffectHandler {
             .ok_or(ApplicationError::InvalidTableMetadata)?;
         schema
             .descriptor()
-            .validate_stored_row(table_object_id.bytes(), mutation.key(), canonical_fields)
+            .validate_stored_row(table_object_id.bytes(), &canonical_key, canonical_fields)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
 
         let OvbRaw::Map(descriptor_entries) = schema.descriptor().raw() else {
