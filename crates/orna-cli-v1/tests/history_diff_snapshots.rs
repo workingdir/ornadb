@@ -1,8 +1,6 @@
-//! `orna history <relation-hex> --diff <from> <to>` compares one relation
-//! between two pinned snapshots over real imported media rows. Both endpoints
-//! are named commits, so the diff is reproducible from the repository alone:
-//! the row added by the later import shows as `added`, the row present on both
-//! sides shows as no change, and the comparison reads no media payload.
+//! `orna history <relation-hex> --diff <from> <to>` compares one source-owned
+//! Object relation between two pinned snapshots. The fixture records the real
+//! table identity and field schema at each endpoint; the diff reads no payload.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -18,7 +16,7 @@ use format3::*;
 
 #[path = "support/media_commit.rs"]
 mod media_commit;
-use media_commit::commit_capture;
+use media_commit::commit_source_captures;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 
@@ -43,12 +41,10 @@ fn relation_hex(relation_id: [u8; 16]) -> String {
     output
 }
 
-/// The full revision once more: the song row exists on both sides, so a diff
-/// between an older and a newer commit reports exactly the row the newer
-/// commit added and leaves the older row untouched.
+/// The image row is newly published after `before`; its source-owned field
+/// tuple is decoded against the exact Object schema pinned by each endpoint.
 #[tokio::test]
 async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payloads() {
-    let (directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -57,6 +53,12 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         )
         .unwrap();
     }
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(source.path());
+    let before = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
 
     let runtime_identity = RuntimeIdentity {
         database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
@@ -74,44 +76,26 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         .with_repository_capture_capability(capability);
 
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
-    let capture = |name: &str| format!("sys.blob.capture_file({root}, {name:?}, 65536)");
-
-    // The song alone is the earlier snapshot.
-    commit_capture(
+    let capture = format!("sys.blob.capture_file({root}, \"pixel.png\", 65536)");
+    commit_source_captures(
         &repository,
         &state,
         writer,
         &mut bindings,
-        &capture("tone.wav"),
-        "song",
-        0x80,
-        true,
         relation_id,
+        &format_context,
+        &[(&capture, "image", 0x90)],
     )
     .await;
-    let before = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
-        .unwrap()
-        .trim()
-        .to_owned();
-
-    // The image import is the later snapshot.
-    commit_capture(
+    let after = commit_source_row_to_native_graph(
+        directory.path(),
         &repository,
-        &state,
-        writer,
-        &mut bindings,
-        &capture("pixel.png"),
+        &before,
+        relation_id,
+        &format_context,
         "image",
-        0x90,
-        true,
-        relation_id,
-    )
-    .await;
-    let after = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
-        .unwrap()
-        .trim()
-        .to_owned();
-    assert_ne!(before, after, "the image import advanced HEAD");
+    );
+    assert_ne!(before, after, "publishing the Object row advanced HEAD");
     drop(bindings);
     drop(state);
 
@@ -128,7 +112,8 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     );
     let diff: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    // The image row is the difference; the song row is unchanged on both sides.
+    // The source fixture contains several candidate Object rows, but only the
+    // admitted image row is published in either native store endpoint.
     assert_eq!(
         diff["added"],
         serde_json::json!(1),
@@ -281,10 +266,19 @@ fn commit_metadata(directory: &Path, parent: &str, database: &str, message: &str
     let database_oid = git_object(directory, "blob", database.as_bytes());
     let store_oid = revision(directory, &format!("{parent}:.orna/store"));
     let source_oid = revision(directory, &format!("{parent}:main.orna"));
-    let orna_tree = git_tree(
-        directory,
-        &format!("100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_oid}\tstore\n"),
-    );
+    let old_orna_tree = revision(directory, &format!("{parent}:.orna"));
+    let old_orna_entries =
+        String::from_utf8(git_output(directory, &["ls-tree", &old_orna_tree], None)).unwrap();
+    let mut orna_entries =
+        format!("100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_oid}\tstore\n");
+    for entry in old_orna_entries
+        .lines()
+        .filter(|entry| !entry.ends_with("\tdatabase.orna") && !entry.ends_with("\tstore"))
+    {
+        orna_entries.push_str(entry);
+        orna_entries.push('\n');
+    }
+    let orna_tree = git_tree(directory, &orna_entries);
     let root_tree = git_tree(
         directory,
         &format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"),
