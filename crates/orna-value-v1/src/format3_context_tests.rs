@@ -74,15 +74,15 @@ fn context_backed_resolver_rejects_foreign_store_root_bindings() {
         Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
     );
     let reference = context.reference(identity, descriptor_oid.clone()).unwrap();
-    let blob = Blob::from_reference_with_annotation(reference, "audio/mpeg", Some("mp3")).unwrap();
+    let blob = Blob::from_reference_with_annotation(reference, "audio/mpeg", Some("mp2")).unwrap();
     assert_eq!(blob.read_to_end().unwrap(), bytes);
     assert_eq!(blob.media_type(), "audio/mpeg");
-    assert_eq!(blob.suffix(), Some("mp3"));
+    assert_eq!(blob.suffix(), Some("mp2"));
     let decoded = decode_rov3_in_context(&encode_rov3(&blob).unwrap(), &context).unwrap();
     assert_eq!(decoded.content_identity(), identity);
     assert_eq!(decoded.descriptor_oid(), Some(&descriptor_oid));
     assert_eq!(decoded.media_type(), "audio/mpeg");
-    assert_eq!(decoded.suffix(), Some("mp3"));
+    assert_eq!(decoded.suffix(), Some("mp2"));
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
 
     let uncommitted_descriptor = context
@@ -99,6 +99,18 @@ fn context_backed_resolver_rejects_foreign_store_root_bindings() {
         NativeOid::from_bytes(&[0x44; 20]).unwrap(),
         Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
     );
+    let foreign_decoded = decode_rov3_in_context(&encode_rov3(&blob).unwrap(), &foreign_context)
+        .expect("decode the wire value under the supplied foreign context");
+    assert_eq!(foreign_decoded.content_identity(), identity);
+    assert_eq!(foreign_decoded.descriptor_oid(), Some(&descriptor_oid));
+    assert_eq!(foreign_decoded.media_type(), "audio/mpeg");
+    assert_eq!(foreign_decoded.suffix(), Some("mp2"));
+    assert_eq!(
+        foreign_decoded.read(0, identity.length()),
+        Err(Error::ContentUnavailable)
+    );
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
+
     let foreign_reference = foreign_context.reference(identity, descriptor_oid).unwrap();
     assert_eq!(
         resolver.read_range(&foreign_reference, 0, identity.length()),
@@ -183,6 +195,70 @@ fn rov3_raw_descriptor_decode_preserves_metadata_without_read_authority() {
 
     assert_eq!(admitted.read(0, 1).unwrap(), b"p");
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn rov3_context_decode_uses_only_the_supplied_snapshot_context() {
+    let bytes = b"payload";
+    let identity = ContentIdentity::from_bytes(bytes);
+    let descriptor_oid = NativeOid::from_bytes(&[0x42; 20]).unwrap();
+    let origin_store_root = NativeOid::from_bytes(&[0x31; 20]).unwrap();
+    let foreign_store_root = NativeOid::from_bytes(&[0x32; 20]).unwrap();
+    let quota = Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap();
+    let origin_resolver = Arc::new(ContextBoundResolver {
+        store_root: origin_store_root.clone(),
+        descriptor_oid: descriptor_oid.clone(),
+        identity,
+        bytes: bytes.to_vec(),
+        reads: AtomicUsize::new(0),
+    });
+    let origin_context =
+        test_context_with_store_root(origin_resolver.clone(), origin_store_root, quota);
+    let origin_blob = Blob::from_reference_with_annotation(
+        origin_context
+            .reference(identity, descriptor_oid.clone())
+            .unwrap(),
+        "audio/mpeg",
+        Some("mp2"),
+    )
+    .unwrap();
+    let encoded = encode_rov3(&origin_blob).unwrap();
+
+    let foreign_resolver = Arc::new(ContextBoundResolver {
+        store_root: foreign_store_root.clone(),
+        descriptor_oid: descriptor_oid.clone(),
+        identity,
+        bytes: bytes.to_vec(),
+        reads: AtomicUsize::new(0),
+    });
+    let foreign_context =
+        test_context_with_store_root(foreign_resolver.clone(), foreign_store_root.clone(), quota);
+    let decoded_value =
+        ContextValue::decode_in_context(&encoded, ValueFormat::Rov3, &foreign_context).unwrap();
+    assert_eq!(
+        decoded_value.context().unwrap().store_root(),
+        &foreign_store_root
+    );
+    assert_eq!(decoded_value.encode().unwrap(), encoded);
+    let decoded = decoded_value.blob().unwrap();
+    assert_eq!(decoded.content_identity(), identity);
+    assert_eq!(decoded.media_type(), "audio/mpeg");
+    assert_eq!(decoded.suffix(), Some("mp2"));
+    assert_eq!(decoded.descriptor_oid(), Some(&descriptor_oid));
+    assert_eq!(
+        decoded.read(0, bytes.len() as u64),
+        Err(Error::ContentUnavailable)
+    );
+    assert_eq!(origin_resolver.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(foreign_resolver.reads.load(Ordering::SeqCst), 0);
+
+    assert_eq!(origin_blob.read(0, bytes.len() as u64).unwrap(), bytes);
+    assert_eq!(origin_resolver.reads.load(Ordering::SeqCst), 1);
+    let foreign_reference = foreign_context.reference(identity, descriptor_oid).unwrap();
+    let foreign_blob =
+        Blob::from_reference_with_annotation(foreign_reference, "audio/mpeg", Some("mp2")).unwrap();
+    assert_eq!(foreign_blob.read(0, bytes.len() as u64).unwrap(), bytes);
+    assert_eq!(foreign_resolver.reads.load(Ordering::SeqCst), 1);
 }
 
 #[test]
