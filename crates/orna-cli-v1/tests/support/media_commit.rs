@@ -192,7 +192,8 @@ pub async fn commit_source_captures(
         assert!(mutation.value().is_some_and(|value| !value.is_empty()));
         paths_by_key.insert(
             mutation.key().to_vec(),
-            LoosePath::for_key("Object", &[key.to_string()]),
+            LoosePath::for_key("Object", &[key.to_string()])
+                .expect("the committed source row has a managed path"),
         );
         retained_sources.push(source_bindings);
         mutations.push(mutation);
