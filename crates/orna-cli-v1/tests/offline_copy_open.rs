@@ -96,6 +96,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         "image",
         0xb0,
         true,
+        relation_id,
     )
     .await;
 
