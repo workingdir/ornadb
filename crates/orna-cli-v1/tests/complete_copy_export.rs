@@ -598,7 +598,7 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
     let expression = fixture
         .trim_end()
         .replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
-    media_commit::commit_capture(
+    media_commit::commit_capture_pending(
         &repository,
         &state,
         writer,
