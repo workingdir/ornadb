@@ -173,11 +173,11 @@ pub async fn commit_source_captures(
     let mut retained_sources = Vec::with_capacity(captures.len());
     for (expression, key, ordinal) in captures {
         let logical_path = format!("Object/{key}.orna");
-        let row = project
-            .loose_rows()
-            .iter()
-            .find(|row| row.logical_path() == logical_path)
+        let row_source = repository
+            .read_committed_file(&commit, &logical_path, 1 << 20)
             .expect("the committed project contains this source Object row");
+        let row_source = std::str::from_utf8(&row_source)
+            .expect("the committed source Object row is valid UTF-8");
         let value = evaluate_expression_ovb2_with_effects(
             expression,
             &Default::default(),
@@ -190,8 +190,8 @@ pub async fn commit_source_captures(
             .expect("accept the captured Blob for this row");
         let admitted = admit_source_row_with_owner_fields(
             &project,
-            row.logical_path(),
-            row.source(),
+            &logical_path,
+            row_source,
             &schema,
             format_context,
             vec![("payload".to_owned(), blob_binding)],
