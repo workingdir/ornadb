@@ -4306,6 +4306,26 @@ struct TransactionalTableCandidateValidator {
     tables: Vec<String>,
 }
 
+pub fn transactional_table_candidate_validator(
+    unit: &SourceUnit,
+    entry: &str,
+    cwd_generation: orna_repository_v1::CwdGeneration,
+    limits: EvaluatorLimits,
+) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
+    let admitted = admit_transaction_source_inner(unit, limits, entry, false)
+        .map_err(|failure| *failure)?;
+    Ok(Box::new(TransactionalTableCandidateValidator::new(
+        cwd_generation,
+        &admitted.functions,
+        &admitted.key_fields,
+        &admitted.float_fields,
+        &admitted.table_fields,
+        &admitted.table_assertions,
+        &admitted.module_assertions,
+        limits,
+    )))
+}
+
 impl TransactionalTableCandidateValidator {
     fn new(
         cwd_generation: orna_repository_v1::CwdGeneration,
@@ -6085,6 +6105,15 @@ fn admit_transaction_source(
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
+    admit_transaction_source_inner(unit, limits, entry, true)
+}
+
+fn admit_transaction_source_inner(
+    unit: &SourceUnit,
+    limits: EvaluatorLimits,
+    entry: &str,
+    require_entry: bool,
+) -> Result<AdmittedTransaction, AdmissionFailure> {
     if let Err(error) = limits.check_source(&unit.source) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
     }
@@ -6144,7 +6173,7 @@ fn admit_transaction_source(
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
     }
-    if !functions.contains_key(entry) {
+    if require_entry && !functions.contains_key(entry) {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "configured transaction entry function is not present".into(),
         }));
