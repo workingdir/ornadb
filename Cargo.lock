@@ -1483,10 +1483,15 @@ version = "1.0.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
+ "orna-project-v1",
+ "orna-repository-v1",
+ "orna-semantic-v1",
  "orna-standard-sources",
  "orna-syntax-v1",
  "serde",
  "serde_json",
+ "tempfile",
+ "url",
 ]
 
 [[package]]
