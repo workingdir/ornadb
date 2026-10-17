@@ -14,7 +14,7 @@ use orna_repository_v1::{
     AdmittedBlobReference, CommittedTableBinding, GitCommitRef, GitHashAlgorithm,
     HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, Repository, TypedKey,
 };
-use orna_runtime_v1::TableObjectId;
+use orna_runtime_v1::{vfs::project_component, TableObjectId};
 
 const ROOT_INODE: u64 = 1;
 const ROW_PAGE_LIMIT: usize = 256;
@@ -281,10 +281,10 @@ impl FsBuilder {
         let mut parent = ROOT_INODE;
         if !module_name.is_empty() {
             for component in module_name.split('.') {
-                parent = self.ensure_directory(parent, &safe_component(component))?;
+                parent = self.ensure_directory(parent, &project_component(component))?;
             }
         }
-        self.ensure_directory(parent, &safe_component(table_name))
+        self.ensure_directory(parent, &project_component(table_name))
     }
 
     fn add_table_rows(
@@ -317,10 +317,7 @@ impl FsBuilder {
                 let decoded = graph
                     .decode_admitted_row_fields(&row, binding, &row_scope)
                     .map_err(|error| format!("committed row fields could not be decoded: {error:?}"))?;
-                let row_directory = self.ensure_directory(
-                    table_directory,
-                    &key_component(row.key())?,
-                )?;
+                let row_directory = self.key_directory(table_directory, row.key())?;
                 let mut document = String::new();
                 let mut blob_files = Vec::new();
                 for field in decoded.fields() {
@@ -406,6 +403,23 @@ impl FsBuilder {
         )
     }
 
+    fn key_directory(&mut self, parent: u64, key: &TypedKey) -> Result<u64, String> {
+        match key {
+            TypedKey::Tuple(components) if components.is_empty() => {
+                Err("composite row key has no components".into())
+            }
+            TypedKey::Tuple(components) => {
+                let mut directory = parent;
+                for component in components {
+                    directory = self.key_directory(directory, component)?;
+                }
+                Ok(directory)
+            }
+            _ => self.ensure_directory(parent, &key_component(key)?),
+        }
+    }
+
+
     fn add_file(&mut self, parent: u64, name: &str, kind: NodeKind) -> Result<u64, String> {
         if self.nodes.get(&parent).is_some_and(|node| match &node.kind {
             NodeKind::Directory(entries) => entries.iter().any(|entry| entry.name == OsStr::new(name)),
@@ -489,31 +503,18 @@ fn field_names_for_table(
 }
 
 fn key_component(key: &TypedKey) -> Result<String, String> {
-    match key {
-        TypedKey::Text(value) => Ok(safe_component(value)),
-        _ => key
-            .canonical_bytes()
-            .map(|bytes| format!("@{}", hex_bytes(&bytes)))
-            .map_err(|error| format!("row key could not be encoded: {error:?}")),
-    }
-}
-
-fn safe_component(value: &str) -> String {
-    if value.is_empty() {
-        return "%00".into();
-    }
-    let escape_dots = value == "." || value == "..";
-    let mut escaped = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if !escape_dots
-            && (byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-        {
-            escaped.push(char::from(byte));
-        } else {
-            let _ = write!(escaped, "%{byte:02X}");
+    let canonical_text = match key {
+        TypedKey::Null => "null".to_owned(),
+        TypedKey::Bool(value) => value.to_string(),
+        TypedKey::UInt(value) => value.to_string(),
+        TypedKey::Int(value) => value.to_string(),
+        TypedKey::Bytes(bytes) => format!("0x{}", hex_bytes(bytes)),
+        TypedKey::Text(value) => value.clone(),
+        TypedKey::Tuple(_) => {
+            return Err("tuple key must be projected component by component".into());
         }
-    }
-    escaped
+    };
+    Ok(project_component(&canonical_text))
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -522,4 +523,62 @@ fn hex_bytes(bytes: &[u8]) -> String {
         let _ = write!(text, "{byte:02x}");
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::{FsBuilder, NodeKind, ROOT_INODE};
+    use orna_repository_v1::TypedKey;
+    use orna_runtime_v1::vfs::project_component;
+
+    #[test]
+    fn table_and_text_key_paths_use_runtime_components() {
+        let mut builder = FsBuilder::new();
+        let table = builder.table_directory("Music", "data.orna").unwrap();
+        let row = builder
+            .key_directory(table, &TypedKey::Text("".into()))
+            .unwrap();
+
+        let NodeKind::Directory(root) = &builder.nodes.get(&ROOT_INODE).unwrap().kind else {
+            panic!("root is a directory");
+        };
+        let module = root.iter().find(|entry| entry.name == OsStr::new("Music")).unwrap();
+        let NodeKind::Directory(tables) = &builder.nodes.get(&module.inode).unwrap().kind else {
+            panic!("module path is a directory");
+        };
+        let table_entry = tables.iter().find(|entry| entry.inode == table).unwrap();
+        assert_eq!(table_entry.name.as_os_str(), OsStr::new(&project_component("data.orna")));
+        let NodeKind::Directory(rows) = &builder.nodes.get(&table).unwrap().kind else {
+            panic!("table path is a directory");
+        };
+        let row_entry = rows.iter().find(|entry| entry.inode == row).unwrap();
+        assert_eq!(row_entry.name.as_os_str(), OsStr::new(&project_component("")));
+    }
+
+    #[test]
+    fn composite_keys_use_one_projected_path_component_per_part() {
+        let mut builder = FsBuilder::new();
+        let table = builder.table_directory("Music", "Music").unwrap();
+        let row = builder
+            .key_directory(
+                table,
+                &TypedKey::Tuple(vec![
+                    TypedKey::Text("live/in".into()),
+                    TypedKey::Int(7.into()),
+                ]),
+            )
+            .unwrap();
+
+        let NodeKind::Directory(table_entries) = &builder.nodes.get(&table).unwrap().kind else {
+            panic!("table path is a directory");
+        };
+        let first = table_entries.iter().find(|entry| entry.name == OsStr::new(&project_component("live/in"))).unwrap();
+        let NodeKind::Directory(first_entries) = &builder.nodes.get(&first.inode).unwrap().kind else {
+            panic!("first key component is a directory");
+        };
+        let second = first_entries.iter().find(|entry| entry.inode == row).unwrap();
+        assert_eq!(second.name.as_os_str(), OsStr::new(&project_component("7")));
+    }
 }

@@ -157,6 +157,33 @@ pub async fn commit_source_captures(
     format_context: &Format3Context,
     captures: &[(&str, &str, u8)],
 ) {
+    commit_source_captures_for_table(
+        repository,
+        state,
+        writer,
+        bindings,
+        relation_id,
+        format_context,
+        "Object",
+        "payload",
+        captures,
+    )
+    .await;
+}
+
+/// Captures and commits complete source-owned rows for any source table with
+/// one captured Blob field.
+pub async fn commit_source_captures_for_table(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    relation_id: [u8; 16],
+    format_context: &Format3Context,
+    table_name: &str,
+    blob_field_name: &str,
+    captures: &[(&str, &str, u8)],
+) {
     assert!(!captures.is_empty());
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
@@ -165,19 +192,19 @@ pub async fn commit_source_captures(
         .expect("load the committed source project");
     let schema = loader
         .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
-        .expect("resolve the Object table from its committed identity manifest");
-    assert_eq!(schema.declaration_name(), "Object");
+        .expect("resolve the table from its committed identity manifest");
+    assert_eq!(schema.declaration_name(), table_name);
     assert_eq!(schema.table_object_id(), TableObjectId::new(relation_id));
     let mut mutations = Vec::with_capacity(captures.len());
     let mut paths_by_key = std::collections::BTreeMap::new();
     let mut retained_sources = Vec::with_capacity(captures.len());
     for (expression, key, ordinal) in captures {
-        let logical_path = format!("Object/{key}.orna");
+        let logical_path = format!("{table_name}/{key}.orna");
         let row_source = repository
             .read_committed_file(&commit, &logical_path, 1 << 20)
-            .expect("the committed project contains this source Object row");
+            .expect("the committed project contains this source row");
         let row_source = std::str::from_utf8(&row_source)
-            .expect("the committed source Object row is valid UTF-8");
+            .expect("the committed source row is valid UTF-8");
         let value = evaluate_expression_ovb2_with_effects(
             expression,
             &Default::default(),
@@ -194,18 +221,18 @@ pub async fn commit_source_captures(
             row_source,
             &schema,
             format_context,
-            vec![("payload".to_owned(), blob_binding)],
+            vec![(blob_field_name.to_owned(), blob_binding)],
             vec![],
             [ordinal.wrapping_add(3); 16],
         )
-        .expect("admit a source-bound full Object row");
+        .expect("admit a source-bound full row");
         let (source_mutation, source_bindings, resolved_schema) =
             admitted.into_mutation_and_bindings();
         assert_eq!(
             resolved_schema.table_object_id(),
             TableObjectId::new(relation_id)
         );
-        assert_eq!(source_mutation.table(), "Object");
+        assert_eq!(source_mutation.table(), table_name);
         assert_eq!(
             source_mutation.table_object_id(),
             Some(TableObjectId::new(relation_id))
@@ -229,7 +256,7 @@ pub async fn commit_source_captures(
         assert!(mutation.value().is_some_and(|value| !value.is_empty()));
         paths_by_key.insert(
             mutation.key().to_vec(),
-            LoosePath::for_key("Object", &[key.to_string()])
+            LoosePath::for_key(table_name, &[key.to_string()])
                 .expect("the committed source row has a managed path"),
         );
         retained_sources.push(source_bindings);
