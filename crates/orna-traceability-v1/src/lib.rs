@@ -1226,7 +1226,7 @@ mod tests {
         fs::create_dir_all(&root).expect("create workspace without api folder");
         let api = load_sys_api(&root).expect("use embedded generated sys API");
         fs::remove_dir_all(&root).expect("remove temporary workspace");
-        assert_eq!(api["functions"].as_array().unwrap().len(), 66);
+        assert_eq!(api["functions"].as_array().unwrap().len(), 82);
     }
     #[test]
     fn model_and_skipped_entries_never_pass() {

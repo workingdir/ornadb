@@ -1779,7 +1779,7 @@
       "parse_as": "module_unit",
       "failing_phase": "parse",
       "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
-      "message_contains": "remove postfix `?`; failure propagation is automatic",
+      "message_contains": "postfix propagation `?` was removed; failures propagate automatically",
       "expect": {
         "parse": "fail",
         "resolve": "not-run",

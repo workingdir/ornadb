@@ -31,6 +31,7 @@ fn stdout_error() -> Diagnostic {
     mount_error("Mount output is unavailable", "stdout could not be written")
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn run_mount(
     endpoint: &Endpoint,
     mountpoint: &Path,
@@ -39,13 +40,52 @@ pub(super) fn run_mount(
     let repository = open_repository(endpoint)?;
     let view = MountView::attach(&repository, mountpoint, selector)
         .map_err(|error| mount_error("Mount was refused", error.to_string()))?;
-    // The durable record is re-read before reporting success: an attach that
-    // cannot be reported is not an attached view.
-    let status = view
-        .verify_record()
-        .map_err(|error| mount_error("Mount record could not be verified", error.to_string()))?;
-    writeln!(io::stdout().lock(), "{}", human_row(&status)).map_err(|_| stdout_error())?;
-    Ok(())
+    let status = match view.verify_record() {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = view.detach();
+            return Err(mount_error("Mount record could not be verified", error.to_string()));
+        }
+    };
+    let signal_handler = match MountSignalHandler::new() {
+        Ok(handler) => handler,
+        Err(error) => {
+            let _ = view.detach();
+            return Err(mount_error("Mount signal handling could not be started", error));
+        }
+    };
+    let source = format!("orna-{}", status.view_hex());
+    let session = match crate::fuse_mount::spawn_read_only(
+        &repository, view.commit(), view.context(), status.mountpoint(), source,
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            drop(signal_handler);
+            let _ = view.detach();
+            return Err(mount_error("Mount was refused", error));
+        }
+    };
+    if writeln!(io::stdout().lock(), "{}", human_row(&status)).is_err() {
+        let cleanup = session.umount_and_join();
+        drop(signal_handler);
+        if let Err(error) = cleanup {
+            return Err(mount_error("FUSE cleanup failed", error.to_string()));
+        }
+        view.detach().map_err(|error| mount_error("Mount view could not be detached", error.to_string()))?;
+        return Err(stdout_error());
+    }
+    signal_handler.join(session, status.mountpoint())
+        .map_err(|error| mount_error("Mount session ended unexpectedly", error))?;
+    view.detach().map_err(|error| mount_error("Mount view could not be detached", error.to_string()))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn run_mount(
+    _endpoint: &Endpoint,
+    _mountpoint: &Path,
+    _selector: &str,
+) -> Result<(), Diagnostic> {
+    Err(mount_error("Workspace mounts are unavailable", "mount DIR --at requires Linux FUSE support"))
 }
 
 #[cfg(target_os = "linux")]
@@ -359,9 +399,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
 fn canonical_mountpoint_or_original(path: &Path) -> std::path::PathBuf {
     match fs::canonicalize(path) {
         Ok(canonical) => return canonical,
-        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {
-            return path.to_path_buf();
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
         Err(_) => {}
     }
     let parent = path

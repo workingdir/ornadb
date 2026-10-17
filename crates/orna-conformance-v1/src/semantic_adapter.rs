@@ -224,7 +224,8 @@ impl SemanticPhase {
 fn typecheck_phase(diagnostic: &Diagnostic) -> bool {
     matches!(
         diagnostic.code(),
-        "ORNA-S020-ANNOTATION"
+        "ORNA091-E-RESULT"
+            | "ORNA-S020-ANNOTATION"
             | "ORNA-S021-TYPE"
             | "ORNA-S022-UNSUPPORTED"
             | "ORNA-A091-004"
@@ -234,16 +235,17 @@ fn typecheck_phase(diagnostic: &Diagnostic) -> bool {
     ) || diagnostic.message() == "type name cannot be resolved"
 }
 
-/// Picks one diagnostic for the stage: an explicitly published mapping wins
-/// over unrelated internal codes so specific fixture obligations are not
-/// masked by incidental errors, otherwise the first accepted diagnostic does.
+/// Picks one diagnostic for the stage: an explicitly published mapping or
+/// the spec-mandated Result diagnostic wins over incidental internal codes;
+/// otherwise the first accepted diagnostic does.
 fn select_diagnostic(
     diagnostics: Vec<Diagnostic>,
     phase: SemanticPhase,
 ) -> StageOutcome<Diagnostic> {
     let mut first_accepted = None;
     for diagnostic in diagnostics {
-        if published_diagnostic_code(&diagnostic) != diagnostic.code() {
+        if diagnostic.code() == "ORNA091-E-RESULT"
+            || published_diagnostic_code(&diagnostic) != diagnostic.code() {
             if phase.accepts(&diagnostic) {
                 return StageOutcome::Failed(diagnostic);
             }

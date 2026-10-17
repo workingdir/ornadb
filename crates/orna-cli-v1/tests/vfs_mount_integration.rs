@@ -1,4 +1,4 @@
-//! Gate E.1: the workspace view is a real Linux FUSE mount backed by the
+//! Gate E.1: a historical format-3 view is a real Linux FUSE mount backed by the
 //! published row graph, and Blob reads are served as verified byte ranges.
 
 #![cfg(target_os = "linux")]
@@ -57,13 +57,18 @@ impl Drop for MountedProcess {
 }
 
 fn run_unmount(repository: &Path, mountpoint: &Path) {
+    run_unmount_from(repository, Path::new("."), mountpoint);
+}
+
+fn run_unmount_from(repository: &Path, working_directory: &Path, mountpoint: &Path) {
     let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .current_dir(working_directory)
         .args([
             "--db",
             repository.to_str().expect("repository path is UTF-8"),
             "unmount",
-            mountpoint.to_str().expect("mountpoint is UTF-8"),
         ])
+        .arg(mountpoint)
         .output()
         .expect("run `orna unmount`");
     assert!(
@@ -189,7 +194,7 @@ fn mountinfo_contains(mountpoint: &Path) -> bool {
 }
 
 #[tokio::test]
-async fn snapshot_mount_projects_row_document_and_reads_blob_ranges() {
+async fn mount_at_prior_commit_reads_path_changed_afterward() {
     if !fuse_test_available() {
         return;
     }
@@ -260,6 +265,18 @@ async fn snapshot_mount_projects_row_document_and_reads_blob_ranges() {
         1
     );
     let current = repository.head().unwrap().unwrap();
+    let historical_commit = current.to_string();
+    let revised_row = format!(
+        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
+    );
+    std::fs::write(repository_directory.path().join("Music/london.orna"), &revised_row)
+        .unwrap();
+    format3::git(repository_directory.path(), &["add", "Music/london.orna"]);
+    format3::git(
+        repository_directory.path(),
+        &["commit", "--quiet", "-m", "update source row after historical commit"],
+    );
+    assert_ne!(repository.head().unwrap().unwrap().to_string(), historical_commit);
     let schema = orna_project_v1::ProjectLoader::default()
         .resolve_committed_source_table_schema(
             &repository,
@@ -272,7 +289,6 @@ async fn snapshot_mount_projects_row_document_and_reads_blob_ranges() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let current_selector = current.to_string();
     let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .args([
             "--db",
@@ -280,12 +296,12 @@ async fn snapshot_mount_projects_row_document_and_reads_blob_ranges() {
             "mount",
             mountpoint.to_str().unwrap(),
             "--at",
-            current_selector.as_str(),
+            historical_commit.as_str(),
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start mount --at current commit");
+        .expect("start mount --at historical commit");
     let mut mounted = MountedProcess {
         child,
         mountpoint: mountpoint.clone(),
@@ -900,7 +916,11 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
     let dead_mount_error = std::fs::read_dir(&mountpoint)
         .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>().map(|_| ()))
         .err();
-    run_unmount(repository_directory.path(), &mountpoint);
+    run_unmount_from(
+        repository_directory.path(),
+        mount_parent.path(),
+        Path::new("library"),
+    );
 
     assert!(
         !mountinfo_contains(&mountpoint),
