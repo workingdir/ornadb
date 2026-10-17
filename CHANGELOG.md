@@ -17,13 +17,22 @@ been published.
 - Optional Blob fields preserve `Some` bindings through source-row admission,
   metadata queries, history diffs and offline export; overflow verification counts
   nested Blob references through `Some` without reading payload bytes.
-
+- FUSE workspace mounts page through the pinned row index on listing, resolve
+  known keys by the index, and isolate projection errors as EIO so one corrupt
+  row does not block neighboring rows.
+- FUSE workspace mounts hold a private, per-worktree reference to their pinned
+  snapshot so reads survive HEAD changes and garbage collection. SIGINT,
+  SIGTERM, and SIGHUP clean up mounts, while orna unmount can detach orphaned
+  mounts.
+- FUSE teardown serializes daemon and CLI cleanup so concurrent detach paths do
+  not race to remove the same view pin and record.
 - The trusted REPL exposes the root namespace as `main` unless a user module named
   `main` exists, and admits `main.add` Blob rows using typed keys against the
   committed format-3 schema. A semicolon-terminated capture/add submission
   suppresses the row result while retaining one durable runtime transaction.
   Captured scratch refs share the runtime owner and are reclaimed when a later
   runtime reopen recovers a crashed session.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this

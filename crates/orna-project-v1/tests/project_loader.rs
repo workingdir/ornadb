@@ -148,6 +148,43 @@ fn format3_committed_rows_are_not_loaded_as_source_files() {
 }
 
 #[test]
+fn legacy_database_sidecar_does_not_hide_committed_source_rows() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
+        (".orna/format.orna", "format 1\n"),
+        (".orna/database.orna", "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n"),
+        ("Music/london.orna", "{\n    title: \"Legacy row\",\n}\n"),
+    ]);
+    commit_all(&directory);
+    let commit = repository.head().unwrap().unwrap();
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &commit)
+        .unwrap();
+
+    assert_eq!(project.loose_rows().len(), 1);
+    assert_eq!(project.loose_rows()[0].logical_path(), "Music/london.orna");
+    let candidate_source =
+        "pub table Music(id: Str) { title: Str, }\npub let answer: Int = 42\n";
+    let candidate = repository
+        .build_private_commit(
+            &commit,
+            &[ManagedFileChange::new(
+                ManagedPath::new("main.orna").unwrap(),
+                Some(candidate_source.as_bytes().to_vec()),
+            )],
+            "legacy sidecar candidate",
+        )
+        .unwrap();
+    let candidate_project = ProjectLoader::default()
+        .load_private_candidate(&repository, &candidate)
+        .unwrap();
+    assert_eq!(candidate_project.loose_rows().len(), 1);
+    assert_eq!(candidate_project.loose_rows()[0].logical_path(), "Music/london.orna");
+
+}
+
+
+#[test]
 fn loads_only_reachable_modules_in_deterministic_logical_order() {
     let (_directory, repository) = repository(&[
         (
