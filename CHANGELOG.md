@@ -20,6 +20,10 @@ been published.
 - FUSE workspace mounts page through the pinned row index on listing, resolve
   known keys by the index, and isolate projection errors as EIO so one corrupt
   row does not block neighboring rows.
+- FUSE workspace mounts hold a private, per-worktree reference to their pinned
+  snapshot so reads survive HEAD changes and garbage collection. SIGINT,
+  SIGTERM, and SIGHUP clean up mounts, while orna unmount can detach orphaned
+  mounts.
 - FUSE teardown serializes daemon and CLI cleanup so concurrent detach paths do
   not race to remove the same view pin and record.
 - The trusted REPL exposes the root namespace as `main` unless a user module named
