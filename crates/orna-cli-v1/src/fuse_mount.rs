@@ -3,35 +3,37 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use fuser::{
-    Config, Errno, FileAttr, FileType, Filesystem, Generation, INodeNo, MountOption, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite,
-    RenameFlags, Request,
+    Config, Errno, FileAttr, FileType, Filesystem, Generation, INodeNo, MountOption, RenameFlags,
+    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyWrite, Request,
 };
+use orna_conformance_v1::transactional_loaded_project_candidate_validator;
+use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_project_v1::{
     ObjectIdentityManifest, ObjectKind, ProjectLoader, ResolvedTableSchema,
     admit_source_row_with_owner_fields,
 };
 use orna_repository_v1::{
-    AdmittedBlobReference, CommittedTableBinding, GitCommitRef, GitHashAlgorithm,
-    HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, Repository, RowMapSnapshot,
-    RuntimeGeneration, TypedKey,
+    AdmittedBlobReference, CommittedTableBinding, ContentIdentity, GitCommitRef, GitHashAlgorithm,
+    HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, OrpBlobBinding, Repository,
+    RowMapSnapshot, RuntimeGeneration, TypedKey,
 };
 use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableIdentity, TableObjectId,
     vfs::{
-        EditDraft, ManagedFile, SnapshotPin, TemporarySave, VfsDurableSave, VfsFileSnapshot,
-        VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate, VfsSaveCoordinates,
-        VfsStoredField, VfsTableRowReplacement, TemporaryRenameOutcome, project_component,
+        EditDraft, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave, VfsDurableSave,
+        VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate,
+        VfsSaveCoordinates, VfsStoredField, VfsTableRowReplacement, project_component,
     },
 };
+use orna_syntax_v1::{Expr, parse_row};
 use orna_value_v1::{Format3Context, Raw, SchemaDescriptor, decode_canonical_storage_value};
-use orna_conformance_v1::transactional_loaded_project_candidate_validator;
-use orna_evaluator_v1::Limits as EvaluatorLimits;
+use sha2::{Digest, Sha256};
 struct MountWriter {
     runtime: tokio::runtime::Runtime,
     state: RuntimeState,
@@ -76,7 +78,9 @@ impl MountWriter {
             .map_err(|_| "mounted editor runtime generation is invalid".to_owned())?;
         self.repository
             .cwd_generation(RuntimeGeneration::new(generation))
-            .map_err(|error| format!("mounted editor repository generation is unavailable: {error:?}"))
+            .map_err(|error| {
+                format!("mounted editor repository generation is unavailable: {error:?}")
+            })
     }
 
     fn row_baseline(
@@ -86,7 +90,10 @@ impl MountWriter {
     ) -> Result<Option<Vec<u8>>, String> {
         let snapshot = self
             .runtime
-            .block_on(self.state.begin_admitted_table_activation(std::slice::from_ref(table)))
+            .block_on(
+                self.state
+                    .begin_admitted_table_activation(std::slice::from_ref(table)),
+            )
             .map_err(|error| format!("mounted editor row admission failed: {error:?}"))?;
         snapshot
             .query_exact(table.table(), key)
@@ -99,24 +106,119 @@ impl MountWriter {
         row: &RowSaveContext,
         coordinates: &VfsSaveCoordinates,
         bytes: &[u8],
+        replacement_binding: Option<(String, OrpBlobBinding)>,
     ) -> Result<(VfsSaveCandidate, Vec<u8>), orna_runtime_v1::TableActivationError> {
-        let source = std::str::from_utf8(bytes)
-            .map_err(|_| orna_runtime_v1::TableActivationError::Runtime(orna_runtime_v1::RuntimeError::InvalidTableMutation))?;
+        let source = std::str::from_utf8(bytes).map_err(|_| {
+            orna_runtime_v1::TableActivationError::Runtime(
+                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+            )
+        })?;
+        let blob_fields = row
+            .blob_fields
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let omitted_blob_fields = blob_fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect::<Vec<_>>();
+        let source = source_without_fields(source, &omitted_blob_fields).map_err(|error| {
+            eprintln!("mounted row source projection failed: {error}");
+            orna_runtime_v1::TableActivationError::Runtime(
+                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+            )
+        })?;
+        let mut replacement_binding = replacement_binding;
+        let mut blob_bindings = Vec::with_capacity(blob_fields.len());
+        if !blob_fields.is_empty() {
+            let scope = row.source.graph.open_read_scope().map_err(|_| {
+                orna_runtime_v1::TableActivationError::Runtime(
+                    orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                )
+            })?;
+            for field in &blob_fields {
+                let binding = if replacement_binding
+                    .as_ref()
+                    .is_some_and(|(name, _)| name == &field.name)
+                {
+                    replacement_binding
+                        .take()
+                        .map(|(_, binding)| binding)
+                        .ok_or(orna_runtime_v1::TableActivationError::Runtime(
+                            orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                        ))?
+                } else if let Some(bytes) = &field.replacement_bytes {
+                    let capture = self
+                        .repository
+                        .capture_capability(*row.source.binding.relation_id())
+                        .map_err(|_| {
+                            orna_runtime_v1::TableActivationError::Runtime(
+                                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                            )
+                        })?;
+                    let candidate = capture
+                        .capture_blob_candidate(bytes.as_ref(), bytes.len() as u64)
+                        .map_err(|_| {
+                            orna_runtime_v1::TableActivationError::Runtime(
+                                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                            )
+                        })?;
+                    capture
+                        .accept_captured_blob(candidate, &field.media_type, field.suffix.as_deref())
+                        .map_err(|_| {
+                            orna_runtime_v1::TableActivationError::Runtime(
+                                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                            )
+                        })?
+                } else {
+                    let pin = row
+                        .source
+                        .graph
+                        .protect_verified_blob(&field.reference, &scope)
+                        .map_err(|_| {
+                            orna_runtime_v1::TableActivationError::Runtime(
+                                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                            )
+                        })?;
+                    row.source
+                        .graph
+                        .accept_protected_blob_pin_with_annotation(
+                            pin,
+                            &field.media_type,
+                            field.suffix.as_deref(),
+                        )
+                        .map_err(|_| {
+                            orna_runtime_v1::TableActivationError::Runtime(
+                                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                            )
+                        })?
+                };
+                blob_bindings.push((field.name.clone(), binding));
+            }
+        }
+        if replacement_binding.is_some() {
+            return Err(orna_runtime_v1::TableActivationError::Runtime(
+                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+            ));
+        }
         let mut mutation_id = [0_u8; 16];
         getrandom::fill(&mut mutation_id).map_err(|_| {
-            orna_runtime_v1::TableActivationError::Runtime(orna_runtime_v1::RuntimeError::InvalidTableMutation)
+            orna_runtime_v1::TableActivationError::Runtime(
+                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+            )
         })?;
         let admitted = admit_source_row_with_owner_fields(
             &self.project,
             &row.logical_path,
-            source,
+            &source,
             &row.source.schema,
             &row.source.value_context,
-            Vec::new(),
+            blob_bindings,
             Vec::new(),
             mutation_id,
         )
-        .map_err(|_| {
+        .map_err(|error| {
+            eprintln!("mounted row source admission failed: {error:?}");
             orna_runtime_v1::TableActivationError::Runtime(
                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
             )
@@ -139,11 +241,12 @@ impl MountWriter {
         }
         // Source-row admission creates insert-only mutations; this durable
         // save already admitted the existing baseline, so write a replacement.
-        let replacement_value = source_mutation.value().ok_or(
-            orna_runtime_v1::TableActivationError::Runtime(
-                orna_runtime_v1::RuntimeError::InvalidTableMutation,
-            ),
-        )?;
+        let replacement_value =
+            source_mutation
+                .value()
+                .ok_or(orna_runtime_v1::TableActivationError::Runtime(
+                    orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                ))?;
         let mut mutation = orna_runtime_v1::TableMutation::new(
             source_mutation.id(),
             source_mutation.table().to_owned(),
@@ -160,6 +263,10 @@ impl MountWriter {
                 .map_err(orna_runtime_v1::TableActivationError::Runtime)?;
             pins.push(pin);
         }
+        let content_transfers = pins
+            .iter()
+            .map(|pin| pin.transfer_record())
+            .collect::<Vec<_>>();
         let replacement_bytes = mutation
             .value()
             .ok_or(orna_runtime_v1::TableActivationError::Runtime(
@@ -183,10 +290,21 @@ impl MountWriter {
                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
             )
         })?;
-        Ok((VfsSaveCandidate::new(replacement, validator), replacement_bytes))
+        let candidate = VfsSaveCandidate::new(replacement, validator)
+            .with_protected_content_transfers(replacement_bytes.clone(), content_transfers);
+        Ok((candidate, replacement_bytes))
     }
 }
 
+#[derive(Clone)]
+struct BlobField {
+    name: String,
+    file_name: String,
+    media_type: String,
+    suffix: Option<String>,
+    reference: AdmittedBlobReference,
+    replacement_bytes: Option<Arc<[u8]>>,
+}
 struct RowSaveContext {
     writer: Arc<MountWriter>,
     source: Arc<TableSource>,
@@ -196,14 +314,26 @@ struct RowSaveContext {
     table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
     logical_path: String,
     expected_baseline_row: Mutex<Option<Vec<u8>>>,
+    blob_fields: Mutex<Vec<BlobField>>,
 }
 
+// Source-row mutations store text primary keys as UTF-8; other keys use their
+// canonical typed-key encoding.
+fn runtime_table_key_bytes(key: &TypedKey) -> Result<Vec<u8>, String> {
+    match key {
+        TypedKey::Text(key) => Ok(key.as_bytes().to_vec()),
+        _ => key
+            .canonical_bytes()
+            .map_err(|error| format!("committed row key cannot be encoded: {error:?}")),
+    }
+}
 fn row_save_context(
     writer: &Arc<MountWriter>,
     source: &Arc<TableSource>,
     key: &TypedKey,
     table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
     document_bytes: &[u8],
+    blob_fields: Vec<BlobField>,
 ) -> Result<Arc<RowSaveContext>, String> {
     let declaration = source
         .binding
@@ -214,9 +344,7 @@ fn row_save_context(
         TableObjectId::new(*source.binding.relation_id()),
     )
     .map_err(|error| format!("committed table identity is invalid: {error:?}"))?;
-    let key_bytes = key
-        .canonical_bytes()
-        .map_err(|error| format!("committed row key cannot be encoded: {error:?}"))?;
+    let key_bytes = runtime_table_key_bytes(key)?;
     let expected_baseline_row = writer.row_baseline(&table, &key_bytes)?;
     let mut components = Vec::new();
     flatten_key_components(key, &mut components)?;
@@ -248,6 +376,7 @@ fn row_save_context(
         logical_path,
         table_object_ids,
         expected_baseline_row: Mutex::new(expected_baseline_row),
+        blob_fields: Mutex::new(blob_fields),
     }))
 }
 impl RowSaveContext {
@@ -265,10 +394,7 @@ impl RowSaveContext {
         expected_baseline_row: Option<Vec<u8>>,
     ) -> Result<VfsDurableSave, String> {
         let cwd_generation = self.writer.cwd_generation()?;
-        let key = self
-            .key
-            .canonical_bytes()
-            .map_err(|error| format!("committed row key cannot be encoded: {error:?}"))?;
+        let key = runtime_table_key_bytes(&self.key)?;
         Ok(VfsDurableSave::new(
             self.writer.owner_id,
             cwd_generation,
@@ -292,21 +418,25 @@ impl RowSaveContext {
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
-        let outcome = self.writer.runtime.block_on(self.target.commit_durable_document_save(
-            draft,
-            &self.writer.state,
-            save,
-            move |coordinates, bytes| async move {
-                let (candidate, row_bytes) = row_context
-                    .writer
-                    .candidate(&row_context, &coordinates, &bytes)?;
-                *accepted_row_output
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
-                Ok(candidate)
-            },
-            &NoFault,
-        ));
+        let outcome = self
+            .writer
+            .runtime
+            .block_on(self.target.commit_durable_document_save(
+                draft,
+                &self.writer.state,
+                save,
+                move |coordinates, bytes| async move {
+                    let (candidate, row_bytes) =
+                        row_context
+                            .writer
+                            .candidate(&row_context, &coordinates, &bytes, None)?;
+                    *accepted_row_output
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
+                    Ok(candidate)
+                },
+                &NoFault,
+            ));
         match outcome {
             Ok(TemporaryRenameOutcome::Applied { .. }) => {
                 let accepted_row = accepted_row
@@ -326,6 +456,88 @@ impl RowSaveContext {
         }
     }
 
+    fn commit_blob_temporary(
+        self: &Arc<Self>,
+        target: &Arc<ManagedFile<RowMapSnapshot>>,
+        scratch: &TemporarySave<RowMapSnapshot>,
+        field: &BlobField,
+        expected_baseline_row: Option<Vec<u8>>,
+    ) -> Result<(), String> {
+        let replacement_bytes = self.writer.runtime.block_on(scratch.candidate_bytes());
+        let length = u64::try_from(replacement_bytes.len())
+            .map_err(|_| "replacement Blob length is invalid".to_owned())?;
+        let digest: [u8; 32] = Sha256::digest(&replacement_bytes).into();
+        let expected_identity = ContentIdentity::new(length, digest)
+            .map_err(|error| format!("replacement Blob identity is invalid: {error:?}"))?;
+        let capture = self
+            .writer
+            .repository
+            .capture_capability(*self.source.binding.relation_id())
+            .map_err(|error| format!("replacement Blob capture is unavailable: {error:?}"))?;
+        let document = self.writer.runtime.block_on(self.target.open_read());
+        let document_length = usize::try_from(document.len())
+            .map_err(|_| "mounted row document length is invalid".to_owned())?;
+        let document_bytes: Arc<[u8]> = Arc::from(document.read_at(0, document_length));
+        let save = self.durable_save_with_baseline(expected_baseline_row)?;
+        let row_context = Arc::clone(self);
+        let field_name = field.name.clone();
+        let accepted_row = Arc::new(Mutex::new(None));
+        let accepted_row_output = Arc::clone(&accepted_row);
+        let outcome = self
+            .writer
+            .runtime
+            .block_on(self.writer.cache.commit_durable_blob_rename(
+                target,
+                scratch,
+                &self.writer.state,
+                save,
+                &capture,
+                expected_identity,
+                &field.media_type,
+                field.suffix.as_deref(),
+                move |coordinates, _blob_bytes, binding| async move {
+                    let (candidate, row_bytes) = row_context.writer.candidate(
+                        &row_context,
+                        &coordinates,
+                        &document_bytes,
+                        Some((field_name, binding)),
+                    )?;
+                    *accepted_row_output
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
+                    Ok(candidate)
+                },
+                &NoFault,
+            ));
+        match outcome {
+            Ok(TemporaryRenameOutcome::Applied { .. }) => {
+                if let Some(field) = self
+                    .blob_fields
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter_mut()
+                    .find(|candidate| candidate.name == field.name)
+                {
+                    field.replacement_bytes = Some(replacement_bytes);
+                } else {
+                    return Err("replaced Blob field disappeared from its row".into());
+                }
+                let row = accepted_row
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                self.record_accepted_row(row);
+                Ok(())
+            }
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => {
+                Err("mounted Blob replacement was rejected by semantic admission".into())
+            }
+            Ok(TemporaryRenameOutcome::Stale { .. }) => {
+                Err("mounted Blob replacement is stale against its captured baseline".into())
+            }
+            Err(error) => Err(format!("mounted Blob replacement failed: {error:?}")),
+        }
+    }
     fn fsync_temporary(&self, scratch: &TemporarySave<RowMapSnapshot>) -> Result<(), String> {
         self.writer
             .runtime
@@ -342,21 +554,25 @@ impl RowSaveContext {
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
-        let outcome = self.writer.runtime.block_on(self.target.commit_durable_temporary_rename(
-            scratch,
-            &self.writer.state,
-            save,
-            move |coordinates, bytes| async move {
-                let (candidate, row_bytes) = row_context
-                    .writer
-                    .candidate(&row_context, &coordinates, &bytes)?;
-                *accepted_row_output
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
-                Ok(candidate)
-            },
-            &NoFault,
-        ));
+        let outcome = self
+            .writer
+            .runtime
+            .block_on(self.target.commit_durable_temporary_rename(
+                scratch,
+                &self.writer.state,
+                save,
+                move |coordinates, bytes| async move {
+                    let (candidate, row_bytes) =
+                        row_context
+                            .writer
+                            .candidate(&row_context, &coordinates, &bytes, None)?;
+                    *accepted_row_output
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
+                    Ok(candidate)
+                },
+                &NoFault,
+            ));
         match outcome {
             Ok(TemporaryRenameOutcome::Applied { .. }) => {
                 let accepted_row = accepted_row
@@ -456,7 +672,12 @@ fn fusermount_program() -> OsString {
 #[derive(Clone)]
 enum OpenFile {
     Document(Arc<RowSaveContext>, Arc<EditDraft<RowMapSnapshot>>),
-    Temporary(Arc<RowSaveContext>, Arc<TemporarySave<RowMapSnapshot>>),
+    Temporary(
+        Arc<RowSaveContext>,
+        Arc<ManagedFile<RowMapSnapshot>>,
+        Arc<TemporarySave<RowMapSnapshot>>,
+        Option<BlobField>,
+    ),
 }
 
 struct WorkspaceFilesystem {
@@ -514,10 +735,17 @@ impl WorkspaceFilesystem {
                 Arc::new(context.open_native_graph(&rows).map_err(|error| {
                     format!("committed native graph could not be opened: {error}")
                 })?);
-            let value_context = context
-                .open_value_context(relation_id)
-                .map_err(|error| format!("committed row value context could not be opened: {error:?}"))?;
-            builder.add_table_rows(table_directory, graph, Arc::new(rows), &schema, value_context, &field_names)?;
+            let value_context = context.open_value_context(relation_id).map_err(|error| {
+                format!("committed row value context could not be opened: {error:?}")
+            })?;
+            builder.add_table_rows(
+                table_directory,
+                graph,
+                Arc::new(rows),
+                &schema,
+                value_context,
+                &field_names,
+            )?;
         }
 
         Ok(Self {
@@ -528,7 +756,10 @@ impl WorkspaceFilesystem {
         })
     }
     fn update_writable_bytes(&self, inode: u64, bytes: &[u8]) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(node) = state.nodes.get_mut(&inode) else {
             return false;
         };
@@ -599,7 +830,7 @@ impl Filesystem for WorkspaceFilesystem {
                 OpenFile::Document(save, draft) => {
                     save.writer.runtime.block_on(draft.candidate_bytes())
                 }
-                OpenFile::Temporary(save, scratch) => {
+                OpenFile::Temporary(save, _, scratch, _) => {
                     save.writer.runtime.block_on(scratch.candidate_bytes())
                 }
             };
@@ -622,14 +853,41 @@ impl Filesystem for WorkspaceFilesystem {
     }
 
     fn open(&self, _request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
-        let (save, scratch) = {
-            let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let replaced_blob = matches!(
+            state.nodes.get(&inode.0).map(|node| &node.kind),
+            Some(NodeKind::BlobBytes(_))
+        );
+        drop(state);
+        if replaced_blob {
+            reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
+            return;
+        }
+        let (save, target, scratch, blob_field) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match state.nodes.get(&inode.0).map(|node| &node.kind) {
-                Some(NodeKind::Document { save, .. }) => (Arc::clone(save), None),
-                Some(NodeKind::Temporary { save, scratch, .. }) => {
-                    (Arc::clone(save), Some(Arc::clone(scratch)))
+                Some(NodeKind::Document { save, .. }) => {
+                    (Arc::clone(save), Arc::clone(&save.target), None, None)
                 }
-                Some(NodeKind::Bytes(_) | NodeKind::Blob { .. }) => {
+                Some(NodeKind::Temporary {
+                    save,
+                    target,
+                    scratch,
+                    blob_field,
+                    ..
+                }) => (
+                    Arc::clone(save),
+                    Arc::clone(target),
+                    Some(Arc::clone(scratch)),
+                    blob_field.clone(),
+                ),
+                Some(NodeKind::Bytes(_) | NodeKind::BlobBytes(_) | NodeKind::Blob { .. }) => {
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
                 }
@@ -656,7 +914,11 @@ impl Filesystem for WorkspaceFilesystem {
         };
         if let Some(scratch) = scratch {
             if let Some(size) = truncate_size
-                && save.writer.runtime.block_on(scratch.truncate(size)).is_err()
+                && save
+                    .writer
+                    .runtime
+                    .block_on(scratch.truncate(size))
+                    .is_err()
             {
                 reply.error(Errno::EIO);
                 return;
@@ -664,11 +926,18 @@ impl Filesystem for WorkspaceFilesystem {
             self.open_files
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(handle, OpenFile::Temporary(save, scratch));
+                .insert(
+                    handle,
+                    OpenFile::Temporary(save, target, scratch, blob_field),
+                );
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
-        let draft = Arc::new(save.writer.runtime.block_on(save.target.open_draft(usize::MAX)));
+        let draft = Arc::new(
+            save.writer
+                .runtime
+                .block_on(save.target.open_draft(usize::MAX)),
+        );
         if let Some(size) = truncate_size
             && save.writer.runtime.block_on(draft.truncate(size)).is_err()
         {
@@ -695,13 +964,15 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EINVAL);
             return;
         };
-        if !is_replacement_scratch_name(name) {
-            reply.error(Errno::EROFS);
-            return;
-        }
-        let (attr, save, scratch) = {
-            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !matches!(state.nodes.get(&parent.0).map(|node| &node.kind), Some(NodeKind::Row(_))) {
+        let (attr, save, target, scratch, blob_field) = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !matches!(
+                state.nodes.get(&parent.0).map(|node| &node.kind),
+                Some(NodeKind::Row(_))
+            ) {
                 reply.error(Errno::EROFS);
                 return;
             }
@@ -719,18 +990,60 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
+            let blob_field = if is_replacement_scratch_name(name) {
+                None
+            } else {
+                save.blob_fields
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .find(|field| is_replacement_scratch_for(name, &field.file_name))
+                    .cloned()
+            };
+            if !is_replacement_scratch_name(name) && blob_field.is_none() {
+                reply.error(Errno::EROFS);
+                return;
+            }
             let baseline = save
                 .expected_baseline_row
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            let scratch = Arc::new(save.writer.runtime.block_on(
-                save.target.begin_temporary_replacement(usize::MAX),
-            ));
+            let target = if blob_field.is_some() {
+                let image = Arc::new(VfsFileSnapshot::new(
+                    SnapshotPin::capture(Arc::clone(&save.source.rows)),
+                    Arc::<[u8]>::from([]),
+                ));
+                match save
+                    .writer
+                    .runtime
+                    .block_on(save.writer.cache.managed_file(image))
+                {
+                    Ok(target) => target,
+                    Err(_) => {
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                }
+            } else {
+                Arc::clone(&save.target)
+            };
+            let scratch = Arc::new(
+                save.writer
+                    .runtime
+                    .block_on(target.begin_temporary_replacement(usize::MAX)),
+            );
             let inode = match state.add_file(
                 parent.0,
                 name,
-                NodeKind::Temporary { bytes: Vec::new(), save: Arc::clone(&save), scratch: Arc::clone(&scratch), baseline },
+                NodeKind::Temporary {
+                    bytes: Vec::new(),
+                    save: Arc::clone(&save),
+                    target: Arc::clone(&target),
+                    scratch: Arc::clone(&scratch),
+                    blob_field: blob_field.clone(),
+                    baseline,
+                },
             ) {
                 Ok(inode) => inode,
                 Err(_) => {
@@ -742,13 +1055,16 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EIO);
                 return;
             };
-            (attr, save, scratch)
+            (attr, save, target, scratch, blob_field)
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(handle, OpenFile::Temporary(save, scratch));
+            .insert(
+                handle,
+                OpenFile::Temporary(save, target, scratch, blob_field),
+            );
         reply.created(
             &ENTRY_TTL,
             &attr,
@@ -767,12 +1083,15 @@ impl Filesystem for WorkspaceFilesystem {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        if parent != newparent || newname != OsStr::new("data.orna") || flags != RenameFlags::empty() {
+        if parent != newparent || flags != RenameFlags::empty() {
             reply.error(Errno::EROFS);
             return;
         }
-        let (source_inode, destination_inode, save, scratch, baseline) = {
-            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (source_inode, destination_inode, save, target, scratch, blob_field, baseline) = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let source_inode = match state.lookup_child(parent.0, name) {
                 Ok(Some(inode)) => inode,
                 Ok(None) | Err(_) => {
@@ -780,6 +1099,34 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
+            let (save, target, scratch, blob_field, baseline) =
+                match state.nodes.get(&source_inode).map(|node| &node.kind) {
+                    Some(NodeKind::Temporary {
+                        save,
+                        target,
+                        scratch,
+                        blob_field,
+                        baseline,
+                        ..
+                    }) => (
+                        Arc::clone(save),
+                        Arc::clone(target),
+                        Arc::clone(scratch),
+                        blob_field.clone(),
+                        baseline.clone(),
+                    ),
+                    _ => {
+                        reply.error(Errno::EROFS);
+                        return;
+                    }
+                };
+            let expected_name = blob_field
+                .as_ref()
+                .map_or("data.orna", |field| field.file_name.as_str());
+            if newname.to_str() != Some(expected_name) {
+                reply.error(Errno::EROFS);
+                return;
+            }
             let destination_inode = match state.lookup_child(newparent.0, newname) {
                 Ok(Some(inode)) => inode,
                 Ok(None) | Err(_) => {
@@ -787,43 +1134,67 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            let (save, scratch, baseline) = match state.nodes.get(&source_inode).map(|node| &node.kind) {
-                Some(NodeKind::Temporary { save, scratch, baseline, .. }) => {
-                    (Arc::clone(save), Arc::clone(scratch), baseline.clone())
+            match (
+                blob_field.as_ref(),
+                state.nodes.get(&destination_inode).map(|node| &node.kind),
+            ) {
+                (
+                    None,
+                    Some(NodeKind::Document {
+                        save: destination_save,
+                        ..
+                    }),
+                ) => {
+                    if !Arc::ptr_eq(&save, destination_save) {
+                        reply.error(Errno::EXDEV);
+                        return;
+                    }
                 }
+                (Some(_), Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_))) => {}
                 _ => {
                     reply.error(Errno::EROFS);
                     return;
                 }
-            };
-            let destination_save = match state.nodes.get(&destination_inode).map(|node| &node.kind) {
-                Some(NodeKind::Document { save, .. }) => save,
-                _ => {
-                    reply.error(Errno::EROFS);
-                    return;
-                }
-            };
-            if !Arc::ptr_eq(&save, destination_save) {
-                reply.error(Errno::EXDEV);
-                return;
             }
-            (source_inode, destination_inode, save, scratch, baseline)
+            (
+                source_inode,
+                destination_inode,
+                save,
+                target,
+                scratch,
+                blob_field,
+                baseline,
+            )
         };
-        if save.commit_temporary(&scratch, baseline).is_err() {
+        let committed = match &blob_field {
+            Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline),
+            None => save.commit_temporary(&scratch, baseline),
+        };
+        if let Err(error) = committed {
+            eprintln!("mounted replacement failed: {error}");
             reply.error(Errno::EIO);
             return;
         }
         let accepted_bytes = save.writer.runtime.block_on(scratch.candidate_bytes());
-        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(NodeKind::Document { bytes, .. }) = state
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let destination = state
             .nodes
             .get_mut(&destination_inode)
-            .map(|node| &mut node.kind)
-        {
-            *bytes = accepted_bytes.to_vec();
-        } else {
-            reply.error(Errno::EIO);
-            return;
+            .map(|node| &mut node.kind);
+        match (blob_field, destination) {
+            (Some(_), Some(kind @ (NodeKind::Blob { .. } | NodeKind::BlobBytes(_)))) => {
+                *kind = NodeKind::BlobBytes(accepted_bytes);
+            }
+            (None, Some(NodeKind::Document { bytes, .. })) => {
+                *bytes = accepted_bytes.to_vec();
+            }
+            _ => {
+                reply.error(Errno::EIO);
+                return;
+            }
         }
         let removed = state
             .nodes
@@ -858,7 +1229,7 @@ impl Filesystem for WorkspaceFilesystem {
             Some(OpenFile::Document(save, draft)) => {
                 Some(save.writer.runtime.block_on(draft.candidate_bytes()))
             }
-            Some(OpenFile::Temporary(save, scratch)) => {
+            Some(OpenFile::Temporary(save, _, scratch, _)) => {
                 Some(save.writer.runtime.block_on(scratch.candidate_bytes()))
             }
             None => None,
@@ -879,7 +1250,21 @@ impl Filesystem for WorkspaceFilesystem {
                 return;
             };
             match &node.kind {
-                NodeKind::Bytes(bytes) | NodeKind::Document { bytes, .. } | NodeKind::Temporary { bytes, .. } => {
+                NodeKind::Bytes(bytes)
+                | NodeKind::Document { bytes, .. }
+                | NodeKind::Temporary { bytes, .. } => {
+                    let start = match usize::try_from(offset) {
+                        Ok(start) if start < bytes.len() => start,
+                        _ => {
+                            reply.data(&[]);
+                            return;
+                        }
+                    };
+                    let end = start.saturating_add(size as usize).min(bytes.len());
+                    reply.data(&bytes[start..end]);
+                    return;
+                }
+                NodeKind::BlobBytes(bytes) => {
                     let start = match usize::try_from(offset) {
                         Ok(start) if start < bytes.len() => start,
                         _ => {
@@ -945,10 +1330,11 @@ impl Filesystem for WorkspaceFilesystem {
             .get(&handle.0)
             .cloned();
         let (result, candidate_bytes) = match open_file {
-            Some(OpenFile::Document(save, draft)) => {
-                (save.writer.runtime.block_on(draft.write_at(offset, data)), None)
-            }
-            Some(OpenFile::Temporary(save, scratch)) => {
+            Some(OpenFile::Document(save, draft)) => (
+                save.writer.runtime.block_on(draft.write_at(offset, data)),
+                None,
+            ),
+            Some(OpenFile::Temporary(save, _, scratch, _)) => {
                 let result = save.writer.runtime.block_on(scratch.write_at(offset, data));
                 let bytes = result
                     .is_ok()
@@ -1002,7 +1388,7 @@ impl Filesystem for WorkspaceFilesystem {
                 }
                 result
             }
-            Some(OpenFile::Temporary(save, scratch)) => save.fsync_temporary(&scratch),
+            Some(OpenFile::Temporary(save, _, scratch, _)) => save.fsync_temporary(&scratch),
             None => Err("file handle is not open".to_owned()),
         };
         if result.is_ok() {
@@ -1074,7 +1460,7 @@ impl Filesystem for WorkspaceFilesystem {
                     Some(OpenFile::Document(save, draft)) => {
                         (save.writer.runtime.block_on(draft.truncate(size)), None)
                     }
-                    Some(OpenFile::Temporary(save, scratch)) => {
+                    Some(OpenFile::Temporary(save, _, scratch, _)) => {
                         let result = save.writer.runtime.block_on(scratch.truncate(size));
                         let bytes = result
                             .is_ok()
@@ -1094,8 +1480,14 @@ impl Filesystem for WorkspaceFilesystem {
                     self.update_writable_bytes(inode.0, &bytes);
                 }
             } else {
-                let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if !matches!(state.nodes.get(&inode.0).map(|node| &node.kind), Some(NodeKind::Document { .. })) {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !matches!(
+                    state.nodes.get(&inode.0).map(|node| &node.kind),
+                    Some(NodeKind::Document { .. })
+                ) {
                     reply.error(Errno::EROFS);
                     return;
                 }
@@ -1105,7 +1497,10 @@ impl Filesystem for WorkspaceFilesystem {
                     .insert(inode.0, size);
             }
         }
-        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match state.attr(inode.0) {
             Some(mut attr) => {
                 if let Some(size) = size {
@@ -1229,8 +1624,13 @@ impl FsBuilder {
                 )
             }
             NodeKind::Bytes(bytes) => (FileType::RegularFile, bytes.len() as u64, 0o444, 1),
-            NodeKind::Document { bytes, .. } => (FileType::RegularFile, bytes.len() as u64, 0o644, 1),
-            NodeKind::Temporary { bytes, .. } => (FileType::RegularFile, bytes.len() as u64, 0o644, 1),
+            NodeKind::BlobBytes(bytes) => (FileType::RegularFile, bytes.len() as u64, 0o444, 1),
+            NodeKind::Document { bytes, .. } => {
+                (FileType::RegularFile, bytes.len() as u64, 0o644, 1)
+            }
+            NodeKind::Temporary { bytes, .. } => {
+                (FileType::RegularFile, bytes.len() as u64, 0o644, 1)
+            }
             NodeKind::Blob { reference, .. } => (
                 FileType::RegularFile,
                 reference.content_identity().length(),
@@ -1674,6 +2074,7 @@ impl FsBuilder {
 
         let mut projected_fields = Vec::with_capacity(values.len());
         let mut blob_files = Vec::new();
+        let mut blob_fields = Vec::new();
         for (field, value) in decoded.fields().iter().zip(values) {
             let field_name = source
                 .field_names
@@ -1702,6 +2103,7 @@ impl FsBuilder {
                     })?;
                 let annotation = stored.annotation();
                 let suffix = annotation.suffix().or(metadata.suffix()).map(str::to_owned);
+                let media_type = annotation.media_type().to_owned();
                 let file_name = orna_runtime_v1::vfs::project_content_name(
                     field_name,
                     annotation.media_type(),
@@ -1711,18 +2113,26 @@ impl FsBuilder {
                     VfsStoredField::content_optional(
                         field_name.clone(),
                         annotation.media_type(),
-                        suffix,
+                        suffix.clone(),
                         metadata.length(),
                     )
                 } else {
                     VfsStoredField::content(
                         field_name.clone(),
                         annotation.media_type(),
-                        suffix,
+                        suffix.clone(),
                         metadata.length(),
                     )
                 };
                 projected_fields.push(projected);
+                blob_fields.push(BlobField {
+                    name: field_name.clone(),
+                    file_name: file_name.clone(),
+                    media_type,
+                    suffix,
+                    reference: stored.reference().clone(),
+                    replacement_bytes: None,
+                });
                 blob_files.push((file_name, stored.reference().clone()));
             } else if stored_value_is_null(&value) {
                 projected_fields.push(VfsStoredField::null(field_name.clone()));
@@ -1748,6 +2158,7 @@ impl FsBuilder {
                     key,
                     Arc::clone(&self.table_object_ids),
                     &document_bytes,
+                    blob_fields,
                 )?,
                 bytes: document_bytes,
             },
@@ -1782,7 +2193,11 @@ impl FsBuilder {
             | NodeKind::Table(_)
             | NodeKind::KeyDirectory(_)
             | NodeKind::Row(_) => FileType::Directory,
-            NodeKind::Bytes(_) | NodeKind::Document { .. } | NodeKind::Temporary { .. } | NodeKind::Blob { .. } => FileType::RegularFile,
+            NodeKind::Bytes(_)
+            | NodeKind::BlobBytes(_)
+            | NodeKind::Document { .. }
+            | NodeKind::Temporary { .. }
+            | NodeKind::Blob { .. } => FileType::RegularFile,
         };
         self.insert_node(parent, name, kind, file_type)
     }
@@ -1842,13 +2257,16 @@ enum NodeKind {
     Temporary {
         bytes: Vec<u8>,
         save: Arc<RowSaveContext>,
+        target: Arc<ManagedFile<RowMapSnapshot>>,
         scratch: Arc<TemporarySave<RowMapSnapshot>>,
+        blob_field: Option<BlobField>,
         baseline: Option<Vec<u8>>,
     },
     Blob {
         graph: Arc<NativeGraphContext>,
         reference: AdmittedBlobReference,
     },
+    BlobBytes(Arc<[u8]>),
 }
 
 impl NodeKind {
@@ -1858,7 +2276,11 @@ impl NodeKind {
             Self::Table(table) => Some(&table.directory),
             Self::KeyDirectory(directory) => Some(&directory.directory),
             Self::Row(row) => Some(&row.directory),
-            Self::Bytes(_) | Self::Document { .. } | Self::Temporary { .. } | Self::Blob { .. } => None,
+            Self::Bytes(_)
+            | Self::BlobBytes(_)
+            | Self::Document { .. }
+            | Self::Temporary { .. }
+            | Self::Blob { .. } => None,
         }
     }
 
@@ -1868,7 +2290,11 @@ impl NodeKind {
             Self::Table(table) => Some(&mut table.directory),
             Self::KeyDirectory(directory) => Some(&mut directory.directory),
             Self::Row(row) => Some(&mut row.directory),
-            Self::Bytes(_) | Self::Document { .. } | Self::Temporary { .. } | Self::Blob { .. } => None,
+            Self::Bytes(_)
+            | Self::BlobBytes(_)
+            | Self::Document { .. }
+            | Self::Temporary { .. }
+            | Self::Blob { .. } => None,
         }
     }
 
@@ -2214,9 +2640,59 @@ fn key_component(key: &TypedKey) -> Result<String, String> {
     Ok(project_component(&canonical_text))
 }
 
+/// Removes projected Blob summary fields from a source row before row admission.
+/// The selected values are supplied separately by owner-issued Blob bindings.
+fn source_without_fields(source: &str, omitted: &[String]) -> Result<String, String> {
+    let parsed = parse_row(source);
+    if !parsed.diagnostics.is_empty() {
+        return Err("mounted row document is not a valid source row".into());
+    }
+    let Expr::Record { fields, .. } = parsed.value else {
+        return Err("mounted row document is not a record".into());
+    };
+    let mut ranges = Vec::new();
+    for (index, field) in fields.iter().enumerate() {
+        if !omitted.iter().any(|name| name == &field.name) {
+            continue;
+        }
+        let start = field.span.start;
+        let end = field.span.end;
+        let next_start = fields
+            .get(index + 1)
+            .map_or(source.len(), |next| next.span.start);
+        if let Some(relative_comma) = source[end..next_start].find(',') {
+            ranges.push(start..end + relative_comma + 1);
+        } else if index > 0 {
+            let previous_end = fields[index - 1].span.end;
+            let relative_comma = source[previous_end..start]
+                .rfind(',')
+                .ok_or_else(|| "mounted row field separator is missing".to_owned())?;
+            ranges.push(previous_end + relative_comma..end);
+        } else {
+            ranges.push(start..end);
+        }
+    }
+    ranges.sort_by_key(|range| range.start);
+    let mut output = source.to_owned();
+    for range in ranges.into_iter().rev() {
+        output.replace_range(range, "");
+    }
+    Ok(output)
+}
+
 fn is_replacement_scratch_name(name: &str) -> bool {
-    name.strip_prefix(".data.orna.")
-        .is_some_and(|suffix| !suffix.is_empty() && suffix != "." && suffix != "..")
+    is_replacement_scratch_for(name, "data.orna")
+}
+
+fn is_replacement_scratch_for(name: &str, file_name: &str) -> bool {
+    let Some(suffix) = name
+        .strip_prefix('.')
+        .and_then(|name| name.strip_prefix(file_name))
+        .and_then(|name| name.strip_prefix('.'))
+    else {
+        return false;
+    };
+    !suffix.is_empty() && suffix != "." && suffix != ".." && !suffix.contains('/') && suffix != "/"
 }
 fn hex_bytes(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
@@ -2248,9 +2724,42 @@ fn key_directory(builder: &mut FsBuilder, parent: u64, key: &TypedKey) -> Result
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{FsBuilder, NodeKind, ROOT_INODE, is_replacement_scratch_name, key_directory};
+    use super::{
+        Expr, FsBuilder, NodeKind, ROOT_INODE, is_replacement_scratch_name, key_directory,
+        parse_row, runtime_table_key_bytes, source_without_fields,
+    };
     use orna_repository_v1::TypedKey;
     use orna_runtime_v1::vfs::project_component;
+    #[test]
+    fn runtime_table_keys_use_persisted_text_bytes_and_typed_encoding_otherwise() {
+        assert_eq!(
+            runtime_table_key_bytes(&TypedKey::Text("london".into())).unwrap(),
+            b"london"
+        );
+
+        let numeric = TypedKey::Int(7);
+        assert_eq!(
+            runtime_table_key_bytes(&numeric).unwrap(),
+            numeric.canonical_bytes().unwrap()
+        );
+    }
+    #[test]
+    fn source_row_blob_fields_are_omitted_for_owner_bindings() {
+        let source = r#"{ title: "song", content: { path: "./content.mp3", media_type: "audio/mpeg" }, artist: "A", }"#;
+        let without_content = source_without_fields(source, &["content".to_owned()]).unwrap();
+        let parsed = parse_row(&without_content);
+        assert!(parsed.diagnostics.is_empty());
+        let Expr::Record { fields, .. } = parsed.value else {
+            panic!("row remains a record");
+        };
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["title", "artist"]
+        );
+    }
 
     #[test]
     fn only_replacement_shaped_sibling_names_are_candidates() {
