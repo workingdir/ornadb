@@ -5183,14 +5183,38 @@ impl Repository {
     /// Stages the exact managed-file bytes already captured by a caller.
     ///
     /// The candidate index is built off-index and atomically installed only if
-    /// the observed index generation remains current. Git path filters and the
-    /// file mode are preserved while the staged blob comes from `contents`,
-    /// not from a second worktree read.
+    /// the observed index generation remains current and the worktree bytes
+    /// still match the supplied contents. Git path filters and the file mode
+    /// are preserved while the staged blob comes from those contents, not a
+    /// second worktree read.
     pub fn stage_managed_contents(
         &self,
         expected: &IndexGeneration,
         path: &ManagedPath,
         contents: &[u8],
+    ) -> Result<IndexGeneration, RepositoryError> {
+        self.stage_managed_contents_inner(expected, path, contents, None)
+    }
+
+    /// Test-only interleaving seam for worktree changes between candidate
+    /// construction and installation.
+    #[doc(hidden)]
+    pub fn stage_managed_contents_with_test_hook(
+        &self,
+        expected: &IndexGeneration,
+        path: &ManagedPath,
+        contents: &[u8],
+        hook: &mut dyn FnMut(),
+    ) -> Result<IndexGeneration, RepositoryError> {
+        self.stage_managed_contents_inner(expected, path, contents, Some(hook))
+    }
+
+    fn stage_managed_contents_inner(
+        &self,
+        expected: &IndexGeneration,
+        path: &ManagedPath,
+        contents: &[u8],
+        before_install: Option<&mut dyn FnMut()>,
     ) -> Result<IndexGeneration, RepositoryError> {
         let _lock = self.acquire_coordination_lock()?;
         let actual = self.index_generation()?;
@@ -5200,15 +5224,12 @@ impl Repository {
                 actual,
             });
         }
-        let target = self.managed_target(path)?;
-        if self.read_managed_file(&target)?.as_deref() != Some(contents) {
-            return Err(RepositoryError::ManagedContentConflict);
-        }
+        self.ensure_managed_contents_match(path, contents)?;
         self.update_managed_index(
             expected,
             std::slice::from_ref(path),
             ManagedIndexOperation::AddContents(contents),
-            None,
+            before_install,
         )
     }
 
@@ -6669,6 +6690,19 @@ impl Repository {
         }
     }
 
+    fn ensure_managed_contents_match(
+        &self,
+        path: &ManagedPath,
+        contents: &[u8],
+    ) -> Result<(), RepositoryError> {
+        let target = self.managed_target(path)?;
+        if self.read_managed_file(&target)?.as_deref() == Some(contents) {
+            Ok(())
+        } else {
+            Err(RepositoryError::ManagedContentConflict)
+        }
+    }
+
     fn managed_index_matches_head(
         &self,
         expected_head: &GitCommitRef,
@@ -6848,6 +6882,18 @@ impl Repository {
                 expected: expected.clone(),
                 actual,
             });
+        }
+        let contents_match = match operation {
+            ManagedIndexOperation::AddContents(contents) => paths
+                .first()
+                .ok_or(RepositoryError::NoManagedPaths)
+                .and_then(|path| self.ensure_managed_contents_match(path, contents)),
+            _ => Ok(()),
+        };
+        if let Err(error) = contents_match {
+            let _ = fs::remove_file(&candidate);
+            drop(git_lock);
+            return Err(error);
         }
         fs::rename(&candidate, &index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         fs::File::open(

@@ -125,7 +125,22 @@ fn row_add_rejects_changed_source_and_stages_refreshed_generation() {
     let index = repository.index_generation().unwrap();
     std::fs::write(&row_path, later_bytes).unwrap();
 
-    let error = repository.stage_managed_contents(&index, &path, candidate.source_bytes()).unwrap_err();
+    let error = repository
+        .stage_managed_contents(&index, &path, candidate.source_bytes())
+        .unwrap_err();
+    assert!(error.to_string().contains("changed since capture"), "{error}");
+    assert_eq!(git(root, &["status", "--porcelain"]).stdout, b" M Music/london.orna\n");
+
+    std::fs::write(&row_path, candidate_bytes).unwrap();
+    let mut mutate_worktree = || std::fs::write(&row_path, later_bytes).unwrap();
+    let error = repository
+        .stage_managed_contents_with_test_hook(
+            &index,
+            &path,
+            candidate.source_bytes(),
+            &mut mutate_worktree,
+        )
+        .unwrap_err();
     assert!(error.to_string().contains("changed since capture"), "{error}");
     assert_eq!(git(root, &["status", "--porcelain"]).stdout, b" M Music/london.orna\n");
 
