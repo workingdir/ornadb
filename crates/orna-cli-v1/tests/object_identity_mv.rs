@@ -279,7 +279,12 @@ fn mv_refuses_a_symlinked_loose_row_directory() {
     symlink(external.path(), directory.path().join("Media")).expect("row-directory symlink");
 
     let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "symlinked path should fail");
+    assert!(
+        stderr.contains("E2100") && stderr.contains("loose-row directory is unavailable or unsafe"),
+        "unexpected symlink-path diagnostic: {stderr}"
+    );
     assert_eq!(fs::read(&source_path).unwrap(), source_before);
     assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
     assert_eq!(fs::read(external.path().join("north.orna")).unwrap(), b"external");
@@ -302,7 +307,12 @@ fn mv_refuses_a_symlinked_row_destination() {
     symlink(external.path(), &destination).expect("destination symlink");
 
     let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "symlink destination should fail");
+    assert!(
+        stderr.contains("E2100") && stderr.contains("loose-row directory is unavailable or unsafe"),
+        "unexpected symlink-destination diagnostic: {stderr}"
+    );
     assert_eq!(fs::read(&source_path).unwrap(), source_before);
     assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
     assert_eq!(fs::read(external.path().join("preserve.txt")).unwrap(), b"external");
