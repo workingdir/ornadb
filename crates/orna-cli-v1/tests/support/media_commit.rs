@@ -17,6 +17,12 @@ use orna_runtime_v1::{
 use orna_storage_v1::LoosePath;
 use orna_value_v1::Format3Context;
 
+#[derive(Clone, Copy)]
+enum CaptureStorageMode {
+    BlobValue,
+    CompleteSourceRow,
+    GenericTable,
+}
 /// Commits one captured media row and publishes it, so the row is durable in
 /// the store before the caller reads it.
 pub async fn commit_capture(
@@ -32,7 +38,7 @@ pub async fn commit_capture(
 ) {
     commit_capture_inner(
         repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
-        "media", true, true,
+        "media", true, CaptureStorageMode::BlobValue,
     )
     .await;
 }
@@ -51,7 +57,7 @@ pub async fn commit_capture_for_table(
 ) {
     commit_capture_inner(
         repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
-        table_name, true, false,
+        table_name, true, CaptureStorageMode::GenericTable,
     )
     .await;
 }
@@ -71,7 +77,7 @@ pub async fn commit_capture_pending(
 ) {
     commit_capture_inner(
         repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
-        "media", false, true,
+        "media", false, CaptureStorageMode::CompleteSourceRow,
     )
     .await;
 }
@@ -88,7 +94,7 @@ async fn commit_capture_inner(
     relation_id: [u8; 16],
     table_name: &str,
     publish: bool,
-    source_admission: bool,
+    storage_mode: CaptureStorageMode,
 ) {
     let request_identity = RequestIdentity {
         session_id: [ordinal; 16],
@@ -118,39 +124,100 @@ async fn commit_capture_inner(
     )
     .unwrap();
     let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    let mutation = if source_admission {
-        let logical_path = format!("{table_name}/{key}.orna");
-        let commit = repository.head().unwrap().unwrap();
-        let loader = ProjectLoader::default();
-        let project = loader
-            .load_committed_snapshot(repository, &commit)
-            .expect("load the committed media project");
-        let schema = loader
-            .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
-            .expect("resolve the media table from its committed identity manifest");
-        let source = format!("{{ content: {expression}, }}\n");
-        let format_context = current_format3_context(repository);
-        let admitted = admit_source_row(
-            &project,
-            &logical_path,
-            &source,
-            &schema,
-            &format_context,
-            vec![("content".to_owned(), binding)],
-            [ordinal + 3; 16],
-        )
-        .expect("admit a source-owned media row with its Blob binding");
-        let (source_mutation, source_bindings, _) = admitted.into_mutation_and_bindings();
-        if insert_only {
-            let mut mutation = TableMutation::insert(
-                source_mutation.id(),
-                source_mutation.table().to_owned(),
-                source_mutation.key().to_vec(),
-                source_mutation
-                    .value()
-                    .expect("an admitted media row has stored fields")
-                    .to_vec(),
+    let mutation = match storage_mode {
+        CaptureStorageMode::GenericTable => {
+            let row = Vec::new();
+            let mutation = if insert_only {
+                TableMutation::insert(
+                    [ordinal + 3; 16],
+                    table_name,
+                    key.as_bytes().to_vec(),
+                    row,
+                )
+            } else {
+                TableMutation::new(
+                    [ordinal + 3; 16],
+                    table_name,
+                    key.as_bytes().to_vec(),
+                    Some(row),
+                )
+            }
+            .unwrap()
+            .with_table_object_id(TableObjectId::new(relation_id))
+            .with_orp_blob_binding(binding)
+            .unwrap();
+            mutation
+        }
+        CaptureStorageMode::BlobValue | CaptureStorageMode::CompleteSourceRow => {
+            let logical_path = format!("{table_name}/{key}.orna");
+            let source = format!("{{ content: {expression}, }}\n");
+            if matches!(storage_mode, CaptureStorageMode::CompleteSourceRow) {
+                let source_path = repository.worktree().join(&logical_path);
+                if std::fs::read(&source_path).ok().as_deref() != Some(source.as_bytes()) {
+                    std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+                    std::fs::write(&source_path, &source).unwrap();
+                    crate::format3::git(repository.worktree(), &["add", "--", logical_path.as_str()]);
+                    crate::format3::git(
+                        repository.worktree(),
+                        &["commit", "--quiet", "-m", "fixture: add admitted source row"],
+                    );
+                }
+            }
+            let commit = repository.head().unwrap().unwrap();
+            let loader = ProjectLoader::default();
+            let project = loader
+                .load_committed_snapshot(repository, &commit)
+                .expect("load the committed media project");
+            let schema = loader
+                .resolve_committed_source_table_schema(
+                    repository,
+                    &commit,
+                    TableObjectId::new(relation_id),
+                )
+                .expect("resolve the media table from its committed identity manifest");
+            let format_context = current_format3_context(repository);
+            let admitted = admit_source_row(
+                &project,
+                &logical_path,
+                &source,
+                &schema,
+                &format_context,
+                vec![("content".to_owned(), binding)],
+                [ordinal + 3; 16],
             )
+            .expect("admit a source-owned media row with its Blob binding");
+            let (source_mutation, source_bindings, _) = admitted.into_mutation_and_bindings();
+            let (mutation_key, row) = match storage_mode {
+                CaptureStorageMode::BlobValue => {
+                    let [source_blob] = source_bindings.as_slice() else {
+                        panic!("the media source row admits exactly one Blob field")
+                    };
+                    (key.as_bytes().to_vec(), source_blob.encoded_value().to_vec())
+                }
+                CaptureStorageMode::CompleteSourceRow => (
+                    source_mutation.key().to_vec(),
+                    source_mutation
+                        .value()
+                        .expect("an admitted media row has stored fields")
+                        .to_vec(),
+                ),
+                CaptureStorageMode::GenericTable => unreachable!(),
+            };
+            let mut mutation = if insert_only {
+                TableMutation::insert(
+                    source_mutation.id(),
+                    source_mutation.table().to_owned(),
+                    mutation_key,
+                    row,
+                )
+            } else {
+                TableMutation::new(
+                    source_mutation.id(),
+                    source_mutation.table().to_owned(),
+                    mutation_key,
+                    Some(row),
+                )
+            }
             .unwrap()
             .with_table_object_id(TableObjectId::new(relation_id));
             for binding in &source_bindings {
@@ -159,31 +226,7 @@ async fn commit_capture_inner(
                     .expect("retain the admitted Blob pin");
             }
             mutation
-        } else {
-            source_mutation
         }
-    } else {
-        let row = Vec::new();
-        let mutation = if insert_only {
-            TableMutation::insert(
-                [ordinal + 3; 16],
-                table_name,
-                key.as_bytes().to_vec(),
-                row,
-            )
-        } else {
-            TableMutation::new(
-                [ordinal + 3; 16],
-                table_name,
-                key.as_bytes().to_vec(),
-                Some(row),
-            )
-        }
-        .unwrap()
-        .with_table_object_id(TableObjectId::new(relation_id))
-        .with_orp_blob_binding(binding)
-        .unwrap();
-        mutation
     };
     let committed = state
         .commit_table_request_activation(
