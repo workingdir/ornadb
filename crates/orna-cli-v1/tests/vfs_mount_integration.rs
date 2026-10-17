@@ -689,7 +689,23 @@ async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
     .await;
     drop(state);
 
-    let mount_parent = TempDir::new().unwrap();
+    let chunk_oid = git_output(
+        repository_directory.path(),
+        &["hash-object", source_file.to_str().unwrap()],
+    );
+    let objects = repository_directory.path().join(git_output(
+        repository_directory.path(),
+        &["rev-parse", "--git-path", "objects"],
+    ));
+    let chunk_path = objects.join(&chunk_oid[..2]).join(&chunk_oid[2..]);
+    assert!(
+        chunk_path.is_file(),
+        "captured chunk is stored as a loose object"
+    );
+    std::fs::set_permissions(&chunk_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&chunk_path, b"corrupt Git loose object bytes").unwrap();
+
+     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
@@ -732,21 +748,19 @@ async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
         thread::sleep(Duration::from_millis(20));
     }
 
-    let chunk_oid = git_output(
-        repository_directory.path(),
-        &["hash-object", source_file.to_str().unwrap()],
-    );
-    let objects = repository_directory.path().join(git_output(
-        repository_directory.path(),
-        &["rev-parse", "--git-path", "objects"],
-    ));
-    let chunk_path = objects.join(&chunk_oid[..2]).join(&chunk_oid[2..]);
+
+    let metadata = Command::new("cat")
+        .arg(mountpoint.join("Music/london/data.orna"))
+        .output()
+        .expect("read row metadata after corrupting the media chunk");
     assert!(
-        chunk_path.is_file(),
-        "captured chunk is stored as a loose object"
+        metadata.status.success(),
+        "metadata read must not fetch corrupt media payload"
     );
-    std::fs::set_permissions(&chunk_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    std::fs::write(&chunk_path, b"corrupt Git loose object bytes").unwrap();
+    let metadata = String::from_utf8(metadata.stdout).unwrap();
+    assert!(metadata.contains(
+        "content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" }"
+    ));
 
     let mut blob = File::open(&blob_path).expect("open projected Blob");
     let mut byte = [0u8; 1];
