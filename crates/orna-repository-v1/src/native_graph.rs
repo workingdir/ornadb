@@ -186,6 +186,24 @@ impl PrivateRefCleanupOwner {
         Ok(output.stdout)
     }
 
+    fn create_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
+        let zero = "0".repeat(oid.algorithm().width() * 2);
+        self.git_output(&["update-ref", reference, &oid.to_hex(), &zero])?;
+        self.sync_ref_file(reference)
+    }
+
+    fn sync_ref_file(&self, reference: &str) -> Result<(), GraphError> {
+        let output = self.git_output(&["rev-parse", "--git-path", reference])?;
+        let path = resolve_git_path(self.repository.worktree(), &output)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|_| GraphError::DurabilityFailed)?;
+        if !metadata.file_type().is_file() {
+            return Err(GraphError::DurabilityFailed);
+        }
+        File::open(&path)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| GraphError::DurabilityFailed)?;
+        self.sync_ref_directories(reference)
+    }
     fn delete_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
         self.git_output(&["update-ref", "-d", reference, &oid.to_hex()])?;
         self.sync_ref_directories(reference)
@@ -697,6 +715,49 @@ impl NativeGraphContext {
             .collect()
     }
 
+    /// Reads only the logical keys in a bounded row-map interval. Row values
+    /// are not decoded, so directory iteration can continue past one corrupt
+    /// value and defer its error until that row is opened.
+    pub fn range_row_keys(
+        &self,
+        range: &crate::row_store::KeyRange,
+        scope: &RepositoryReadScope,
+    ) -> Result<Vec<crate::row_store::TypedKey>, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+        let root = version.primary_root().clone();
+        let domain = rows_domain_for_version(version);
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+        let root_node = read_node(&root)?;
+        validate_ordered_root_node(&root_node, &domain, expected_count)?;
+        let mut entries = Vec::with_capacity(range.limit());
+        collect_ordered_range_with(
+            &mut read_node,
+            root_node,
+            &domain,
+            None,
+            None,
+            range.lower_inclusive(),
+            range.upper_exclusive(),
+            range.limit(),
+            &mut entries,
+        )?;
+        entries
+            .into_iter()
+            .map(|entry| {
+                crate::row_store::TypedKey::decode_canonical(&entry.key)
+                    .map_err(|_| GraphError::NonCanonicalData)
+            })
+            .collect()
+    }
     /// Applies ordered mutations to the pinned primary ORP-1 root and returns
     /// the new root together with the object accounting of the pass.
     ///
@@ -4204,6 +4265,66 @@ pub(crate) fn reclaim_dead_owner_pin_refs(
     Ok(reclaimed)
 }
 
+fn mount_snapshot_pin_ref(owner_id: &[u8; 16], view_id: &[u8; 32]) -> String {
+    format!(
+        "refs/orna/pins/{}/mounts/{}",
+        hex_encode(owner_id),
+        hex_encode(view_id)
+    )
+}
+
+pub(crate) fn create_mount_snapshot_pin(
+    repository: &crate::Repository,
+    owner_id: &[u8; 16],
+    view_id: &[u8; 32],
+    commit_oid_hex: &str,
+) -> Result<String, GraphError> {
+    let algorithm = algorithm_for_hex(commit_oid_hex).ok_or(GraphError::MalformedOid)?;
+    let oid = NativeOid::from_hex(algorithm, commit_oid_hex)?;
+    let reference = mount_snapshot_pin_ref(owner_id, view_id);
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    owner.create_protected_ref(&reference, &oid)?;
+    Ok(oid.to_hex())
+}
+
+pub(crate) fn verify_mount_snapshot_pin(
+    repository: &crate::Repository,
+    owner_id: &[u8; 16],
+    view_id: &[u8; 32],
+    commit_oid_hex: &str,
+) -> Result<(), GraphError> {
+    let algorithm = algorithm_for_hex(commit_oid_hex).ok_or(GraphError::MalformedOid)?;
+    let expected = NativeOid::from_hex(algorithm, commit_oid_hex)?;
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    let reference = mount_snapshot_pin_ref(owner_id, view_id);
+    let resolved = owner.git_output(&["rev-parse", "--verify", &reference])?;
+    let resolved = String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
+    let resolved = resolved.trim();
+    let algorithm = algorithm_for_hex(resolved).ok_or(GraphError::MalformedReferenceName)?;
+    let actual = NativeOid::from_hex(algorithm, resolved)?;
+    if actual != expected {
+        return Err(GraphError::InvalidProtectedRef);
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_mount_snapshot_pin(
+    repository: &crate::Repository,
+    owner_id: &[u8; 16],
+    view_id: &[u8; 32],
+    commit_oid_hex: &str,
+) -> Result<(), GraphError> {
+    let algorithm = algorithm_for_hex(commit_oid_hex).ok_or(GraphError::MalformedOid)?;
+    let oid = NativeOid::from_hex(algorithm, commit_oid_hex)?;
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    owner.delete_protected_ref(&mount_snapshot_pin_ref(owner_id, view_id), &oid)
+}
 fn resolve_git_path(worktree: &Path, output: &[u8]) -> Result<PathBuf, GraphError> {
     let value = std::str::from_utf8(output)
         .map_err(|_| GraphError::GitObjectMalformed)?
@@ -8982,6 +9103,13 @@ mod persisted_orp_tests {
                 .collect::<Vec<_>>()
         );
         let bounded_objects = bounded_scope.objects_read();
+        let key_scope = graph.open_read_scope().expect("key-only query scope");
+        let key_only = graph
+            .range_row_keys(&bounded_range, &key_scope)
+            .expect("read matching keys without decoding their values");
+        assert_eq!(key_only, bounded_keys);
+        assert_eq!(key_scope.payload_bytes_read(), 0);
+        assert_eq!(key_scope.objects_read(), bounded_objects);
 
         let full_scope = graph.open_read_scope().expect("full query scope");
         let mut full_rows = Vec::with_capacity(700);
