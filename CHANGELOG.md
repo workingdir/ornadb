@@ -6,7 +6,7 @@ been published.
 
 ## Unreleased
 
-- Citation scanning counts requirement IDs used as active Rust test operands outside assertion macros, including through referenced test helpers/constants.
+- Citation scanning counts active test operands and referenced test helpers/constants while excluding diagnostic text, format placeholders, unused helpers/constants, and non-test literals. The optional `--locations-output` flag emits deterministic per-ID source locations.
 
 - Replacing a mounted top-level Blob file updates that field's immutable
   descriptor through the durable row-save transaction while retaining the
