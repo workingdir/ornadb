@@ -319,7 +319,7 @@ async fn commit_capture(
 }
 
 #[tokio::test]
-async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
+async fn publish_rejects_noncanonical_source_key_before_candidate_changes() {
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),
@@ -384,7 +384,7 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
     let error = String::from_utf8_lossy(&published.stderr);
     assert!(error.contains("E2300"), "typed CLI error: {error}");
     assert!(
-        error.contains("source row path could not be resolved"),
+        error.contains("source row key is not canonical"),
         "source failure: {error}"
     );
     assert_eq!(head(root_path), head_before);
@@ -414,6 +414,79 @@ async fn publish_rejects_unprojectable_source_row_before_candidate_changes() {
         .await
         .unwrap();
     assert_eq!(preserved.pending_count().await.unwrap(), pending_before);
+}
+
+#[tokio::test]
+async fn publish_projects_a_new_format3_row_from_its_typed_key_without_source_lookup() {
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("pixel.png"),
+        source.path().join("pixel.png"),
+    )
+    .unwrap();
+    let (directory, repository, relation_id, format_context) =
+        object_format3_repository(source.path());
+    let root_path = directory.path();
+    let source_commit = repository.head().unwrap().unwrap();
+    let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    let fixture = std::fs::read_to_string(REIMPORT_FIXTURE).unwrap();
+    let media_root = format!("{:?}", source.path().to_string_lossy().as_ref());
+    let expression = fixture
+        .trim_end()
+        .replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
+    let logical_key = "runtime/../only";
+    let key = orna_repository_v1::TypedKey::Text(logical_key.to_owned())
+        .canonical_bytes()
+        .unwrap();
+    let projection_path =
+        orna_storage_v1::LoosePath::for_key("Object", &[logical_key.to_owned()]).unwrap();
+    let projection = root_path.join(projection_path.as_managed_path().as_path());
+    assert!(!projection.exists());
+    commit_capture(
+        &repository,
+        &source_commit,
+        &state,
+        writer,
+        &mut bindings,
+        &expression,
+        "image",
+        0xe1,
+        true,
+        relation_id,
+        &format_context,
+        Some(&key),
+    )
+    .await;
+    drop(state);
+
+    let published = run(root_path, &["publish"]);
+    assert!(
+        published.status.success(),
+        "valid typed key needs no pre-existing source path: {}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    assert_ne!(head(root_path), source_commit.as_str());
+    assert!(projection.is_file());
+    assert!(
+        committed_store_rows(&repository, relation_id)
+            .iter()
+            .any(|row| {
+                row.key() == &orna_repository_v1::TypedKey::Text(logical_key.to_owned())
+            })
+    );
 }
 
 #[tokio::test]
