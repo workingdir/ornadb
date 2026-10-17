@@ -118,6 +118,7 @@ struct ServerState {
     documents: HashMap<Uri, Document>,
     semantic_tokens: HashMap<Uri, SemanticTokenSnapshot>,
     next_semantic_token_result: u64,
+    pending_identity_renames: HashMap<Uri, Vec<ObjectIdentityRename>>,
 }
 
 struct SemanticTokenSnapshot {
@@ -128,6 +129,7 @@ struct SemanticTokenSnapshot {
 impl ServerState {
     fn new() -> Self {
         Self {
+            pending_identity_renames: HashMap::new(),
             documents: HashMap::new(),
             semantic_tokens: HashMap::new(),
             next_semantic_token_result: 0,
@@ -397,6 +399,7 @@ fn handle_notification(
                 params.text_document.text,
                 params.text_document.version,
             );
+            state.pending_identity_renames.remove(&uri);
             state.semantic_tokens.remove(&uri);
             state.documents.insert(uri.clone(), document);
             publish_diagnostics(state, connection, &uri);
@@ -427,6 +430,7 @@ fn handle_notification(
             if let Ok(params) =
                 serde_json::from_value::<lsp_types::DidSaveTextDocumentParams>(notification.params)
             {
+                persist_pending_rename_identity(state, &params.text_document.uri);
                 publish_diagnostics(state, connection, &params.text_document.uri);
             }
             false
@@ -436,7 +440,7 @@ fn handle_notification(
                 serde_json::from_value::<lsp_types::DidCloseTextDocumentParams>(notification.params)
             {
                 let uri = params.text_document.uri;
-                state.documents.remove(&uri);
+                state.pending_identity_renames.remove(&uri);
                 state.semantic_tokens.remove(&uri);
                 let _ = connection.sender.send(Message::Notification(Notification {
                     method: "textDocument/publishDiagnostics".to_owned(),
@@ -780,68 +784,54 @@ fn request_document_highlights(
     Ok(serde_json::to_value(highlights)?)
 }
 
-fn persist_rename_identity(
+fn identity_rename_for_request(
     state: &ServerState,
     uri: &Uri,
     position: Position,
     new_name: &str,
-    changes: &HashMap<Uri, Vec<TextEdit>>,
-) {
-    let Some(document) = state.document(uri) else { return };
-    let Ok(url) = url::Url::parse(uri.as_str()) else { return };
-    let Ok(path) = url.to_file_path() else { return };
-    let Ok(repository) = Repository::discover(&path) else { return };
+) -> Option<ObjectIdentityRename> {
+    let document = state.document(uri)?;
+    let url = url::Url::parse(uri.as_str()).ok()?;
+    let path = url.to_file_path().ok()?;
+    let repository = Repository::discover(&path).ok()?;
     let root = repository.worktree();
-    let Ok(relative) = path.strip_prefix(root) else { return };
+    let relative = path.strip_prefix(root).ok()?;
     let logical_path = relative.to_string_lossy().replace('\\', "/");
-    let Some(old_name) = identifier_at(&document.text, position) else { return };
-    let Ok(Some(previous)) = ObjectIdentityManifest::read_worktree(&repository) else { return };
-    let (kind, old_qualified, new_qualified) = {
-        let namespace = module_namespace(&logical_path);
-        let qualify = |name: &str| if namespace.is_empty() { name.to_owned() } else { format!("{namespace}.{name}") };
-        let table = qualify(&old_name);
-        if previous.id(ObjectKind::Table, &table).is_some() {
-            (ObjectKind::Table, table.clone(), qualify(new_name))
-        } else {
-            let suffix = format!(".{old_name}");
-            let mut matches = previous.records().iter().filter(|record| {
-                !record.is_retired() && record.kind() == ObjectKind::Field && record.qualified_name().ends_with(&suffix)
-                    && record.qualified_name()[..record.qualified_name().len() - suffix.len()].starts_with(&namespace)
-            });
-            let Some(record) = matches.next() else { return };
-            if matches.next().is_some() { return; }
-            let parent = &record.qualified_name()[..record.qualified_name().len() - old_name.len()];
-            (ObjectKind::Field, record.qualified_name().to_owned(), format!("{parent}{new_name}"))
-        }
+    let old_name = identifier_at(&document.text, position)?;
+    let previous = ObjectIdentityManifest::read_worktree(&repository).ok()??;
+    let namespace = module_namespace(&logical_path);
+    let qualify = |name: &str| if namespace.is_empty() { name.to_owned() } else { format!("{namespace}.{name}") };
+    let table = qualify(&old_name);
+    let (kind, old_qualified, new_qualified) = if previous.id(ObjectKind::Table, &table).is_some() {
+        (ObjectKind::Table, table, qualify(new_name))
+    } else {
+        let suffix = format!(".{old_name}");
+        let mut matches = previous.records().iter().filter(|record| {
+            !record.is_retired() && record.kind() == ObjectKind::Field && record.qualified_name().ends_with(&suffix)
+                && record.qualified_name()[..record.qualified_name().len() - suffix.len()].starts_with(&namespace)
+        });
+        let record = matches.next()?;
+        if matches.next().is_some() { return None; }
+        let parent = &record.qualified_name()[..record.qualified_name().len() - old_name.len()];
+        (ObjectKind::Field, record.qualified_name().to_owned(), format!("{parent}{new_name}"))
     };
-    let rename = ObjectIdentityRename::new(kind, old_qualified, new_qualified);
+    Some(ObjectIdentityRename::new(kind, old_qualified, new_qualified))
+}
+
+fn persist_pending_rename_identity(state: &mut ServerState, uri: &Uri) {
+    let Some(renames) = state.pending_identity_renames.remove(uri) else { return; };
+    let Ok(url) = url::Url::parse(uri.as_str()) else { return; };
+    let Ok(path) = url.to_file_path() else { return; };
+    let Ok(repository) = Repository::discover(&path) else { return; };
     let Ok(project) = ProjectLoader::default().load(&repository) else { return; };
-    let mut modules = project.into_modules();
-    let open_modules = state.documents.values().filter_map(|opened| {
-        let opened_url = url::Url::parse(opened.uri.as_str()).ok()?;
-        let opened_path = opened_url.to_file_path().ok()?;
-        let relative = opened_path.strip_prefix(root).ok()?;
-        let logical = relative.to_string_lossy().replace('\\', "/");
-        if !logical.ends_with(".orna") { return None; }
-        let text = if let Some(edits) = changes.get(&opened.uri) {
-            apply_text_edits(&opened.text, edits)?
-        } else { opened.text.clone() };
-        Some(ModuleInput::new(logical, text))
+    let modules = project.into_modules();
+    let Ok(Some(previous)) = ObjectIdentityManifest::read_worktree(&repository) else { return; };
+    let applicable = renames.into_iter().filter(|rename| {
+        ObjectIdentityManifest::reconcile_with_renames(&modules, Some(&previous), std::slice::from_ref(rename)).is_ok()
     }).collect::<Vec<_>>();
-    for open_module in open_modules {
-        if let Some(module) = modules.iter_mut().find(|module| module.logical_path == open_module.logical_path) {
-            *module = open_module;
-        } else {
-            modules.push(open_module);
-        }
-    }
-    if !modules.iter().any(|module| module.logical_path == logical_path) {
-        let source = changes.get(uri).and_then(|edits| apply_text_edits(&document.text, edits));
-        let Some(source) = source else { return };
-        modules.push(ModuleInput::new(logical_path, source));
-    }
+    if applicable.is_empty() { return; }
     let _ = ObjectIdentityManifest::reconcile_and_write_worktree_with_renames(
-        &repository, &modules, &[rename],
+        &repository, &modules, &applicable,
     );
 }
 
@@ -886,7 +876,9 @@ fn request_rename(
     let Some(changes) = semantic_rename(&state.documents, &uri, position, &params.new_name) else {
         return Ok(serde_json::Value::Null);
     };
-    persist_rename_identity(state, &uri, position, &params.new_name, &changes);
+    if let Some(rename) = identity_rename_for_request(state, &uri, position, &params.new_name) {
+        state.pending_identity_renames.entry(uri.clone()).or_default().push(rename);
+    }
     let workspace_edit = WorkspaceEdit {
         changes: Some(changes),
         document_changes: None,
@@ -2620,38 +2612,28 @@ mod identity_rename_follow_tests {
     }
 }
 
-
 #[cfg(test)]
 mod persisted_object_rename_tests {
     use super::*;
     use std::{fs, process::Command};
 
-    #[test]
-    fn rename_preserves_object_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        let init = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap();
-        assert!(init.success());
-        let source = "pub table Media(id: Str) { payload: Blob, }";
-        fs::write(directory.path().join("main.orna"), source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
-        let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(directory.path().join("main.orna"))
-            .unwrap()
-            .as_str()
-            .parse::<Uri>()
-            .unwrap();
-        let document = Document::new(uri.clone(), source.to_owned(), 1);
-        let mut state = ServerState::new();
-        state.documents.insert(uri.clone(), document);
-        let request = Request::new(
+    fn notify(state: &mut ServerState, notification: Notification) {
+        let (connection, _transport) = Connection::memory();
+        handle_notification(state, &connection, notification);
+    }
+
+    fn did_save(state: &mut ServerState, uri: &Uri) {
+        notify(
+            state,
+            Notification {
+                method: "textDocument/didSave".to_owned(),
+                params: serde_json::json!({ "textDocument": { "uri": uri } }),
+            },
+        );
+    }
+
+    fn rename_request(uri: Uri) -> Request {
+        Request::new(
             1.into(),
             "textDocument/rename".to_owned(),
             serde_json::json!({
@@ -2659,14 +2641,83 @@ mod persisted_object_rename_tests {
                 "position": { "line": 0, "character": 11 },
                 "newName": "Archive",
             }),
-        );
+        )
+    }
 
-        let response = request_rename(&mut state, request).unwrap();
-        assert!(!response.is_null());
-        let updated = ObjectIdentityManifest::read_worktree(&repository)
+    #[test]
+    fn rename_preserves_object_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
             .unwrap()
-            .unwrap();
+            .success());
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let source_path = directory.path().join("main.orna");
+        fs::write(&source_path, source).unwrap();
+        let repository = Repository::discover(directory.path()).unwrap();
+        let module = ModuleInput::new("main.orna", source);
+        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
+            &repository, std::slice::from_ref(&module),
+        ).unwrap();
+        let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
+        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let mut state = ServerState::new();
+        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+
+        let response = request_rename(&mut state, rename_request(uri.clone())).unwrap();
+        let manifest_path = directory.path().join(".orna/object-identities.cbor");
+        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
+
+        let workspace_edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        let edits = workspace_edit.changes.unwrap().remove(&uri).unwrap();
+        let renamed_source = apply_text_edits(source, &edits).unwrap();
+        notify(&mut state, Notification {
+            method: "textDocument/didChange".to_owned(),
+            params: serde_json::json!({
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": renamed_source }],
+            }),
+        });
+        fs::write(&source_path, &renamed_source).unwrap();
+        did_save(&mut state, &uri);
+
+        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
         assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
-        assert!(directory.path().join(".orna/object-identities.cbor").is_file());
+        assert!(manifest_path.is_file());
+    }
+
+    #[test]
+    fn declined_or_lost_rename_response_does_not_persist_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success());
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let source_path = directory.path().join("main.orna");
+        fs::write(&source_path, source).unwrap();
+        let repository = Repository::discover(directory.path()).unwrap();
+        let module = ModuleInput::new("main.orna", source);
+        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
+            &repository, std::slice::from_ref(&module),
+        ).unwrap();
+        let manifest_path = directory.path().join(".orna/object-identities.cbor");
+        let original_bytes = fs::read(&manifest_path).unwrap();
+        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let mut state = ServerState::new();
+        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+
+        let lost_response = request_rename(&mut state, rename_request(uri.clone())).unwrap();
+        assert!(!lost_response.is_null());
+        drop(lost_response);
+        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
+        did_save(&mut state, &uri);
+
+        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
+        assert_eq!(fs::read(&manifest_path).unwrap(), original_bytes);
     }
 }

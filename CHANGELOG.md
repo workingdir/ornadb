@@ -17,8 +17,8 @@ been published.
 - Source identity reconciliation accepts explicit rename mappings and preserves
   existing IDs across authorized name changes. Unassisted renames remain
   delete-plus-create, and retired IDs are never reused.
-- LSP declaration renames persist authorized identity mappings in the worktree
-  manifest, preserving the renamed table or field ID.
+- LSP declaration renames persist authorized identity mappings only after the
+  edited source is saved, preserving table and field IDs when an edit is applied.
 - The `mv` CLI command renames committed tables and retains their table and
   child-field IDs in uncommitted source and identity-manifest changes. It moves
   the associated loose-row directory and can resume after a source rename is
