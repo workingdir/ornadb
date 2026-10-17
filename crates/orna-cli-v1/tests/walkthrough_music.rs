@@ -1,4 +1,4 @@
-use std::{path::Path, process::{Command, Output}};
+use std::{io::Write, path::Path, process::{Command, Output, Stdio}};
 
 use orna_application_v1::{ApplicationAuthority, CommittedTableIdentity};
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
@@ -28,6 +28,19 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn run_repl(directory: &Path, input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args(["--db", directory.to_str().unwrap(), "repl"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Orna REPL process");
+    child.stdin.take().unwrap().write_all(format!("{input}\n:quit\n").as_bytes()).unwrap();
+    child.wait_with_output().unwrap()
 }
 struct UnusedResolver;
 
@@ -64,7 +77,60 @@ fn format3_context_for_database(commit: &GitCommitRef, database_id: [u8; 16]) ->
         std::sync::Arc::new(UnusedResolver),
     ).unwrap()
 }
+const REPL_UPDATE_SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, }\npub fn main() {}\n";
 
+#[tokio::test]
+async fn repl_update() {
+    let (directory, repository, relation_id) = format3_repository_for_table(REPL_UPDATE_SOURCE, "music");
+    let root = directory.path();
+    let source_commit = repository.head().unwrap().unwrap();
+    let loader = ProjectLoader::default();
+    let project = loader.load_committed_snapshot(&repository, &source_commit).unwrap();
+    let schema = loader.resolve_committed_source_table_schema(&repository, &source_commit, TableObjectId::new(relation_id)).unwrap();
+    let value_context = format3_context_for_database(&source_commit, *schema.database_id());
+    let row = admit_source_row(&project, "music/london.orna", r#"{ title: "Old title", artist: "Artist", }"#, &schema, &value_context, vec![], [0x72; 16]).unwrap();
+    let (identity, initial_digest) = cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, identity, initial_digest).await.unwrap();
+    let writer = state.acquire_lease(identity.repository_id).await.unwrap();
+    let context = state.begin_activation().await.unwrap();
+    let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+    let application = authority.admit_module_with_committed_table_metadata("main.orna", REPL_UPDATE_SOURCE, "main", [CommittedTableIdentity::new("music", TableObjectId::new(relation_id))]).unwrap();
+    let staged_source = authority.evaluate_staged_with_source_rows(&application, &Environment::new(), vec![row], &value_context).unwrap();
+    let staged = staged_source.stage(&authority, &context).unwrap();
+    state.commit_table_activation(writer, &context, staged.mutations(), staged.next_digest(), &NoFault).await.unwrap();
+    drop(state);
+
+    let published = run(root, &["publish"]);
+    assert_eq!(published.status.code(), Some(0), "initial publish failed: {}", stderr(&published));
+    git(root, &["reset", "--quiet", "--hard", "HEAD"]);
+    std::fs::remove_file(root.join("music/london.orna")).unwrap();
+
+    let invalid = run_repl(root, r#"main.music.update("london", { title: 7 })"#);
+    let invalid_output = format!("{}{}", String::from_utf8_lossy(&invalid.stdout), stderr(&invalid));
+    assert!(invalid_output.contains("ORNA-S021-TYPE"), "invalid update should be rejected: {invalid_output}");
+    git(root, &["checkout", "--", "music/london.orna"]);
+    let invalid_publish = run(root, &["publish"]);
+    assert_eq!(invalid_publish.status.code(), Some(0), "invalid update left a publication: {}", stderr(&invalid_publish));
+    let rows = committed_store_rows(&repository, relation_id);
+    assert_eq!(rows.len(), 1);
+    let fields = rows[0].value().encoded_fields().unwrap();
+    let decoded = orna_value_v1::decode_canonical_storage_value(fields).unwrap();
+    assert!(format!("{decoded:?}").contains("Old title"), "invalid update changed the committed row: {decoded:?}");
+    std::fs::remove_file(root.join("music/london.orna")).unwrap();
+
+    let updated = run_repl(root, r#"main.music.update("london", { title: "New title" })"#);
+    let stdout = String::from_utf8_lossy(&updated.stdout);
+    assert!(!stdout.contains("ORNA-EVAL-TABLE-SNAPSHOT"), "REPL update must resolve the committed row snapshot: {stdout} {}", stderr(&updated));
+    assert_eq!(updated.status.code(), Some(0), "REPL update failed: {stdout} {}", stderr(&updated));
+    git(root, &["checkout", "--", "music/london.orna"]);
+    let published = run(root, &["publish"]);
+    assert_eq!(published.status.code(), Some(0), "updated row publish failed: {}", stderr(&published));
+    let rows = committed_store_rows(&repository, relation_id);
+    assert_eq!(rows.len(), 1);
+    let fields = rows[0].value().encoded_fields().unwrap();
+    let decoded = orna_value_v1::decode_canonical_storage_value(fields).unwrap();
+    assert!(format!("{decoded:?}").contains("New title"), "updated title was not persisted: {decoded:?}; REPL stdout={stdout}; stderr={}", stderr(&updated));
+}
 #[tokio::test]
 async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let (directory, repository, relation_id) = format3_repository_for_table(MUSIC_SOURCE, "music");
