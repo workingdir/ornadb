@@ -476,20 +476,17 @@ fn run_mv(
                 return Err(mv_loose_row_path_error());
             }
             if sync_parent_directory(&old_table_directory).is_err() {
-                let rows_restored = restore_table_directory(
+                rollback_failed_mv_update(
+                    &repository,
+                    &previous,
+                    &next,
                     &old_table_directory,
                     &new_table_directory,
-                );
-                let source_restored = original_source.as_deref().map_or(true, |original| {
-                    restore_source_after_failed_write(
-                        &source_path,
-                        original.as_bytes(),
-                        modules[module_index].source.as_bytes(),
-                    )
-                });
-                if !rows_restored || !source_restored {
-                    return Err(mv_partial_update_error());
-                }
+                    row_directory_moved,
+                    &source_path,
+                    original_source.as_deref().map(str::as_bytes),
+                    modules[module_index].source.as_bytes(),
+                )?;
                 return Err(mv_loose_row_path_error());
             }
         }
@@ -879,9 +876,13 @@ fn rollback_failed_mv_update(
         };
     let rows_restored = !row_directory_moved
         || restore_table_directory(old_table_directory, new_table_directory);
-    let source_restored = original_source.map_or(true, |original| {
-        restore_source_after_failed_write(source_path, original, updated_source)
-    });
+    let source_restored = if rows_restored {
+        original_source.map_or(true, |original| {
+            restore_source_after_failed_write(source_path, original, updated_source)
+        })
+    } else {
+        false
+    };
     if manifest_restored && rows_restored && source_restored {
         Ok(())
     } else {
@@ -909,7 +910,7 @@ fn mv_partial_update_error() -> Diagnostic {
     Diagnostic::target(
         "E2100",
         "table rename could not be fully rolled back",
-        "inspect the source module and object identity manifest before retrying `mv`",
+        "inspect the source module, table row directory, and object identity manifest before retrying `mv`",
     )
 }
 
@@ -1263,6 +1264,38 @@ mod mv_tests {
         assert!(restore_table_directory(&old_path, &new_path));
         fs::create_dir(&new_path).unwrap();
         assert!(!restore_table_directory(&old_path, &new_path));
+    }
+
+    #[test]
+    fn failed_mv_rollback_keeps_source_when_row_directory_restore_fails() {
+        const ORIGINAL: &[u8] = b"pub table Media(id: Str) { payload: Blob, }";
+        const UPDATED: &[u8] = b"pub table Archive(id: Str) { payload: Blob, }";
+        let (directory, repository, previous, next) = manifest_rollback_state();
+        next.write_worktree(&repository).unwrap();
+        let (source, old_directory, new_directory) = moved_mv_rollback_files(&directory);
+        fs::create_dir(&old_directory).unwrap();
+        fs::write(old_directory.join("conflict.orna"), b"existing old directory").unwrap();
+
+        let error = rollback_failed_mv_update(
+            &repository,
+            &previous,
+            &next,
+            &old_directory,
+            &new_directory,
+            true,
+            &source,
+            Some(ORIGINAL),
+            UPDATED,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.title, "table rename could not be fully rolled back");
+        assert_eq!(fs::read(&source).unwrap(), UPDATED);
+        assert_eq!(
+            fs::read(old_directory.join("conflict.orna")).unwrap(),
+            b"existing old directory"
+        );
+        assert_eq!(fs::read(new_directory.join("row.orna")).unwrap(), b"row");
     }
 
     fn manifest_rollback_state() -> (
