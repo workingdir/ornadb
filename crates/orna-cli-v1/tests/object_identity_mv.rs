@@ -115,6 +115,27 @@ fn mv_moves_loose_rows_to_the_renamed_table_directory() {
         "Archive/north/42.orna"
     );
 }
+#[test]
+fn mv_leaves_directories_without_owned_loose_rows_in_place() {
+    let (without_rows, _) = initialized_project();
+
+    let output = run_cli(without_rows.path(), &["mv", "Media", "Archive"]);
+
+    assert!(output.status.success(), "mv stderr: {:?}", output.stderr);
+    assert!(!without_rows.path().join("Media").exists());
+    assert!(!without_rows.path().join("Archive").exists());
+
+    let (with_notes, _) = initialized_project();
+    let notes_directory = with_notes.path().join("Media");
+    fs::create_dir(&notes_directory).expect("table notes directory");
+    fs::write(notes_directory.join("notes.txt"), b"keep me").expect("table note");
+
+    let output = run_cli(with_notes.path(), &["mv", "Media", "Archive"]);
+
+    assert!(output.status.success(), "mv stderr: {:?}", output.stderr);
+    assert_eq!(fs::read(notes_directory.join("notes.txt")).unwrap(), b"keep me");
+    assert!(!with_notes.path().join("Archive").exists());
+}
 
 #[test]
 fn mv_resumes_after_source_write_before_manifest_write() {
