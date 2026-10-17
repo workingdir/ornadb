@@ -241,20 +241,29 @@ pub fn commit_source_row_to_native_graph(
     key: &str,
 ) -> String {
     let head = repository.head().unwrap().unwrap();
-    let fields = repository
-        .read_committed_file(&head, format!("Object/{key}.orna"), 1 << 20)
-        .unwrap();
     let source_path = format!("{source_commit}:Object/{key}.orna");
     let original_source = git_output(root, &["show", &source_path], None);
     let format = repository
         .open_pinned_format_context(head.as_str())
         .unwrap();
     let rows = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&rows).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let stored_row = graph
+        .range_rows(&KeyRange::new(None, None, 16).expect("key range"), &scope)
+        .expect("read the committed source rows")
+        .into_iter()
+        .find(|row| logical_key_bytes(row.key()).as_slice() == key.as_bytes())
+        .expect("the source row is present in the committed row map");
+    let fields = stored_row
+        .value()
+        .encoded_fields()
+        .expect("the fixture row fields fit inline");
     let schema_oid = rows.version().schema().schema_oid();
     let schema_digest = *rows.version().schema().schema_digest();
     let database_id = format.require_database_id().unwrap();
 
-    let raw_fields = ContextValue::decode_in_context(&fields, ValueFormat::Rov3, context).unwrap();
+    let raw_fields = ContextValue::decode_in_context(fields, ValueFormat::Rov3, context).unwrap();
     let mut dependency_oids = BTreeSet::new();
     collect_row_dependencies(raw_fields.raw(), &mut dependency_oids);
     let dependencies = dependency_oids
@@ -271,7 +280,7 @@ pub fn commit_source_row_to_native_graph(
     row.extend_from_slice(&row_domain);
     row.extend_from_slice(&[0x81, 0x82]);
     row.extend_from_slice(&key_bytes);
-    row.extend_from_slice(&fields);
+    row.extend_from_slice(fields);
     let row_root = native_fixture_node(root, &row, &dependencies);
     let schema_oid_hex = schema_oid.to_hex();
 
