@@ -1193,10 +1193,10 @@ struct CommittedProjectionSchema {
     stored_field_count: usize,
 }
 
-struct ProjectedRuntimeMutation {
-    key: Vec<u8>,
-    rekey_to: Option<Vec<u8>>,
-    value: Option<Vec<u8>>,
+pub struct ProjectedRuntimeMutation {
+    pub key: Vec<u8>,
+    pub rekey_to: Option<Vec<u8>>,
+    pub value: Option<Vec<u8>>,
 }
 
 fn schema_descriptor_entry(
@@ -1264,27 +1264,44 @@ fn committed_projection_schema(
 /// while a scalar is wrapped byte-exactly only for a one-field committed
 /// schema. The descriptor comes from the row map at the pinned expected head.
 
+fn project_runtime_key(
+    schema: &CommittedProjectionSchema,
+    relation_id: [u8; 16],
+    bytes: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let key = if schema.text_primary_key {
+        let text = std::str::from_utf8(bytes).map_err(|_| Error::RepositoryUnavailable)?;
+        TypedKey::Text(text.to_owned())
+            .canonical_bytes()
+            .map_err(|_| Error::RepositoryUnavailable)?
+    } else {
+        bytes.to_vec()
+    };
+    schema
+        .descriptor
+        .validate_stored_key(relation_id, &key)
+        .map_err(|_| Error::RepositoryUnavailable)?;
+    Ok(key)
+}
+
+/// Converts runtime keys to the committed store-key representation.
+/// Single-`Str` keys arrive as UTF-8; other shapes arrive canonical.
+pub fn canonicalize_runtime_key(
+    descriptor: &SchemaDescriptor,
+    relation_id: [u8; 16],
+    bytes: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let schema = committed_projection_schema(descriptor.clone())?;
+    project_runtime_key(&schema, relation_id, bytes)
+}
+
 fn project_runtime_mutation(
     schema: &CommittedProjectionSchema,
     relation_id: [u8; 16],
     mutation: &TableMutation,
     value_context: &Format3Context,
 ) -> Result<ProjectedRuntimeMutation, Error> {
-    let project_key = |bytes: &[u8]| -> Result<Vec<u8>, Error> {
-        let key = if schema.text_primary_key {
-            let text = std::str::from_utf8(bytes).map_err(|_| Error::RepositoryUnavailable)?;
-            TypedKey::Text(text.to_owned())
-                .canonical_bytes()
-                .map_err(|_| Error::RepositoryUnavailable)?
-        } else {
-            bytes.to_vec()
-        };
-        schema
-            .descriptor
-            .validate_stored_key(relation_id, &key)
-            .map_err(|_| Error::RepositoryUnavailable)?;
-        Ok(key)
-    };
+    let project_key = |bytes: &[u8]| project_runtime_key(schema, relation_id, bytes);
     let key = project_key(mutation.key())?;
     let rekey_to = mutation.rekey_to().map(project_key).transpose()?;
     let value = mutation
@@ -1327,6 +1344,17 @@ fn project_runtime_mutation(
         rekey_to,
         value,
     })
+}
+/// Projects a runtime mutation with the committed schema and format context.
+/// This is the same key and row normalization used by publication.
+pub fn project_runtime_mutation_for_descriptor(
+    descriptor: &SchemaDescriptor,
+    relation_id: [u8; 16],
+    mutation: &TableMutation,
+    value_context: &Format3Context,
+) -> Result<ProjectedRuntimeMutation, Error> {
+    let schema = committed_projection_schema(descriptor.clone())?;
+    project_runtime_mutation(&schema, relation_id, mutation, value_context)
 }
 
 fn build_frozen_publication_store_root(
