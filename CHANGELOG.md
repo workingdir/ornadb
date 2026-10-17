@@ -6,6 +6,8 @@ been published.
 
 ## Unreleased
 
+- Citation scanning counts requirement IDs used as active Rust test operands outside assertion macros, including through referenced test helpers/constants.
+
 - Replacing a mounted top-level Blob file updates that field's immutable
   descriptor through the durable row-save transaction while retaining the
   existing row key and the previous content for already-open handles.
