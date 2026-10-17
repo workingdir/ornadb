@@ -852,17 +852,26 @@ fn persist_pending_rename_identity(state: &mut ServerState, uri: &Uri) {
     let applicable = chains.into_iter().filter_map(|chain| {
         let first = chain.first()?;
         let mut furthest_saved_rename = None;
-        for step in &chain {
+        for (index, step) in chain.iter().enumerate() {
             let rename = ObjectIdentityRename::new(
                 first.kind(),
                 first.old_qualified_name(),
                 step.new_qualified_name(),
             );
-            if ObjectIdentityManifest::reconcile_with_renames(
+            let Ok(reconciled) = ObjectIdentityManifest::reconcile_with_renames(
                 &modules, Some(&previous), std::slice::from_ref(&rename),
-            ).is_ok() {
-                furthest_saved_rename = Some(rename);
+            ) else {
+                continue;
+            };
+            // A later step is only evidenced when its previous target no longer
+            // exists in the saved source. Otherwise an unrelated declaration
+            // can make a declined step appear valid.
+            if chain[..index].iter().any(|earlier| {
+                reconciled.id(first.kind(), earlier.new_qualified_name()).is_some()
+            }) {
+                continue;
             }
+            furthest_saved_rename = Some(rename);
         }
         furthest_saved_rename
     }).collect::<Vec<_>>();
@@ -2770,6 +2779,40 @@ mod persisted_object_rename_tests {
         assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
     }
 
+    #[test]
+    fn unrelated_declaration_matching_declined_target_does_not_steal_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success());
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let source_path = directory.path().join("main.orna");
+        fs::write(&source_path, source).unwrap();
+        let repository = Repository::discover(directory.path()).unwrap();
+        let module = ModuleInput::new("main.orna", source);
+        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
+            &repository, std::slice::from_ref(&module),
+        ).unwrap();
+        let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
+        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let mut state = ServerState::new();
+        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        let declined_response = request_rename(&mut state, rename_request(uri.clone(), "Vault")).unwrap();
+        assert!(!declined_response.is_null());
+        drop(declined_response);
+        let saved_source = format!("{saved_source}\npub table Vault(id: Str) {{ payload: Blob, }}");
+        fs::write(&source_path, &saved_source).unwrap();
+        did_save(&mut state, &uri);
+
+        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
+        assert_ne!(updated.id(ObjectKind::Table, "Vault"), Some(&original_id));
+    }
     #[test]
     fn sequential_rename_chain_not_saved_does_not_persist_identity() {
         let directory = tempfile::tempdir().unwrap();
