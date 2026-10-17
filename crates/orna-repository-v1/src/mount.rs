@@ -12,9 +12,13 @@
 //! FUSE tree, which remains the VFS-1 host slice.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
+use fs2::FileExt;
+
 
 use sha2::{Digest, Sha256};
 
@@ -24,7 +28,28 @@ use crate::{HistoricalFormatContext, Repository, RuntimePaths};
 /// runtime, so a view identifier never collides with a snapshot or store digest.
 const MOUNT_VIEW_DOMAIN: &[u8] = b"orna.repository.mount.view.v1\0";
 /// First line of every mount-view record.
-const MOUNT_RECORD_MAGIC: &str = "orna-mount-view 1";
+const MOUNT_RECORD_MAGIC: &str = "orna-mount-view 2";
+const MOUNT_REGISTRY_OWNER_ID_FILE: &str = "mount-registry-owner-id-v1";
+
+/// Serializes mount records and their snapshot-pin updates across processes.
+fn mount_registry_lock(paths: &RuntimePaths, exclusive: bool) -> Result<fs::File, MountError> {
+    let locks = paths.locks();
+    fs::create_dir_all(&locks).map_err(|_| MountError::HostFilesystem)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(locks.join("mount-registry.lock"))
+        .map_err(|_| MountError::HostFilesystem)?;
+    if exclusive {
+        file.lock_exclusive()
+    } else {
+        file.lock_shared()
+    }
+    .map_err(|_| MountError::HostFilesystem)?;
+    Ok(file)
+}
 
 /// Why a mount view could not be attached or reported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,12 +60,18 @@ pub enum MountError {
     Format(crate::FormatContextError),
     /// The mountpoint exists and is not empty.
     MountpointNotEmpty,
+    /// A mount view is already recorded at this mountpoint.
+    MountpointAlreadyAttached,
     /// The mountpoint is the backing worktree or inside/above it.
     MountpointOverlapsWorktree,
     /// A recorded mount view was malformed and cannot be reported as truth.
     RecordInvalid,
     /// No view is attached at that mountpoint.
     NotAttached,
+    /// The immutable commit could not be durably pinned for this view.
+    SnapshotPinUnavailable,
+    /// Attachment rollback could not clean up its pin or staging record.
+    AttachRollbackFailed,
 }
 
 impl std::fmt::Display for MountError {
@@ -49,11 +80,16 @@ impl std::fmt::Display for MountError {
             Self::HostFilesystem => formatter.write_str("mountpoint or mount registry unavailable"),
             Self::Format(error) => write!(formatter, "snapshot not mountable: {error}"),
             Self::MountpointNotEmpty => formatter.write_str("mountpoint is not empty"),
+            Self::MountpointAlreadyAttached => formatter.write_str("a mount view is already attached there"),
             Self::MountpointOverlapsWorktree => {
                 formatter.write_str("mountpoint overlaps the backing worktree")
             }
             Self::RecordInvalid => formatter.write_str("retained mount-view record is invalid"),
             Self::NotAttached => formatter.write_str("no mount view is attached there"),
+            Self::SnapshotPinUnavailable => formatter.write_str("snapshot could not be pinned for the mount"),
+            Self::AttachRollbackFailed => formatter.write_str(
+                "mount attachment failed and rollback could not clean up its pin or staging record",
+            ),
         }
     }
 }
@@ -67,6 +103,85 @@ fn hex(bytes: &[u8]) -> String {
     text
 }
 
+fn mount_registry_owner_id(
+    paths: &RuntimePaths,
+    create: bool,
+) -> Result<[u8; 16], MountError> {
+    let path = paths.root().join(MOUNT_REGISTRY_OWNER_ID_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(MountError::RecordInvalid);
+            }
+            let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
+            let value = std::str::from_utf8(&bytes).map_err(|_| MountError::RecordInvalid)?;
+            let owner_id = parse_hex16(value)?;
+            if owner_id == [0; 16] {
+                return Err(MountError::RecordInvalid);
+            }
+            Ok(owner_id)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
+            Err(MountError::RecordInvalid)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let owner_id = *crate::Uuid::new_v4().as_bytes();
+            if owner_id == [0; 16] {
+                return Err(MountError::HostFilesystem);
+            }
+            let staging = paths.root().join(format!(
+                ".{MOUNT_REGISTRY_OWNER_ID_FILE}-{}.tmp",
+                hex(&owner_id)
+            ));
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staging)
+                .map_err(|_| MountError::HostFilesystem)?;
+            if file
+                .write_all(hex(&owner_id).as_bytes())
+                .and_then(|()| file.sync_all())
+                .is_err()
+            {
+                let _ = fs::remove_file(&staging);
+                return Err(MountError::HostFilesystem);
+            }
+            drop(file);
+            match fs::hard_link(&staging, &path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&staging);
+                    return mount_registry_owner_id(paths, false);
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&staging);
+                    return Err(MountError::HostFilesystem);
+                }
+            }
+            let _ = fs::remove_file(&staging);
+            Ok(owner_id)
+        }
+        Err(_) => Err(MountError::HostFilesystem),
+    }
+}
+
+fn mount_view_identity(mountpoint: &Path, snapshot_id: &[u8; 32]) -> [u8; 32] {
+    let mut identity = Sha256::new();
+    identity.update(MOUNT_VIEW_DOMAIN);
+    identity.update(mountpoint.as_os_str().as_encoded_bytes());
+    identity.update([0u8]);
+    identity.update(snapshot_id);
+    identity.finalize().into()
+}
+
+fn remove_registry_file(path: &Path) -> Result<(), MountError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(MountError::HostFilesystem),
+    }
+}
+
 /// One attached read-only view of an exactly-resolved snapshot.
 ///
 /// Reads go through the pinned historical context, so schema, row map, native
@@ -78,6 +193,9 @@ pub struct MountView {
     repository: Repository,
     mountpoint: PathBuf,
     selector: String,
+    registry_owner_id: [u8; 16],
+    owner_id: [u8; 16],
+    pin_oid_hex: String,
     view_id: [u8; 32],
     context: HistoricalFormatContext,
 }
@@ -111,6 +229,14 @@ impl MountView {
         {
             return Err(MountError::MountpointOverlapsWorktree);
         }
+        let _registry_lock = mount_registry_lock(repository.runtime_paths(), true)?;
+        let registry_owner_id = reconcile_mount_registry_locked(repository)?;
+        let record_path = mount_record_path(repository.runtime_paths(), &resolved_mountpoint);
+        match fs::symlink_metadata(&record_path) {
+            Ok(_) => return Err(MountError::MountpointAlreadyAttached),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(MountError::HostFilesystem),
+        }
         if resolved_mountpoint.is_dir()
             && fs::read_dir(&resolved_mountpoint)
                 .map_err(|_| MountError::HostFilesystem)?
@@ -120,21 +246,56 @@ impl MountView {
             return Err(MountError::MountpointNotEmpty);
         }
 
-        let mut identity = Sha256::new();
-        identity.update(MOUNT_VIEW_DOMAIN);
-        identity.update(resolved_mountpoint.as_os_str().as_encoded_bytes());
-        identity.update([0u8]);
-        identity.update(context.snapshot_id());
-        let view_id: [u8; 32] = identity.finalize().into();
+        let view_id = mount_view_identity(&resolved_mountpoint, context.snapshot_id());
+        let owner_id = *crate::Uuid::new_v4().as_bytes();
+        let pin_oid_hex = match crate::native_graph::create_mount_snapshot_pin(
+            repository,
+            &registry_owner_id,
+            &owner_id,
+            &view_id,
+            context.commit_oid_hex(),
+        ) {
+            Ok(pin_oid_hex) => pin_oid_hex,
+            Err(_) => {
+                if crate::native_graph::delete_mount_snapshot_pin(
+                    repository,
+                    &registry_owner_id,
+                    &owner_id,
+                    &view_id,
+                    context.commit_oid_hex(),
+                )
+                .is_err()
+                {
+                    return Err(MountError::AttachRollbackFailed);
+                }
+                return Err(MountError::SnapshotPinUnavailable);
+            }
+        };
 
         let view = Self {
             repository: repository.clone(),
             mountpoint: resolved_mountpoint,
             selector: selector.to_owned(),
+            registry_owner_id,
+            owner_id,
+            pin_oid_hex,
             view_id,
             context,
         };
-        view.write_record()?;
+        if let Err(error) = view.write_record() {
+            let pin_cleanup = crate::native_graph::delete_mount_snapshot_pin(
+                repository,
+                &view.registry_owner_id,
+                &view.owner_id,
+                &view.view_id,
+                &view.pin_oid_hex,
+            );
+            let staging_cleanup = remove_registry_file(&view.staging_path());
+            if pin_cleanup.is_err() || staging_cleanup.is_err() {
+                return Err(MountError::AttachRollbackFailed);
+            }
+            return Err(error);
+        }
         Ok(view)
     }
 
@@ -179,21 +340,37 @@ impl MountView {
         mount_record_path(self.repository.runtime_paths(), &self.mountpoint)
     }
 
+    fn staging_path(&self) -> PathBuf {
+        self.record_path().with_extension("staging")
+    }
+
     fn write_record(&self) -> Result<(), MountError> {
         let paths = self.repository.runtime_paths();
         let directory = mount_registry_dir(paths);
         fs::create_dir_all(&directory).map_err(|_| MountError::HostFilesystem)?;
         let record = format!(
-            "{MOUNT_RECORD_MAGIC}\nmountpoint {}\nselector {}\nsnapshot {}\nview {}\nformat {}\nlegacy {}\nread_only true\n",
+            "{MOUNT_RECORD_MAGIC}
+mountpoint {}
+selector {}
+snapshot {}
+view {}
+owner {}
+pin {}
+format {}
+legacy {}
+read_only true
+",
             self.mountpoint.display(),
             self.selector,
             hex(self.context.snapshot_id()),
             hex(&self.view_id),
+            hex(&self.owner_id),
+            self.pin_oid_hex.as_str(),
             self.context.repository_format_number(),
             self.context.is_legacy_format(),
         );
         let path = self.record_path();
-        let staging = path.with_extension("staging");
+        let staging = self.staging_path();
         fs::write(&staging, record.as_bytes()).map_err(|_| MountError::HostFilesystem)?;
         fs::rename(&staging, &path).map_err(|_| MountError::HostFilesystem)
     }
@@ -210,35 +387,84 @@ impl MountView {
     /// Re-reads the durable record this view wrote, proving the attached view
     /// is still reported exactly as it was admitted.
     pub fn verify_record(&self) -> Result<MountStatus, MountError> {
-        let bytes = fs::read(self.record_path()).map_err(|_| MountError::HostFilesystem)?;
+        let _registry_lock = mount_registry_lock(self.repository.runtime_paths(), false)?;
+        let registry_owner_id = mount_registry_owner_id(self.repository.runtime_paths(), false)?;
+        if registry_owner_id != self.registry_owner_id {
+            return Err(MountError::RecordInvalid);
+        }
+        let bytes = fs::read(self.record_path()).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MountError::NotAttached
+            } else {
+                MountError::HostFilesystem
+            }
+        })?;
         let record = MountRecord::parse(&bytes)?;
-        if record.view != self.view_id
+        validate_mount_record_location(
+            self.repository.runtime_paths(),
+            &self.record_path(),
+            &record,
+        )?;
+        if record.mountpoint != self.mountpoint
+            || record.view != self.view_id
             || record.snapshot != *self.context.snapshot_id()
             || record.format != self.context.repository_format_number()
             || record.legacy != self.context.is_legacy_format()
+            || record.owner_id != self.owner_id
+            || record.pin_oid_hex != self.pin_oid_hex
         {
             return Err(MountError::RecordInvalid);
         }
+        crate::native_graph::verify_mount_snapshot_pin(
+            &self.repository,
+            &registry_owner_id,
+            &self.owner_id,
+            &self.view_id,
+            &self.pin_oid_hex,
+        )
+        .map_err(|_| MountError::RecordInvalid)?;
         Ok(MountStatus {
             mountpoint: record.mountpoint,
             snapshot: record.snapshot,
             view: record.view,
+            owner_id: record.owner_id,
             format: record.format,
             legacy: record.legacy,
         })
     }
-
     fn release(&mut self) -> Result<(), MountError> {
+        let _registry_lock = mount_registry_lock(self.repository.runtime_paths(), true)?;
+        let registry_owner_id = reconcile_mount_registry_locked(&self.repository)?;
+        if registry_owner_id != self.registry_owner_id {
+            return Err(MountError::RecordInvalid);
+        }
         let path = self.record_path();
-        let Ok(bytes) = fs::read(&path) else {
-            return Ok(());
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(MountError::HostFilesystem),
         };
-        // Only the view that owns the current record removes it: a replacement
-        // view attached at the same mountpoint keeps its own evidence.
-        if MountRecord::parse(&bytes)?.view != self.view_id {
+        let record = MountRecord::parse(&bytes)?;
+        if record.view != self.view_id
+            || record.owner_id != self.owner_id
+            || record.pin_oid_hex != self.pin_oid_hex
+        {
             return Ok(());
         }
-        fs::remove_file(&path).map_err(|_| MountError::HostFilesystem)
+        if record.mountpoint != self.mountpoint
+            || mount_view_identity(&record.mountpoint, &record.snapshot) != record.view
+        {
+            return Err(MountError::RecordInvalid);
+        }
+        crate::native_graph::delete_mount_snapshot_pin(
+            &self.repository,
+            &registry_owner_id,
+            &self.owner_id,
+            &self.view_id,
+            &self.pin_oid_hex,
+        )
+        .map_err(|_| MountError::SnapshotPinUnavailable)?;
+        remove_registry_file(&path)
     }
 }
 
@@ -260,6 +486,7 @@ pub struct MountStatus {
     mountpoint: PathBuf,
     snapshot: [u8; 32],
     view: [u8; 32],
+    owner_id: [u8; 16],
     format: u8,
     legacy: bool,
 }
@@ -305,6 +532,8 @@ struct MountRecord {
     mountpoint: PathBuf,
     selector: String,
     snapshot: [u8; 32],
+    owner_id: [u8; 16],
+    pin_oid_hex: String,
     view: [u8; 32],
     format: u8,
     legacy: bool,
@@ -321,6 +550,8 @@ impl MountRecord {
         let mut selector = None;
         let mut snapshot = None;
         let mut view = None;
+        let mut owner_id = None;
+        let mut pin_oid_hex = None;
         let mut format = None;
         let mut legacy = None;
         for line in lines {
@@ -332,6 +563,8 @@ impl MountRecord {
                 "selector" => selector = Some(value.to_owned()),
                 "snapshot" => snapshot = Some(parse_hex32(value)?),
                 "view" => view = Some(parse_hex32(value)?),
+                "owner" => owner_id = Some(parse_hex16(value)?),
+                "pin" => pin_oid_hex = Some(parse_mount_pin_oid(value)?),
                 "format" => {
                     format = Some(value.parse::<u8>().map_err(|_| MountError::RecordInvalid)?)
                 }
@@ -351,6 +584,8 @@ impl MountRecord {
             selector: selector.ok_or(MountError::RecordInvalid)?,
             snapshot: snapshot.ok_or(MountError::RecordInvalid)?,
             view: view.ok_or(MountError::RecordInvalid)?,
+            owner_id: owner_id.ok_or(MountError::RecordInvalid)?,
+            pin_oid_hex: pin_oid_hex.ok_or(MountError::RecordInvalid)?,
             format: format.ok_or(MountError::RecordInvalid)?,
             legacy: legacy.ok_or(MountError::RecordInvalid)?,
         })
@@ -369,6 +604,28 @@ fn parse_hex32(value: &str) -> Result<[u8; 32], MountError> {
     Ok(bytes)
 }
 
+fn parse_hex16(value: &str) -> Result<[u8; 16], MountError> {
+    if value.len() != 32 {
+        return Err(MountError::RecordInvalid);
+    }
+    let mut bytes = [0u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| MountError::RecordInvalid)?;
+    }
+    Ok(bytes)
+}
+
+fn parse_mount_pin_oid(value: &str) -> Result<String, MountError> {
+    let algorithm = match value.len() {
+        40 => crate::native_graph::GitHashAlgorithm::Sha1,
+        64 => crate::native_graph::GitHashAlgorithm::Sha256,
+        _ => return Err(MountError::RecordInvalid),
+    };
+    crate::native_graph::NativeOid::from_hex(algorithm, value)
+        .map(|oid| oid.to_hex())
+        .map_err(|_| MountError::RecordInvalid)
+}
 fn mount_registry_dir(paths: &RuntimePaths) -> PathBuf {
     paths.root().join("mounts")
 }
@@ -382,6 +639,96 @@ fn mount_record_path(paths: &RuntimePaths, mountpoint: &Path) -> PathBuf {
     mount_registry_dir(paths).join(format!("mount-{}.orna", hex(&name)))
 }
 
+fn validate_mount_record_location(
+    paths: &RuntimePaths,
+    path: &Path,
+    record: &MountRecord,
+) -> Result<(), MountError> {
+    if mount_record_path(paths, &record.mountpoint) != path
+        || mount_view_identity(&record.mountpoint, &record.snapshot) != record.view
+    {
+        return Err(MountError::RecordInvalid);
+    }
+    Ok(())
+}
+
+fn reconcile_mount_registry_locked(
+    repository: &Repository,
+) -> Result<[u8; 16], MountError> {
+    let paths = repository.runtime_paths();
+    let registry_owner_id = mount_registry_owner_id(paths, true)?;
+    let mut pins = BTreeMap::new();
+    for pin in crate::native_graph::list_mount_snapshot_pins(repository, &registry_owner_id)
+        .map_err(|_| MountError::SnapshotPinUnavailable)?
+    {
+        let key = (pin.owner_id, pin.view_id);
+        if pins.insert(key, pin.oid_hex).is_some() {
+            return Err(MountError::RecordInvalid);
+        }
+    }
+
+    let directory = mount_registry_dir(paths);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            for ((owner_id, view_id), pin_oid_hex) in pins {
+                crate::native_graph::delete_mount_snapshot_pin(
+                    repository,
+                    &registry_owner_id,
+                    &owner_id,
+                    &view_id,
+                    &pin_oid_hex,
+                )
+                .map_err(|_| MountError::SnapshotPinUnavailable)?;
+            }
+            return Ok(registry_owner_id);
+        }
+        Err(_) => return Err(MountError::HostFilesystem),
+    };
+
+    let mut seen = BTreeSet::new();
+    let mut stale_records = Vec::new();
+    let mut transient_files = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
+        if path.extension().is_some_and(|extension| {
+            extension == "staging" || extension == "tmp"
+        }) {
+            transient_files.push(path);
+            continue;
+        }
+        let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
+        let record = MountRecord::parse(&bytes)?;
+        validate_mount_record_location(paths, &path, &record)?;
+        let key = (record.owner_id, record.view);
+        if !seen.insert(key) {
+            return Err(MountError::RecordInvalid);
+        }
+        match pins.get(&key) {
+            Some(pin_oid) if pin_oid == &record.pin_oid_hex => {}
+            Some(_) => return Err(MountError::RecordInvalid),
+            None => stale_records.push(path),
+        }
+    }
+
+    for ((owner_id, view_id), pin_oid_hex) in pins {
+        if !seen.contains(&(owner_id, view_id)) {
+            crate::native_graph::delete_mount_snapshot_pin(
+                repository,
+                &registry_owner_id,
+                &owner_id,
+                &view_id,
+                &pin_oid_hex,
+            )
+            .map_err(|_| MountError::SnapshotPinUnavailable)?;
+        }
+    }
+    for path in stale_records.into_iter().chain(transient_files) {
+        remove_registry_file(&path)?;
+    }
+    Ok(registry_owner_id)
+}
+
 impl Repository {
     /// Reports every currently attached read-only mount view, ordered by
     /// mountpoint.
@@ -391,6 +738,8 @@ impl Repository {
     /// resolved to. A malformed record is reported rather than skipped: a
     /// retained record that cannot be read is not absence of a mount.
     pub fn mount_status(&self) -> Result<Vec<MountStatus>, MountError> {
+        let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
+        let registry_owner_id = reconcile_mount_registry_locked(self)?;
         let directory = mount_registry_dir(self.runtime_paths());
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -399,20 +748,28 @@ impl Repository {
         };
         let mut statuses = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|_| MountError::HostFilesystem)?;
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "staging")
-            {
+            let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
+            if path.extension().is_some_and(|extension| {
+                extension == "staging" || extension == "tmp"
+            }) {
                 continue;
             }
             let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
             let record = MountRecord::parse(&bytes)?;
+            validate_mount_record_location(self.runtime_paths(), &path, &record)?;
+            crate::native_graph::verify_mount_snapshot_pin(
+                self,
+                &registry_owner_id,
+                &record.owner_id,
+                &record.view,
+                &record.pin_oid_hex,
+            )
+            .map_err(|_| MountError::RecordInvalid)?;
             statuses.push(MountStatus {
                 mountpoint: record.mountpoint,
                 snapshot: record.snapshot,
                 view: record.view,
+                owner_id: record.owner_id,
                 format: record.format,
                 legacy: record.legacy,
             });
@@ -434,36 +791,89 @@ impl Repository {
         let resolved = mountpoint
             .canonicalize()
             .unwrap_or_else(|_| mountpoint.clone());
-        let record = self
-            .mount_status()?
-            .into_iter()
-            .find(|status| status.mountpoint == resolved)
-            .ok_or(MountError::NotAttached)?;
-        debug_assert_eq!(record.mountpoint, resolved);
-        // The record names one immutable commit selector. Resolving that
-        // selector again — never a branch tip or the workspace HEAD — restores
-        // the attached view, and the resolved snapshot must match the logical
-        // identity the record reported.
-        let bytes = fs::read(mount_record_path(self.runtime_paths(), &resolved))
-            .map_err(|_| MountError::HostFilesystem)?;
-        let parsed = MountRecord::parse(&bytes)?;
+        let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
+        let registry_owner_id = reconcile_mount_registry_locked(self)?;
+        let record_path = mount_record_path(self.runtime_paths(), &resolved);
+        let bytes = fs::read(&record_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MountError::NotAttached
+            } else {
+                MountError::HostFilesystem
+            }
+        })?;
+        let record = MountRecord::parse(&bytes)?;
+        if record.mountpoint != resolved {
+            return Err(MountError::RecordInvalid);
+        }
+        validate_mount_record_location(self.runtime_paths(), &record_path, &record)?;
+        self.open_mount_record(record, &registry_owner_id)
+    }
+
+    /// Re-attaches to a recorded view using the view identity carried by its
+    /// FUSE source, independent of the registry's canonical mountpoint path.
+    pub fn open_mount_view_by_id(&self, view_id_hex: &str) -> Result<MountView, MountError> {
+        let view_id = parse_hex32(view_id_hex)?;
+        let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
+        let registry_owner_id = reconcile_mount_registry_locked(self)?;
+        let directory = mount_registry_dir(self.runtime_paths());
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(MountError::NotAttached);
+            }
+            Err(_) => return Err(MountError::HostFilesystem),
+        };
+        let mut found = None;
+        for entry in entries {
+            let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
+            if path.extension().is_some_and(|extension| {
+                extension == "staging" || extension == "tmp"
+            }) {
+                continue;
+            }
+            let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
+            let record = MountRecord::parse(&bytes)?;
+            validate_mount_record_location(self.runtime_paths(), &path, &record)?;
+            if record.view == view_id {
+                if found.is_some() {
+                    return Err(MountError::RecordInvalid);
+                }
+                found = Some(record);
+            }
+        }
+        self.open_mount_record(found.ok_or(MountError::NotAttached)?, &registry_owner_id)
+    }
+
+    fn open_mount_record(
+        &self,
+        record: MountRecord,
+        registry_owner_id: &[u8; 16],
+    ) -> Result<MountView, MountError> {
+        crate::native_graph::verify_mount_snapshot_pin(
+            self,
+            registry_owner_id,
+            &record.owner_id,
+            &record.view,
+            &record.pin_oid_hex,
+        )
+        .map_err(|_| MountError::RecordInvalid)?;
         let context = self
-            .open_format_context_at_selector(&parsed.selector)
+            .open_format_context_at_selector(&record.pin_oid_hex)
             .map_err(MountError::Format)?;
-        // The recorded coordinate is re-verified, not trusted: a record whose
-        // format or legacy flag no longer describes the resolved commit is
-        // corrupt and must not be served as an attached view.
-        if context.snapshot_id() != &parsed.snapshot
-            || context.repository_format_number() != parsed.format
-            || context.is_legacy_format() != parsed.legacy
+        if context.snapshot_id() != &record.snapshot
+            || context.repository_format_number() != record.format
+            || context.is_legacy_format() != record.legacy
         {
             return Err(MountError::RecordInvalid);
         }
         Ok(MountView {
             repository: self.clone(),
-            mountpoint: resolved,
-            selector: parsed.selector,
-            view_id: parsed.view,
+            mountpoint: record.mountpoint,
+            selector: record.selector,
+            registry_owner_id: *registry_owner_id,
+            owner_id: record.owner_id,
+            pin_oid_hex: record.pin_oid_hex,
+            view_id: record.view,
             context,
         })
     }
@@ -480,13 +890,38 @@ impl Repository {
         let resolved = mountpoint
             .canonicalize()
             .unwrap_or_else(|_| mountpoint.clone());
-        let status = self
-            .mount_status()?
-            .into_iter()
-            .find(|status| status.mountpoint == resolved)
-            .ok_or(MountError::NotAttached)?;
-        fs::remove_file(mount_record_path(self.runtime_paths(), &resolved))
-            .map_err(|_| MountError::HostFilesystem)?;
+        let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
+        let registry_owner_id = reconcile_mount_registry_locked(self)?;
+        let record_path = mount_record_path(self.runtime_paths(), &resolved);
+        let bytes = fs::read(&record_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MountError::NotAttached
+            } else {
+                MountError::HostFilesystem
+            }
+        })?;
+        let record = MountRecord::parse(&bytes)?;
+        if record.mountpoint != resolved {
+            return Err(MountError::RecordInvalid);
+        }
+        validate_mount_record_location(self.runtime_paths(), &record_path, &record)?;
+        let status = MountStatus {
+            mountpoint: record.mountpoint,
+            snapshot: record.snapshot,
+            view: record.view,
+            owner_id: record.owner_id,
+            format: record.format,
+            legacy: record.legacy,
+        };
+        crate::native_graph::delete_mount_snapshot_pin(
+            self,
+            &registry_owner_id,
+            &record.owner_id,
+            &record.view,
+            &record.pin_oid_hex,
+        )
+        .map_err(|_| MountError::SnapshotPinUnavailable)?;
+        remove_registry_file(&record_path)?;
         Ok(status)
     }
 }
