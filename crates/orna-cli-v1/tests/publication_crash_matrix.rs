@@ -432,7 +432,13 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     let recovered = RuntimeState::open(&repository, identity, digest)
         .await
         .unwrap_or_else(|error| panic!("runtime reopen after candidate crash: {error:?}"));
-    assert!(repository.read_publication_journal().unwrap().is_some());
+    // PUB-3 steps 1 and 6: freezing retains pending mutations, while the
+    // durable publication journal is written only after candidate construction.
+    // This child was killed at the earlier candidate hook, so no journal
+    // should exist yet and the frozen range must still be pending for recovery.
+    assert!(repository.read_publication_journal().unwrap().is_none());
+    assert_eq!(head(&repository), base.as_str(), "candidate crash advanced HEAD");
+    assert!(recovered.pending_count().await.unwrap() > 0);
     let recovered_index = RuntimePublicationCoordinator::recover(&repository, &recovered)
         .await
         .expect("recover the candidate after process death");
