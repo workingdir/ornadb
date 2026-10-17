@@ -246,8 +246,53 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                     ));
                 }
             }
+            let attached_view = if view.is_some() {
+                match repository.open_mount_view(&mountpoint) {
+                    Ok(attached_view) => match attached_view.verify_record() {
+                        Ok(current_status) => {
+                            if Some(&current_status) != view {
+                                return Err(mount_error(
+                                    "Unmount was refused",
+                                    "mount view changed after its status was read",
+                                ));
+                            }
+                            Some(attached_view)
+                        }
+                        Err(orna_repository_v1::MountError::NotAttached) => None,
+                        Err(error) => {
+                            return Err(mount_error(
+                                "Mount view could not be verified",
+                                error.to_string(),
+                            ));
+                        }
+                    },
+                    Err(error) => {
+                        return Err(mount_error(
+                            "Mount view could not be opened",
+                            error.to_string(),
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
             crate::fuse_mount::unmount_mountpoint(&mountpoint)
                 .map_err(|error| mount_error("FUSE unmount failed", error))?;
+            if let Some(expected_view) = view {
+                if let Some(attached_view) = attached_view {
+                    attached_view.detach().map_err(|error| {
+                        mount_error("Mount view could not be detached", error.to_string())
+                    })?;
+                }
+                writeln!(
+                    io::stdout().lock(),
+                    "unmounted {} snapshot {}",
+                    expected_view.mountpoint().display(),
+                    expected_view.snapshot_hex(),
+                )
+                .map_err(|_| stdout_error())?;
+                return Ok(());
+            }
             if view.is_none() {
                 writeln!(
                     io::stdout().lock(),
