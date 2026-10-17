@@ -10,11 +10,12 @@ been published.
   existing IDs across authorized name changes. Unassisted renames remain
   delete-plus-create, and retired IDs are never reused.
 - The `mv` CLI command renames committed tables and retains their table and
-  child-field IDs in uncommitted source and identity-manifest changes.
+  child-field IDs in uncommitted source and identity-manifest changes. It moves
+  the associated loose-row directory and can resume after a source rename is
+  interrupted before the manifest update.
 - Optional Blob fields preserve `Some` bindings through source-row admission,
   metadata queries, history diffs and offline export; overflow verification counts
   nested Blob references through `Some` without reading payload bytes.
-
 - FUSE workspace mounts page through the pinned row index on listing, resolve
   known keys by the index, and isolate projection errors as EIO so one corrupt
   row does not block neighboring rows.
@@ -135,6 +136,10 @@ release gate has passed.
   admitted with. The candidate metadata lookup rejects a row whose spelling is
   not canonical MIME-1, or that differs from the admitted pair, so a transfer
   record cannot report an annotation the pin never admitted.
+- The CLI publication boundary validates format-3 rows against the pinned
+  committed table binding and derives portable loose-row paths from typed
+  keys; legacy formats retain committed-source path resolution. Invalid rows
+  fail closed while preserving the pending range.
 - `orna history <relation> --diff <from> <to>` decodes source-owned Object row
   fields against each endpoint's committed schema and compares stored Blob
   annotations without fetching payloads.
