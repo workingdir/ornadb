@@ -270,9 +270,21 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let expected_cover_sha: [u8; 32] = Sha256::digest(cover_bytes).into();
     assert_eq!(cover_listing["sha256"], hex(&expected_cover_sha));
 
-    // WALKTHROUGH §7's explicit hints alter metadata, not the raw content identity.
+    // MIME-1 defaults to preferred suffixes; explicit hints alter metadata, not identity.
     let script = b"export const answer = 42;\n";
     std::fs::write(song_root.path().join("module.bin"), script).unwrap();
+    let default_script_expr = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"module.bin\", 1024), \"text/javascript\")"
+    );
+    let default_script = evaluate_expression_ovb2_with_effects(
+        &default_script_expr, &Default::default(), Limits::default(), &mut bindings,
+    ).unwrap();
+    let default_script_blob = default_script.blob().unwrap();
+    assert_eq!(default_script_blob.suffix(), None);
+    assert_eq!(default_script_blob.media_type(), "text/javascript");
+    assert_eq!(orna_value_v1::selected_suffix(default_script_blob.media_type(), default_script_blob.suffix()).unwrap(), "js");
+    let expected_script_sha: [u8; 32] = Sha256::digest(script).into();
+    assert_eq!(default_script_blob.content_identity().sha256(), expected_script_sha);
     let module_expr = format!(
         "sys.blob.annotate(sys.blob.capture_file({root}, \"module.bin\", 1024), \"text/javascript\", \"mjs\")"
     );
@@ -284,6 +296,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     assert_eq!(module_blob.suffix(), Some("mjs"));
     let expected_script_sha: [u8; 32] = Sha256::digest(script).into();
     assert_eq!(module_blob.content_identity().sha256(), expected_script_sha);
+    assert_eq!(module_blob.content_identity(), default_script_blob.content_identity());
 
     let old_mpeg = evaluate_expression_ovb2_with_effects(
         &format!(
@@ -296,7 +309,8 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let old_mpeg_blob = old_mpeg.blob().unwrap();
     assert_eq!(old_mpeg_blob.media_type(), "audio/mpeg");
     assert_eq!(old_mpeg_blob.suffix(), Some("mp2"));
-     assert_eq!(old_mpeg_blob.content_identity().sha256(), expected_sha);
+    assert_eq!(orna_value_v1::selected_suffix(old_mpeg_blob.media_type(), None).unwrap(), "mp3");
+    assert_eq!(old_mpeg_blob.content_identity().sha256(), expected_sha);
     drop(bindings);
     // Complete-copy export and restore use only the archive after source removal.
     let outside = TempDir::new().unwrap();
