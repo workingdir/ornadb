@@ -116,25 +116,29 @@ fn mv_moves_loose_rows_to_the_renamed_table_directory() {
     );
 }
 #[test]
-fn mv_leaves_directories_without_owned_loose_rows_in_place() {
-    let (without_rows, _) = initialized_project();
+fn mv_renames_orp_only_table_without_creating_loose_row_directory() {
+    let (directory, _) = initialized_project();
+    assert!(!directory.path().join("Media").exists());
 
-    let output = run_cli(without_rows.path(), &["mv", "Media", "Archive"]);
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
 
     assert!(output.status.success(), "mv stderr: {:?}", output.stderr);
-    assert!(!without_rows.path().join("Media").exists());
-    assert!(!without_rows.path().join("Archive").exists());
+    assert!(!directory.path().join("Media").exists());
+    assert!(!directory.path().join("Archive").exists());
+}
 
-    let (with_notes, _) = initialized_project();
-    let notes_directory = with_notes.path().join("Media");
+#[test]
+fn mv_leaves_table_directory_with_only_notes_in_place() {
+    let (directory, _) = initialized_project();
+    let notes_directory = directory.path().join("Media");
     fs::create_dir(&notes_directory).expect("table notes directory");
     fs::write(notes_directory.join("notes.txt"), b"keep me").expect("table note");
 
-    let output = run_cli(with_notes.path(), &["mv", "Media", "Archive"]);
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
 
     assert!(output.status.success(), "mv stderr: {:?}", output.stderr);
     assert_eq!(fs::read(notes_directory.join("notes.txt")).unwrap(), b"keep me");
-    assert!(!with_notes.path().join("Archive").exists());
+    assert!(!directory.path().join("Archive").exists());
 }
 
 #[test]
@@ -282,8 +286,8 @@ fn mv_refuses_a_symlinked_loose_row_directory() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "symlinked path should fail");
     assert!(
-        stderr.contains("E2100") && stderr.contains("loose-row directory is unavailable or unsafe"),
-        "unexpected symlink-path diagnostic: {stderr}"
+        stderr.contains("E2100") && stderr.contains("project source could not be loaded"),
+        "unexpected loader diagnostic: {stderr}"
     );
     assert_eq!(fs::read(&source_path).unwrap(), source_before);
     assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
@@ -310,8 +314,8 @@ fn mv_refuses_a_symlinked_row_destination() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "symlink destination should fail");
     assert!(
-        stderr.contains("E2100") && stderr.contains("loose-row directory is unavailable or unsafe"),
-        "unexpected symlink-destination diagnostic: {stderr}"
+        stderr.contains("E2100") && stderr.contains("project source could not be loaded"),
+        "unexpected loader diagnostic: {stderr}"
     );
     assert_eq!(fs::read(&source_path).unwrap(), source_before);
     assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
