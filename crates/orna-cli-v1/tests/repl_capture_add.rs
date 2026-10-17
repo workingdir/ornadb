@@ -4,7 +4,7 @@ use std::{
 };
 
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
-use orna_runtime_v1::RuntimeState;
+use orna_runtime_v1::{RuntimeState, RuntimeTableIdentity, TableObjectId};
 use orna_semantic_v1::{Catalogue, ModuleInput};
 use orna_value_v1::{ContextValue, Raw, Value, ValueFormat};
 
@@ -93,6 +93,27 @@ fn git_head(directory: &std::path::Path) -> String {
         .to_owned()
 }
 
+async fn committed_media_row(
+    state: &RuntimeState,
+    relation_id: [u8; 16],
+    key: &str,
+) -> Option<Vec<u8>> {
+    let identity = RuntimeTableIdentity::new("media", TableObjectId::new(relation_id))
+        .expect("committed media identity");
+    let encoded_key = Value::new(Raw::Text(key.to_owned()))
+        .expect("typed media key")
+        .encode()
+        .expect("encode typed media key");
+    let snapshot = state
+        .begin_admitted_table_activation(std::slice::from_ref(&identity))
+        .await
+        .expect("read admitted media table");
+    snapshot
+        .query_exact("media", &encoded_key)
+        .expect("query committed media row")
+        .map(<[u8]>::to_vec)
+}
+
 #[tokio::test]
 async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_commit() {
     let (directory, repository, relation_id) = format3_repository(MUSIC_SOURCE);
@@ -102,7 +123,7 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let head_before = git_head(root);
 
     let input = format!(
-        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add(\"london\", \"Live in London\", audio)",
+        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add(\"london\", \"Live in London\", audio);",
         root = root.to_string_lossy().as_ref(),
     );
     let output = run_repl(root, &input);
@@ -112,6 +133,10 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
         !stdout.contains("ORNA-REPL-EFFECT"),
         "trusted REPL rejected the captured insert: {stdout}"
     );
+    assert!(
+        !stdout.contains("ORNA-EVAL-VALUE"),
+        "trusted REPL could not evaluate the captured insert: {stdout}"
+    );
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
     assert_eq!(git_head(root), head_before, "REPL must not publish a Git commit");
 
@@ -119,11 +144,9 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let state = RuntimeState::open(&repository, identity, initial_digest)
         .await
         .expect("reopen the durable runtime after the REPL process exits");
-    let encoded_row = state
-        .committed_table_row("media", b"london")
+    let encoded_row = committed_media_row(&state, relation_id, "london")
         .await
-        .expect("read the durable row after restart")
-        .unwrap_or_else(|| panic!("the captured row is durable; REPL output: {stdout}"));
+        .unwrap_or_else(|| panic!("committed media row exists; REPL output: {stdout}"));
     let format = repository
         .open_format_context()
         .expect("open committed format-3 context");
@@ -152,21 +175,28 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
 
 #[tokio::test]
 async fn repl_capture_add_accepts_a_key_beyond_the_legacy_path_component_limit() {
-    let (directory, repository, _) = format3_repository(MUSIC_SOURCE);
+    let (directory, repository, relation_id) = format3_repository(MUSIC_SOURCE);
     let root = directory.path();
     let key = "x".repeat(201);
     std::fs::write(root.join("recording.mp3"), b"long key capture")
         .expect("write synthetic media");
     let head_before = git_head(root);
     let input = format!(
-        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add({key:?}, \"Long-key recording\", audio)",
+        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add({key:?}, \"Long-key recording\", audio);",
         root = root.to_string_lossy().as_ref(),
     );
 
     let output = run_repl(root, &input);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}\n{:?}", output.stderr);
-    assert!(!stdout.contains("ORNA-REPL-EFFECT"), "trusted REPL rejected long key: {stdout}");
+    assert!(
+        !stdout.contains("ORNA-REPL-EFFECT"),
+        "trusted REPL rejected long key: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ORNA-EVAL-VALUE"),
+        "trusted REPL could not evaluate the captured long-key row: {stdout}"
+    );
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
     assert_eq!(git_head(root), head_before, "REPL must not publish a Git commit");
 
@@ -175,12 +205,10 @@ async fn repl_capture_add_accepts_a_key_beyond_the_legacy_path_component_limit()
         .await
         .expect("reopen runtime after long-key insert");
     assert!(
-        state
-            .committed_table_row("media", key.as_bytes())
+        committed_media_row(&state, relation_id, &key)
             .await
-            .expect("read long-key row after restart")
             .is_some(),
-        "the typed key remains durable without a legacy loose-row filename",
+        "the typed key remains durable without a legacy loose-row filename; REPL output: {stdout}",
     );
 }
 #[test]

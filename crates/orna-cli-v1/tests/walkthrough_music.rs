@@ -3,12 +3,12 @@ use std::{path::Path, process::{Command, Output}};
 use orna_application_v1::{ApplicationAuthority, CommittedTableIdentity};
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_project_v1::{ProjectLoader, admit_source_row};
-use orna_repository_v1::{GitCommitRef, Repository};
+use orna_repository_v1::Repository;
 use orna_runtime_v1::{NoFault, RuntimeState, TableObjectId};
 use orna_semantic_v1::Catalogue;
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use sha2::{Digest, Sha256};
-use orna_value_v1::{AvailabilityState, BlobResolver, ContentReference, ContextValue, Error as ValueError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot, ValueFormat};
+use orna_value_v1::{ContextValue, ValueFormat};
 use tempfile::TempDir;
 #[path = "support/format3.rs"]
 mod format3;
@@ -29,41 +29,6 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
-struct UnusedResolver;
-
-impl BlobResolver for UnusedResolver {
-    fn read_range(
-        &self,
-        _reference: &ContentReference,
-        _offset: u64,
-        _length: u64,
-    ) -> orna_value_v1::Result<Vec<u8>> {
-        Err(ValueError::ContentUnavailable)
-    }
-}
-
-fn format3_context_for_database(commit: &GitCommitRef, database_id: [u8; 16]) -> Format3Context {
-    let oid = commit.as_str().as_bytes().chunks_exact(2).map(|digits| {
-        u8::from_str_radix(std::str::from_utf8(digits).unwrap(), 16).unwrap()
-    }).collect::<Vec<_>>();
-    let algorithm = match oid.len() {
-        20 => GitHash::Sha1,
-        32 => GitHash::Sha256,
-        _ => panic!("unexpected Git object identifier width"),
-    };
-    let root = NativeOid::from_bytes(&vec![0x55; algorithm.oid_width()]).unwrap();
-    Format3Context::from_persisted(
-        database_id,
-        Snapshot::Commit { database: database_id, algorithm, oid },
-        algorithm,
-        root.clone(),
-        root,
-        AvailabilityState::Available,
-        OwnerLifetime::new([0x66; 16]),
-        Format3Quota::new(1, 0).unwrap(),
-        std::sync::Arc::new(UnusedResolver),
-    ).unwrap()
-}
 
 #[tokio::test]
 async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
@@ -81,11 +46,24 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
         TableObjectId::new(relation_id),
     ).unwrap();
 
+    let runtime_owner_id = [0x61; 16];
+    let (format_commit, format_context) = repository
+        .open_pinned_format_context_with_commit("HEAD")
+        .unwrap();
+    assert_eq!(format_commit, commit);
+    let format_context = format_context.with_runtime_owner_id(runtime_owner_id);
     let (identity, initial_digest) = cli_runtime_identity(&repository);
-    let state = RuntimeState::open(&repository, identity, initial_digest).await.unwrap();
+    let state = RuntimeState::open_with_owner_id(
+        &repository,
+        identity,
+        initial_digest,
+        runtime_owner_id,
+    )
+    .await
+    .unwrap();
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
     let context = state.begin_activation().await.unwrap();
-    let capability = repository.capture_capability(relation_id).unwrap();
+    let capability = format_context.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(song_root.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
@@ -102,7 +80,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
         &mut bindings,
     ).unwrap();
     let content = bindings.accept_captured_blob_for_row(&captured).unwrap();
-    let value_context = format3_context_for_database(&commit, *schema.database_id());
+    let value_context = format_context.open_value_context(relation_id).unwrap();
     assert_eq!(content.transfer_record().database_id(), schema.database_id());
     ContextValue::decode_in_context(content.encoded_value(), ValueFormat::Rov3, &value_context)
         .expect("captured Blob must decode under the committed database context");

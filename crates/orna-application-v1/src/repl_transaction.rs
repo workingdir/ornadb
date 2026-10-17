@@ -634,6 +634,7 @@ impl Ovb2EffectHandler for ReplTransactionEffectHandler<'_, '_> {
             cancellation,
         )
     }
+
 }
 
 fn contains_contextual_blob_value(value: &OvbRaw) -> bool {
