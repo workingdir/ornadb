@@ -4374,23 +4374,118 @@ pub(crate) fn reclaim_dead_owner_pin_refs(
     Ok(reclaimed)
 }
 
-fn mount_snapshot_pin_ref(owner_id: &[u8; 16], view_id: &[u8; 32]) -> String {
+fn mount_snapshot_pin_ref(
+    registry_owner_id: &[u8; 16],
+    owner_id: &[u8; 16],
+    view_id: &[u8; 32],
+) -> String {
     format!(
-        "refs/orna/pins/{}/mounts/{}",
+        "refs/orna/pins/{}/mounts/{}/{}",
+        hex_encode(registry_owner_id),
         hex_encode(owner_id),
         hex_encode(view_id)
     )
 }
 
+pub(crate) struct MountSnapshotPin {
+    pub(crate) owner_id: [u8; 16],
+    pub(crate) view_id: [u8; 32],
+    pub(crate) oid_hex: String,
+}
+
+pub(crate) fn list_mount_snapshot_pins(
+    repository: &crate::Repository,
+    registry_owner_id: &[u8; 16],
+) -> Result<Vec<MountSnapshotPin>, GraphError> {
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    let prefix = format!(
+        "refs/orna/pins/{}/mounts/",
+        hex_encode(registry_owner_id)
+    );
+    let listing = owner.git_output(&[
+        "for-each-ref",
+        "--format=%(refname) %(objectname)",
+        &prefix,
+    ])?;
+    let listing = String::from_utf8(listing).map_err(|_| GraphError::MalformedReferenceName)?;
+    let mut pins = Vec::new();
+    for line in listing.lines() {
+        let (reference, oid_hex) = line
+            .split_once(' ')
+            .ok_or(GraphError::MalformedReferenceName)?;
+        let Some(suffix) = reference.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((owner_hex, view_hex)) = suffix.split_once('/') else {
+            return Err(GraphError::MalformedReferenceName);
+        };
+        if view_hex.contains('/') {
+            return Err(GraphError::MalformedReferenceName);
+        }
+        let owner_id = decode_mount_pin_component::<16>(owner_hex)?;
+        let view_id = decode_mount_pin_component::<32>(view_hex)?;
+        let algorithm = algorithm_for_hex(oid_hex).ok_or(GraphError::MalformedReferenceName)?;
+        let oid = NativeOid::from_hex(algorithm, oid_hex)?;
+        pins.push(MountSnapshotPin {
+            owner_id,
+            view_id,
+            oid_hex: oid.to_hex(),
+        });
+    }
+    Ok(pins)
+}
+
+pub(crate) fn mount_snapshot_pin_oid(
+    repository: &crate::Repository,
+    registry_owner_id: &[u8; 16],
+    owner_id: &[u8; 16],
+    view_id: &[u8; 32],
+) -> Result<Option<String>, GraphError> {
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    let reference = mount_snapshot_pin_ref(registry_owner_id, owner_id, view_id);
+    let listing = owner.git_output(&[
+        "for-each-ref",
+        "--format=%(refname) %(objectname)",
+        &reference,
+    ])?;
+    let listing = String::from_utf8(listing).map_err(|_| GraphError::MalformedReferenceName)?;
+    let Some(oid_hex) = listing.lines().find_map(|line| {
+        let (name, value) = line.split_once(' ')?;
+        (name == reference).then_some(value)
+    }) else {
+        return Ok(None);
+    };
+    let algorithm = algorithm_for_hex(oid_hex).ok_or(GraphError::MalformedReferenceName)?;
+    let oid = NativeOid::from_hex(algorithm, oid_hex)?;
+    Ok(Some(oid.to_hex()))
+}
+
+fn decode_mount_pin_component<const N: usize>(value: &str) -> Result<[u8; N], GraphError> {
+    if value.len() != N * 2 {
+        return Err(GraphError::MalformedReferenceName);
+    }
+    let mut bytes = [0; N];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| GraphError::MalformedReferenceName)?;
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn create_mount_snapshot_pin(
     repository: &crate::Repository,
+    registry_owner_id: &[u8; 16],
     owner_id: &[u8; 16],
     view_id: &[u8; 32],
     commit_oid_hex: &str,
 ) -> Result<String, GraphError> {
     let algorithm = algorithm_for_hex(commit_oid_hex).ok_or(GraphError::MalformedOid)?;
     let oid = NativeOid::from_hex(algorithm, commit_oid_hex)?;
-    let reference = mount_snapshot_pin_ref(owner_id, view_id);
+    let reference = mount_snapshot_pin_ref(registry_owner_id, owner_id, view_id);
     let owner = PrivateRefCleanupOwner {
         repository: repository.clone(),
     };
@@ -4400,21 +4495,17 @@ pub(crate) fn create_mount_snapshot_pin(
 
 pub(crate) fn verify_mount_snapshot_pin(
     repository: &crate::Repository,
+    registry_owner_id: &[u8; 16],
     owner_id: &[u8; 16],
     view_id: &[u8; 32],
     commit_oid_hex: &str,
 ) -> Result<(), GraphError> {
     let algorithm = algorithm_for_hex(commit_oid_hex).ok_or(GraphError::MalformedOid)?;
     let expected = NativeOid::from_hex(algorithm, commit_oid_hex)?;
-    let owner = PrivateRefCleanupOwner {
-        repository: repository.clone(),
-    };
-    let reference = mount_snapshot_pin_ref(owner_id, view_id);
-    let resolved = owner.git_output(&["rev-parse", "--verify", &reference])?;
-    let resolved = String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
-    let resolved = resolved.trim();
-    let algorithm = algorithm_for_hex(resolved).ok_or(GraphError::MalformedReferenceName)?;
-    let actual = NativeOid::from_hex(algorithm, resolved)?;
+    let actual_hex = mount_snapshot_pin_oid(repository, registry_owner_id, owner_id, view_id)?
+        .ok_or(GraphError::InvalidProtectedRef)?;
+    let algorithm = algorithm_for_hex(&actual_hex).ok_or(GraphError::MalformedReferenceName)?;
+    let actual = NativeOid::from_hex(algorithm, &actual_hex)?;
     if actual != expected {
         return Err(GraphError::InvalidProtectedRef);
     }
@@ -4423,16 +4514,26 @@ pub(crate) fn verify_mount_snapshot_pin(
 
 pub(crate) fn delete_mount_snapshot_pin(
     repository: &crate::Repository,
+    registry_owner_id: &[u8; 16],
     owner_id: &[u8; 16],
     view_id: &[u8; 32],
     commit_oid_hex: &str,
 ) -> Result<(), GraphError> {
     let algorithm = algorithm_for_hex(commit_oid_hex).ok_or(GraphError::MalformedOid)?;
     let oid = NativeOid::from_hex(algorithm, commit_oid_hex)?;
+    let Some(actual) = mount_snapshot_pin_oid(repository, registry_owner_id, owner_id, view_id)? else {
+        return Ok(());
+    };
+    if actual != oid.to_hex() {
+        return Err(GraphError::InvalidProtectedRef);
+    }
     let owner = PrivateRefCleanupOwner {
         repository: repository.clone(),
     };
-    owner.delete_protected_ref(&mount_snapshot_pin_ref(owner_id, view_id), &oid)
+    owner.delete_protected_ref(
+        &mount_snapshot_pin_ref(registry_owner_id, owner_id, view_id),
+        &oid,
+    )
 }
 fn resolve_git_path(worktree: &Path, output: &[u8]) -> Result<PathBuf, GraphError> {
     let value = std::str::from_utf8(output)

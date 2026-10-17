@@ -58,21 +58,32 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
     let commit = repository
         .head()
         .map_err(|error| mount_error("Workspace HEAD could not be read", format!("{error:?}")))?
-        .ok_or_else(|| mount_error("Workspace has no committed HEAD", "publish a commit before mounting"))?;
+        .ok_or_else(|| {
+            mount_error(
+                "Workspace has no committed HEAD",
+                "publish a commit before mounting",
+            )
+        })?;
     let view = MountView::attach(&repository, mountpoint, commit.as_str())
         .map_err(|error| mount_error("Mount was refused", error.to_string()))?;
     let status = match view.verify_record() {
         Ok(status) => status,
         Err(error) => {
             let _ = view.detach();
-            return Err(mount_error("Mount record could not be verified", error.to_string()));
+            return Err(mount_error(
+                "Mount record could not be verified",
+                error.to_string(),
+            ));
         }
     };
     let signal_handler = match MountSignalHandler::new() {
         Ok(handler) => handler,
         Err(error) => {
             let _ = view.detach();
-            return Err(mount_error("Mount signal handling could not be started", error));
+            return Err(mount_error(
+                "Mount signal handling could not be started",
+                error,
+            ));
         }
     };
     let source = format!("orna-{}", status.view_hex());
@@ -93,19 +104,18 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
     if writeln!(io::stdout().lock(), "{}", human_row(&status)).is_err() {
         let session_cleanup = session.umount_and_join();
         drop(signal_handler);
-        let detach_result = view.detach();
         if let Err(error) = session_cleanup {
             return Err(mount_error("FUSE cleanup failed", error.to_string()));
         }
-        if let Err(error) = detach_result {
-            return Err(mount_error("Mount view could not be detached", error.to_string()));
-        }
+        view.detach()
+            .map_err(|error| mount_error("Mount view could not be detached", error.to_string()))?;
         return Err(stdout_error());
     }
-    let session_result = signal_handler.join(session, status.mountpoint());
-    let detach_result = view.detach();
-    session_result.map_err(|error| mount_error("Mount session ended unexpectedly", error))?;
-    detach_result.map_err(|error| mount_error("Mount view could not be detached", error.to_string()))
+    signal_handler
+        .join(session, status.mountpoint())
+        .map_err(|error| mount_error("Mount session ended unexpectedly", error))?;
+    view.detach()
+        .map_err(|error| mount_error("Mount view could not be detached", error.to_string()))
 }
 
 #[cfg(target_os = "linux")]
@@ -125,7 +135,7 @@ impl MountSignalHandler {
             .map_err(|error| format!("signal runtime could not be created: {error}"))?;
         let (interrupt, terminate, hangup) = {
             let _entered = runtime.enter();
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             (
                 signal(SignalKind::interrupt())
                     .map_err(|error| format!("SIGINT handler could not be installed: {error}"))?,
@@ -143,11 +153,7 @@ impl MountSignalHandler {
         })
     }
 
-    fn join(
-        self,
-        session: fuser::BackgroundSession,
-        mountpoint: &Path,
-    ) -> Result<(), String> {
+    fn join(self, session: fuser::BackgroundSession, mountpoint: &Path) -> Result<(), String> {
         let Self {
             runtime,
             mut interrupt,
@@ -216,7 +222,6 @@ pub(super) fn run_mount_cwd(_endpoint: &Endpoint, _mountpoint: &Path) -> Result<
     ))
 }
 
-
 pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), Diagnostic> {
     let repository = open_repository(endpoint)?;
     #[cfg(target_os = "linux")]
@@ -226,10 +231,6 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
 
     #[cfg(target_os = "linux")]
     {
-        let statuses = repository
-            .mount_status()
-            .map_err(|error| mount_error("Mount status could not be read", error.to_string()))?;
-        let view = statuses.iter().find(|view| view.mountpoint() == mountpoint);
         if let Some((filesystem, source)) = mounted_source_for_path(&mountpoint)? {
             if !filesystem.starts_with("fuse") || !is_orna_mount_source(&source) {
                 return Err(mount_error(
@@ -237,85 +238,125 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                     format!("mountpoint belongs to {filesystem} {source}, not an Orna FUSE mount"),
                 ));
             }
-            if let Some(view) = view {
-                let expected = format!("orna-{}", view.view_hex());
-                if source != expected {
-                    return Err(mount_error(
-                        "Unmount was refused",
-                        format!("mountpoint belongs to {filesystem} {source}, not {expected}"),
-                    ));
-                }
-            }
-            let attached_view = if view.is_some() {
-                match repository.open_mount_view(&mountpoint) {
-                    Ok(attached_view) => match attached_view.verify_record() {
-                        Ok(current_status) => {
-                            if Some(&current_status) != view {
-                                return Err(mount_error(
-                                    "Unmount was refused",
-                                    "mount view changed after its status was read",
-                                ));
-                            }
-                            Some(attached_view)
-                        }
-                        Err(orna_repository_v1::MountError::NotAttached) => None,
-                        Err(error) => {
-                            return Err(mount_error(
-                                "Mount view could not be verified",
-                                error.to_string(),
-                            ));
-                        }
-                    },
-                    Err(error) => {
+            let Some(view_id_hex) = source.strip_prefix("orna-") else {
+                return Err(mount_error(
+                    "Unmount was refused",
+                    "FUSE source has no Orna view identity",
+                ));
+            };
+            let attached_view = match repository.open_mount_view_by_id(view_id_hex) {
+                Ok(view) => {
+                    let status = view.verify_record().map_err(|error| {
+                        mount_error("Mount view could not be verified", error.to_string())
+                    })?;
+                    if status.mountpoint() != mountpoint {
                         return Err(mount_error(
-                            "Mount view could not be opened",
-                            error.to_string(),
+                            "Unmount was refused",
+                            format!(
+                                "FUSE source identifies a view attached at {}, not {}",
+                                status.mountpoint().display(),
+                                mountpoint.display(),
+                            ),
                         ));
                     }
+                    Some((view, status))
                 }
-            } else {
-                None
+                Err(orna_repository_v1::MountError::NotAttached) => {
+                    let statuses = repository.mount_status().map_err(|error| {
+                        mount_error("Mount status could not be read", error.to_string())
+                    })?;
+                    if let Some(other_view) = statuses
+                        .iter()
+                        .find(|status| status.mountpoint() == mountpoint)
+                    {
+                        return Err(mount_error(
+                            "Unmount was refused",
+                            format!(
+                                "mountpoint record identifies view {}, not FUSE source {}",
+                                other_view.view_hex(),
+                                view_id_hex,
+                            ),
+                        ));
+                    }
+                    None
+                }
+                Err(error) => {
+                    return Err(mount_error(
+                        "Mount view could not be opened",
+                        error.to_string(),
+                    ));
+                }
             };
             crate::fuse_mount::unmount_mountpoint(&mountpoint)
                 .map_err(|error| mount_error("FUSE unmount failed", error))?;
-            if let Some(expected_view) = view {
-                if let Some(attached_view) = attached_view {
-                    attached_view.detach().map_err(|error| {
-                        mount_error("Mount view could not be detached", error.to_string())
-                    })?;
-                }
+            if let Some((attached_view, status)) = attached_view {
+                attached_view.detach().map_err(|error| {
+                    mount_error("Mount view could not be detached", error.to_string())
+                })?;
                 writeln!(
                     io::stdout().lock(),
                     "unmounted {} snapshot {}",
-                    expected_view.mountpoint().display(),
-                    expected_view.snapshot_hex(),
+                    status.mountpoint().display(),
+                    status.snapshot_hex(),
                 )
                 .map_err(|_| stdout_error())?;
-                return Ok(());
-            }
-            if view.is_none() {
+            } else {
                 writeln!(
                     io::stdout().lock(),
                     "unmounted orphan FUSE mount {}",
                     mountpoint.display(),
                 )
                 .map_err(|_| stdout_error())?;
-                return Ok(());
             }
+            return Ok(());
         }
+
+        let statuses = repository
+            .mount_status()
+            .map_err(|error| mount_error("Mount status could not be read", error.to_string()))?;
+        let status = statuses
+            .into_iter()
+            .find(|status| status.mountpoint() == mountpoint)
+            .ok_or_else(|| mount_error("Unmount was refused", "no mount view is attached there"))?;
+        let view = repository
+            .open_mount_view_by_id(&status.view_hex())
+            .map_err(|error| mount_error("Mount view could not be opened", error.to_string()))?;
+        if view
+            .verify_record()
+            .map_err(|error| mount_error("Mount view could not be verified", error.to_string()))?
+            != status
+        {
+            return Err(mount_error(
+                "Unmount was refused",
+                "mount view changed after its status was read",
+            ));
+        }
+        view.detach()
+            .map_err(|error| mount_error("Mount view could not be detached", error.to_string()))?;
+        writeln!(
+            io::stdout().lock(),
+            "unmounted {} snapshot {}",
+            status.mountpoint().display(),
+            status.snapshot_hex(),
+        )
+        .map_err(|_| stdout_error())?;
+        return Ok(());
     }
 
-    let status = repository
-        .unmount_view(&mountpoint)
-        .map_err(|error| mount_error("Unmount was refused", error.to_string()))?;
-    writeln!(
-        io::stdout().lock(),
-        "unmounted {} snapshot {}",
-        status.mountpoint().display(),
-        status.snapshot_hex(),
-    )
-    .map_err(|_| stdout_error())?;
-    Ok(())
+    #[cfg(not(target_os = "linux"))]
+    {
+        let status = repository
+            .unmount_view(&mountpoint)
+            .map_err(|error| mount_error("Unmount was refused", error.to_string()))?;
+        writeln!(
+            io::stdout().lock(),
+            "unmounted {} snapshot {}",
+            status.mountpoint().display(),
+            status.snapshot_hex(),
+        )
+        .map_err(|_| stdout_error())?;
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
