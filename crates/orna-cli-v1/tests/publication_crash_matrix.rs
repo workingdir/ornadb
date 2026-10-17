@@ -363,8 +363,8 @@ async fn capture_and_row_commit_recover_after_process_kill() {
                 .iter()
                 .find(|dependency| dependency.kind() == orna_repository_v1::NativeObjectKind::Tree)
                 .expect("recovered row retains its blob descriptor")
-                .oid();
-            let blob = graph.read_stored_blob_value(&rows[0], descriptor, &scope).unwrap();
+                .oid().to_owned();
+            let blob = graph.read_stored_blob_value(&rows[0], &descriptor, &scope).unwrap();
             let reference = blob.reference();
             let bytes = graph
                 .read_blob_range(
