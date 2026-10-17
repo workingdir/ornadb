@@ -1193,10 +1193,10 @@ struct CommittedProjectionSchema {
     stored_field_count: usize,
 }
 
-struct ProjectedRuntimeMutation {
-    key: Vec<u8>,
-    rekey_to: Option<Vec<u8>>,
-    value: Option<Vec<u8>>,
+pub struct ProjectedRuntimeMutation {
+    pub key: Vec<u8>,
+    pub rekey_to: Option<Vec<u8>>,
+    pub value: Option<Vec<u8>>,
 }
 
 fn schema_descriptor_entry(
@@ -1344,6 +1344,17 @@ fn project_runtime_mutation(
         rekey_to,
         value,
     })
+}
+/// Projects a runtime mutation with the committed schema and format context.
+/// This is the same key and row normalization used by publication.
+pub fn project_runtime_mutation_for_descriptor(
+    descriptor: &SchemaDescriptor,
+    relation_id: [u8; 16],
+    mutation: &TableMutation,
+    value_context: &Format3Context,
+) -> Result<ProjectedRuntimeMutation, Error> {
+    let schema = committed_projection_schema(descriptor.clone())?;
+    project_runtime_mutation(&schema, relation_id, mutation, value_context)
 }
 
 fn build_frozen_publication_store_root(
