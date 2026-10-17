@@ -359,9 +359,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
 fn canonical_mountpoint_or_original(path: &Path) -> std::path::PathBuf {
     match fs::canonicalize(path) {
         Ok(canonical) => return canonical,
-        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {
-            return path.to_path_buf();
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
         Err(_) => {}
     }
     let parent = path
