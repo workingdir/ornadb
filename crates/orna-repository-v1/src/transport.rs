@@ -290,7 +290,7 @@ impl Repository {
         // preventing a journal from appearing between validation and push.
         self.require_no_pending_publication_recovery_locked()?;
         #[cfg(test)]
-        tests::pause_push_after_journal_validation();
+        tests::pause_push_after_journal_validation(self.worktree());
         let branch_ref = format!("refs/heads/{branch}");
         let branch_head =
             local_ref_oid(self, &branch_ref)?.ok_or(FetchError::RequestedRefMissing)?;
@@ -1494,13 +1494,17 @@ mod tests {
         thread,
     };
 
-    static PUSH_LOCK_GATE: Mutex<Option<Arc<(Barrier, Barrier)>>> = Mutex::new(None);
+    static PUSH_LOCK_GATE: Mutex<Option<(PathBuf, Arc<(Barrier, Barrier)>)>> =
+        Mutex::new(None);
 
-    pub(super) fn pause_push_after_journal_validation() {
+    pub(super) fn pause_push_after_journal_validation(worktree: &Path) {
         let gate = PUSH_LOCK_GATE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .as_ref()
+            .and_then(|(target, gate)| {
+                (target.as_path() == worktree).then(|| Arc::clone(gate))
+            });
         if let Some(gate) = gate {
             gate.0.wait();
             gate.1.wait();
@@ -1918,7 +1922,8 @@ mod tests {
         let gate = Arc::new((Barrier::new(2), Barrier::new(2)));
         *PUSH_LOCK_GATE
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate.clone());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((local.clone(), gate.clone()));
         let local_for_push = local.clone();
         let push = thread::spawn(move || {
             Repository::discover(local_for_push)
