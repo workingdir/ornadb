@@ -4,7 +4,7 @@
 #![cfg(target_os = "linux")]
 
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom},
     path::Path,
     process::{Child, Command, Stdio},
@@ -82,17 +82,81 @@ fn directory_entries(path: &Path) -> String {
         Err(error) => format!("<directory error: {error}>"),
     }
 }
+fn fuse_test_required() -> bool {
+    std::env::var_os("ORNA_REQUIRE_FUSE").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+fn fuse_test_available() -> bool {
+    let required = fuse_test_required();
+    let explicitly_skipped =
+        std::env::var_os("ORNA_SKIP_FUSE_TEST").as_deref() == Some(std::ffi::OsStr::new("1"));
+    assert!(
+        !required || !explicitly_skipped,
+        "ORNA_REQUIRE_FUSE=1 forbids ORNA_SKIP_FUSE_TEST=1"
+    );
+    if explicitly_skipped {
+        eprintln!("SKIP: FUSE integration tests explicitly opted out with ORNA_SKIP_FUSE_TEST=1");
+        return false;
+    }
+
+    let prerequisites = (|| {
+        let _device = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/fuse")
+            .map_err(|error| format!("/dev/fuse is unavailable: {error}"))?;
+        if let Some(helper) = std::env::var_os("FUSERMOUNT_PATH") {
+            Command::new(helper)
+                .arg("-h")
+                .output()
+                .map_err(|error| format!("FUSERMOUNT_PATH is not executable: {error}"))?;
+        } else if !["fusermount3", "fusermount"]
+            .into_iter()
+            .any(|helper| Command::new(helper).arg("-h").output().is_ok())
+        {
+            return Err("neither fusermount3 nor fusermount is executable".to_owned());
+        }
+        Ok::<(), String>(())
+    })();
+    match prerequisites {
+        Ok(()) => true,
+        Err(reason) if required => panic!("required FUSE integration prerequisites failed: {reason}"),
+        Err(reason) => {
+            eprintln!("SKIP: FUSE integration prerequisites are unavailable: {reason}");
+            false
+        }
+    }
+}
+
+fn is_optional_fuse_setup_failure(stderr: &str) -> bool {
+    if fuse_test_required() {
+        return false;
+    }
+    let stderr = stderr.to_ascii_lowercase();
+    (stderr.contains("fuse") || stderr.contains("fusermount") || stderr.contains("/dev/fuse"))
+        && [
+            "permission denied",
+            "operation not permitted",
+            "no such file or directory",
+            "not found",
+        ]
+        .iter()
+        .any(|reason| stderr.contains(reason))
+}
+
+fn mountinfo_contains(mountpoint: &Path) -> bool {
+    let mountpoint = mountpoint.to_str().expect("mountpoint is UTF-8");
+    std::fs::read_to_string("/proc/self/mountinfo")
+        .expect("read Linux mount table")
+        .lines()
+        .any(|line| line.split_whitespace().nth(4) == Some(mountpoint))
+}
+
 
 #[tokio::test]
 async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
-    if !Path::new("/dev/fuse").exists() {
-        if std::env::var_os("ORNA_SKIP_FUSE_TEST").as_deref()
-            == Some(std::ffi::OsStr::new("1"))
-        {
-            eprintln!("SKIP: cwd FUSE mount test explicitly opted out with ORNA_SKIP_FUSE_TEST=1");
-            return;
-        }
-        panic!("cwd FUSE mount test requires /dev/fuse; set ORNA_SKIP_FUSE_TEST=1 only to opt out");
+    if !fuse_test_available() {
+        return;
     }
     let media_root = TempDir::new().unwrap();
     let expected = b"ID3-orna-range-read-test-content";
@@ -182,6 +246,10 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
             if let Some(mut pipe) = mounted.child.stderr.take() {
                 let _ = pipe.read_to_string(&mut stderr);
             }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return;
+            }
             panic!("mount exited {status}: {stderr}");
         }
         assert!(
@@ -219,4 +287,85 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
     assert!(status.success(), "mount process exits cleanly after unmount");
+}
+
+#[test]
+fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
+    if !fuse_test_available() {
+        return;
+    }
+    let source = "pub table Music(id: Str) { title: Str, }\n";
+    let (repository_directory, _repository, _relation_id) =
+        format3::format3_repository_for_table(source, "Music");
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess { child, mountpoint: mountpoint.clone() };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !mountinfo_contains(&mountpoint) {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return;
+            }
+            panic!("mount exited before appearing in mountinfo ({status}): {stderr}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "FUSE mount did not appear in /proc/self/mountinfo"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let signal = Command::new("kill")
+        .args(["-TERM", &mounted.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM to mount child");
+    assert!(signal.success(), "kill -TERM failed");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "mount did not stop after SIGTERM");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "mount process exits cleanly after SIGTERM");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while mountinfo_contains(&mountpoint) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !mountinfo_contains(&mountpoint),
+        "SIGTERM left the FUSE mountpoint in /proc/self/mountinfo"
+    );
+    let status = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            "status",
+            "--json",
+        ])
+        .output()
+        .expect("read mount status after SIGTERM");
+    assert!(status.status.success(), "mount status failed: {:?}", status.stderr);
+    assert_eq!(status.stdout, b"{\"mounts\":[]}\n");
 }
