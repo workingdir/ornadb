@@ -139,10 +139,56 @@ fn test_code<'a>(path: &Path, source: &'a str) -> Vec<&'a str> {
                 cursor = attribute_end;
             }
         }
+        append_referenced_test_functions(source, &mut code);
         append_referenced_test_constants(source, &mut code);
     }
     code
 }
+fn append_referenced_test_functions<'a>(source: &'a str, selected: &mut Vec<&'a str>) {
+    let bytes = source.as_bytes();
+    loop {
+        let mut cursor = 0;
+        let mut brace_depth = 0usize;
+        let mut added = false;
+        while cursor < bytes.len() {
+            if let Some(end) = skip_non_code(source, cursor) {
+                cursor = end;
+            } else if brace_depth == 0
+                && bytes[cursor..].starts_with(b"fn")
+                && (cursor == 0 || !(bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_'))
+                && bytes.get(cursor + 2).is_some_and(u8::is_ascii_whitespace)
+            {
+                let mut name_start = cursor + 2;
+                while bytes.get(name_start).is_some_and(u8::is_ascii_whitespace) { name_start += 1; }
+                let mut name_end = name_start;
+                while bytes.get(name_end).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+                    name_end += 1;
+                }
+                if name_end == name_start { cursor += 2; continue; }
+                let name = &source[name_start..name_end];
+                let Some(open) = find_code_byte(source, name_end, b'{') else { break; };
+                let Some(end) = matching_brace(source, open) else { break; };
+                let function = &source[cursor..=end];
+                if !selected.iter().any(|code| code.contains(function))
+                    && selected.iter().any(|code| contains_identifier_in_code(code, name))
+                {
+                    selected.push(function);
+                    added = true;
+                }
+                cursor = end + 1;
+            } else {
+                match bytes[cursor] {
+                    b'{' => brace_depth += 1,
+                    b'}' => brace_depth = brace_depth.saturating_sub(1),
+                    _ => {}
+                }
+                cursor += 1;
+            }
+        }
+        if !added { break; }
+    }
+}
+
 fn append_referenced_test_constants<'a>(source: &'a str, selected: &mut Vec<&'a str>) {
     let bytes = source.as_bytes();
     let mut cursor = 0;
@@ -456,7 +502,128 @@ fn contains_id(source: &str, id: &str) -> bool {
             cursor += 1;
         }
     }
-    contains_id_in_code(&source[code_start..], id) || contains_id_in_assertion_args(source, id)
+    contains_id_in_code(&source[code_start..], id)
+        || contains_id_in_assertion_args(source, id)
+        || contains_id_in_test_string_operands(source, id)
+}
+
+fn contains_id_in_test_string_operands(source: &str, id: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut delimiters: Vec<(u8, Option<usize>, usize, bool)> = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some((end, contents)) = string_literal(source, cursor) {
+            let assertion_argument = delimiters.iter().rev().find_map(|(_, limit, argument, _)| {
+                limit.map(|limit| *argument < limit)
+            });
+            let in_diagnostic = delimiters.iter().any(|(_, _, _, diagnostic)| *diagnostic);
+            if assertion_argument.is_none()
+                && !in_diagnostic
+                && contains_id_in_code(contents, id)
+                && is_active_test_string_operand(source, cursor, end)
+            {
+                return true;
+            }
+            cursor = end;
+        } else if let Some(end) = skip_non_code(source, cursor) {
+            cursor = end;
+        } else if let Some((after_open, close, arguments)) = assertion_macro(source, cursor) {
+            delimiters.push((close, Some(arguments), 0, false));
+            cursor = after_open;
+        } else if let Some((after_open, close)) = diagnostic_macro(source, cursor) {
+            delimiters.push((close, None, 0, true));
+            cursor = after_open;
+        } else if let Some((after_open, close)) = diagnostic_call(source, cursor) {
+            delimiters.push((close, None, 0, true));
+            cursor = after_open;
+        } else {
+            match bytes[cursor] {
+                b'(' => delimiters.push((b')', None, 0, false)),
+                b'[' => delimiters.push((b']', None, 0, false)),
+                b'{' => delimiters.push((b'}', None, 0, false)),
+                b')' | b']' | b'}' => {
+                    if delimiters.last().is_some_and(|(close, _, _, _)| *close == bytes[cursor]) {
+                        delimiters.pop();
+                    }
+                }
+                b',' => {
+                    if let Some((_, Some(_), argument, _)) = delimiters.last_mut() {
+                        *argument += 1;
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+    }
+    false
+}
+
+fn diagnostic_macro(source: &str, start: usize) -> Option<(usize, u8)> {
+    const MACROS: [&[u8]; 7] = [
+        b"println", b"eprintln", b"format", b"panic", b"todo", b"unimplemented", b"dbg",
+    ];
+    let bytes = source.as_bytes();
+    for name in MACROS {
+        if !bytes[start..].starts_with(name)
+            || (start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_'))
+            || bytes.get(start + name.len()).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            continue;
+        }
+        let mut cursor = start + name.len();
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) { cursor += 1; }
+        if bytes.get(cursor) != Some(&b'!') { continue; }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) { cursor += 1; }
+        return match bytes.get(cursor) {
+            Some(b'(') => Some((cursor + 1, b')')),
+            Some(b'{') => Some((cursor + 1, b'}')),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn diagnostic_call(source: &str, start: usize) -> Option<(usize, u8)> {
+    const CALLS: [&[u8]; 4] = [b"expect", b"expect_err", b"unwrap_or_else", b"unwrap_or_default"];
+    let bytes = source.as_bytes();
+    for name in CALLS {
+        if !bytes[start..].starts_with(name)
+            || (start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_'))
+            || bytes.get(start + name.len()).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            continue;
+        }
+        let mut cursor = start + name.len();
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) { cursor += 1; }
+        if bytes.get(cursor) == Some(&b'(') { return Some((cursor + 1, b')')); }
+    }
+    None
+}
+
+fn is_active_test_string_operand(source: &str, start: usize, end: usize) -> bool {
+    let prefix = source[..start].trim_end();
+    let suffix = source[end..].trim_start();
+    if [
+        "println!(", "eprintln!(", "format!(", "panic!(", "expect(",
+        "expect_err(", "unwrap_or_else(",
+    ]
+    .iter()
+    .any(|diagnostic| prefix.ends_with(diagnostic))
+    {
+        return false;
+    }
+    if prefix.ends_with("==") || prefix.ends_with("!=") {
+        return true;
+    }
+    let next_is_operand_delimiter = suffix.starts_with(',')
+        || suffix.starts_with(']')
+        || suffix.starts_with(')')
+        || suffix.starts_with(".into(");
+    matches!(prefix.chars().next_back(), Some(':'))
+        || (matches!(prefix.chars().next_back(), Some('[' | ',' | '('))
+            && next_is_operand_delimiter)
 }
 fn is_line_comment_block(source: &str) -> bool {
     if source.lines().any(|line| {
@@ -716,12 +883,38 @@ mod tests {
         let message_selected = test_code(Path::new("tests/integration.rs"), message_source);
         assert!(!message_selected.iter().any(|code| contains_id(code, "REQ-001")));
     }
+
+    #[test]
+    fn counts_requirement_ids_used_as_active_test_operands_beyond_assertions() {
+        let source = r##"#[test] fn example() {
+            let binding = Binding { requirement_id: "REQ-001" };
+            let witnesses = witnesses_for(&root, "REQ-002");
+            for requirement_id in ["REQ-003", "REQ-004"] {
+                assert_eq!(requirement.requirement_id, requirement_id);
+            }
+            let found = report.items().find(|item| item.requirement_id == "REQ-005");
+            assert_eq!(found, "REQ-006");
+            assert_eq!(actual, expected, "REQ-007");
+            println!("REQ-008");
+            println!("{}", "REQ-010");
+            let _ = Ok::<(), &str>(()).expect("REQ-012");
+            let inert_note = "REQ-009";
+        }"##;
+        let selected = test_code(Path::new("tests/integration.rs"), source);
+        for id in ["REQ-001", "REQ-002", "REQ-003", "REQ-004", "REQ-005", "REQ-006"] {
+            assert!(selected.iter().any(|code| contains_id(code, id)), "{id}");
+        }
+        for id in ["REQ-007", "REQ-008", "REQ-009", "REQ-010", "REQ-012"] {
+            assert!(!selected.iter().any(|code| contains_id(code, id)), "{id}");
+        }
+    }
     #[test]
     fn referenced_integration_test_constants_are_selected_but_unused_constants_are_not() {
         let source = concat!(
             "const ROWS: &[&str] = &[\"REQ-001\"];\n",
             "const UNUSED: &str = \"REQ-002\";\n",
-            "#[test] fn example() { assert_eq!(ROWS.len(), 1); }",
+            "fn rows() -> &'static [&'static str] { ROWS }\n",
+            "#[test] fn example() { assert_eq!(rows().len(), 1); }",
         );
         let selected = test_code(Path::new("tests/integration.rs"), source);
         assert!(selected.iter().any(|code| contains_id(code, "REQ-001")));
