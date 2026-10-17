@@ -50,7 +50,6 @@
   },
   "normative_payload_sha256": {
     "Orna-1.0.0.md": "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d",
-    "api/sys.json": "c5031e0ed7aba06de732c84c6a804ca03cd56a3f91f86c6bc855227a4fd36026",
     "grammar/orna.ebnf": "cb42b88bf387a76bc2c7f42858fedcb30b8d8373273066636691e0e8151ff6db",
     "profiles/compact-storage.md": "1a1ea74be9bc4f2410715f5a8f351e701681119178cbbb3478cb1db5b406e752",
     "profiles/hybrid-and-rekey.md": "d919d2848d06811dd3328af8d43faafd66ec02297f87af5751c7851e3652c998",
@@ -94,7 +93,8 @@
     "source/34-grammar.md": "cd6f6351f2786b2d0870c052b54b4a97db369493e42d1eb97d321b46650e46cc",
     "source/34-system-reference.md": "6fb35a6693d4d25534f0bc73f69329fc57ba350fadbf67ab40e8a88176f27e54",
     "source/35-references.md": "91d6156f9236f574d5fdb3334b788dd013fcb993e0fe63c95fd2a3fec6e9e90b",
-    "source/manifest.json": "7b6fc36817360c24259bbd2eead054f3aa0af907ffb4d1d3a8d07b27232784b1"
+    "source/manifest.json": "7b6fc36817360c24259bbd2eead054f3aa0af907ffb4d1d3a8d07b27232784b1",
+    "api/sys.json": "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e"
   },
   "authoritative_input_inventory": "provenance/inputs.json",
   "finding_dispositions": "evidence/review-dispositions.json",
