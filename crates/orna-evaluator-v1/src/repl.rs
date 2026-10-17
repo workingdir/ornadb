@@ -166,6 +166,10 @@ impl ReplSession {
                 candidate.last_success = Some(value.clone());
                 Some(value)
             }
+            ReplInput::ExpressionStatement(expression) => {
+                candidate.evaluate_discarded(expression, None, Some(effects))?;
+                None
+            }
             ReplInput::Item(item) => match &item.declaration {
                 Declaration::Let { pattern, value, .. } => {
                     candidate.let_binding(pattern, value, None, Some(effects))?;
@@ -211,6 +215,10 @@ impl ReplSession {
                 self.last_success = Some(value.clone());
                 Ok(Some(value))
             }
+            ReplInput::ExpressionStatement(expression) => {
+                self.evaluate_discarded(&expression, None, None)?;
+                Ok(None)
+            }
             ReplInput::Item(item) => {
                 let mut candidate = self.clone();
                 candidate.declare(item.declaration)?;
@@ -234,6 +242,10 @@ impl ReplSession {
                 self.last_success = Some(value.clone());
                 Ok(Some(value))
             }
+            ReplInput::ExpressionStatement(expression) => {
+                self.evaluate_discarded(expression, cancellation, None)?;
+                Ok(None)
+            }
             ReplInput::Item(item) => {
                 self.declare_admitted(&item.declaration, cancellation)?;
                 Ok(None)
@@ -256,6 +268,7 @@ impl ReplSession {
         cancellation: Option<&CancellationToken>,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, cancellation, None)
+            .and_then(crate::Value::canonical)
     }
 
     fn evaluate_with_effects(
@@ -264,6 +277,17 @@ impl ReplSession {
         effects: &mut dyn crate::EffectHandler,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, None, Some(effects))
+            .and_then(crate::Value::canonical)
+    }
+
+    fn evaluate_discarded(
+        &self,
+        expression: &Expr,
+        cancellation: Option<&CancellationToken>,
+        effects: Option<&mut dyn crate::EffectHandler>,
+    ) -> Result<(), EvaluationError> {
+        self.evaluate_inner(expression, cancellation, effects)?
+            .discard_result()
     }
 
     fn evaluate_inner(
@@ -271,7 +295,7 @@ impl ReplSession {
         expression: &Expr,
         cancellation: Option<&CancellationToken>,
         effects: Option<&mut dyn crate::EffectHandler>,
-    ) -> Result<CanonicalValue, EvaluationError> {
+    ) -> Result<crate::Value, EvaluationError> {
         self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
@@ -309,7 +333,7 @@ impl ReplSession {
         if context.transfer.is_some() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        value.canonical()
+        Ok(value)
     }
 
     fn declare(&mut self, declaration: Declaration) -> Result<(), EvaluationError> {
@@ -1492,6 +1516,32 @@ mod tests {
                 .submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna"))
                 .unwrap(),
             Some(Value::int(42.into()))
+        );
+    }
+
+    #[test]
+    fn semicolon_terminated_expressions_discard_results_without_replacing_last_result() {
+        let mut session = ReplSession::new(Limits::default());
+        assert_eq!(
+            session.submit("40").expect("first expression"),
+            Some(Value::int(40.into())),
+        );
+        assert_eq!(session.submit("2;").expect("statement"), None);
+        assert_eq!(
+            session.submit("$_").expect("previous result remains available"),
+            Some(Value::int(40.into())),
+        );
+    }
+
+    #[test]
+    fn discarded_results_still_propagate_nested_evaluation_errors() {
+        let value = crate::Value::List(vec![crate::Value::Error(error("ORNA-EVAL-UNSUPPORTED"))]);
+        assert_eq!(
+            value
+                .discard_result()
+                .expect_err("nested errors are not discarded")
+                .code(),
+            "ORNA-EVAL-UNSUPPORTED",
         );
     }
 

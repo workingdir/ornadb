@@ -102,10 +102,12 @@ impl ReplContext {
         next.revision = revision;
         let mut diagnostics = Vec::new();
         let (ty, effects) = match input {
-            ReplInput::Expression(expression) => {
+            ReplInput::Expression(expression) | ReplInput::ExpressionStatement(expression) => {
                 let scope = self.scope(&self.imports, &self.symbols, &mut diagnostics);
                 let inferred = infer(expression, &scope, &BTreeMap::new(), &mut diagnostics);
-                next.last_result = Some(inferred.ty.clone());
+                if matches!(input, ReplInput::Expression(_)) {
+                    next.last_result = Some(inferred.ty.clone());
+                }
                 (Some(inferred.ty), inferred.effects)
             }
             ReplInput::Item(item) => match &item.declaration {
