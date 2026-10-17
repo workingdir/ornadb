@@ -406,23 +406,36 @@ pub fn format3_repository_for_table_with_source_row(
     source_row_path: &str,
     source_row: &str,
 ) -> (TempDir, Repository, [u8; 16], Format3Context) {
-    let (directory, repository, relation_id, schema_root, store_root) =
-        format3_repository_parts(media_source, table_name);
-    let path = directory.path().join(source_row_path);
-    std::fs::create_dir_all(path.parent().expect("source row has a parent")).unwrap();
-    std::fs::write(path, source_row).unwrap();
-    git(directory.path(), &["add", "--all"]);
-    git(directory.path(), &["commit", "--quiet", "-m", "add source row fixture"]);
-    let commit = repository.head().unwrap().unwrap();
-    let context = persisted_format3_context(
-        &repository,
-        commit.as_str(),
-        &schema_root,
-        &store_root,
-    );
-    (directory, repository, relation_id, context)
+    format3_repository_for_table_with_source_rows(
+        media_source,
+        table_name,
+        &[(source_row_path, source_row)],
+    )
 }
 
+pub fn format3_repository_for_table_with_source_rows(
+    media_source: &str,
+    table_name: &str,
+    source_rows: &[(&str, &str)],
+) -> (TempDir, Repository, [u8; 16], Format3Context) {
+    assert!(!source_rows.is_empty());
+    let (directory, repository, relation_id, schema_root, store_root) =
+        format3_repository_parts(media_source, table_name);
+    for (source_row_path, source_row) in source_rows {
+        let path = directory.path().join(source_row_path);
+        std::fs::create_dir_all(path.parent().expect("source row has a parent")).unwrap();
+        std::fs::write(path, source_row).unwrap();
+    }
+    git(directory.path(), &["add", "--all"]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "add source row fixture"],
+    );
+    let commit = repository.head().unwrap().unwrap();
+    let context =
+        persisted_format3_context(&repository, commit.as_str(), &schema_root, &store_root);
+    (directory, repository, relation_id, context)
+}
 
 fn format3_repository_parts(
     media_source: &str,

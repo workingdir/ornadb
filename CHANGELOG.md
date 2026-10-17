@@ -15,6 +15,10 @@ been published.
   metadata queries, history diffs and offline export; overflow verification counts
   nested Blob references through `Some` without reading payload bytes.
 
+- FUSE workspace mounts page through the pinned row index on listing, resolve
+  known keys by the index, and isolate projection errors as EIO so one corrupt
+  row does not block neighboring rows.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
