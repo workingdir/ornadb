@@ -13519,12 +13519,11 @@ impl RuntimeState {
         let mut rows = self
             .connection
             .query(
-                "SELECT checkpoint.generation, checkpoint.digest, checkpoint.mutation_sequence, pending_mutation.sequence, publication_commit.intent_id \
+                "SELECT checkpoint.generation, checkpoint.digest, checkpoint.mutation_sequence, pending_mutation.sequence, \
+                        (SELECT publication_commit.intent_id FROM publication_freeze \
+                         JOIN publication_commit ON publication_commit.intent_id = publication_freeze.intent_id \
+                         WHERE publication_freeze.checkpoint_mutation_sequence = checkpoint.mutation_sequence LIMIT 1) \
                  FROM checkpoint LEFT JOIN pending_mutation ON pending_mutation.sequence = checkpoint.mutation_sequence \
-                 LEFT JOIN publication_freeze ON publication_freeze.checkpoint_generation = checkpoint.generation \
-                 AND publication_freeze.checkpoint_mutation_sequence = checkpoint.mutation_sequence \
-                 AND publication_freeze.checkpoint_digest = checkpoint.digest \
-                 LEFT JOIN publication_commit ON publication_commit.intent_id = publication_freeze.intent_id \
                  ORDER BY checkpoint.generation",
                 (),
             )
@@ -13553,8 +13552,11 @@ impl RuntimeState {
             let referenced: Option<i64> = row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let completed: Option<Vec<u8>> =
                 row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            // Generations can advance without a new mutation, so repeated mutation
+            // sequence numbers are valid. A committed publication anchors later
+            // checkpoints at the same sequence after its pending row is consumed.
             if sequence == 0
-                || sequence <= previous_sequence
+                || sequence < previous_sequence
                 || (referenced.and_then(|value| u64::try_from(value).ok()) != Some(sequence)
                     && completed.is_none())
             {
@@ -13562,7 +13564,6 @@ impl RuntimeState {
             }
             previous_sequence = sequence;
         }
-
         let mut freezes = self
             .connection
             .query(
@@ -13625,7 +13626,6 @@ impl RuntimeState {
                 _ => return Err(RuntimeError::RecoveryInvalid),
             }
         }
-
         let mut publications = self
             .connection
             .query(
