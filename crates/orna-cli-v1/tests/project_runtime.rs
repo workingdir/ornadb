@@ -699,7 +699,7 @@ fn binary_run_without_a_target_executes_root_main() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn binary_run_reads_both_publication_relations_from_runtime_state() {
+async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_state() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
         directory.path().join("main.orna"),

@@ -264,7 +264,7 @@
       "path": "examples/invalid/legacy-postfix-question.orna",
       "failing_phase": "parse",
       "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
-      "message_contains": "remove postfix `?`; failure propagation is automatic"
+      "message_contains": "postfix propagation `?` was removed; failures propagate automatically"
     },
     {
       "path": "examples/invalid/legacy-refined-where.orna",

@@ -205,12 +205,17 @@ pub async fn commit_source_captures_for_table(
     let mut retained_sources = Vec::with_capacity(captures.len());
     for capture in captures {
         let logical_path = format!("{table_name}/{}.orna", capture.key);
-        let committed_row = repository
-            .read_committed_file(&commit, &logical_path, 1 << 20)
-            .expect("the committed project contains this source row");
-        let committed_row = std::str::from_utf8(&committed_row)
-            .expect("the committed source row is valid UTF-8");
-        let row_source = capture.source_row.unwrap_or(committed_row);
+        let row_source = match capture.source_row {
+            Some(row_source) => row_source.to_owned(),
+            None => {
+                let committed_row = repository
+                    .read_committed_file(&commit, &logical_path, 1 << 20)
+                    .expect("the committed project contains this source row");
+                std::str::from_utf8(&committed_row)
+                    .expect("the committed source row is valid UTF-8")
+                    .to_owned()
+            }
+        };
         let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
         for (field_name, expression) in capture.blob_fields {
             let value = evaluate_expression_ovb2_with_effects(
@@ -228,7 +233,7 @@ pub async fn commit_source_captures_for_table(
         let admitted = admit_source_row_with_owner_fields(
             &project,
             &logical_path,
-            row_source,
+            &row_source,
             &schema,
             format_context,
             blob_fields,
