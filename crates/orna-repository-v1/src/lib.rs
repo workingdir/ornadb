@@ -2820,7 +2820,7 @@ impl Repository {
 
     fn reconcile_published_index_locked(
         &self,
-        _expected_index: &IndexGeneration,
+        expected_index: &IndexGeneration,
         candidate: &PrivateCommit,
         paths: &[ManagedPath],
         base_index: &[u8],
@@ -2872,6 +2872,13 @@ impl Repository {
                     }
                 }
             }
+            // Reconcile store leaves before atomically installing the candidate index.
+            self.reconcile_store_worktree_transition(
+                expected_index,
+                candidate,
+                true,
+            )?;
+            self.clear_store_tree_skip_worktree(&candidate_index)?;
             fs::File::open(&candidate_index)
                 .and_then(|file| file.sync_all())
                 .map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -2896,6 +2903,297 @@ impl Repository {
         })();
         let _ = fs::remove_file(&candidate_index);
         result
+    }
+
+    /// Clears obsolete skip-worktree bits so edits to internal store files remain visible.
+    /// The store files themselves are materialized from the published Git tree.
+    fn clear_store_tree_skip_worktree(&self, index: &Path) -> Result<(), RepositoryError> {
+        let paths = self.store_skip_worktree_paths(index)?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut encoded_paths = Vec::new();
+        for path in paths {
+            encoded_paths.extend_from_slice(path.as_bytes());
+            encoded_paths.push(0);
+        }
+
+        let mut update = self.command();
+        update
+            .env("GIT_INDEX_FILE", index)
+            .args(["update-index", "--no-skip-worktree", "-z", "--stdin"])
+            .stdin(Stdio::piped());
+        let mut child = update
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        child
+            .stdin
+            .take()
+            .ok_or(RepositoryError::LocalStateUnavailable)?
+            .write_all(&encoded_paths)
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(RepositoryError::GitOperationFailed)
+        }
+    }
+
+    /// Enumerates regular blobs in a committed native-store tree.
+    /// Tree entries are validated before they can affect the worktree.
+    fn native_store_tree_blobs(
+        &self,
+        treeish: &str,
+    ) -> Result<BTreeMap<String, String>, RepositoryError> {
+        let mut list = self.command();
+        list.env("GIT_NO_LAZY_FETCH", "1").args([
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            treeish,
+            "--",
+            ".orna/store",
+        ]);
+        let output = self.run(list)?.stdout;
+        let mut entries = BTreeMap::new();
+        for record in output.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+            let tab = record
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .ok_or(RepositoryError::GitOperationFailed)?;
+            let mut fields = record[..tab].split(|byte| *byte == b' ');
+            let mode = fields.next().unwrap_or_default();
+            let kind = fields.next().unwrap_or_default();
+            let object = fields.next().unwrap_or_default();
+            if mode != b"100644" || kind != b"blob" || fields.next().is_some() {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let path = String::from_utf8(record[tab + 1..].to_vec())
+                .map_err(|_| RepositoryError::UnsafeManagedPath)?;
+            if !path.starts_with(".orna/store/") {
+                return Err(RepositoryError::UnsafeManagedPath);
+            }
+            ManagedPath::new(path.as_str())?;
+            let object = String::from_utf8(object.to_vec())
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            if entries.insert(path, object).is_some() {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+        }
+        Ok(entries)
+    }
+
+    fn store_skip_worktree_paths(
+        &self,
+        index: &Path,
+    ) -> Result<BTreeSet<String>, RepositoryError> {
+        let mut list = self.command();
+        list.env("GIT_INDEX_FILE", index)
+            .args(["ls-files", "-t", "-z", "--", ".orna/store"]);
+        let output = self.run(list)?.stdout;
+        let mut paths = BTreeSet::new();
+        for record in output.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
+            if record.len() < 3 || record[0] != b'S' || record[1] != b' ' {
+                continue;
+            }
+            let path = std::str::from_utf8(&record[2..])
+                .map_err(|_| RepositoryError::UnsafeManagedPath)?;
+            if !path.starts_with(".orna/store/") {
+                return Err(RepositoryError::UnsafeManagedPath);
+            }
+            ManagedPath::new(path)?;
+            paths.insert(path.to_owned());
+        }
+        Ok(paths)
+    }
+
+    fn reconcile_store_worktree_transition(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        install: bool,
+    ) -> Result<(), RepositoryError> {
+        let index = self.git_path("index")?;
+        let skipped_paths = self.store_skip_worktree_paths(&index)?;
+        let old = expected_index
+            .tree()
+            .map(|tree| self.native_store_tree_blobs(tree.as_str()))
+            .transpose()?
+            .unwrap_or_default();
+        let new = self.native_store_tree_blobs(candidate.commit().as_str())?;
+        let paths = old.keys().chain(new.keys()).collect::<BTreeSet<_>>();
+        for relative in paths {
+            let relative = relative.as_str();
+            let old_object = old.get(relative);
+            let new_object = new.get(relative);
+            let unchanged = old_object == new_object;
+            let skipped = skipped_paths.contains(relative);
+            if unchanged && !skipped {
+                continue;
+            }
+
+            let path = ManagedPath::new(relative)?;
+            let (target, quarantine) = self.store_reconciliation_paths(&path, candidate)?;
+            let current = self.read_managed_file(&target)?;
+            // Older publications could leave skipped leaves absent; restore them before
+            // clearing those bits so reconciliation does not invent deletions.
+            if unchanged {
+                let displaced = self.read_managed_file(&quarantine)?;
+                if current.is_none() || displaced.is_some() {
+                    let next = new_object
+                        .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
+                        .transpose()?
+                        .ok_or(RepositoryError::GitOperationFailed)?;
+                    if displaced
+                        .as_deref()
+                        .is_some_and(|bytes| bytes != next.as_slice())
+                        || current
+                            .as_deref()
+                            .is_some_and(|bytes| bytes != next.as_slice())
+                    {
+                        return Err(RepositoryError::ManagedContentConflict);
+                    }
+                    if install {
+                        let expected = displaced.as_deref().map(|_| next.as_slice());
+                        self.materialize_store_worktree_file(
+                            &path,
+                            expected,
+                            Some(&next),
+                            candidate,
+                        )?;
+                    }
+                }
+                continue;
+            }
+
+            let old_bytes = old_object
+                .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
+                .transpose()?;
+            let new_bytes = new_object
+                .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
+                .transpose()?;
+            let displaced = self.read_managed_file(&quarantine)?;
+            if displaced.as_deref().is_some_and(|bytes| {
+                Some(bytes) != old_bytes.as_deref()
+                    || current.as_deref().is_some_and(|current_bytes| {
+                        Some(current_bytes) != new_bytes.as_deref()
+                    })
+            }) {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            let matches_old = current.as_deref() == old_bytes.as_deref();
+            let matches_new = current.as_deref() == new_bytes.as_deref();
+            let recovering_quarantine = !matches_old
+                && !matches_new
+                && current.is_none()
+                && old_bytes.is_some()
+                && new_bytes.is_some()
+                && displaced.as_deref() == old_bytes.as_deref();
+            let skipped_missing = skipped && current.is_none() && displaced.is_none();
+            if !matches_old && !matches_new && !recovering_quarantine && !skipped_missing {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            if install {
+                let expected = if skipped_missing { None } else { old_bytes.as_deref() };
+                self.materialize_store_worktree_file(
+                    &path,
+                    expected,
+                    new_bytes.as_deref(),
+                    candidate,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn store_reconciliation_paths(
+        &self,
+        path: &ManagedPath,
+        candidate: &PrivateCommit,
+    ) -> Result<(PathBuf, PathBuf), RepositoryError> {
+        let target = self.managed_target(path)?;
+        let parent = target
+            .parent()
+            .ok_or(RepositoryError::LocalStateUnavailable)?;
+        let name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(RepositoryError::UnsafeManagedPath)?;
+        let quarantine = parent.join(format!(
+            ".orna-store-reconcile-{}-{name}",
+            candidate.commit().as_str()
+        ));
+        Ok((target, quarantine))
+    }
+
+    fn materialize_store_worktree_file(
+        &self,
+        path: &ManagedPath,
+        expected: Option<&[u8]>,
+        next: Option<&[u8]>,
+        candidate: &PrivateCommit,
+    ) -> Result<(), RepositoryError> {
+        let (target, quarantine) = self.store_reconciliation_paths(path, candidate)?;
+        let parent = target
+            .parent()
+            .ok_or(RepositoryError::LocalStateUnavailable)?;
+        let current = self.read_managed_file(&target)?;
+        let displaced = self.read_managed_file(&quarantine)?;
+
+        if let Some(displaced) = displaced.as_deref() {
+            if Some(displaced) != expected {
+                return Err(RepositoryError::ManagedContentConflict);
+            }
+            if current.as_deref() == next {
+                return self.remove_verified_quarantine(
+                    parent,
+                    &quarantine,
+                    &target,
+                    expected,
+                    next,
+                );
+            }
+            if current.is_none() {
+                if let Some(next) = next {
+                    self.materialize_managed_file_impl_with_quarantine_locked(
+                        path,
+                        None,
+                        Some(next),
+                        None,
+                        None,
+                        None,
+                    )?;
+                }
+                return self.remove_verified_quarantine(
+                    parent,
+                    &quarantine,
+                    &target,
+                    expected,
+                    next,
+                );
+            }
+            return Err(RepositoryError::ManagedContentConflict);
+        }
+
+        if current.as_deref() == next {
+            return Ok(());
+        }
+        if current.as_deref() != expected {
+            return Err(RepositoryError::ManagedContentConflict);
+        }
+        let quarantine_path = expected.map(|_| quarantine.as_path());
+        self.materialize_managed_file_impl_with_quarantine_locked(
+            path,
+            expected,
+            next,
+            quarantine_path,
+            None,
+            None,
+        )
     }
 
     /// Atomically persists the current publication journal in private runtime
@@ -3104,8 +3402,26 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
     ) -> Result<IndexGeneration, RepositoryError> {
-        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false)
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false, |_| {})
     }
+    /// Executes publication and observes durable ref/index journal stages.
+    pub fn publish_candidate_with_stage_hook(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        journal: &mut PublicationJournal,
+        on_stage: impl FnMut(PublicationJournalStage),
+    ) -> Result<IndexGeneration, RepositoryError> {
+        self.publish_candidate_impl_with_migration(
+            expected_index,
+            candidate,
+            journal,
+            false,
+            false,
+            on_stage,
+        )
+    }
+
 
     /// Explicitly publishes a caller-built format-3 migration from a captured
     /// format-1/2 snapshot through the shared durable PUB-3 journal.
@@ -3176,7 +3492,7 @@ impl Repository {
             return Err(RepositoryError::InvalidFormatMigration);
         }
 
-        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, true)
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, true, |_| {})
     }
 
     /// The common PUB-1 ref/index/worktree machinery. Compact candidates are
@@ -3195,6 +3511,7 @@ impl Repository {
             journal,
             permit_compact,
             false,
+            |_| {},
         )
     }
 
@@ -3205,6 +3522,7 @@ impl Repository {
         journal: &mut PublicationJournal,
         permit_compact: bool,
         permit_legacy_migration: bool,
+        mut on_stage: impl FnMut(PublicationJournalStage),
     ) -> Result<IndexGeneration, RepositoryError> {
         if journal.migration_continuity().is_some() != permit_legacy_migration
             || journal.migration_annotation_defaults().is_some() != permit_legacy_migration
@@ -3265,6 +3583,17 @@ impl Repository {
                 return Err(RepositoryError::ManagedContentConflict);
             }
         }
+        if let Err(error) =
+            self.reconcile_store_worktree_transition(expected_index, candidate, false)
+        {
+            // A failed pre-ref store check has no observable publication to recover.
+            // Remove its prepared journal so the preserved pending batch can be retried.
+            if self.head()?.as_ref() == Some(journal.old_head()) {
+                self.clear_publication_journal_locked()?;
+            }
+            drop(git_lock);
+            return Err(error);
+        }
         self.advance_current_ref_bound(
             journal.old_head(),
             candidate,
@@ -3275,6 +3604,7 @@ impl Repository {
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
         self.write_publication_journal_locked(journal)?;
+        on_stage(PublicationJournalStage::RefAdvanced);
         let reconciled = self.reconcile_published_index_locked(
             expected_index,
             candidate,
@@ -3285,6 +3615,7 @@ impl Repository {
 
         journal.advance(PublicationJournalStage::IndexReconciled)?;
         self.write_publication_journal_locked(journal)?;
+        on_stage(PublicationJournalStage::IndexReconciled);
         for index in 0..journal.entries().len() {
             self.materialize_publication_entry_locked(journal, index)?;
         }
@@ -3375,6 +3706,7 @@ impl Repository {
                 self.write_publication_journal_locked(&journal)?;
             }
             if journal.stage() == PublicationJournalStage::RefAdvanced {
+                self.reconcile_store_worktree_transition(&expected_index, &candidate, false)?;
                 let current = IndexGeneration {
                     head: self.head()?,
                     tree: self.index_tree_from_file(&index)?,
@@ -3391,7 +3723,16 @@ impl Repository {
                         &git_lock,
                     )?
                 } else if self.index_entries_match_candidate(&candidate, &journal)? {
-                    current
+                    let paths = self.publication_index_paths(&candidate, &journal)?;
+                    let base_index =
+                        fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                    self.reconcile_published_index_locked(
+                        &expected_index,
+                        &candidate,
+                        &paths,
+                        &base_index,
+                        &git_lock,
+                    )?
                 } else {
                     return Err(RepositoryError::StaleIndex {
                         expected: expected_index,
@@ -6173,6 +6514,14 @@ impl Repository {
     fn git<const N: usize>(&self, args: [&str; N]) -> Result<String, RepositoryError> {
         Self::git_at(&self.worktree, args)
     }
+    fn git_bytes_no_lazy_fetch<const N: usize>(
+        &self,
+        args: [&str; N],
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let mut command = self.command();
+        command.env("GIT_NO_LAZY_FETCH", "1").args(args);
+        Ok(self.run(command)?.stdout)
+    }
     fn git_bytes<const N: usize>(&self, args: [&str; N]) -> Result<Vec<u8>, RepositoryError> {
         let mut command = self.command();
         command.args(args);
@@ -6322,6 +6671,7 @@ impl Repository {
             _ => Err(RepositoryError::InvalidPublicationJournal),
         }
     }
+
 
     fn publication_index_paths(
         &self,
