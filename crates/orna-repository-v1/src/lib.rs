@@ -3512,6 +3512,9 @@ impl Repository {
         {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
+        if review.candidate_paths.is_empty() {
+            return Err(RepositoryError::SysGitNothingToCommit);
+        }
         let result_path = self.runtime.root().join(format!("reviewed-result-{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
         if let Ok(recorded) = fs::read_to_string(&result_path) {
             if self.head()?.as_ref().is_some_and(|head| head.as_str() == recorded.trim()) {
@@ -10728,6 +10731,90 @@ mod tests {
         repository.mark_runtime_complete(intent, &mut recovered).unwrap();
         assert!(repository.read_publication_journal().unwrap().is_none());
         assert_eq!(repository.head().unwrap(), Some(candidate.commit().clone()));
+    }
+
+    #[test]
+    fn reviewed_candidate_commit_preserves_unstaged_work_and_replays_result() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/database.orna"), include_str!("../tests/fixtures/format-context/database-final.orna")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"store root one").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let staged = b"module main;\n// admitted\n";
+        fs::write(root.path().join("main.orna"), staged).unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        fs::write(root.path().join("unrelated.txt"), b"unstaged").unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([10; 16]), super::Uuid::from_bytes([11; 16]), 3,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(4), vec![0x81, 0x00],
+        ).unwrap();
+        let intent = [12; 16];
+        let committed = repository.commit_reviewed_candidate(
+            &review, &review.index_tree, 3, intent, "reviewed",
+        ).unwrap();
+        assert_eq!(repository.head().unwrap(), Some(committed.clone()));
+        assert_eq!(repository.index_generation().unwrap().tree(), Some(&review.index_tree));
+        assert_eq!(repository.read_committed_file(&committed, "main.orna", 1 << 20).unwrap(), staged);
+        assert_eq!(fs::read(root.path().join("unrelated.txt")).unwrap(), b"unstaged");
+        assert!(!git(root.path(), &["status", "--porcelain"]).is_empty());
+        let replay = repository.commit_reviewed_candidate(
+            &review, &review.index_tree, 3, intent, "reviewed",
+        ).unwrap();
+        assert_eq!(replay, committed);
+    }
+
+    #[test]
+    fn reviewed_candidate_retries_after_index_lock_contention() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/database.orna"), include_str!("../tests/fixtures/format-context/database-final.orna")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"store root one").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+        fs::write(root.path().join("main.orna"), "module main;\n// lock retry\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([20; 16]), super::Uuid::from_bytes([21; 16]), 5,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(6), vec![0x81, 0x00],
+        ).unwrap();
+        let index = repository.git_path("index").unwrap();
+        let lock = index.with_extension("lock");
+        fs::write(&lock, b"occupied").unwrap();
+        assert!(repository.commit_reviewed_candidate(&review, &review.index_tree, 5, [22; 16], "reviewed").is_err());
+        fs::remove_file(&lock).unwrap();
+        assert!(repository.commit_reviewed_candidate(&review, &review.index_tree, 5, [22; 16], "reviewed").is_ok());
+        assert!(repository.read_publication_journal().unwrap().is_none());
+    }
+
+    #[test]
+    fn reviewed_candidate_empty_commit_returns_nothing_to_commit() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([30; 16]), super::Uuid::from_bytes([31; 16]), 8,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(9), vec![0x81, 0x00],
+        ).unwrap();
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&review, &review.index_tree, 8, [32; 16], "reviewed"),
+            Err(RepositoryError::SysGitNothingToCommit)
+        ));
     }
 
      #[test]
