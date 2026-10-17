@@ -3517,9 +3517,7 @@ impl Repository {
         }
         let result_path = self.runtime.root().join(format!("reviewed-result-{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
         if let Ok(recorded) = fs::read_to_string(&result_path) {
-            if self.head()?.as_ref().is_some_and(|head| head.as_str() == recorded.trim()) {
-                return self.snapshot_from_native_oid(recorded.trim().to_owned());
-            }
+            return self.snapshot_from_native_oid(recorded.trim().to_owned());
         }
         let actual_cwd = self.cwd_generation(review.cwd.runtime())?;
         let index = self.git_path("index")?;
@@ -10764,6 +10762,8 @@ mod tests {
         assert_eq!(repository.read_committed_file(&committed, "main.orna", 1 << 20).unwrap(), staged);
         assert_eq!(fs::read(root.path().join("unrelated.txt")).unwrap(), b"unstaged");
         assert!(!git(root.path(), &["status", "--porcelain"]).is_empty());
+        git(root.path(), &["commit", "--allow-empty", "-m", "later unrelated commit"]);
+        assert_ne!(repository.head().unwrap(), Some(committed.clone()));
         let replay = repository.commit_reviewed_candidate(
             &review, &review.index_tree, 3, intent, "reviewed",
         ).unwrap();
