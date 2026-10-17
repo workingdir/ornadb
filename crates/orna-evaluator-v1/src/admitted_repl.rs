@@ -587,7 +587,27 @@ fn admitted_runtime_sources(
         }
     }
 
+    let has_main_module = parsed_modules
+        .iter()
+        .any(|(namespace, _)| namespace.as_deref() == Some("main"));
     let mut module_aliases = BTreeMap::new();
+    if !has_main_module {
+        for (namespace, module) in &parsed_modules {
+            if namespace.is_some() {
+                continue;
+            }
+            for item in &module.items {
+                if let Declaration::Function { signature, .. } = &item.declaration
+                    && matches!(item.visibility, Visibility::Public { .. })
+                {
+                    module_aliases.insert(
+                        format!("main.{}", signature.name),
+                        signature.name.clone(),
+                    );
+                }
+            }
+        }
+    }
     for (namespace, module) in &parsed_modules {
         let Some(namespace) = namespace else {
             continue;
@@ -626,7 +646,7 @@ fn admitted_runtime_sources(
                         },
                     );
                 }
-                Declaration::Use { .. } => {}
+                Declaration::Use { .. } | Declaration::Table { .. } => {}
                 // The bounded REPL admits pinned standard functions as
                 // executable source, while declaration-only standard items
                 // remain represented by the semantic catalogue. Keep these
@@ -855,6 +875,35 @@ mod tests {
             .load_with_standard_profile(&repository, profile)
             .unwrap();
         (directory, project)
+    }
+
+    #[test]
+    fn root_main_runtime_alias_yields_to_a_source_main_module() {
+        let mut root = admitted_runtime_sources(
+            vec![(None, "pub fn add(value: Int) = value + 10;".into())],
+            Vec::new(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .expect("root functions load");
+        assert_eq!(root.submit("main.add(1)"), Ok(Some(Value::int(11.into()))));
+
+        let mut with_main = admitted_runtime_sources(
+            vec![
+                (None, "pub fn add(value: Int) = value + 10;".into()),
+                (Some("main".into()), "pub fn add(value: Int) = value + 1;".into()),
+            ],
+            Vec::new(),
+            Vec::new(),
+            Limits::default(),
+        )
+        .expect("root and user main functions load");
+        assert!(with_main.submit("main.add(1)").is_err());
+        with_main.submit("use main;").expect("user main module imports");
+        assert_eq!(
+            with_main.submit("main.add(1)"),
+            Ok(Some(Value::int(2.into())))
+        );
     }
 
     #[test]
