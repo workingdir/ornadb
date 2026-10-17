@@ -75,6 +75,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
       # This ratchets citations in test code, not conformance. To lower max_uncited, update the baseline only after reviewing the cited-ID output and preserving cited_ids.
+# When eligibility rules change, revalidate every dropped ID and set max_uncited to the corrected scan's exact uncited count.
       - name: Ratchet requirement citations (not conformance proof)
         run: cargo run --locked -p orna-traceability-v1 -- cited --baseline crates/orna-traceability-v1/citation-baseline.json --crates-root .
 
