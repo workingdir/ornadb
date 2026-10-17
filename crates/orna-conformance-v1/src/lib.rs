@@ -38,6 +38,7 @@ pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use semantic_adapter::{
     BoundedEvaluator, DurableTransactionalEvaluator, RunningTableRequestDisposition,
     RuntimeAdapter, RuntimeEvaluator, RuntimeTarget, SemanticAdapter, TransactionalEvaluator,
+    transactional_table_candidate_validator,
 };
 pub use syntax_adapter::SyntaxAdapter;
 
