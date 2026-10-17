@@ -3179,6 +3179,44 @@ fn join_planner_preserves_declared_order_when_cumulative_cardinality_overflows()
         surfaced_join_sources,
         ["table:first", "table:second", "table:third", "table:fourth"]
     );
+    let base_overflow_sources = [
+        obj("table:base-first"),
+        obj("table:base-second"),
+        obj("table:base-third"),
+    ];
+    let base_overflow = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:base-join-overflow"),
+        source: obj("table:large-base"),
+        source_statistics: Some(stats(100_000_000, 0)),
+        joins: base_overflow_sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| QueryJoinDescription {
+                source: source.clone(),
+                statistics: Some(stats(100_000, (3 - index as u64) * 4_096)),
+                predicate: None,
+            })
+            .collect(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("query whose base estimate makes cumulative join cardinality overflow");
+    let surfaced_base_overflow_sources = base_overflow
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Scan)
+        .filter_map(|node| node.object().map(|object| object.as_str()))
+        .filter(|source| *source != "table:large-base")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        surfaced_base_overflow_sources,
+        ["table:base-first", "table:base-second", "table:base-third"]
+    );
 }
 #[test]
 fn explain_rejects_conflicting_function_edges_and_over_limit_query_shapes() {
