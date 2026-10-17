@@ -3133,6 +3133,54 @@ fn function_explain_keeps_direct_effect_edges_visible() {
 }
 
 #[test]
+fn join_planner_preserves_declared_order_when_cumulative_cardinality_overflows() {
+    let stats = |rows, bytes| QuerySourceStatistics {
+        estimated_rows: Some(rows),
+        estimated_bytes: Some(bytes),
+        mutable_branch: None,
+    };
+    let declared_sources = [
+        obj("table:first"),
+        obj("table:second"),
+        obj("table:third"),
+        obj("table:fourth"),
+    ];
+    let query = QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:cumulative-join-overflow"),
+        source: obj("table:base"),
+        source_statistics: Some(stats(100_000, 0)),
+        joins: declared_sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| QueryJoinDescription {
+                source: source.clone(),
+                statistics: Some(stats(100_000, (4 - index as u64) * 4_096)),
+                predicate: None,
+            })
+            .collect(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    };
+
+    let explained = explain_query(&query).expect("query with cumulative join overflow");
+    let surfaced_join_sources = explained
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Scan)
+        .filter_map(|node| node.object().map(|object| object.as_str()))
+        .filter(|source| *source != "table:base")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        surfaced_join_sources,
+        ["table:first", "table:second", "table:third", "table:fourth"]
+    );
+}
+#[test]
 fn explain_rejects_conflicting_function_edges_and_over_limit_query_shapes() {
     let function = obj("function:main");
     let target = obj("function:normalize");
