@@ -86,15 +86,29 @@ fn directory_entries(path: &Path) -> String {
 #[tokio::test]
 async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     if !Path::new("/dev/fuse").exists() {
-        eprintln!("SKIP: cwd FUSE mount test requires /dev/fuse, which is unavailable");
-        return;
+        if std::env::var_os("ORNA_SKIP_FUSE_TEST").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            eprintln!("SKIP: cwd FUSE mount test explicitly opted out with ORNA_SKIP_FUSE_TEST=1");
+            return;
+        }
+        panic!("cwd FUSE mount test requires /dev/fuse; set ORNA_SKIP_FUSE_TEST=1 only to opt out");
     }
-    let source = "pub table Music(id: Str) { content: Blob, }\n";
-    let (repository_directory, repository, relation_id) =
-        format3::format3_repository_for_table(source, "Music");
     let media_root = TempDir::new().unwrap();
     let expected = b"ID3-orna-range-read-test-content";
     std::fs::write(media_root.path().join("tone.mp3"), expected).unwrap();
+    let source = "pub table Music(id: Str) { title: Str, artist: Str, content: Blob, cover: Blob?, }\n";
+    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
+    let row_source = format!(
+        "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 65536),\n    cover: null,\n}}\n"
+    );
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            source,
+            "Music",
+            "Music/london.orna",
+            &row_source,
+        );
 
     let runtime_identity = RuntimeIdentity {
         database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
@@ -110,19 +124,17 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
     let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
-    media_commit::commit_capture_for_table(
+    media_commit::commit_source_captures_for_table(
         &repository,
         &state,
         writer,
         &mut bindings,
-        &capture,
-        "Music",
-        "london",
-        0x80,
-        true,
         relation_id,
+        &format_context,
+        "Music",
+        "content",
+        &[(&capture, "london", 0x80)],
     )
     .await;
 
