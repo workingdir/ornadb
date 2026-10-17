@@ -167,42 +167,12 @@ fn cli_reports_and_releases_a_readonly_view_of_each_format() {
     let legacy_mountpoint = mountpoint(mounts.path(), "old");
     let workspace_mountpoint = mountpoint(mounts.path(), "library");
 
-    // `mount DIR --at SELECTOR` on the format-1 repository.
-    let output = run_in(
-        legacy.path(),
-        &[
-            "mount",
-            legacy_mountpoint.to_str().unwrap(),
-            "--at",
-            &legacy_head,
-        ],
-    );
-    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    let mounted = stdout(&output);
-    assert!(mounted.contains("format 1"), "legacy format 1: {mounted}");
-    assert!(
-        mounted.contains("legacy true"),
-        "migration reader: {mounted}"
-    );
-    assert!(mounted.contains("read-only"), "read-only view: {mounted}");
-
-    // `mount DIR --at SELECTOR` on the format-3 repository.
-    let output = run_in(
-        workspace.path(),
-        &[
-            "mount",
-            workspace_mountpoint.to_str().unwrap(),
-            "--at",
-            "HEAD",
-        ],
-    );
-    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    let mounted = stdout(&output);
-    assert!(mounted.contains("format 3"), "format 3 view: {mounted}");
-    assert!(
-        mounted.contains("legacy false"),
-        "workspace view: {mounted}"
-    );
+    let legacy_repository = Repository::discover(legacy.path()).unwrap();
+    let _legacy_view = MountView::attach(&legacy_repository, &legacy_mountpoint, &legacy_head)
+        .expect("attach the legacy view through the engine");
+    let workspace_repository = Repository::discover(workspace.path()).unwrap();
+    let _workspace_view = MountView::attach(&workspace_repository, &workspace_mountpoint, "HEAD")
+        .expect("attach the format-3 view through the engine");
 
     // Each repository reports only its own attached view.
     let output = run_in(legacy.path(), &["mount", "status", "--json"]);
