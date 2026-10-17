@@ -16,10 +16,12 @@ use orna_repository_v1::{
     CompactRuntimeReceipt, CompactSegment, CompactSegmentRole, GitDeclaredObjectSetState,
     GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
     ManagedFileChange, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
-    NativeObjectId, OrnaInternalRef, PublicationJournal, PublicationJournalEntry,
-    PublicationJournalStage, RemoteContinuity, Repository, RepositoryError, RequiredInternalRef,
-    RuntimeGeneration, StreamCheckpointIdentityPredecessor, WorktreeState,
+    MountError, MountView, NativeObjectId, OrnaInternalRef, PublicationJournal,
+    PublicationJournalEntry, PublicationJournalStage, RemoteContinuity, Repository,
+    RepositoryError, RequiredInternalRef, RuntimeGeneration, StreamCheckpointIdentityPredecessor,
+    WorktreeState,
 };
+
 use parquet::{
     basic::{Compression, Encoding, PageType},
     column::reader::ColumnReader,
@@ -9159,4 +9161,173 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             Err(RepositoryError::PublicationRecoveryConflict)
         ));
     }
+}
+fn only_mount_record(repository: &Repository) -> PathBuf {
+    fs::read_dir(repository.runtime_paths().root().join("mounts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "orna"))
+        .unwrap()
+}
+
+fn mount_record_field<'a>(record: &'a str, name: &str) -> &'a str {
+    let prefix = format!("{name} ");
+    record
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap()
+}
+
+fn mount_pin_reference(repository: &Repository, record: &str) -> String {
+    let registry_owner_id = fs::read_to_string(
+        repository
+            .runtime_paths()
+            .root()
+            .join("mount-registry-owner-id-v1"),
+    )
+    .unwrap();
+    format!(
+        "refs/orna/pins/{}/mounts/{}/{}",
+        registry_owner_id,
+        mount_record_field(record, "owner"),
+        mount_record_field(record, "view"),
+    )
+}
+
+#[test]
+fn mount_attach_rejects_a_second_view_and_reopens_by_view_identity() {
+    let root = repository();
+    let repository = Repository::discover(root.path()).unwrap();
+    let mountpoint = TempDir::new().unwrap();
+    let _original = MountView::attach(&repository, mountpoint.path(), "HEAD").unwrap();
+    let status = repository.mount_status().unwrap().pop().unwrap();
+
+    assert_eq!(
+        MountView::attach(&repository, mountpoint.path(), "HEAD").unwrap_err(),
+        MountError::MountpointAlreadyAttached,
+    );
+    let reopened = repository
+        .open_mount_view_by_id(&status.view_hex())
+        .unwrap();
+    assert_eq!(reopened.verify_record().unwrap(), status);
+    reopened.detach().unwrap();
+    assert!(repository.mount_status().unwrap().is_empty());
+}
+
+#[test]
+fn mount_registry_reconciles_interrupted_pin_and_record_updates() {
+    let root = repository();
+    let repository = Repository::discover(root.path()).unwrap();
+    let mountpoint = TempDir::new().unwrap();
+    let _first = MountView::attach(&repository, mountpoint.path(), "HEAD").unwrap();
+
+    let first_record_path = only_mount_record(&repository);
+    let first_record = fs::read_to_string(&first_record_path).unwrap();
+    let first_pin = mount_pin_reference(&repository, &first_record);
+    fs::remove_file(&first_record_path).unwrap();
+    assert!(repository.mount_status().unwrap().is_empty());
+    assert!(!Command::new("git")
+        .current_dir(root.path())
+        .args(["show-ref", "--verify", "--quiet", &first_pin])
+        .status()
+        .unwrap()
+        .success());
+
+    let _second = MountView::attach(&repository, mountpoint.path(), "HEAD").unwrap();
+    let second_record_path = only_mount_record(&repository);
+    let second_record = fs::read_to_string(&second_record_path).unwrap();
+    let second_pin = mount_pin_reference(&repository, &second_record);
+    let pin_oid = mount_record_field(&second_record, "pin");
+    git(
+        root.path(),
+        &["update-ref", "-d", second_pin.as_str(), pin_oid],
+    );
+    assert!(repository.mount_status().unwrap().is_empty());
+    assert!(!second_record_path.exists());
+}
+
+#[test]
+fn mount_registry_reconciliation_preserves_other_worktree_pins() {
+    let root = repository();
+    let linked_worktree_path = root.path().join("linked-worktree");
+    let linked_worktree_argument = linked_worktree_path.to_str().unwrap();
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            linked_worktree_argument,
+            "HEAD",
+        ],
+    );
+    let repository = Repository::discover(root.path()).unwrap();
+    let linked_repository = Repository::discover(&linked_worktree_path).unwrap();
+    assert_ne!(
+        repository.runtime_paths().root(),
+        linked_repository.runtime_paths().root()
+    );
+
+    let mountpoint = TempDir::new().unwrap();
+    let linked_mountpoint = TempDir::new().unwrap();
+    let first_view = MountView::attach(&repository, mountpoint.path(), "HEAD").unwrap();
+    let linked_view =
+        MountView::attach(&linked_repository, linked_mountpoint.path(), "HEAD").unwrap();
+    let owner_id_path = |repository: &Repository| {
+        repository
+            .runtime_paths()
+            .root()
+            .join("mount-registry-owner-id-v1")
+    };
+    let first_registry_id = fs::read_to_string(owner_id_path(&repository)).unwrap();
+    let linked_registry_id = fs::read_to_string(owner_id_path(&linked_repository)).unwrap();
+    assert_ne!(first_registry_id, linked_registry_id);
+    let rediscovered = Repository::discover(root.path()).unwrap();
+    assert_eq!(
+        fs::read_to_string(owner_id_path(&rediscovered)).unwrap(),
+        first_registry_id,
+    );
+
+    let linked_record_path = only_mount_record(&linked_repository);
+    let linked_record = fs::read_to_string(&linked_record_path).unwrap();
+    let linked_pin = mount_pin_reference(&linked_repository, &linked_record);
+    fs::remove_file(&linked_record_path).unwrap();
+
+    assert_eq!(repository.mount_status().unwrap().len(), 1);
+    assert!(Command::new("git")
+        .current_dir(root.path())
+        .args(["show-ref", "--verify", "--quiet", &linked_pin])
+        .status()
+        .unwrap()
+        .success());
+    assert!(linked_repository.mount_status().unwrap().is_empty());
+    assert!(!Command::new("git")
+        .current_dir(root.path())
+        .args(["show-ref", "--verify", "--quiet", &linked_pin])
+        .status()
+        .unwrap()
+        .success());
+    linked_view.detach().unwrap();
+    first_view.detach().unwrap();
+}
+
+#[test]
+fn mount_detach_propagates_non_not_found_registry_read_errors() {
+    let root = repository();
+    let repository = Repository::discover(root.path()).unwrap();
+    let mountpoint = TempDir::new().unwrap();
+    let view = MountView::attach(&repository, mountpoint.path(), "HEAD").unwrap();
+    let record_path = only_mount_record(&repository);
+    let record = fs::read_to_string(&record_path).unwrap();
+    let pin = mount_pin_reference(&repository, &record);
+
+    fs::remove_file(&record_path).unwrap();
+    fs::create_dir(&record_path).unwrap();
+    assert_eq!(view.detach().unwrap_err(), MountError::HostFilesystem);
+    assert!(Command::new("git")
+        .current_dir(root.path())
+        .args(["show-ref", "--verify", "--quiet", &pin])
+        .status()
+        .unwrap()
+        .success());
 }
