@@ -374,14 +374,14 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     assert!(!unstaged_before.is_empty(), "fixture has unstaged unrelated work");
 
     let marker = root.join("crash-marker");
-    let mut child = launch(root, "candidate", &marker);
+    let mut child = launch(root, "ref-cas", &marker);
     let deadline = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(
         marker.exists(),
-        "child never reached candidate; status: {:?}",
+        "child never reached ref-cas; status: {:?}",
         child.try_wait().unwrap()
     );
     let tail_payload = std::fs::read(Path::new(MEDIA_FIXTURES).join("pixel2.png")).unwrap();
@@ -423,21 +423,21 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
 
     child.kill().expect("SIGKILL publication child");
     let status = child.wait().expect("wait for killed publication child");
-    assert!(!status.success(), "child unexpectedly returned at candidate");
-    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "candidate");
+    assert!(!status.success(), "child unexpectedly returned at ref-cas");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ref-cas");
     std::fs::remove_file(&marker).unwrap();
     drop(state);
 
     let (identity, digest) = cli_runtime_identity(&repository);
     let recovered = RuntimeState::open(&repository, identity, digest)
         .await
-        .unwrap_or_else(|error| panic!("runtime reopen after candidate crash: {error:?}"));
-    // PUB-3 steps 1 and 6: freezing retains pending mutations, while the
-    // durable publication journal is written only after candidate construction.
-    // This child was killed at the earlier candidate hook, so no journal
-    // should exist yet and the frozen range must still be pending for recovery.
-    assert!(repository.read_publication_journal().unwrap().is_none());
-    assert_eq!(head(&repository), base.as_str(), "candidate crash advanced HEAD");
+        .unwrap_or_else(|error| panic!("runtime reopen after ref-cas crash: {error:?}"));
+    // PUB-3 steps 6 and 9 journal before advancing the ref; ORNA-PUB-007,
+    // ORNA-PUB-008, and ORNA-PUB-016 require recovery to finish reconciliation,
+    // consume only the frozen range, and preserve unrelated index/worktree edits.
+    // The ref-cas hook is the first crash boundary with a durable journal.
+    assert!(repository.read_publication_journal().unwrap().is_some());
+    assert_ne!(head(&repository), base.as_str(), "ref-cas crash did not advance HEAD");
     assert!(recovered.pending_count().await.unwrap() > 0);
     let recovered_index = RuntimePublicationCoordinator::recover(&repository, &recovered)
         .await
