@@ -118,39 +118,43 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     assert_eq!(content.transfer_record().database_id(), schema.database_id());
     ContextValue::decode_in_context(content.encoded_value(), ValueFormat::Rov3, &value_context)
         .expect("captured Blob must decode under the committed database context");
-    // Keep the original content-only admission path covered: the nullable cover
-    // is an explicit source value, not an omitted field or a captured Blob.
-    let content_only_capture = evaluate_expression_ovb2_with_effects(
+    // The original content-only path admits a typed null cover on its own row.
+    let null_cover_row = admit_source_row(
+        &project,
+        "music/london.orna",
+        r#"{ title: "Field recording", artist: "Kieran", cover: null, }"#,
+        &schema,
+        &value_context,
+        vec![("content".to_owned(), content)],
+        [0x32; 16],
+    )
+    .expect("a content-bound Music row admits its explicit null cover");
+    assert_eq!(null_cover_row.mutation().key(), b"london");
+
+    let cover_content_capture = evaluate_expression_ovb2_with_effects(
         &capture,
         &Default::default(),
         Limits::default(),
         &mut bindings,
     )
     .unwrap();
-    let content_only = bindings
-        .accept_captured_blob_for_row(&content_only_capture)
+    let cover_content = bindings
+        .accept_captured_blob_for_row(&cover_content_capture)
         .unwrap();
-    admit_source_row(
+    let covered_row = admit_source_row(
         &project,
-        "music/london.orna",
-        r#"{ title: "Field recording", artist: "Kieran", cover: null, }"#,
-        &schema,
-        &value_context,
-        vec![("content".to_owned(), content_only)],
-        [0x32; 16],
-    )
-    .expect("a content-bound Music row admits its explicit null cover");
-
-    let admitted = admit_source_row(
-        &project,
-        "music/london.orna",
+        "music/london-cover.orna",
         r#"{ title: "Live in London", artist: "Kieran", }"#,
         &schema,
         &value_context,
-        vec![("content".to_owned(), content), ("cover".to_owned(), cover)],
+        vec![
+            ("content".to_owned(), cover_content),
+            ("cover".to_owned(), cover),
+        ],
         [0x31; 16],
-    ).expect("the Music row admits the captured Blob in its named content field");
-    assert_eq!(admitted.mutation().key(), b"london");
+    )
+    .expect("the Music row admits content and cover in their named Blob fields");
+    assert_eq!(covered_row.mutation().key(), b"london-cover");
 
     // The admitted-row path resolves the field name against the committed descriptor,
     // checks its Blob type, and retains the field pin through staging and commit.
@@ -164,7 +168,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let staged_source = authority.evaluate_staged_with_source_rows(
         &application,
         &Environment::new(),
-        vec![admitted],
+        vec![null_cover_row, covered_row],
         &value_context,
     ).unwrap();
     let staged = staged_source.stage(&authority, &context).unwrap();
@@ -185,12 +189,12 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let report: serde_json::Value = serde_json::from_slice(&query.stdout).unwrap();
     assert_eq!(report["media_payload_bytes_read"], 0);
     let listings = report["listings"].as_array().unwrap();
-    assert_eq!(listings.len(), 2);
+    assert_eq!(listings.len(), 3);
     let listing = listings.iter()
         .find(|item| item["key"] == "london" && item["media_type"] == "audio/mpeg")
         .unwrap_or_else(|| panic!("Music.content is listed with its stored audio annotation: {report}"));
     let cover_listing = listings.iter()
-        .find(|item| item["key"] == "london" && item["media_type"] == "image/png")
+        .find(|item| item["key"] == "london-cover" && item["media_type"] == "image/png")
         .unwrap_or_else(|| panic!("Music.cover is listed with its stored image annotation: {report}"));
     assert_eq!(listing["media_type"], "audio/mpeg");
     assert_eq!(listing["length"], original.len() as u64);
@@ -254,16 +258,28 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let restored_listings = restored_report["listings"].as_array().unwrap();
     let restored_cover_listing = restored_listings
         .iter()
-        .find(|item| item["key"] == "london" && item["media_type"] == "image/png")
+        .find(|item| item["key"] == "london-cover" && item["media_type"] == "image/png")
         .expect("offline restore retains the Music.cover listing");
     assert_eq!(restored_cover_listing["length"], cover_bytes.len() as u64);
     assert_eq!(restored_cover_listing["sha256"], hex(&expected_cover_sha));
     assert!(String::from_utf8(git_output(&restored, &["remote"], None)).unwrap().trim().is_empty());
     let copied = Repository::discover(&restored).unwrap();
     let rows = committed_store_rows(&copied, relation_id);
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].key(), &orna_repository_v1::TypedKey::Text("london".to_owned()));
-    let blob_fields = rows[0].blob_fields().expect("Music row carries Blob metadata");
+    assert_eq!(rows.len(), 2);
+    let content_only_row = rows
+        .iter()
+        .find(|row| row.key() == &orna_repository_v1::TypedKey::Text("london".to_owned()))
+        .expect("content-only Music row survives offline restore");
+    let content_only_blobs = content_only_row
+        .blob_fields()
+        .expect("the null-cover row retains its content Blob");
+    assert_eq!(content_only_blobs.len(), 1);
+    assert_eq!(content_only_blobs[0].1.sha256(), expected_sha);
+    let covered_row = rows
+        .iter()
+        .find(|row| row.key() == &orna_repository_v1::TypedKey::Text("london-cover".to_owned()))
+        .expect("Music row with a cover survives offline restore");
+    let blob_fields = covered_row.blob_fields().expect("Music row carries Blob metadata");
     assert_eq!(blob_fields.len(), 2);
     assert!(blob_fields.iter().any(|(_, metadata)| metadata.sha256() == expected_sha));
     assert!(blob_fields.iter().any(|(_, metadata)| metadata.sha256() == expected_cover_sha));
@@ -271,7 +287,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let row_map = format.load_row_map(relation_id).unwrap();
     let graph = format.open_native_graph(&row_map).unwrap();
     let scope = graph.open_read_scope().unwrap();
-    let row = graph.lookup_row(rows[0].key(), &scope).unwrap().unwrap();
+    let row = graph.lookup_row(covered_row.key(), &scope).unwrap().unwrap();
     let dependencies = row.value().dependencies();
     let stored = dependencies.iter().find_map(|dependency| {
         if dependency.kind() != orna_repository_v1::NativeObjectKind::Tree {
