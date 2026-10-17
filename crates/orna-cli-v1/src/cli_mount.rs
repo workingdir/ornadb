@@ -11,7 +11,7 @@
 
 use std::path::Path;
 #[cfg(target_os = "linux")]
-use std::{fs, os::unix::ffi::OsStrExt, process::Command};
+use std::{fs, os::unix::ffi::OsStrExt};
 
 use super::*;
 use orna_repository_v1::{MountStatus, MountView, Repository};
@@ -177,20 +177,9 @@ impl MountSignalHandler {
                     .as_ref()
                     .is_some_and(|session| !session.guard.is_finished());
                 if still_mounted {
-                    let unmount = std::process::Command::new("fusermount3")
-                        .args(["-u", "--"])
-                        .arg(&mountpoint)
-                        .output();
-                    let unmount_error = match unmount {
-                        Ok(output) if output.status.success() => None,
-                        Ok(output) => Some(format!(
-                            "fusermount3 failed after {signal}: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        )),
-                        Err(error) => Some(format!(
-                            "fusermount3 could not run after {signal}: {error}"
-                        )),
-                    };
+                    let unmount_error = crate::fuse_mount::unmount_mountpoint(&mountpoint)
+                        .err()
+                        .map(|error| format!("FUSE unmount failed after {signal}: {error}"));
                     if let Some(error) = unmount_error
                         && session
                             .as_ref()
@@ -231,8 +220,7 @@ pub(super) fn run_mount_cwd(_endpoint: &Endpoint, _mountpoint: &Path) -> Result<
 pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), Diagnostic> {
     let repository = open_repository(endpoint)?;
     #[cfg(target_os = "linux")]
-    let mountpoint = fs::canonicalize(mountpoint)
-        .map_err(|error| mount_error("Mountpoint could not be resolved", error.to_string()))?;
+    let mountpoint = canonical_mountpoint_or_original(mountpoint);
     #[cfg(not(target_os = "linux"))]
     let mountpoint = mountpoint.to_path_buf();
 
@@ -241,27 +229,33 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
         let statuses = repository
             .mount_status()
             .map_err(|error| mount_error("Mount status could not be read", error.to_string()))?;
-        if let Some(view) = statuses.iter().find(|view| view.mountpoint() == mountpoint) {
-            if let Some((filesystem, source)) = mounted_source_for_path(&mountpoint)? {
+        let view = statuses.iter().find(|view| view.mountpoint() == mountpoint);
+        if let Some((filesystem, source)) = mounted_source_for_path(&mountpoint)? {
+            if !filesystem.starts_with("fuse") || !is_orna_mount_source(&source) {
+                return Err(mount_error(
+                    "Unmount was refused",
+                    format!("mountpoint belongs to {filesystem} {source}, not an Orna FUSE mount"),
+                ));
+            }
+            if let Some(view) = view {
                 let expected = format!("orna-{}", view.view_hex());
-                if !filesystem.starts_with("fuse") || source != expected {
+                if source != expected {
                     return Err(mount_error(
                         "Unmount was refused",
                         format!("mountpoint belongs to {filesystem} {source}, not {expected}"),
                     ));
                 }
-                let output = Command::new("fusermount3")
-                    .arg("-u")
-                    .arg("--")
-                    .arg(&mountpoint)
-                    .output()
-                    .map_err(|error| mount_error("FUSE unmount failed", error.to_string()))?;
-                if !output.status.success() {
-                    return Err(mount_error(
-                        "FUSE unmount failed",
-                        String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-                    ));
-                }
+            }
+            crate::fuse_mount::unmount_mountpoint(&mountpoint)
+                .map_err(|error| mount_error("FUSE unmount failed", error))?;
+            if view.is_none() {
+                writeln!(
+                    io::stdout().lock(),
+                    "unmounted orphan FUSE mount {}",
+                    mountpoint.display(),
+                )
+                .map_err(|_| stdout_error())?;
+                return Ok(());
             }
         }
     }
@@ -277,6 +271,32 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
     )
     .map_err(|_| stdout_error())?;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn canonical_mountpoint_or_original(path: &Path) -> std::path::PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match (path.file_name(), fs::canonicalize(parent)) {
+        (Some(name), Ok(parent)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_orna_mount_source(source: &str) -> bool {
+    let Some(view) = source.strip_prefix("orna-") else {
+        return false;
+    };
+    view.len() == 64
+        && view
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(target_os = "linux")]
