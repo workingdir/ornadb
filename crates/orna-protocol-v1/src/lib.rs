@@ -1441,15 +1441,39 @@ impl Diagnostic {
     fn decode(node: &Node) -> Result<Self> {
         validate_diagnostic(node)?;
         let bytes = encode_node(node)?;
+        // Only the fixed, payload-free read-only diagnostic is safe to disclose.
+        // The wire redacted bit is never sufficient authority; all other
+        // diagnostics are redacted fail-closed at this boundary.
+        if Self::is_safe_read_only_diagnostic(node) {
+            return Ok(Self(ValueNode(node.clone())));
+        }
         let diagnostic = orna_foundation_v1::Diagnostic::decode_ovb(&bytes)
             .map_err(|_| Error::InvalidValue)?
             .redacted();
-        // The wire protocol carries no disclosure authorization. Redact every
-        // diagnostic at ingress so standalone, Result, and status responses
-        // share the same fail-closed boundary, including recursive causes.
         let safe_bytes = diagnostic.encode_ovb().map_err(|_| Error::InvalidValue)?;
         let safe = CanonicalValue::decode(&safe_bytes).map_err(|_| Error::InvalidValue)?;
         Ok(Self(ValueNode(from_ovb(safe.raw())?)))
+    }
+
+    fn is_safe_read_only_diagnostic(node: &Node) -> bool {
+        let Node::Tag(60011, value) = node else {
+            return false;
+        };
+        let Some(fields) = map(value) else {
+            return false;
+        };
+        let field = |id| {
+            fields
+                .iter()
+                .find(|(key, _)| *key == Node::Int(BigInt::from(id)))
+                .map(|(_, value)| value)
+        };
+        matches!(field(0), Some(Node::Text(code)) if code == "wire.read_only")
+            && matches!(field(2), Some(Node::Text(message)) if message == "not permitted")
+            && matches!(field(3), Some(Node::Array(spans)) if spans.is_empty())
+            && matches!(field(4), Some(Node::Array(notes)) if notes.is_empty())
+            && matches!(field(5), Some(Node::Array(causes)) if causes.is_empty())
+            && matches!(field(6), Some(Node::Bool(false)))
     }
 }
 impl ResultBody {
