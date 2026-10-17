@@ -15,6 +15,7 @@ use orna_runtime_v1::{
     TerminalOutcome, WriterLease,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
+use orna_storage_v1::RuntimePublicationCoordinator;
 use tempfile::TempDir;
 
 #[path = "support/format3.rs"]
@@ -43,6 +44,9 @@ async fn commit_capture(
     writer: WriterLease,
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
+    logical_path: &str,
+    owner_id: [u8; 16],
+    request: RequestIdentity,
     relation_id: [u8; 16],
     format_context: &orna_value_v1::Format3Context,
 ) {
@@ -53,7 +57,6 @@ async fn commit_capture(
     let schema = loader
         .resolve_committed_source_table_schema(repository, source_commit, TableObjectId::new(relation_id))
         .unwrap();
-    let logical_path = "Object/image.orna";
     let row_source = repository
         .read_committed_file(source_commit, logical_path, 1 << 20)
         .unwrap();
@@ -70,7 +73,7 @@ async fn commit_capture(
         format_context,
         vec![("payload".to_owned(), blob_binding)],
         vec![],
-        [33; 16],
+        owner_id,
     ).unwrap();
     let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
     assert_eq!(resolved_schema.table_object_id(), TableObjectId::new(relation_id));
@@ -81,7 +84,6 @@ async fn commit_capture(
     for binding in &source_bindings {
         mutation = mutation.with_protected_content_pin(binding.pin()).unwrap();
     }
-    let request = RequestIdentity { session_id: [21; 16], request_id: [22; 16] };
     let fingerprint = [23; 32];
     let (_, admission) = state.reserve_request_with_admission(request, fingerprint).await.unwrap();
     state.start_request_with_owner_and_admission(
@@ -229,6 +231,9 @@ async fn capture_crash_child() {
                 writer,
                 &mut bindings,
                 &expression,
+                "Object/image.orna",
+                [33; 16],
+                RequestIdentity { session_id: [21; 16], request_id: [22; 16] },
                 relation_id,
                 &format_context,
             )
@@ -238,7 +243,15 @@ async fn capture_crash_child() {
     }
 }
 
-async fn seeded_project() -> (TempDir, TempDir, Repository, RuntimeState, orna_repository_v1::GitCommitRef) {
+async fn seeded_project() -> (
+    TempDir,
+    TempDir,
+    Repository,
+    RuntimeState,
+    orna_repository_v1::GitCommitRef,
+    [u8; 16],
+    orna_value_v1::Format3Context,
+) {
     let source = TempDir::new().unwrap();
     std::fs::copy(Path::new(MEDIA_FIXTURES).join("pixel.png"), source.path().join("pixel.png")).unwrap();
     let (directory, repository, relation_id, format_context) = object_format3_repository(source.path());
@@ -255,8 +268,21 @@ async fn seeded_project() -> (TempDir, TempDir, Repository, RuntimeState, orna_r
     let fixture = std::fs::read_to_string(REIMPORT_FIXTURE).unwrap();
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root);
-    commit_capture(&repository, &base, &state, writer, &mut bindings, &expression, relation_id, &format_context).await;
-    (directory, source, repository, state, base)
+    commit_capture(
+        &repository,
+        &base,
+        &state,
+        writer,
+        &mut bindings,
+        &expression,
+        "Object/image.orna",
+        [33; 16],
+        RequestIdentity { session_id: [21; 16], request_id: [22; 16] },
+        relation_id,
+        &format_context,
+    )
+    .await;
+    (directory, source, repository, state, base, relation_id, format_context)
 }
 
 fn head(repository: &Repository) -> String {
@@ -268,7 +294,8 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
     // The repository observer fires after each ref/index stage is durable;
     // ref-index remains the existing boundary after both stages complete.
     for boundary in ["capture", "row", "candidate", "ref-cas", "index", "ref-index", "tail"] {
-        let (directory, _source, repository, state, base) = seeded_project().await;
+        let (directory, _source, repository, state, base, _relation_id, _format_context) =
+            seeded_project().await;
         let root = directory.path();
         let marker = root.join("crash-marker");
         let mut child = launch(root, boundary, &marker);
@@ -307,6 +334,131 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
         );
     }
 }
+
+#[tokio::test]
+async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
+    let (directory, source, repository, state, _, relation_id, format_context) =
+        seeded_project().await;
+    let root = directory.path();
+    std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+    git(root, &["add", "--", "unrelated-tracked.txt"]);
+    git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+    let base = repository.head().unwrap().unwrap();
+
+    let staged_path = root.join("unrelated-staged.txt");
+    std::fs::write(&staged_path, b"staged before crash\n").unwrap();
+    git(root, &["add", "--", "unrelated-staged.txt"]);
+    let unstaged_path = root.join("unrelated-tracked.txt");
+    std::fs::write(&unstaged_path, b"unstaged before crash\n").unwrap();
+    let staged_before = git_output(root, &["diff", "--cached", "--binary"], None);
+    let unstaged_before = git_output(root, &["diff", "--binary"], None);
+    assert!(!staged_before.is_empty(), "fixture has staged unrelated work");
+    assert!(!unstaged_before.is_empty(), "fixture has unstaged unrelated work");
+
+    let marker = root.join("crash-marker");
+    let mut child = launch(root, "candidate", &marker);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "child never reached candidate; status: {:?}",
+        child.try_wait().unwrap()
+    );
+
+    let (identity, _) = cli_runtime_identity(&repository);
+    let writer = state.acquire_lease(identity.repository_id).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    let fixture = std::fs::read_to_string(REIMPORT_FIXTURE).unwrap();
+    let media_root = format!("{:?}", source.path().to_string_lossy().as_ref());
+    let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
+    commit_capture(
+        &repository,
+        &base,
+        &state,
+        writer,
+        &mut bindings,
+        &expression,
+        "Object/song.orna",
+        [43; 16],
+        RequestIdentity { session_id: [41; 16], request_id: [42; 16] },
+        relation_id,
+        &format_context,
+    )
+    .await;
+
+    child.kill().expect("SIGKILL publication child");
+    let status = child.wait().expect("wait for killed publication child");
+    assert!(!status.success(), "child unexpectedly returned at candidate");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "candidate");
+    std::fs::remove_file(&marker).unwrap();
+    drop(state);
+
+    let (identity, digest) = cli_runtime_identity(&repository);
+    let recovered = RuntimeState::open(&repository, identity, digest)
+        .await
+        .unwrap_or_else(|error| panic!("runtime reopen after candidate crash: {error:?}"));
+    assert!(repository.read_publication_journal().unwrap().is_some());
+    let recovered_index = RuntimePublicationCoordinator::recover(&repository, &recovered)
+        .await
+        .expect("recover the candidate after process death");
+    assert!(recovered_index.is_some(), "prepared candidate was not recovered");
+    assert!(repository.read_publication_journal().unwrap().is_none());
+    assert_ne!(head(&repository), base.as_str(), "frozen range was not recovered");
+    assert_eq!(
+        committed_store_rows(&repository, relation_id).len(),
+        1,
+        "recovery published only the frozen row, not the newer tail"
+    );
+    assert!(
+        recovered.pending_count().await.unwrap() > 0,
+        "newer mutation remains pending after frozen-range recovery"
+    );
+    assert_eq!(
+        git_output(root, &["diff", "--cached", "--binary"], None),
+        staged_before,
+        "recovery preserves unrelated staged work"
+    );
+    assert_eq!(
+        git_output(root, &["diff", "--binary"], None),
+        unstaged_before,
+        "recovery preserves unrelated unstaged work"
+    );
+    assert_eq!(std::fs::read(&staged_path).unwrap(), b"staged before crash\n");
+    assert_eq!(std::fs::read(&unstaged_path).unwrap(), b"unstaged before crash\n");
+    let recovered_head = head(&repository);
+    drop(recovered);
+
+    let tail = cli(root, &["publish"]);
+    assert!(tail.status.success(), "later tail publish failed: {}", String::from_utf8_lossy(&tail.stderr));
+    assert_ne!(head(&repository), recovered_head, "pending later tail was not publishable");
+    assert_eq!(committed_store_rows(&repository, relation_id).len(), 2);
+    let completed = RuntimeState::open(&repository, identity, digest).await.unwrap();
+    assert_eq!(completed.pending_count().await.unwrap(), 0);
+    drop(completed);
+    assert_eq!(
+        git_output(root, &["diff", "--cached", "--binary"], None),
+        staged_before,
+        "later tail publication preserves unrelated staged work"
+    );
+    assert_eq!(
+        git_output(root, &["diff", "--binary"], None),
+        unstaged_before,
+        "later tail publication preserves unrelated unstaged work"
+    );
+    let tail_head = head(&repository);
+    let no_op = cli(root, &["publish"]);
+    assert!(no_op.status.success(), "repeat publish failed: {}", String::from_utf8_lossy(&no_op.stderr));
+    assert_eq!(head(&repository), tail_head);
+    assert!(String::from_utf8_lossy(&no_op.stdout).contains("nothing to publish"));
+}
+
 
 #[tokio::test]
 async fn capture_and_row_commit_recover_after_process_kill() {
