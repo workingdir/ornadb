@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -43,6 +44,39 @@ pub(super) fn spawn_read_only(
     fuser::spawn_mount(filesystem, mountpoint, &config)
         .map_err(|error| format!("FUSE mount could not be created: {error}"))
 }
+pub(super) fn unmount_mountpoint(mountpoint: &Path) -> Result<(), String> {
+    let output = Command::new(fusermount_program())
+        .args(["-u", "--"])
+        .arg(mountpoint)
+        .output()
+        .map_err(|error| format!("FUSE unmount helper could not be started: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(())
+}
+
+fn fusermount_program() -> OsString {
+    if let Some(program) = std::env::var_os("FUSERMOUNT_PATH") {
+        return program;
+    }
+    for program in [
+        "fusermount3",
+        "fusermount",
+        "mount_fusefs",
+        "/sbin/fusermount3",
+        "/sbin/fusermount",
+        "/sbin/mount_fusefs",
+        "/bin/fusermount3",
+        "/bin/fusermount",
+    ] {
+        if Command::new(program).arg("-h").output().is_ok() {
+            return OsString::from(program);
+        }
+    }
+    OsString::from("fusermount3")
+}
+
 
 struct WorkspaceFilesystem {
     nodes: HashMap<u64, FsNode>,

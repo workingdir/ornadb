@@ -29,10 +29,26 @@ struct MountedProcess {
 
 impl Drop for MountedProcess {
     fn drop(&mut self) {
+        if mountinfo_contains(&self.mountpoint) {
+            if let Some(program) = std::env::var_os("FUSERMOUNT_PATH") {
+                let _ = Command::new(program)
+                    .args(["-u", "--"])
+                    .arg(&self.mountpoint)
+                    .status();
+            } else {
+                for program in ["fusermount3", "fusermount"] {
+                    if Command::new(program)
+                        .args(["-u", "--"])
+                        .arg(&self.mountpoint)
+                        .status()
+                        .is_ok_and(|status| status.success())
+                    {
+                        break;
+                    }
+                }
+            }
+        }
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
-            let _ = Command::new("fusermount3")
-                .args(["-u", self.mountpoint.to_str().unwrap_or_default()])
-                .status();
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
@@ -368,4 +384,81 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         .expect("read mount status after SIGTERM");
     assert!(status.status.success(), "mount status failed: {:?}", status.stderr);
     assert_eq!(status.stdout, b"{\"mounts\":[]}\n");
+}
+
+#[test]
+fn unmount_releases_a_dead_unregistered_fuse_mount() {
+    if !fuse_test_available() {
+        return;
+    }
+    let source = "pub table Music(id: Str) { title: Str, }\n";
+    let (repository_directory, repository, _relation_id) =
+        format3::format3_repository_for_table(source, "Music");
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess { child, mountpoint: mountpoint.clone() };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !mountinfo_contains(&mountpoint) {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return;
+            }
+            panic!("mount exited before appearing in mountinfo ({status}): {stderr}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "FUSE mount did not appear in /proc/self/mountinfo"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    assert_eq!(repository.mount_status().unwrap().len(), 1);
+    repository.unmount_view(&mountpoint).unwrap();
+    assert!(repository.mount_status().unwrap().is_empty());
+
+    let signal = Command::new("kill")
+        .args(["-KILL", &mounted.child.id().to_string()])
+        .status()
+        .expect("send SIGKILL to mount child");
+    assert!(signal.success(), "kill -KILL failed");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let child_status = loop {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "mount did not exit after SIGKILL");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!child_status.success(), "SIGKILL should terminate the mount child");
+    let canonicalization_error = std::fs::canonicalize(&mountpoint).err();
+
+    run_unmount(repository_directory.path(), &mountpoint);
+    assert!(
+        !mountinfo_contains(&mountpoint),
+        "orna unmount left the orphaned FUSE mount in /proc/self/mountinfo"
+    );
+    assert_eq!(repository.mount_status().unwrap().len(), 0);
+    assert_eq!(
+        canonicalization_error.map(|error| error.kind()),
+        Some(std::io::ErrorKind::NotConnected),
+        "dead FUSE mountpoint canonicalization should fail with ENOTCONN"
+    );
 }
