@@ -734,7 +734,8 @@ use orna_runtime_v1::{
     TableMutation,
 };
 use orna_value_v1::{
-    path_decode_key_components, path_encode_key_components, path_validate_relative_components,
+    ContextValue, Format3Context, Raw, ValueFormat, path_decode_key_components,
+    path_encode_key_components, path_validate_relative_components,
 };
 use sha2::{Digest, Sha256};
 
@@ -1267,6 +1268,7 @@ fn project_runtime_mutation(
     schema: &CommittedProjectionSchema,
     relation_id: [u8; 16],
     mutation: &TableMutation,
+    value_context: &Format3Context,
 ) -> Result<ProjectedRuntimeMutation, Error> {
     let project_key = |bytes: &[u8]| -> Result<Vec<u8>, Error> {
         let key = if schema.text_primary_key {
@@ -1289,17 +1291,30 @@ fn project_runtime_mutation(
         .value()
         .map(|bytes| {
             let row_key = rekey_to.as_deref().unwrap_or(key.as_slice());
-            let fields = if bytes.first().is_some_and(|byte| byte >> 5 == 4) {
+            let decoded = ContextValue::decode_in_context(
+                bytes,
+                ValueFormat::Rov3,
+                value_context,
+            )
+            .map_err(|_| Error::RepositoryUnavailable)?;
+            let fields = if schema
+                .descriptor
+                .validate_stored_row(relation_id, row_key, bytes)
+                .is_ok()
+            {
                 bytes.to_vec()
-            } else {
-                if schema.stored_field_count != 1 {
-                    return Err(Error::RepositoryUnavailable);
-                }
-                let mut fields = Vec::with_capacity(bytes.len() + 1);
-                fields.push(0x81);
-                fields.extend_from_slice(bytes);
-                fields
-            };
+             } else if schema.stored_field_count == 1 {
+                 let fields = ContextValue::new_in_context(
+                     value_context,
+                     ValueFormat::Rov3,
+                     Raw::Array(vec![decoded.raw().clone()]),
+                 )
+                 .and_then(|value| value.encode())
+                 .map_err(|_| Error::RepositoryUnavailable)?;
+                 fields
+             } else {
+                bytes.to_vec()
+             };
             schema
                 .descriptor
                 .validate_stored_row(relation_id, row_key, &fields)
@@ -1348,14 +1363,17 @@ fn build_frozen_publication_store_root(
                 .read_schema_descriptor(&scope)
                 .map_err(|_| Error::RepositoryUnavailable)?;
             let schema = committed_projection_schema(descriptor)?;
-            relation_bases.insert(relation_id, (rows, graph, schema));
+            let value_context = format
+                .open_value_context(relation_id)
+                .map_err(|_| Error::RepositoryUnavailable)?;
+            relation_bases.insert(relation_id, (rows, graph, schema, value_context));
         }
-        let (_, _, schema) = relation_bases
+        let (_, _, schema, value_context) = relation_bases
             .get(&relation_id)
             .ok_or(Error::RepositoryUnavailable)?;
         operations_by_relation.entry(relation_id).or_default();
 
-        let projected = project_runtime_mutation(schema, relation_id, mutation)?;
+        let projected = project_runtime_mutation(schema, relation_id, mutation, value_context)?;
         let source = projected_rows
             .entry((relation_id, projected.key))
             .or_insert_with(|| ProjectedStoreRow {
@@ -1396,7 +1414,7 @@ fn build_frozen_publication_store_root(
 
     let mut relation_candidates = Vec::with_capacity(operations_by_relation.len());
     for (relation_id, operations) in operations_by_relation {
-        let (rows, graph, _) = relation_bases
+        let (rows, graph, _, _) = relation_bases
             .remove(&relation_id)
             .ok_or(Error::RepositoryUnavailable)?;
         let maintenance = if operations.is_empty() {

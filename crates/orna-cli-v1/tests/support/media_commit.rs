@@ -246,9 +246,17 @@ async fn commit_capture_inner(
         crate::format3::publish_media_row(repository, state, key, ordinal + 0x10).await;
     }
 }
-/// Captures and commits complete source-owned Object rows. The schema, row
-/// candidates, canonical keys, ordered field tuple, and protected Blob pins all
-/// come from the same committed ProjectLoader artifact and repository graph.
+/// One source row's named Blob captures and whether publication inserts or replaces it.
+#[derive(Clone, Copy)]
+pub struct SourceCaptureRow<'a> {
+    pub key: &'a str,
+    pub blob_fields: &'a [(&'a str, &'a str)],
+    pub source_row: Option<&'a str>,
+    pub ordinal: u8,
+    pub insert_only: bool,
+}
+
+/// Publishes every source row by its canonical mutation key and committed path.
 pub async fn commit_source_captures(
     repository: &Repository,
     state: &RuntimeState,
@@ -256,7 +264,7 @@ pub async fn commit_source_captures(
     bindings: &mut SysHostBindingRegistry,
     relation_id: [u8; 16],
     format_context: &Format3Context,
-    captures: &[(&str, &str, u8)],
+    captures: &[SourceCaptureRow<'_>],
 ) {
     assert!(!captures.is_empty());
     let commit = repository.head().unwrap().unwrap();
@@ -272,34 +280,41 @@ pub async fn commit_source_captures(
     let mut mutations = Vec::with_capacity(captures.len());
     let mut paths_by_key = std::collections::BTreeMap::new();
     let mut retained_sources = Vec::with_capacity(captures.len());
-    for (expression, key, ordinal) in captures {
-        let logical_path = format!("Object/{key}.orna");
-        let row_source = repository
+    for capture in captures {
+        let logical_path = format!("Object/{}.orna", capture.key);
+        let committed_row = repository
             .read_committed_file(&commit, &logical_path, 1 << 20)
             .expect("the committed project contains this source Object row");
-        let row_source = std::str::from_utf8(&row_source)
+        let committed_row = std::str::from_utf8(&committed_row)
             .expect("the committed source Object row is valid UTF-8");
-        let value = evaluate_expression_ovb2_with_effects(
-            expression,
-            &Default::default(),
-            Limits::default(),
-            bindings,
-        )
-        .expect("capture the source payload");
-        let blob_binding = bindings
-            .accept_captured_blob_for_row(&value)
-            .expect("accept the captured Blob for this row");
+        let row_source = capture.source_row.unwrap_or(committed_row);
+        let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
+        for (field_name, expression) in capture.blob_fields {
+            let value = evaluate_expression_ovb2_with_effects(
+                expression,
+                &Default::default(),
+                Limits::default(),
+                bindings,
+            )
+            .expect("capture the source payload");
+            let blob_binding = bindings
+                .accept_captured_blob_for_row(&value)
+                .expect("accept the captured Blob for this row");
+            blob_fields.push(((*field_name).to_owned(), blob_binding));
+        }
         let admitted = admit_source_row_with_owner_fields(
             &project,
             &logical_path,
             row_source,
             &schema,
             format_context,
-            vec![("payload".to_owned(), blob_binding)],
+            blob_fields,
             vec![],
-            [ordinal.wrapping_add(3); 16],
+            [capture.ordinal.wrapping_add(3); 16],
         )
-        .expect("admit a source-bound full Object row");
+        .unwrap_or_else(|error| {
+            panic!("admit source row ordinal {} ({row_source}): {error:?}", capture.ordinal)
+        });
         let (source_mutation, source_bindings, resolved_schema) =
             admitted.into_mutation_and_bindings();
         assert_eq!(
@@ -311,36 +326,46 @@ pub async fn commit_source_captures(
             source_mutation.table_object_id(),
             Some(TableObjectId::new(relation_id))
         );
-        let mut mutation = TableMutation::insert(
-            source_mutation.id(),
-            source_mutation.table().to_owned(),
-            source_mutation.key().to_vec(),
-            source_mutation
-                .value()
-                .expect("admitted source row has a value")
-                .to_vec(),
-        )
-        .expect("the source row is a new store row")
+        let mutation_id = source_mutation.id();
+        let mutation_table = source_mutation.table().to_owned();
+        let mutation_key = source_mutation.key().to_vec();
+        let mutation_value = source_mutation
+            .value()
+            .expect("admitted source row has a value")
+            .to_vec();
+        let mut mutation = if capture.insert_only {
+            TableMutation::insert(mutation_id, mutation_table, mutation_key, mutation_value)
+                .expect("the source row is a new store row")
+        } else {
+            TableMutation::new(
+                mutation_id,
+                mutation_table,
+                mutation_key,
+                Some(mutation_value),
+            )
+            .expect("the source row replaces an existing store row")
+        }
         .with_table_object_id(TableObjectId::new(relation_id));
         for binding in &source_bindings {
             mutation = mutation
                 .with_protected_content_pin(binding.pin())
-                .expect("retain the admitted Blob pin on the insert");
+                .expect("retain the admitted Blob pin on the mutation");
         }
         assert!(mutation.value().is_some_and(|value| !value.is_empty()));
         paths_by_key.insert(
             mutation.key().to_vec(),
-            LoosePath::for_key("Object", &[key.to_string()])
+            LoosePath::for_key("Object", &[capture.key.to_string()])
                 .expect("the committed source row has a managed path"),
         );
         retained_sources.push(source_bindings);
         mutations.push(mutation);
     }
+    let ordinal = captures[0].ordinal;
     let request_identity = RequestIdentity {
         session_id: [0x91; 16],
-        request_id: [0x92; 16],
+        request_id: [ordinal; 16],
     };
-    let fingerprint = [0x93; 32];
+    let fingerprint = [ordinal; 32];
     let (_, admission) = state
         .reserve_request_with_admission(request_identity, fingerprint)
         .await
@@ -362,13 +387,19 @@ pub async fn commit_source_captures(
             fingerprint,
             &context,
             &mutations,
-            [0x94; 32],
-            TerminalOutcome::new(vec![0x95]).unwrap(),
+            [ordinal.wrapping_add(4); 32],
+            TerminalOutcome::new(vec![ordinal.wrapping_add(5)]).unwrap(),
             &NoFault,
         )
         .await
         .unwrap();
     assert_eq!(committed.request.state, RequestState::Completed);
-    crate::format3::publish_source_rows(repository, state, &paths_by_key).await;
+    crate::format3::publish_source_rows(
+        repository,
+        state,
+        &paths_by_key,
+        [ordinal.wrapping_add(6); 16],
+    )
+    .await;
     drop(retained_sources);
 }

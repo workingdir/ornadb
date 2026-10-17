@@ -16,7 +16,7 @@ use format3::*;
 
 #[path = "support/media_commit.rs"]
 mod media_commit;
-use media_commit::commit_source_captures;
+use media_commit::{commit_source_captures, SourceCaptureRow};
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 
@@ -41,10 +41,10 @@ fn relation_hex(relation_id: [u8; 16]) -> String {
     output
 }
 
-/// The image row is newly published after `before`; its source-owned field
-/// tuple is decoded against the exact Object schema pinned by each endpoint.
+/// The song row is added after `before`, then its optional cover changes from
+/// None to Some without reading either snapshot's payloads.
 #[tokio::test]
-async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payloads() {
+async fn diff_between_two_pinned_snapshots_reports_a_nullable_blob_field_change_without_payloads() {
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -76,7 +76,15 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         .with_repository_capture_capability(capability);
 
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
-    let capture = format!("sys.blob.capture_file({root}, \"pixel.png\", 65536)");
+    let capture = format!("sys.blob.capture_file({root}, \"tone.wav\", 65536)");
+    let initial_fields = [("payload", capture.as_str())];
+    let initial_row = [SourceCaptureRow {
+        key: "song",
+        blob_fields: &initial_fields,
+        source_row: None,
+        ordinal: 0x90,
+        insert_only: true,
+    }];
     commit_source_captures(
         &repository,
         &state,
@@ -84,7 +92,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         &mut bindings,
         relation_id,
         &format_context,
-        &[(&capture, "image", 0x90)],
+        &initial_row,
     )
     .await;
     let after = commit_source_row_to_native_graph(
@@ -93,11 +101,9 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         &before,
         relation_id,
         &format_context,
-        "image",
+        "song",
     );
     assert_ne!(before, after, "publishing the Object row advanced HEAD");
-    drop(bindings);
-    drop(state);
 
     let relation = relation_hex(relation_id);
     let output = run_history(
@@ -113,7 +119,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     let diff: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
     // The source fixture contains several candidate Object rows, but only the
-    // admitted image row is published in either native store endpoint.
+    // admitted song row is published in either native store endpoint.
     assert_eq!(
         diff["added"],
         serde_json::json!(1),
@@ -124,7 +130,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     let changes = diff["changes"].as_array().unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0]["change"], serde_json::json!("added"));
-    assert_eq!(changes[0]["key"], serde_json::json!("image"));
+    assert_eq!(changes[0]["key"], serde_json::json!("song"));
 
     // The comparison is a local read: neither side fetched a media payload.
     assert_eq!(
@@ -160,7 +166,7 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
     let human = run_history(directory.path(), &[&relation, "--diff", &before, &after]);
     assert_eq!(human.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&human.stdout);
-    assert!(stdout.contains("added   image"), "human listing: {stdout}");
+    assert!(stdout.contains("added   song"), "human listing: {stdout}");
     assert!(
         stdout.contains("media payload bytes read: 0"),
         "human listing reports the cost: {stdout}"
@@ -177,6 +183,89 @@ async fn diff_between_two_pinned_snapshots_reports_the_added_row_without_payload
         "unresolvable endpoint refused: {}",
         String::from_utf8_lossy(&missing.stderr)
     );
+
+    drop(bindings);
+    drop(state);
+
+    let updated_state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+            repository_id: [0x81; 16],
+        },
+        [0x82; 32],
+    )
+    .await
+    .unwrap();
+    let writer = updated_state.acquire_lease([0x83; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let updated_commit = repository.head().unwrap().unwrap();
+    let committed_source = repository
+        .read_committed_file(&updated_commit, "Object/song.orna", 1 << 20)
+        .unwrap();
+    let updated_format_context =
+        format3_context_for_snapshot(&repository, updated_commit.as_str());
+    let updated_source = std::str::from_utf8(&committed_source)
+        .unwrap()
+        .replace("    cover: null,\n", "");
+    assert!(
+        !updated_source.contains("cover"),
+        "cover is omitted from the updated source row: {updated_source}"
+    );
+    let cover_capture = format!(r#"sys.blob.capture_file({root}, "pixel.png", 65536)"#);
+    let updated_fields = [("payload", capture.as_str()), ("cover", cover_capture.as_str())];
+    let updated_row = [SourceCaptureRow {
+        key: "song",
+        blob_fields: &updated_fields,
+        source_row: Some(&updated_source),
+        ordinal: 0xA0,
+        insert_only: false,
+    }];
+    commit_source_captures(
+        &repository,
+        &updated_state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &updated_format_context,
+        &updated_row,
+    )
+    .await;
+    let with_cover = commit_source_row_to_native_graph(
+        directory.path(),
+        &repository,
+        &after,
+        relation_id,
+        &format_context,
+        "song",
+    );
+    assert_ne!(after, with_cover, "publishing the cover update advanced HEAD");
+    drop(bindings);
+    drop(updated_state);
+
+    let cover_diff = run_history(
+        directory.path(),
+        &[&relation, "--diff", &after, &with_cover, "--format", "json"],
+    );
+    assert_eq!(
+        cover_diff.status.code(),
+        Some(0),
+        "history --diff for None to Some cover failed: {}",
+        String::from_utf8_lossy(&cover_diff.stderr)
+    );
+    let cover_diff: serde_json::Value = serde_json::from_slice(&cover_diff.stdout).unwrap();
+    assert_eq!(cover_diff["added"], serde_json::json!(0));
+    assert_eq!(cover_diff["changed"], serde_json::json!(1));
+    assert_eq!(cover_diff["removed"], serde_json::json!(0));
+    assert_eq!(cover_diff["changes"][0]["change"], "changed");
+    assert_eq!(cover_diff["changes"][0]["key"], "song");
+    assert_eq!(cover_diff["media_payload_bytes_read"], serde_json::json!(0));
 
     drop(directory);
 }
