@@ -31,7 +31,15 @@ pub async fn commit_capture(
     relation_id: [u8; 16],
 ) {
     commit_capture_for_table(
-        repository, state, writer, bindings, expression, "media", key, ordinal, insert_only,
+        repository,
+        state,
+        writer,
+        bindings,
+        expression,
+        "media",
+        key,
+        ordinal,
+        insert_only,
         relation_id,
     )
     .await;
@@ -50,8 +58,17 @@ pub async fn commit_capture_for_table(
     relation_id: [u8; 16],
 ) {
     commit_capture_inner(
-        repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
-        table_name, true,
+        repository,
+        state,
+        writer,
+        bindings,
+        expression,
+        key,
+        ordinal,
+        insert_only,
+        relation_id,
+        table_name,
+        true,
     )
     .await;
 }
@@ -70,8 +87,17 @@ pub async fn commit_capture_pending(
     relation_id: [u8; 16],
 ) {
     commit_capture_inner(
-        repository, state, writer, bindings, expression, key, ordinal, insert_only, relation_id,
-        "media", false,
+        repository,
+        state,
+        writer,
+        bindings,
+        expression,
+        key,
+        ordinal,
+        insert_only,
+        relation_id,
+        "media",
+        false,
     )
     .await;
 }

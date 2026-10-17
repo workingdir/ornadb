@@ -7,13 +7,14 @@
 
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 
 use orna_repository_v1::{
-    ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, RepositoryCaptureCapability,
+    ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, ProtectedContentTransfer,
+    RepositoryCaptureCapability,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -2510,10 +2511,72 @@ impl VfsSaveCandidate {
             validator,
         }
     }
+    /// Requires every protected content transfer to match the row value
+    /// generated from those transfers in the accepted candidate snapshot.
+    pub fn with_protected_content_transfers(
+        self,
+        row_value: Vec<u8>,
+        expected_transfers: Vec<ProtectedContentTransfer>,
+    ) -> Self {
+        if expected_transfers.is_empty() {
+            return self;
+        }
+        let table = self.replacement.table().table().to_owned();
+        let key = self.replacement.key().to_vec();
+        Self {
+            replacement: self.replacement,
+            validator: Box::new(ContentPinCandidateValidator {
+                inner: self.validator,
+                table,
+                key,
+                row_value,
+                expected_transfers,
+            }),
+        }
+    }
 
     /// The row replacement the activation will commit.
     pub fn replacement(&self) -> &VfsTableRowReplacement {
         &self.replacement
+    }
+}
+struct ContentPinCandidateValidator {
+    inner: Box<dyn TableActivationCandidateValidator>,
+    table: String,
+    key: Vec<u8>,
+    row_value: Vec<u8>,
+    expected_transfers: Vec<ProtectedContentTransfer>,
+}
+
+impl TableActivationCandidateValidator for ContentPinCandidateValidator {
+    fn tables(&self) -> &[String] {
+        self.inner.tables()
+    }
+
+    fn table_object_ids(&self) -> BTreeMap<String, super::TableObjectId> {
+        self.inner.table_object_ids()
+    }
+
+    fn cwd_generation(&self) -> &CwdGeneration {
+        self.inner.cwd_generation()
+    }
+
+    fn validate(&mut self, rows: &super::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        self.inner.validate(rows)
+    }
+
+    fn validate_content_pins(
+        &mut self,
+        rows: &super::RuntimeTableRows,
+        transfers: &[ProtectedContentTransfer],
+    ) -> bool {
+        self.inner.validate_content_pins(rows, &[])
+            && transfers == self.expected_transfers.as_slice()
+            && rows.get(&self.table).is_some_and(|table_rows| {
+                table_rows
+                    .iter()
+                    .any(|(key, value)| key == &self.key && value == &self.row_value)
+            })
     }
 }
 
