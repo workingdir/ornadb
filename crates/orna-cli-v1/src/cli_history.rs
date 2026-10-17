@@ -581,6 +581,32 @@ fn history_row(
         let metadata = field.blob_metadata();
         let content = match metadata {
             Some(metadata) => {
+                let value = match value {
+                    Raw::Tag(60013, payload) => {
+                        let Raw::Array(parts) = payload.as_ref() else {
+                            return Err(history_error(
+                                "Decoded Blob field is not canonical",
+                                format!(
+                                    "source field {} has an invalid Option encoding",
+                                    hex(field.field_id())
+                                ),
+                            ));
+                        };
+                        match parts.as_slice() {
+                            [Raw::Int(flag), value] if *flag == 1.into() => value,
+                            _ => {
+                                return Err(history_error(
+                                    "Decoded Blob field is not canonical",
+                                    format!(
+                                        "source field {} does not contain Some(Blob)",
+                                        hex(field.field_id())
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    value => value,
+                };
                 if !matches!(value, Raw::Tag(ROV3_BLOB_TAG, _)) {
                     return Err(history_error(
                         "Decoded Blob field is not canonical",
