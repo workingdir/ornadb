@@ -67,6 +67,10 @@ fn normalize_repl_mutations(
     for mutation in mutations {
         let table = mutation.table().to_owned();
         let table_schema = tables.get(&table).ok_or(ApplicationError::InvalidTableMetadata)?;
+        if mutation.is_insert() {
+            normalized.push(mutation);
+            continue;
+        }
         let text_primary_key = table_schema.admission.as_ref().is_some_and(|admission| {
             matches!(admission.keys.as_slice(), [(_, Type::Text)])
         });
@@ -74,11 +78,10 @@ fn normalize_repl_mutations(
         let rekey_to = mutation.rekey_to()
             .map(|key| normalize_runtime_key(key, text_primary_key))
             .transpose()?;
-        let row_value = mutation.value().map(<[u8]>::to_vec);
         let mutation = mutation
             .with_reencoded_keys(key, rekey_to)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let Some(row_value) = row_value else {
+        let Some(row_value) = mutation.value().map(<[u8]>::to_vec) else {
             normalized.push(mutation);
             continue;
         };
