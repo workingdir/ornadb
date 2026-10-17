@@ -92,26 +92,19 @@ fn git_head(directory: &std::path::Path) -> String {
         .trim()
         .to_owned()
 }
-
 async fn committed_media_row(
     state: &RuntimeState,
     relation_id: [u8; 16],
     key: &str,
 ) -> Option<Vec<u8>> {
-    let identity = RuntimeTableIdentity::new("media", TableObjectId::new(relation_id))
-        .expect("committed media identity");
     let encoded_key = Value::new(Raw::Text(key.to_owned()))
         .expect("typed media key")
         .encode()
         .expect("encode typed media key");
-    let snapshot = state
-        .begin_admitted_table_activation(std::slice::from_ref(&identity))
+    committed_admitted_rows(state, "media", relation_id)
         .await
-        .expect("read admitted media table");
-    snapshot
-        .query_exact("media", &encoded_key)
-        .expect("query committed media row")
-        .map(<[u8]>::to_vec)
+        .into_iter()
+        .find_map(|(row_key, row)| (row_key == encoded_key).then_some(row))
 }
 
 #[tokio::test]
@@ -123,7 +116,7 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let head_before = git_head(root);
 
     let input = format!(
-        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add(\"london\", \"Live in London\", audio);",
+        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add(\"london\", \"Live in London\", audio).id",
         root = root.to_string_lossy().as_ref(),
     );
     let output = run_repl(root, &input);
@@ -139,6 +132,16 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     );
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
     assert_eq!(git_head(root), head_before, "REPL must not publish a Git commit");
+    let key_json = "\"london\"";
+    let typed_key = stdout.find(key_json).and_then(|start| {
+        let end = start + key_json.len();
+        serde_json::from_str::<String>(&stdout[start..end]).ok()
+    });
+    assert_eq!(
+        typed_key.as_deref(),
+        Some("london"),
+        "logical row key should be a Str in the REPL result: {stdout}"
+    );
 
     let (identity, initial_digest) = cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, identity, initial_digest)
@@ -158,10 +161,15 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let Raw::Array(fields) = row.raw() else {
         panic!("stored Music row is not an array");
     };
-    let encoded_blob = Value::new(fields[2].clone())
-        .expect("construct content field value")
-        .encode()
-        .expect("encode content field value");
+    assert_eq!(fields.len(), 2, "the primary key is stored in the index, not the row array");
+    let encoded_blob = ContextValue::new_in_context(
+        &value_context,
+        ValueFormat::Rov3,
+        fields[1].clone(),
+    )
+    .expect("construct content field value")
+    .encode()
+    .expect("encode content field value");
     let blob_value = ContextValue::decode_in_context(
         &encoded_blob,
         ValueFormat::Rov3,
