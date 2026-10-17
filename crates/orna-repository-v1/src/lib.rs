@@ -2872,6 +2872,12 @@ impl Repository {
                     }
                 }
             }
+            if paths
+                .iter()
+                .any(|path| path.as_path() == Path::new(".orna/store"))
+            {
+                self.mark_store_tree_skip_worktree(&candidate_index)?;
+            }
             fs::File::open(&candidate_index)
                 .and_then(|file| file.sync_all())
                 .map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -2896,6 +2902,41 @@ impl Repository {
         })();
         let _ = fs::remove_file(&candidate_index);
         result
+    }
+
+    /// Keeps the native store tree out of worktree diffs; its Git objects are
+    /// addressed through the committed graph rather than checked out files.
+    fn mark_store_tree_skip_worktree(&self, index: &Path) -> Result<(), RepositoryError> {
+        let mut list = self.command();
+        list.env("GIT_INDEX_FILE", index)
+            .args(["ls-files", "-z", "--", ".orna/store"]);
+        let paths = self.run(list)?.stdout;
+        if paths.is_empty() {
+            return Ok(());
+        }
+
+        let mut update = self.command();
+        update
+            .env("GIT_INDEX_FILE", index)
+            .args(["update-index", "--skip-worktree", "-z", "--stdin"])
+            .stdin(Stdio::piped());
+        let mut child = update
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        child
+            .stdin
+            .take()
+            .ok_or(RepositoryError::LocalStateUnavailable)?
+            .write_all(&paths)
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(RepositoryError::GitOperationFailed)
+        }
     }
 
     /// Atomically persists the current publication journal in private runtime
@@ -3413,7 +3454,16 @@ impl Repository {
                         &git_lock,
                     )?
                 } else if self.index_entries_match_candidate(&candidate, &journal)? {
-                    current
+                    let paths = self.publication_index_paths(&candidate, &journal)?;
+                    let base_index =
+                        fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                    self.reconcile_published_index_locked(
+                        &expected_index,
+                        &candidate,
+                        &paths,
+                        &base_index,
+                        &git_lock,
+                    )?
                 } else {
                     return Err(RepositoryError::StaleIndex {
                         expected: expected_index,
@@ -6344,6 +6394,7 @@ impl Repository {
             _ => Err(RepositoryError::InvalidPublicationJournal),
         }
     }
+
 
     fn publication_index_paths(
         &self,

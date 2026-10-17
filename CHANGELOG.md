@@ -6,6 +6,8 @@ been published.
 
 ## Unreleased
 
+- Publication reconciliation marks .orna/store entries skip-worktree so the internal native graph does not appear as unstaged worktree deletions.
+
 - Citation scanning counts active test operands and referenced test helpers/constants while excluding diagnostic text, format placeholders, unused helpers/constants, and non-test literals. The optional `--locations-output` flag emits deterministic per-ID source locations.
 
 - Replacing a mounted top-level Blob file updates that field's immutable
