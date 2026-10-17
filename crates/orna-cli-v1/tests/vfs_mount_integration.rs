@@ -136,7 +136,9 @@ fn fuse_test_available() -> bool {
     })();
     match prerequisites {
         Ok(()) => true,
-        Err(reason) if required => panic!("required FUSE integration prerequisites failed: {reason}"),
+        Err(reason) if required => {
+            panic!("required FUSE integration prerequisites failed: {reason}")
+        }
         Err(reason) => {
             eprintln!("SKIP: FUSE integration prerequisites are unavailable: {reason}");
             false
@@ -168,7 +170,6 @@ fn mountinfo_contains(mountpoint: &Path) -> bool {
         .any(|line| line.split_whitespace().nth(4) == Some(mountpoint))
 }
 
-
 #[tokio::test]
 async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     if !fuse_test_available() {
@@ -177,7 +178,8 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     let media_root = TempDir::new().unwrap();
     let expected = b"ID3-orna-range-read-test-content";
     std::fs::write(media_root.path().join("tone.mp3"), expected).unwrap();
-    let source = "pub table Music(id: Str) { title: Str, artist: Str, content: Blob, cover: Blob?, }\n";
+    let source =
+        "pub table Music(id: Str) { title: Str, artist: Str, content: Blob, cover: Blob?, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
     let row_source = format!(
         "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 65536),\n    cover: null,\n}}\n"
@@ -225,7 +227,10 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     )
     .await;
 
-    assert_eq!(format3::committed_store_rows(&repository, relation_id).len(), 1);
+    assert_eq!(
+        format3::committed_store_rows(&repository, relation_id).len(),
+        1
+    );
     let current = repository.head().unwrap().unwrap();
     let schema = orna_project_v1::ProjectLoader::default()
         .resolve_committed_source_table_schema(
@@ -251,7 +256,10 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start mount --cwd");
-    let mut mounted = MountedProcess { child, mountpoint: mountpoint.clone() };
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
 
     let data_path = mountpoint.join("Music/london/data.orna");
     let blob_path = mountpoint.join("Music/london/content.mp3");
@@ -284,12 +292,36 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         .expect("read data.orna with cat");
     assert!(output.status.success());
     let document = String::from_utf8(output.stdout).unwrap();
-    let expected_document = "{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" },\n    cover: null,\n}\n";
+    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(&repository, &current)
+        .expect("read the committed field identities");
+    let mut expected_fields = vec![
+        ("title", "\"Live in London\""),
+        (
+            "content",
+            "{ path: \"./content.mp3\", media_type: \"audio/mpeg\" }",
+        ),
+        ("artist", "\"Kieran\""),
+        ("cover", "null"),
+    ];
+    expected_fields.sort_by_key(|(name, _)| {
+        let qualified_name = format!("Music.{name}");
+        *identities
+            .id(orna_project_v1::ObjectKind::Field, &qualified_name)
+            .expect("stored field identity exists")
+    });
+    let expected_fields = expected_fields
+        .into_iter()
+        .map(|(name, value)| format!("    {name}: {value},\n"))
+        .collect::<String>();
+    let expected_document = format!("{{\n{expected_fields}}}\n");
     assert_eq!(document, expected_document);
 
     let options = mount_options(&mountpoint);
     for required in ["ro", "nodev", "nosuid", "noexec"] {
-        assert!(options.split(',').any(|option| option == required), "missing {required} in mount options {options}");
+        assert!(
+            options.split(',').any(|option| option == required),
+            "missing {required} in mount options {options}"
+        );
     }
 
     let mut blob = File::open(&blob_path).expect("open projected Blob");
@@ -302,7 +334,149 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     drop(blob);
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
-    assert!(status.success(), "mount process exits cleanly after unmount");
+    assert!(
+        status.success(),
+        "mount process exits cleanly after unmount"
+    );
+}
+
+#[tokio::test]
+async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values() {
+    if !fuse_test_available() {
+        return;
+    }
+
+    let media_root = TempDir::new().unwrap();
+    let expected = b"row-local-error-test-content";
+    std::fs::write(media_root.path().join("tone.mp3"), expected).unwrap();
+    let source = "pub table Music(id: Str) { title: Str, content: Blob, duplicate: Blob?, }\n";
+    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
+    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let bad_row = format!(
+        "{{\n    title: \"bad\",\n    content: {capture},\n    duplicate: {capture},\n}}\n",
+    );
+    let good_row =
+        format!("{{\n    title: \"good\",\n    content: {capture},\n    duplicate: null,\n}}\n",);
+    let source_rows = [
+        ("Music/bad.orna", bad_row.as_str()),
+        ("Music/good.orna", good_row.as_str()),
+    ];
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_rows(source, "Music", &source_rows);
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x81; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x82; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x83; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(media_root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    let duplicate_blob_fields = [
+        ("content", capture.as_str()),
+        ("duplicate", capture.as_str()),
+    ];
+    let single_blob_fields = [("content", capture.as_str())];
+    let capture_rows = [
+        media_commit::SourceCaptureRow {
+            key: "bad",
+            blob_fields: &duplicate_blob_fields,
+            source_row: None,
+            ordinal: 0x81,
+            insert_only: true,
+        },
+        media_commit::SourceCaptureRow {
+            key: "good",
+            blob_fields: &single_blob_fields,
+            source_row: None,
+            ordinal: 0x82,
+            insert_only: true,
+        },
+    ];
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &capture_rows,
+    )
+    .await;
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let good_data_path = mountpoint.join("Music/good/data.orna");
+    let bad_data_path = mountpoint.join("Music/bad/data.orna");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !good_data_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return;
+            }
+            panic!("mount exited {status}: {stderr}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "FUSE mount did not expose good row; root=[{}], Music=[{}], good=[{}]",
+            directory_entries(&mountpoint),
+            directory_entries(&mountpoint.join("Music")),
+            directory_entries(&mountpoint.join("Music/good")),
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let rows = std::fs::read_dir(mountpoint.join("Music"))
+        .expect("indexed table listing succeeds despite a malformed row")
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(rows.iter().any(|name| name == "bad"));
+    assert!(rows.iter().any(|name| name == "good"));
+    let bad_row_error = std::fs::read(&bad_data_path).expect_err("malformed row is isolated");
+    assert_eq!(
+        bad_row_error.raw_os_error(),
+        Some(5),
+        "a malformed row returns Linux EIO without failing the mount",
+    );
+    let good_document = std::fs::read_to_string(&good_data_path).unwrap();
+    assert!(good_document.contains("title: \"good\""));
+    assert!(mounted.child.try_wait().unwrap().is_none());
+
+    run_unmount(repository_directory.path(), &mountpoint);
+    let status = mounted.child.wait().unwrap();
+    assert!(
+        status.success(),
+        "mount process exits cleanly after unmount"
+    );
 }
 
 #[test]
@@ -328,7 +502,10 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start mount --cwd");
-    let mut mounted = MountedProcess { child, mountpoint: mountpoint.clone() };
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     while !mountinfo_contains(&mountpoint) {
         if let Some(status) = mounted.child.try_wait().unwrap() {
@@ -359,10 +536,16 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         if let Some(status) = mounted.child.try_wait().unwrap() {
             break status;
         }
-        assert!(Instant::now() < deadline, "mount did not stop after SIGTERM");
+        assert!(
+            Instant::now() < deadline,
+            "mount did not stop after SIGTERM"
+        );
         thread::sleep(Duration::from_millis(20));
     };
-    assert!(status.success(), "mount process exits cleanly after SIGTERM");
+    assert!(
+        status.success(),
+        "mount process exits cleanly after SIGTERM"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while mountinfo_contains(&mountpoint) && Instant::now() < deadline {
@@ -382,7 +565,11 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         ])
         .output()
         .expect("read mount status after SIGTERM");
-    assert!(status.status.success(), "mount status failed: {:?}", status.stderr);
+    assert!(
+        status.status.success(),
+        "mount status failed: {:?}",
+        status.stderr
+    );
     assert_eq!(status.stdout, b"{\"mounts\":[]}\n");
 }
 
@@ -409,7 +596,10 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start mount --cwd");
-    let mut mounted = MountedProcess { child, mountpoint: mountpoint.clone() };
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     while !mountinfo_contains(&mountpoint) {
         if let Some(status) = mounted.child.try_wait().unwrap() {
@@ -444,10 +634,16 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         if let Some(status) = mounted.child.try_wait().unwrap() {
             break status;
         }
-        assert!(Instant::now() < deadline, "mount did not exit after SIGKILL");
+        assert!(
+            Instant::now() < deadline,
+            "mount did not exit after SIGKILL"
+        );
         thread::sleep(Duration::from_millis(20));
     };
-    assert!(!child_status.success(), "SIGKILL should terminate the mount child");
+    assert!(
+        !child_status.success(),
+        "SIGKILL should terminate the mount child"
+    );
     let canonicalization_error = std::fs::canonicalize(&mountpoint).err();
 
     run_unmount(repository_directory.path(), &mountpoint);
