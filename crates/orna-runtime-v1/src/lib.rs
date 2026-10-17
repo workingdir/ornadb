@@ -991,7 +991,36 @@ impl TableMutation {
         self.table_object_id = Some(object_id);
         self
     }
-
+    /// Replaces runtime key encodings without changing the mutation's semantic intent.
+    /// Re-key destinations must be supplied when this mutation already carries one.
+    pub fn with_reencoded_keys(
+        mut self,
+        key: Vec<u8>,
+        rekey_to: Option<Vec<u8>>,
+    ) -> Result<Self, RuntimeError> {
+        if self.rekey_to.is_some() != rekey_to.is_some() {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        validate_table_mutation(self.id, &self.table, &key, self.value.as_deref())?;
+        if let Some(destination) = &rekey_to {
+            validate_table_identity(&self.table, destination)?;
+            if *destination == key {
+                return Err(RuntimeError::InvalidTableMutation);
+            }
+        }
+        self.key = key;
+        self.rekey_to = rekey_to;
+        Ok(self)
+    }
+    /// Mutation identity, table identity, re-key intent, and protected-content evidence are retained.
+    pub fn with_reencoded_value(mut self, value: Vec<u8>) -> Result<Self, RuntimeError> {
+        if self.value.is_none() {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        validate_table_mutation(self.id, &self.table, &self.key, Some(&value))?;
+        self.value = Some(value);
+        Ok(self)
+    }
     pub fn key(&self) -> &[u8] {
         &self.key
     }
@@ -4351,22 +4380,39 @@ impl RuntimeState {
         identity: RuntimeIdentity,
         initial_digest: [u8; 32],
     ) -> Result<Self, RuntimeError> {
+        Self::open_with_owner_id(
+            repository,
+            identity,
+            initial_digest,
+            *Uuid::new_v4().as_bytes(),
+        )
+        .await
+    }
+
+    /// Opens the runtime with an owner identity shared with the component
+    /// issuing its owner-scoped graph references. A busy owner lock still
+    /// opens the runtime as a secondary participant.
+    pub async fn open_with_owner_id(
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        initial_digest: [u8; 32],
+        owner_id: [u8; 16],
+    ) -> Result<Self, RuntimeError> {
         repository
             .runtime_paths()
             .ensure_exists()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let runtime_owner_lock =
-            match repository.acquire_runtime_owner_lock(*Uuid::new_v4().as_bytes()) {
-                Ok(owner_lock) => Some(owner_lock),
-                // The owner lock is the takeover lock that reclaims a departed
-                // owner's protected pins. It says nothing about the state
-                // database or the writer lease, so a second live runtime in the
-                // same worktree opens as a secondary participant instead of
-                // refusing every verb that needs the runtime. Reclamation stays
-                // with the owner that holds the lock.
-                Err(RepositoryError::RepositoryBusy) => None,
-                Err(_) => return Err(RuntimeError::StorageUnavailable),
-            };
+        let runtime_owner_lock = match repository.acquire_runtime_owner_lock(owner_id) {
+            Ok(owner_lock) => Some(owner_lock),
+            // The owner lock is the takeover lock that reclaims a departed
+            // owner's protected pins. It says nothing about the state
+            // database or the writer lease, so a second live runtime in the
+            // same worktree opens as a secondary participant instead of
+            // refusing every verb that needs the runtime. Reclamation stays
+            // with the owner that holds the lock.
+            Err(RepositoryError::RepositoryBusy) => None,
+            Err(_) => return Err(RuntimeError::StorageUnavailable),
+        };
         let graph_repository_id = current_graph_repository_id(repository, identity.database_id)?;
         Self::open_path_with_graph_repository_id(
             &repository.runtime_paths().state_db(),
@@ -4465,6 +4511,11 @@ impl RuntimeState {
         Ok(state)
     }
 
+    /// Whether this state owns the repository runtime lock used to reclaim
+    /// scratch references for its owner identity.
+    pub fn holds_runtime_owner_lock(&self) -> bool {
+        self.runtime_owner_lock.is_some()
+    }
     /// The runtime links the baked module roles at startup. Extension loading
     /// is not part of this 1.0 runtime surface.
     pub fn system_provider_roles(&self) -> &orna_sys_v1::ProviderRoleRegistry {
