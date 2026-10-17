@@ -193,7 +193,8 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         .expect("read data.orna with cat");
     assert!(output.status.success());
     let document = String::from_utf8(output.stdout).unwrap();
-    assert!(document.contains("content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" }"));
+    let expected_document = "{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" },\n    cover: null,\n}\n";
+    assert_eq!(document, expected_document);
 
     let options = mount_options(&mountpoint);
     for required in ["ro", "nodev", "nosuid", "noexec"] {

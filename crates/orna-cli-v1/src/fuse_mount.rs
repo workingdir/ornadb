@@ -14,7 +14,11 @@ use orna_repository_v1::{
     AdmittedBlobReference, CommittedTableBinding, GitCommitRef, GitHashAlgorithm,
     HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, Repository, TypedKey,
 };
-use orna_runtime_v1::{vfs::project_component, TableObjectId};
+use orna_runtime_v1::{
+    vfs::{project_component, SnapshotPin, VfsRowProjection, VfsStoredField},
+    TableObjectId,
+};
+use orna_value_v1::{decode_canonical_storage_value, Raw, SchemaDescriptor};
 
 const ROOT_INODE: u64 = 1;
 const ROW_PAGE_LIMIT: usize = 256;
@@ -294,6 +298,7 @@ impl FsBuilder {
         binding: &CommittedTableBinding,
         field_names: &HashMap<[u8; 16], String>,
     ) -> Result<(), String> {
+        let field_types = stored_field_types(binding.descriptor())?;
         let mut lower = None;
         loop {
             let range = KeyRange::new(lower.clone(), None, ROW_PAGE_LIMIT)
@@ -317,56 +322,93 @@ impl FsBuilder {
                 let decoded = graph
                     .decode_admitted_row_fields(&row, binding, &row_scope)
                     .map_err(|error| format!("committed row fields could not be decoded: {error:?}"))?;
-                let row_directory = self.key_directory(table_directory, row.key())?;
-                let mut document = String::new();
-                let mut blob_files = Vec::new();
-                for field in decoded.fields() {
-                    let Some(metadata) = field.blob_metadata() else {
-                        continue;
-                    };
-                    let field_name = field_names.get(field.field_id()).ok_or_else(|| {
-                        "committed Blob field has no source identity".to_owned()
-                    })?;
-                    let value_oid = metadata.descriptor_oid().ok_or_else(|| {
-                        "committed Blob field has no descriptor identity".to_owned()
-                    })?;
-                    let algorithm = match value_oid.len() {
-                        20 => GitHashAlgorithm::Sha1,
-                        32 => GitHashAlgorithm::Sha256,
-                        _ => return Err("committed Blob descriptor has an invalid OID width".into()),
-                    };
-                    let descriptor = NativeOid::new(algorithm, value_oid.as_bytes())
-                        .map_err(|error| format!("committed Blob descriptor is invalid: {error:?}"))?;
-                    let stored = graph
-                        .read_stored_blob_value(&row, &descriptor, &row_scope)
-                        .map_err(|error| format!("committed Blob reference could not be admitted: {error:?}"))?;
-                    let annotation = stored.annotation();
-                    let file_name = orna_runtime_v1::vfs::project_content_name(
-                        field_name,
-                        annotation.media_type(),
-                        annotation.suffix().or(metadata.suffix()),
-                    );
-                    let relative_path = format!("./{file_name}");
-                    writeln!(
-                        &mut document,
-                        "{field_name}: {{ path: {relative_path:?}, media_type: {:?} }}",
-                        stored.annotation().media_type(),
-                    )
-                    .expect("formatting into a String succeeds");
-                    blob_files.push((file_name, stored.reference().clone()));
+                let canonical_fields = decode_canonical_storage_value(decoded.canonical_fields())
+                    .map_err(|error| format!("committed row values could not be decoded: {error:?}"))?;
+                let Raw::Array(values) = canonical_fields else {
+                    return Err("committed row values are not a canonical field array".into());
+                };
+                if values.len() != decoded.fields().len() {
+                    return Err("committed row value and field counts differ".into());
                 }
+
+                let row_directory = self.key_directory(table_directory, row.key())?;
+                let mut projected_fields = Vec::with_capacity(values.len());
+                let mut blob_files = Vec::new();
+                for (field, value) in decoded.fields().iter().zip(values) {
+                    let field_name = field_names.get(field.field_id()).ok_or_else(|| {
+                        "committed field has no source identity".to_owned()
+                    })?;
+                    let field_type = field_types.get(field.field_id()).ok_or_else(|| {
+                        "committed field has no schema type".to_owned()
+                    })?;
+                    if let Some(metadata) = field.blob_metadata() {
+                        let value_oid = metadata.descriptor_oid().ok_or_else(|| {
+                            "committed Blob field has no descriptor identity".to_owned()
+                        })?;
+                        let algorithm = match value_oid.len() {
+                            20 => GitHashAlgorithm::Sha1,
+                            32 => GitHashAlgorithm::Sha256,
+                            _ => return Err("committed Blob descriptor has an invalid OID width".into()),
+                        };
+                        let descriptor = NativeOid::new(algorithm, value_oid.as_bytes())
+                            .map_err(|error| format!("committed Blob descriptor is invalid: {error:?}"))?;
+                        let stored = graph
+                            .read_stored_blob_value(&row, &descriptor, &row_scope)
+                            .map_err(|error| format!("committed Blob reference could not be admitted: {error:?}"))?;
+                        let annotation = stored.annotation();
+                        let suffix = annotation.suffix().or(metadata.suffix()).map(str::to_owned);
+                        let file_name = orna_runtime_v1::vfs::project_content_name(
+                            field_name,
+                            annotation.media_type(),
+                            suffix.as_deref(),
+                        );
+                        let projected = if is_optional_field(field_type) {
+                            VfsStoredField::content_optional(
+                                field_name.clone(),
+                                annotation.media_type(),
+                                suffix,
+                                metadata.length(),
+                            )
+                        } else {
+                            VfsStoredField::content(
+                                field_name.clone(),
+                                annotation.media_type(),
+                                suffix,
+                                metadata.length(),
+                            )
+                        };
+                        projected_fields.push(projected);
+                        blob_files.push((file_name, stored.reference().clone()));
+                    } else if stored_value_is_null(&value) {
+                        projected_fields.push(VfsStoredField::null(field_name.clone()));
+                    } else {
+                        projected_fields.push(VfsStoredField::document(
+                            field_name.clone(),
+                            render_stored_source_value(&value)?,
+                        ));
+                    }
+                }
+                let projection = VfsRowProjection::project(
+                    SnapshotPin::capture(Arc::clone(&graph)),
+                    &projected_fields,
+                )
+                .map_err(|error| format!("committed row projection is invalid: {error:?}"))?;
                 self.add_file(
                     row_directory,
                     "data.orna",
-                    NodeKind::Bytes(document.into_bytes()),
+                    NodeKind::Bytes(projection.document_text().as_bytes().to_vec()),
                 )?;
-                for (file_name, reference) in blob_files {
+                for file in projection.files() {
+                    let reference = blob_files
+                        .iter()
+                        .find_map(|(name, reference)| (name == file.name()).then_some(reference))
+                        .ok_or_else(|| "projected Blob has no admitted file reference".to_owned())?;
                     self.add_file(
                         row_directory,
-                        &file_name,
+                        file.name(),
                         NodeKind::Blob {
                             graph: Arc::clone(&graph),
-                            reference,
+                            reference: reference.clone(),
                         },
                     )?;
                 }
@@ -500,6 +542,212 @@ fn field_names_for_table(
                 .map(|name| (*identity.id(), name.to_owned()))
         })
         .collect()
+}
+
+fn stored_field_types<'a>(
+    descriptor: &'a SchemaDescriptor,
+) -> Result<HashMap<[u8; 16], &'a Raw>, String> {
+    let Raw::Map(schema) = descriptor.raw() else {
+        return Err("committed table schema is not a canonical map".into());
+    };
+    let fields_key = Raw::Int(3.into());
+    let fields = schema
+        .iter()
+        .find_map(|(key, value)| (key == &fields_key).then_some(value))
+        .ok_or_else(|| "committed table schema has no fields".to_owned())?;
+    let Raw::Array(fields) = fields else {
+        return Err("committed table schema fields are not an array".into());
+    };
+    let stored_role = Raw::Int(1.into());
+    let mut types = HashMap::with_capacity(fields.len());
+    for field in fields {
+        let Raw::Array(parts) = field else {
+            return Err("committed table schema field is not an array".into());
+        };
+        let [Raw::Tag(37, identity), _, field_type, role, _] = parts.as_slice() else {
+            return Err("committed table schema field is malformed".into());
+        };
+        if role != &stored_role {
+            continue;
+        }
+        let Raw::Bytes(identity) = identity.as_ref() else {
+            return Err("committed field identity is not a UUID".into());
+        };
+        let identity: [u8; 16] = identity
+            .as_slice()
+            .try_into()
+            .map_err(|_| "committed field identity has the wrong width")?;
+        if types.insert(identity, field_type).is_some() {
+            return Err("committed table schema repeats a stored field".into());
+        }
+    }
+    Ok(types)
+}
+
+fn is_optional_field(field_type: &Raw) -> bool {
+    matches!(field_type, Raw::Array(parts) if parts.len() == 2 && parts[0] == Raw::Int(2.into()))
+}
+
+fn stored_value_is_null(value: &Raw) -> bool {
+    matches!(value, Raw::Null)
+        || matches!(value, Raw::Tag(60013, option) if matches!(option.as_ref(), Raw::Array(parts) if matches!(parts.as_slice(), [Raw::Int(index)] if index.to_string() == "0")))
+}
+
+fn render_stored_source_value(value: &Raw) -> Result<String, String> {
+    match value {
+        Raw::Null => Ok("null".into()),
+        Raw::Bool(value) => Ok(value.to_string()),
+        Raw::Int(value) => Ok(value.to_string()),
+        Raw::Float(bits) => {
+            let value = f64::from_bits(*bits);
+            if !value.is_finite() {
+                return Err("committed row contains a non-finite source number".into());
+            }
+            Ok(format!("{value:?}f"))
+        }
+        Raw::Text(value) => serde_json::to_string(value)
+            .map_err(|error| format!("stored string could not be rendered: {error}")),
+        Raw::Bytes(_) => Err("committed row contains a byte value without a source spelling".into()),
+        Raw::Array(values) => {
+            let values = values
+                .iter()
+                .map(render_stored_source_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("[{}]", values.join(", ")))
+        }
+        Raw::Map(entries) => {
+            let fields = entries
+                .iter()
+                .map(|(key, value)| {
+                    let Raw::Text(name) = key else {
+                        return Err("stored record has a non-text field name".to_owned());
+                    };
+                    Ok(format!("{name}: {}", render_stored_source_value(value)?))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{{ {} }}", fields.join(", ")))
+        }
+        Raw::Tag(60000, decimal) => {
+            let Raw::Array(parts) = decimal.as_ref() else {
+                return Err("stored decimal has an invalid payload".into());
+            };
+            let [Raw::Int(coefficient), Raw::Int(exponent)] = parts.as_slice() else {
+                return Err("stored decimal has an invalid payload".into());
+            };
+            Ok(format!("{coefficient}e{exponent}.decimal"))
+        }
+        Raw::Tag(60001, date) => match date.as_ref() {
+            Raw::Text(date) => Ok(date.clone()),
+            _ => Err("stored date has an invalid payload".into()),
+        },
+        Raw::Tag(60002, instant) => render_stored_instant(instant),
+        Raw::Tag(60013, option) => {
+            let Raw::Array(parts) = option.as_ref() else {
+                return Err("stored optional field has an invalid payload".into());
+            };
+            match parts.as_slice() {
+                [Raw::Int(index)] if index.to_string() == "0" => Ok("null".into()),
+                [Raw::Int(index), value] if index.to_string() == "1" => {
+                    render_stored_source_value(value)
+                }
+                _ => Err("stored optional field has an invalid value".into()),
+            }
+        }
+        Raw::Tag(60014, _) => Ok("()".into()),
+        Raw::Tag(60015, tuple) => {
+            let Raw::Array(values) = tuple.as_ref() else {
+                return Err("stored tuple has an invalid payload".into());
+            };
+            let values = values
+                .iter()
+                .map(render_stored_source_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut body = values.join(", ");
+            if values.len() == 1 {
+                body.push(',');
+            }
+            Ok(format!("({body})"))
+        }
+        Raw::Tag(60009, record) => {
+            let Raw::Array(parts) = record.as_ref() else {
+                return Err("stored record has an invalid payload".into());
+            };
+            let [_, Raw::Array(entries)] = parts.as_slice() else {
+                return Err("stored record has an invalid payload".into());
+            };
+            let fields = entries
+                .iter()
+                .map(|entry| {
+                    let Raw::Array(parts) = entry else {
+                        return Err("stored record field is malformed".to_owned());
+                    };
+                    let [Raw::Text(name), value] = parts.as_slice() else {
+                        return Err("stored record field has no source name".to_owned());
+                    };
+                    Ok(format!("{name}: {}", render_stored_source_value(value)?))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{{ {} }}", fields.join(", ")))
+        }
+        Raw::Tag(tag, _) => Err(format!("committed row value tag {tag} has no source spelling")),
+    }
+}
+
+fn render_stored_instant(instant: &Raw) -> Result<String, String> {
+    let Raw::Array(parts) = instant else {
+        return Err("stored instant has an invalid payload".into());
+    };
+    let [Raw::Int(seconds), Raw::Int(nanoseconds)] = parts.as_slice() else {
+        return Err("stored instant has an invalid payload".into());
+    };
+    let seconds = seconds
+        .to_string()
+        .parse::<i64>()
+        .map_err(|_| "stored instant seconds are out of range")?;
+    let nanoseconds = nanoseconds
+        .to_string()
+        .parse::<u32>()
+        .map_err(|_| "stored instant nanoseconds are out of range")?;
+    if nanoseconds >= 1_000_000_000 {
+        return Err("stored instant nanoseconds are out of range".into());
+    }
+    let day = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    let (year, month, date) = civil_date_from_days(day);
+    if !(0..=9999).contains(&year) {
+        return Err("stored instant is outside the source calendar range".into());
+    }
+    let hour = day_seconds / 3_600;
+    let minute = (day_seconds % 3_600) / 60;
+    let second = day_seconds % 60;
+    let mut rendered = format!("{year:04}-{month:02}-{date:02}T{hour:02}:{minute:02}:{second:02}");
+    if nanoseconds != 0 {
+        let mut fraction = format!("{nanoseconds:09}");
+        while fraction.ends_with('0') {
+            fraction.pop();
+        }
+        rendered.push('.');
+        rendered.push_str(&fraction);
+    }
+    rendered.push('Z');
+    Ok(rendered)
+}
+
+fn civil_date_from_days(days: i64) -> (i64, i64, i64) {
+    let adjusted = days + 719_468;
+    let era = if adjusted >= 0 { adjusted } else { adjusted - 146_096 } / 146_097;
+    let day_of_era = adjusted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let date = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 { month_prime + 3 } else { month_prime - 9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month, date)
 }
 
 fn key_component(key: &TypedKey) -> Result<String, String> {
