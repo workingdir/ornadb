@@ -12,8 +12,8 @@ been published.
 - The `mv` CLI command renames committed tables and retains their table and
   child-field IDs in uncommitted source and identity-manifest changes.
 - Optional Blob fields preserve `Some` bindings through source-row admission,
-  metadata queries and offline export; overflow verification counts nested Blob
-  references through `Some` without reading payload bytes.
+  metadata queries, history diffs and offline export; overflow verification counts
+  nested Blob references through `Some` without reading payload bytes.
 
 ## 1.0.0 — release inventory (publication pending)
 
