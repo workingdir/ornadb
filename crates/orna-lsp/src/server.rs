@@ -116,6 +116,7 @@ fn stdio_connection() -> (Connection, StdioIoThreads) {
 struct PendingIdentityRename {
     rename: ObjectIdentityRename,
     requested_version: i32,
+    pre_edit_text: String,
     // Exact full text produced by the returned WorkspaceEdit for this document.
     expected_text: String,
     applied_version: Option<i32>,
@@ -956,11 +957,13 @@ fn request_rename(
             return Ok(serde_json::to_value(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None })?);
         };
         let requested_version = document.version;
+        let pre_edit_text = document.text.clone();
         let pending = state.pending_identity_renames.entry(uri.clone()).or_default();
         if let Some(chain) = pending.iter_mut().find(|chain| {
             chain.last().is_some_and(|last| {
                 last.rename.kind() == rename.kind()
                     && last.rename.new_qualified_name() == rename.old_qualified_name()
+                    && last.expected_text == pre_edit_text
             })
         }) {
             chain.push(PendingIdentityRename { rename, requested_version, expected_text, applied_version: None });
