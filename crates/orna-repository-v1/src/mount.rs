@@ -331,11 +331,15 @@ impl MountView {
         true
     }
 
+    /// The canonical Git commit resolved for this view's historical snapshot.
+    pub fn commit(&self) -> &crate::GitCommitRef {
+        self.context.commit()
+    }
+
     /// The pinned historical context, for schema/row/graph reads.
     pub fn context(&self) -> &HistoricalFormatContext {
         &self.context
     }
-
     fn record_path(&self) -> PathBuf {
         mount_record_path(self.repository.runtime_paths(), &self.mountpoint)
     }
