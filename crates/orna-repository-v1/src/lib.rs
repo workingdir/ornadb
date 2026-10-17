@@ -3516,12 +3516,19 @@ impl Repository {
             return Err(RepositoryError::SysGitNothingToCommit);
         }
         let token_hex = review.token.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let message_digest_hex = Sha256::digest(message.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let result_path = self.runtime.root().join(format!("reviewed-result-{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
         if let Ok(recorded) = fs::read_to_string(&result_path) {
-            let Some((recorded_token, recorded_commit)) = recorded.split_once('\n') else {
+            let mut fields = recorded.lines();
+            let (Some(recorded_token), Some(recorded_message_digest), Some(recorded_commit)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
                 return Err(RepositoryError::LocalStateUnavailable);
             };
-            if recorded_token != token_hex {
+            if fields.next().is_some() {
+                return Err(RepositoryError::LocalStateUnavailable);
+            }
+            if recorded_token != token_hex || recorded_message_digest != message_digest_hex {
                 return Err(RepositoryError::StaleReviewedCandidate);
             }
             return self.snapshot_from_native_oid(recorded_commit.trim().to_owned());
@@ -3576,7 +3583,7 @@ impl Repository {
             &review.cwd.index, &candidate, &mut journal, false, false, Some(review), on_stage,
         )?;
         self.mark_runtime_complete(runtime_intent_id, &mut journal)?;
-        fs::write(&result_path, format!("{token_hex}\n{}", candidate.commit().as_str()))
+        fs::write(&result_path, format!("{token_hex}\n{message_digest_hex}\n{}", candidate.commit().as_str()))
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         Ok(candidate.commit().clone())
     }
@@ -10785,6 +10792,42 @@ mod tests {
         assert_eq!(replay, committed);
     }
 
+    #[test]
+    fn reviewed_candidate_replay_requires_the_original_message() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/database.orna"), include_str!("../tests/fixtures/format-context/database-final.orna")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"store root one").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        fs::write(root.path().join("main.orna"), "module main;\n// admitted\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([10; 16]), super::Uuid::from_bytes([11; 16]), 3,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(4), vec![0x81, 0x00],
+        ).unwrap();
+        let intent = [12; 16];
+        let committed = repository.commit_reviewed_candidate(
+            &review, &review.index_tree, 3, intent, "reviewed",
+        ).unwrap();
+
+        let replay = repository.commit_reviewed_candidate(
+            &review, &review.index_tree, 3, intent, "reviewed",
+        ).unwrap();
+        assert_eq!(replay, committed);
+        assert!(matches!(
+            repository.commit_reviewed_candidate(
+                &review, &review.index_tree, 3, intent, "corrected message",
+            ),
+            Err(RepositoryError::StaleReviewedCandidate)
+        ));
+    }
     #[test]
     fn reviewed_candidate_retries_after_index_lock_contention() {
         let root = tempfile::TempDir::new().unwrap();
