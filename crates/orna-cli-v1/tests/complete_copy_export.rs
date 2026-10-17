@@ -909,8 +909,17 @@ fn export_fails_locally_for_a_missing_promisor_object() {
     .unwrap()
     .trim()
     .to_owned();
-    let source_object = source.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
-    assert!(source_object.is_file(), "origin has the promised object");
+    // Git maintenance may pack loose objects while this fixture runs.
+    let has_origin_object = || {
+        Command::new("git")
+            .current_dir(source)
+            .args(["cat-file", "-e", &oid])
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .status()
+            .expect("check origin object availability")
+            .success()
+    };
+    assert!(has_origin_object(), "origin has the promised object");
 
     let outside = TempDir::new().unwrap();
     let partial = outside.path().join("partial");
@@ -951,10 +960,9 @@ fn export_fails_locally_for_a_missing_promisor_object() {
         "the object is missing locally before export"
     );
     assert!(
-        source_object.is_file(),
+        has_origin_object(),
         "the origin can still serve the object"
     );
-
     let archive = outside.path().join("incomplete-copy");
     std::fs::create_dir(&archive).unwrap();
     let exported = run(
