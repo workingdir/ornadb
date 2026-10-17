@@ -20,6 +20,8 @@ been published.
 - FUSE workspace mounts page through the pinned row index on listing, resolve
   known keys by the index, and isolate projection errors as EIO so one corrupt
   row does not block neighboring rows.
+- FUSE teardown serializes daemon and CLI cleanup so concurrent detach paths do
+  not race to remove the same view pin and record.
 - The trusted REPL exposes the root namespace as `main` unless a user module named
   `main` exists, and admits `main.add` Blob rows using typed keys against the
   committed format-3 schema. A semicolon-terminated capture/add submission

@@ -15,6 +15,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use fs2::FileExt;
 
 use sha2::{Digest, Sha256};
 
@@ -25,6 +26,26 @@ use crate::{HistoricalFormatContext, Repository, RuntimePaths};
 const MOUNT_VIEW_DOMAIN: &[u8] = b"orna.repository.mount.view.v1\0";
 /// First line of every mount-view record.
 const MOUNT_RECORD_MAGIC: &str = "orna-mount-view 2";
+
+/// Serializes mount records and their snapshot-pin updates across processes.
+fn mount_registry_lock(paths: &RuntimePaths, exclusive: bool) -> Result<fs::File, MountError> {
+    let locks = paths.locks();
+    fs::create_dir_all(&locks).map_err(|_| MountError::HostFilesystem)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(locks.join("mount-registry.lock"))
+        .map_err(|_| MountError::HostFilesystem)?;
+    if exclusive {
+        file.lock_exclusive()
+    } else {
+        file.lock_shared()
+    }
+    .map_err(|_| MountError::HostFilesystem)?;
+    Ok(file)
+}
 
 /// Why a mount view could not be attached or reported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +145,7 @@ impl MountView {
         {
             return Err(MountError::MountpointNotEmpty);
         }
+        let _registry_lock = mount_registry_lock(repository.runtime_paths(), true)?;
 
         let mut identity = Sha256::new();
         identity.update(MOUNT_VIEW_DOMAIN);
@@ -235,7 +257,14 @@ impl MountView {
     /// Re-reads the durable record this view wrote, proving the attached view
     /// is still reported exactly as it was admitted.
     pub fn verify_record(&self) -> Result<MountStatus, MountError> {
-        let bytes = fs::read(self.record_path()).map_err(|_| MountError::HostFilesystem)?;
+        let _registry_lock = mount_registry_lock(self.repository.runtime_paths(), false)?;
+        let bytes = fs::read(self.record_path()).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MountError::NotAttached
+            } else {
+                MountError::HostFilesystem
+            }
+        })?;
         let record = MountRecord::parse(&bytes)?;
         if record.view != self.view_id
             || record.snapshot != *self.context.snapshot_id()
@@ -257,12 +286,14 @@ impl MountView {
             mountpoint: record.mountpoint,
             snapshot: record.snapshot,
             view: record.view,
+            owner_id: record.owner_id,
             format: record.format,
             legacy: record.legacy,
         })
     }
 
     fn release(&mut self) -> Result<(), MountError> {
+        let _registry_lock = mount_registry_lock(self.repository.runtime_paths(), true)?;
         let path = self.record_path();
         let Ok(bytes) = fs::read(&path) else {
             return Ok(());
@@ -305,6 +336,7 @@ pub struct MountStatus {
     mountpoint: PathBuf,
     snapshot: [u8; 32],
     view: [u8; 32],
+    owner_id: [u8; 16],
     format: u8,
     legacy: bool,
 }
@@ -466,6 +498,7 @@ impl Repository {
     /// resolved to. A malformed record is reported rather than skipped: a
     /// retained record that cannot be read is not absence of a mount.
     pub fn mount_status(&self) -> Result<Vec<MountStatus>, MountError> {
+        let _registry_lock = mount_registry_lock(self.runtime_paths(), false)?;
         let directory = mount_registry_dir(self.runtime_paths());
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
@@ -495,6 +528,7 @@ impl Repository {
                 mountpoint: record.mountpoint,
                 snapshot: record.snapshot,
                 view: record.view,
+                owner_id: record.owner_id,
                 format: record.format,
                 legacy: record.legacy,
             });
@@ -516,19 +550,23 @@ impl Repository {
         let resolved = mountpoint
             .canonicalize()
             .unwrap_or_else(|_| mountpoint.clone());
-        let record = self
-            .mount_status()?
-            .into_iter()
-            .find(|status| status.mountpoint == resolved)
-            .ok_or(MountError::NotAttached)?;
-        debug_assert_eq!(record.mountpoint, resolved);
+        let _registry_lock = mount_registry_lock(self.runtime_paths(), false)?;
+        let record_path = mount_record_path(self.runtime_paths(), &resolved);
+        let bytes = fs::read(&record_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MountError::NotAttached
+            } else {
+                MountError::HostFilesystem
+            }
+        })?;
+        let parsed = MountRecord::parse(&bytes)?;
+        if parsed.mountpoint != resolved {
+            return Err(MountError::RecordInvalid);
+        }
         // The record names one immutable commit selector. Resolving that
         // selector again — never a branch tip or the workspace HEAD — restores
         // the attached view, and the resolved snapshot must match the logical
         // identity the record reported.
-        let bytes = fs::read(mount_record_path(self.runtime_paths(), &resolved))
-            .map_err(|_| MountError::HostFilesystem)?;
-        let parsed = MountRecord::parse(&bytes)?;
         crate::native_graph::verify_mount_snapshot_pin(
             self,
             &parsed.owner_id,
@@ -571,6 +609,7 @@ impl Repository {
         let resolved = mountpoint
             .canonicalize()
             .unwrap_or_else(|_| mountpoint.clone());
+        let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
         let record_path = mount_record_path(self.runtime_paths(), &resolved);
         let bytes = fs::read(&record_path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -587,6 +626,7 @@ impl Repository {
             mountpoint: record.mountpoint,
             snapshot: record.snapshot,
             view: record.view,
+            owner_id: record.owner_id,
             format: record.format,
             legacy: record.legacy,
         };

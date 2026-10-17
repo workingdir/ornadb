@@ -334,9 +334,13 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     drop(blob);
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = mounted.child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
     assert!(
         status.success(),
-        "mount process exits cleanly after unmount"
+        "mount process exits cleanly after unmount; status={status:?}; stderr={stderr}"
     );
 }
 
@@ -473,9 +477,13 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
 
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = mounted.child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
     assert!(
         status.success(),
-        "mount process exits cleanly after unmount"
+        "mount process exits cleanly after unmount; status={status:?}; stderr={stderr}"
     );
 }
 
@@ -644,17 +652,20 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         !child_status.success(),
         "SIGKILL should terminate the mount child"
     );
-    let canonicalization_error = std::fs::canonicalize(&mountpoint).err();
-
+    let dead_mount_error = std::fs::read_dir(&mountpoint)
+        .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>().map(|_| ()))
+        .err();
     run_unmount(repository_directory.path(), &mountpoint);
+
     assert!(
         !mountinfo_contains(&mountpoint),
         "orna unmount left the orphaned FUSE mount in /proc/self/mountinfo"
     );
     assert_eq!(repository.mount_status().unwrap().len(), 0);
     assert_eq!(
-        canonicalization_error.map(|error| error.kind()),
+        dead_mount_error.map(|error| error.kind()),
         Some(std::io::ErrorKind::NotConnected),
-        "dead FUSE mountpoint canonicalization should fail with ENOTCONN"
+        "a directory request to the dead FUSE mount should fail with ENOTCONN"
     );
 }
+
