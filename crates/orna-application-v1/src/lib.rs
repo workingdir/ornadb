@@ -1155,6 +1155,7 @@ impl SourceMutationEffectHandler {
         row: AdmittedSourceRow,
         value_context: &Format3Context,
     ) -> Result<(), ApplicationError> {
+        let canonical_key = row.canonical_key().to_vec();
         let (mutation, bindings, schema) = row.into_mutation_and_bindings();
         let table_name = schema.declaration_name().to_owned();
         let table_object_id = schema.table_object_id();
@@ -1178,7 +1179,7 @@ impl SourceMutationEffectHandler {
             .ok_or(ApplicationError::InvalidTableMetadata)?;
         schema
             .descriptor()
-            .validate_stored_row(table_object_id.bytes(), mutation.key(), canonical_fields)
+            .validate_stored_row(table_object_id.bytes(), &canonical_key, canonical_fields)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
 
         let OvbRaw::Map(descriptor_entries) = schema.descriptor().raw() else {
@@ -1250,6 +1251,19 @@ impl SourceMutationEffectHandler {
                 .iter()
                 .find(|candidate| candidate.pin_id() == pin.pin_id())
                 .ok_or(ApplicationError::InvalidTableMetadata)?;
+            let stored_blob_matches = match fields.get(field_index) {
+                Some(value) if value == encoded_blob.raw() => true,
+                Some(OvbRaw::Tag(60013, payload)) => matches!(
+                    payload.as_ref(),
+                    OvbRaw::Array(parts)
+                        if matches!(
+                            parts.as_slice(),
+                            [OvbRaw::Int(state), value]
+                                if state == &role_stored && value == encoded_blob.raw()
+                        )
+                ),
+                _ => false,
+            };
             if !field_ids.insert(field_object_id)
                 || !pin_ids.insert(*pin.pin_id())
                 || transfer.database_id() != schema.database_id()
@@ -1258,7 +1272,7 @@ impl SourceMutationEffectHandler {
                 || transfer_evidence.pin_id() != transfer.pin_id()
                 || transfer_evidence.descriptor_oid() != transfer.descriptor_oid()
                 || transfer_evidence.content_identity() != transfer.content_identity()
-                || fields.get(field_index) != Some(encoded_blob.raw())
+                || !stored_blob_matches
             {
                 return Err(ApplicationError::InvalidTableMetadata);
             }
