@@ -1090,27 +1090,6 @@
       ]
     },
     {
-      "name": "sys.PublicationPolicy",
-      "kind": "record",
-      "purpose": "Effective runtime limits for compressed publication size, file size and pending age.",
-      "type_parameters": [],
-      "fields": [
-        {
-          "name": "compressed_target_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "max_file_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "max_pending_age_seconds",
-          "type": "Int"
-        }
-      ],
-      "invariants": []
-    },
-    {
       "name": "sys.CompactionResult",
       "kind": "record",
       "purpose": "Physical maintenance result for the one indexed profile; segment-named fields refer to observed bounded storage pages.",
@@ -5332,7 +5311,7 @@
       "kind": "relation",
       "availability": "local-durable",
       "key": "object",
-      "purpose": "Observed single indexed row-store root, generation, availability and cumulative publication counters; not a placement policy.",
+      "purpose": "Observed single indexed row-store root, generation and availability; not a placement policy.",
       "fields": [
         {
           "name": "reference",
@@ -5367,14 +5346,6 @@
           "type": "Int"
         },
         {
-          "name": "published_rows",
-          "type": "Int"
-        },
-        {
-          "name": "published_bytes",
-          "type": "Int"
-        },
-        {
           "name": "compression",
           "type": "Str?"
         },
@@ -5396,7 +5367,7 @@
         },
         {
           "name": "publication_policy",
-          "type": "sys.PublicationPolicy"
+          "type": "sys.Value"
         },
         {
           "name": "verification",
@@ -5775,7 +5746,7 @@
       "kind": "relation",
       "availability": "local-durable",
       "key": "id",
-      "purpose": "Verification/prune/flush/maintenance operation with publication metadata.",
+      "purpose": "Verification/prune/flush/maintenance operation.",
       "fields": [
         {
           "name": "reference",
@@ -5792,30 +5763,6 @@
         {
           "name": "object",
           "type": "sys.ObjectRef?"
-        },
-        {
-          "name": "publication_policy",
-          "type": "sys.PublicationPolicy"
-        },
-        {
-          "name": "pending_rows",
-          "type": "Int"
-        },
-        {
-          "name": "pending_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "published_rows",
-          "type": "Int"
-        },
-        {
-          "name": "published_bytes",
-          "type": "Int"
-        },
-        {
-          "name": "last_publication",
-          "type": "Instant?"
         },
         {
           "name": "started",
@@ -6749,7 +6696,7 @@
     "singletons": 4,
     "opaque_identifiers": 21,
     "reference_aliases": 78,
-    "value_types": 36,
+    "value_types": 35,
     "enums": 42,
     "relations": 78,
     "functions": 82,
