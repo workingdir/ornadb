@@ -14,8 +14,10 @@ been published.
 
 - The trusted REPL exposes the root namespace as `main` unless a user module named
   `main` exists, and admits `main.add` Blob rows using typed keys against the
-  committed format-3 schema. Captured scratch refs share the runtime owner and
-  are reclaimed when a later runtime reopen recovers a crashed session.
+  committed format-3 schema. A semicolon-terminated capture/add submission
+  suppresses the row result while retaining one durable runtime transaction.
+  Captured scratch refs share the runtime owner and are reclaimed when a later
+  runtime reopen recovers a crashed session.
 
 ## 1.0.0 — release inventory (publication pending)
 
