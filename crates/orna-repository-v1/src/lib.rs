@@ -249,6 +249,7 @@ pub(crate) struct ReviewedCandidateReview {
     head_ref: Option<String>,
     cwd: CwdGeneration,
     cwd_snapshot_descriptor: Vec<u8>,
+    candidate_paths: Vec<String>,
     index_bytes_digest: [u8; 32],
     index_tree: IndexTreeRef,
     token: [u8; 32],
@@ -277,19 +278,20 @@ fn append_cbor_optional_text(bytes: &mut Vec<u8>, value: Option<&str>) { match v
 
 fn reviewed_candidate_token(review: &ReviewedCandidateReview) -> [u8; 32] {
     let mut payload = Vec::with_capacity(256 + review.cwd_snapshot_descriptor.len());
-    append_cbor_head(&mut payload, 4, 10);
+    append_cbor_head(&mut payload, 4, 11);
     append_cbor_bytes(&mut payload, review.database_id.as_bytes());
     append_cbor_bytes(&mut payload, review.runtime_id.as_bytes());
     append_cbor_optional_text(&mut payload, review.cwd.head().map(GitCommitRef::as_str));
     append_cbor_optional_text(&mut payload, review.head_ref.as_deref());
     append_cbor_text(&mut payload, review.index_tree.as_str());
     append_cbor_bytes(&mut payload, &review.index_bytes_digest);
-    append_cbor_bytes(&mut payload, review.cwd.worktree.content_digest());
+    append_cbor_head(&mut payload, 4, review.candidate_paths.len() as u64);
+    for path in &review.candidate_paths { append_cbor_text(&mut payload, path); }
     append_cbor_bytes(&mut payload, &review.cwd_snapshot_descriptor);
     append_cbor_head(&mut payload, 0, review.pending_generation);
     append_cbor_head(&mut payload, 0, u64::from(review.repository_format.number()));
     let mut digest = Sha256::new();
-    digest.update(b"orna.commit-review.v1\0");
+    digest.update(b"orna.commit-review-worktree.v1\0");
     digest.update(payload);
     digest.finalize().into()
 }
@@ -3471,9 +3473,12 @@ impl Repository {
         {
             return Err(RepositoryError::StaleCwd);
         }
+        let mut path_diff = self.command();
+        path_diff.args(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z"]).arg(cwd.head().ok_or(RepositoryError::UnbornHead)?.as_str()).arg(index_tree.as_str());
+        let candidate_paths = self.run(path_diff)?.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()).map(|path| String::from_utf8(path.to_vec()).map_err(|_| RepositoryError::UnsafeManagedPath)).collect::<Result<Vec<_>, _>>()?;
         let mut review = ReviewedCandidateReview {
             database_id, runtime_id, pending_generation, repository_format,
-            head_ref: cwd.branch().map(str::to_owned), cwd, cwd_snapshot_descriptor,
+            head_ref: cwd.branch().map(str::to_owned), cwd, cwd_snapshot_descriptor, candidate_paths,
             index_bytes_digest: Sha256::digest(&index_bytes).into(), index_tree, token: [0; 32],
         };
         review.token = reviewed_candidate_token(&review);
@@ -3507,6 +3512,12 @@ impl Repository {
         {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
+        let result_path = self.runtime.root().join(format!("reviewed-result-{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
+        if let Ok(recorded) = fs::read_to_string(&result_path) {
+            if self.head()?.as_ref().is_some_and(|head| head.as_str() == recorded.trim()) {
+                return self.snapshot_from_native_oid(recorded.trim().to_owned());
+            }
+        }
         let actual_cwd = self.cwd_generation(review.cwd.runtime())?;
         let index = self.git_path("index")?;
         let index_bytes = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -3525,6 +3536,10 @@ impl Repository {
             tree: admitted_index_tree.clone(),
             commit: self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?,
         };
+        let anchor = format!("refs/orna/review-candidates/{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        let mut pin = self.command();
+        pin.args(["update-ref", anchor.as_str(), candidate.commit().as_str()]);
+        self.run(pin)?;
         let context = self.open_private_candidate_format_context(&candidate)
             .map_err(|_| RepositoryError::InvalidFormatMigration)?;
         if context.repository_format() != review.repository_format
@@ -3545,7 +3560,7 @@ impl Repository {
             let current = self.read_managed_file(&target)?;
             entries.push(PublicationJournalEntry::new(path, current.clone(), current));
         }
-        if entries.is_empty() { return Err(RepositoryError::NoManagedPaths); }
+        if entries.is_empty() { return Err(RepositoryError::SysGitNothingToCommit); }
         let mut journal = PublicationJournal::new_with_runtime_intent(
             old_head, candidate.commit().clone(), review.index_tree.clone(), runtime_intent_id, entries,
         )?;
@@ -3553,6 +3568,7 @@ impl Repository {
             &review.cwd.index, &candidate, &mut journal, false, false, Some(review), on_stage,
         )?;
         self.mark_runtime_complete(runtime_intent_id, &mut journal)?;
+        fs::write(&result_path, candidate.commit().as_str()).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         Ok(candidate.commit().clone())
     }
 
@@ -3750,11 +3766,12 @@ impl Repository {
         let index = self.git_path("index")?;
         let base_index = self.capture_index_for_expected(expected_index, &index)?;
         let lock_binding = journal.lock_binding()?;
-        self.write_publication_journal_locked(journal)?;
-        // Own Git's writer lock before exposing the new ref. This closes the
+        // Own Git's writer lock before persisting a prepared intent so lock contention
+        // cannot strand a timestamped journal that blocks a fresh retry. This closes the
         // post-ref/pre-index race where an ordinary Git writer could publish
         // the captured, stale index.
         let git_lock = GitIndexLock::acquire_owned(index.with_extension("lock"), lock_binding)?;
+        self.write_publication_journal_locked(journal)?;
         self.ensure_no_git_operation_in_progress()?;
         if let Some(review) = review {
             let bytes = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -8965,6 +8982,7 @@ pub enum RepositoryError {
     InvalidCompactManifest,
     UnsafeManagedPath,
     NoManagedPaths,
+    SysGitNothingToCommit,
     UnbornHead,
     StaleIndex {
         expected: IndexGeneration,
@@ -9024,6 +9042,7 @@ impl fmt::Display for RepositoryError {
             Self::InvalidCompactManifest => f.write_str("invalid compact storage manifest"),
             Self::UnsafeManagedPath => f.write_str("unsafe managed path"),
             Self::NoManagedPaths => f.write_str("at least one managed path is required"),
+            Self::SysGitNothingToCommit => f.write_str("sys.git.nothing_to_commit"),
             Self::UnbornHead => f.write_str("cannot create a branch from an unborn HEAD"),
             Self::StaleIndex { .. } => {
                 f.write_str("Git index changed since the expected generation")
