@@ -101,11 +101,12 @@ release gate has passed.
   argument files, canonical output, JSON/table/CSV presenters, and bounded
   invocation tracing are implemented where the selected route supports them.
 - On Linux, `orna mount DIR --cwd` mounts the current committed workspace
-  through host FUSE and allows validated row-document saves. The mount checks
-  each edit before it changes durable row data and supports sibling temporary
-  files renamed over `data.orna`. `orna unmount DIR` releases the kernel mount
-  and its view record; `orna mount DIR --at SELECTOR` remains a read-only,
-  record-only snapshot view.
+  through host FUSE and allows validated in-place row-document saves, including
+  editors that open with `O_TRUNC`. Existing rows are validated and replaced
+  before durable data changes; sibling temporary files renamed over `data.orna`
+  remain supported. `orna unmount DIR` releases the kernel mount and its view
+  record; `orna mount DIR --at SELECTOR` remains a read-only, record-only
+  snapshot view.
 - Committed snapshot loading preserves nested module import candidates while
   keeping format-3 row documents out of loose-row source discovery.
 - USER state is principal-scoped and typed. Local peer authentication supplies
