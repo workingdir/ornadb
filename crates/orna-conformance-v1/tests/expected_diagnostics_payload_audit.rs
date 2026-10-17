@@ -227,11 +227,6 @@ fn every_invalid_sidecar_matches_the_emitted_diagnostic_payload() {
         );
         if !fields.is_empty() {
             match fixture.path {
-                "examples/invalid/legacy-result.orna" => {
-                    assert_eq!(actual_code, Some("ORNA-S012-UNRESOLVED"));
-                    assert_eq!(message, Some("type name cannot be resolved"));
-                    assert_eq!(actual_native_code, "ORNA-S012-UNRESOLVED");
-                }
                 "examples/invalid/two-durable-sources.orna" => {
                     assert_eq!(actual_code, Some("ORNA-S021-TYPE"));
                     assert_eq!(
@@ -249,7 +244,6 @@ fn every_invalid_sidecar_matches_the_emitted_diagnostic_payload() {
     println!("PAYLOAD TOTAL fixtures={} mismatches={}", FIXTURES.len(), mismatches.len());
     let observed: BTreeSet<_> = mismatches.iter().map(String::as_str).collect();
     let attributed = BTreeSet::from([
-        "examples/invalid/legacy-result.orna: primary_diagnostic(emission),message_contains(emission)",
         "examples/invalid/two-durable-sources.orna: primary_diagnostic(emission)",
     ]);
     assert_eq!(observed, attributed, "payload mismatch set changed; update the audit and attribution");
