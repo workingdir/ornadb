@@ -603,8 +603,13 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
         }
         panic!("mounted Blob replacement rename failed: {error}; stderr={stderr}");
     }
-    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
-
+    // Reopen through the mounted path after save: subsequent reads must see the
+    // admitted bytes rather than the Blob node's original pinned reference.
+    let mut reopened = std::fs::File::open(&blob_path).unwrap();
+    let mut reopened_bytes = Vec::new();
+    reopened.read_to_end(&mut reopened_bytes).unwrap();
+    assert_eq!(reopened_bytes, replacement);
+    drop(reopened);
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
     let mut stderr = String::new();
