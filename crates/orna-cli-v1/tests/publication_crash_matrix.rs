@@ -302,6 +302,87 @@ async fn seeded_project() -> (
     (directory, source, repository, state, base, relation_id, format_context)
 }
 
+#[tokio::test]
+async fn format3_publication_recovers_when_gc_prunes_candidate_before_publish() {
+    let (directory, _source, repository, state, old_head, _relation_id, _format_context) =
+        seeded_project().await;
+    let root = directory.path();
+    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+    let freeze = state.freeze([0x44; 16], &checkpoint).await.unwrap();
+    let intent_id = freeze.intent_id;
+    let expected_index = repository.index_generation().unwrap();
+    let mut coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &old_head,
+        expected_index,
+        &freeze,
+        |_| panic!("Format-3 store-only publication must not request a legacy path"),
+        "test format-3 publication",
+    )
+    .await
+    .unwrap()
+    .expect("the seeded store-only mutation needs publication");
+    let candidate_commit = coordinator.candidate().commit().clone();
+    repository
+        .write_publication_journal(coordinator.journal())
+        .unwrap();
+
+    git(root, &["gc", "--prune=now", "--quiet"]);
+    let candidate_status = Command::new("git")
+        .args(["cat-file", "-e", candidate_commit.as_str()])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        !candidate_status.status.success(),
+        "candidate commit remained reachable after git gc"
+    );
+    assert!(
+        coordinator.publish(&repository).is_err(),
+        "publication unexpectedly succeeded with its candidate pruned"
+    );
+    drop(coordinator);
+    drop(state);
+
+    let (identity, digest) = cli_runtime_identity(&repository);
+    let recovered = RuntimeState::open(&repository, identity, digest).await.unwrap();
+    assert!(
+        RuntimePublicationCoordinator::recover(&repository, &recovered)
+            .await
+            .unwrap()
+            .is_some(),
+        "recovery must clear the missing prepared candidate"
+    );
+    assert!(repository.read_publication_journal().unwrap().is_none());
+    assert_eq!(repository.head().unwrap(), Some(old_head.clone()));
+    assert!(
+        recovered.pending_count().await.unwrap() > 0,
+        "candidate loss must preserve the frozen runtime mutations"
+    );
+
+    let retry_freeze = recovered.publication_freeze(intent_id).await.unwrap();
+    let retry_index = repository.index_generation().unwrap();
+    let mut retry = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &recovered,
+        &old_head,
+        retry_index,
+        &retry_freeze,
+        |_| panic!("Format-3 store-only retry must not request a legacy path"),
+        "retry format-3 publication",
+    )
+    .await
+    .unwrap()
+    .expect("the unconsumed store-only mutation must be rebuilt");
+    let retry_commit = retry.candidate().commit().clone();
+    retry.publish(&repository).unwrap();
+    retry.complete(&repository, &recovered, &retry_freeze).await.unwrap();
+    assert_eq!(repository.head().unwrap(), Some(retry_commit));
+    assert!(repository.read_publication_journal().unwrap().is_none());
+    assert_eq!(recovered.pending_count().await.unwrap(), 0);
+}
+
 fn head(repository: &Repository) -> String {
     repository.head().unwrap().unwrap().as_str().to_owned()
 }
