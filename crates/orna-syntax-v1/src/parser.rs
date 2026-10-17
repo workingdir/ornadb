@@ -4168,7 +4168,7 @@ impl Parser {
             if self.is_punct("?") {
                 self.error_here(
                     "ORNA091-E-POSTFIX-QUESTION",
-                    "remove postfix `?`; failure propagation is automatic",
+                    "postfix propagation `?` was removed; failures propagate automatically",
                 );
                 self.bump();
                 continue;

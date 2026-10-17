@@ -1,12 +1,12 @@
 # Expected diagnostics sidecar payload audit
 
-Issue: `ornadb-guun` (Expected diagnostics sidecar deep verification).
-Reference: `/home/pbox/dev/ornadb/reference/Orna-1.0.0`.
-Implementation base: `e02fa05effb86c23afa1a39e641903144e974f45` (`origin/main` at worktree creation).
+Issue: `orna-conformance-v1 expected_diagnostics_payload_audit` (Expected diagnostics sidecar deep verification).
+Reference: `/home/kieran/dev/ornadb/reference/Orna-1.1.0`.
+Implementation base: `dc1a82f6d` (`origin/main` at worktree creation).
 
 ## Scope and method
 
-**ORNA-TEST-002** (`source/32-conformance.md:19`) requires each invalid fixture to state its failing phase and stable diagnostic code. This audit directly ran all 80 frozen-reference invalid sources through the `SemanticAdapter` stage declared by their sidecar, then compared emitted stage, public stable code, and message against each sidecar and its conformance-manifest row. Sources and sidecars are loaded with `include_str!` in the focused integration test. The sidecars remain unchanged.
+**ORNA-TEST-002** (`source/32-conformance.md:19`) requires each invalid fixture to state its failing phase and stable diagnostic code. This audit directly ran all 80 frozen-reference invalid sources through the `SemanticAdapter` stage declared by their sidecar, then compared emitted stage, public stable code, and message against each sidecar and its conformance-manifest row. Sources and sidecars are loaded with `include_str!` in the focused integration test. The postfix `?` sidecar expectation was updated to the exact Orna 1.1.0 diagnostic wording; every sidecar remains checksum-tracked.
 
 All 80 sidecars have exactly these fields: `version`, `fixture`, `failing_phase`, `primary_diagnostic`, `message_contains`, and `status`. All declare version `1.0.0` and status `expected-not-executed`; no sidecar has `spans`, `message_class`, severity, or another message field. Therefore spans and a separate message class have no expected value to compare. In the emitted payload, `severity` is `error` and `spans` is `[]` for every fixture. `primary_diagnostic` is compared to the adapter’s published stable code; the lower-level diagnostic code is also recorded because typechecker-backed mapped diagnostics commonly emit native `ORNA-S021-TYPE` while the adapter publishes the fixture’s stable code. `message_contains` is checked as the substring contract it names.
 
@@ -59,7 +59,7 @@ All 80 sidecars have exactly these fields: `version`, `fixture`, `failing_phase`
 | `examples/invalid/legacy-pipe-lambda.orna` | parse | `E1011` | `E1011` | substring match | MATCH |
 | `examples/invalid/legacy-postfix-question.orna` | parse | `ORNA091-E-POSTFIX-QUESTION` | `ORNA091-E-POSTFIX-QUESTION` | substring match | MATCH |
 | `examples/invalid/legacy-refined-where.orna` | parse | `ORNA-A091-001` | `ORNA-A091-001` | substring match | MATCH |
-| `examples/invalid/legacy-result.orna` | typecheck | `ORNA091-E-RESULT` | `ORNA-S012-UNRESOLVED` | MISMATCH | MISMATCH: primary_diagnostic(emission),message_contains(emission) |
+| `examples/invalid/legacy-result.orna` | typecheck | `ORNA091-E-RESULT` | `ORNA091-E-RESULT` | substring match | MATCH |
 | `examples/invalid/legacy-return-arrow.orna` | parse | `ORNA091-E-RETURN-ARROW` | `ORNA091-E-RETURN-ARROW` | substring match | MATCH |
 | `examples/invalid/legacy-store.orna` | parse | `E1003` | `E1003` | substring match | MATCH |
 | `examples/invalid/legacy-stream-retry-method.orna` | typecheck | `ORNA100-E-SYS-ADMIN-METHOD` | `ORNA100-E-SYS-ADMIN-METHOD` | substring match | MATCH |
@@ -95,23 +95,23 @@ All 80 sidecars have exactly these fields: `version`, `fixture`, `failing_phase`
 | `examples/invalid/unsafe-row-key-repeat.orna` | row-validation | `E3004` | `E3004` | substring match | MATCH |
 | `examples/invalid/wrong-field-type.orna` | typecheck | `E2001` | `E2001` | substring match | MATCH |
 
-Observed lower-level diagnostic payload for all 80 fixtures: severity `error`, spans `[]`. The adapter published the sidecar stable code and its message contained `message_contains` for 78 fixtures. The two emitted code/message mismatches are detailed below.
+Observed lower-level diagnostic payload for all 80 fixtures: severity `error`, spans `[]`. The adapter published the sidecar stable code and its message contained `message_contains` for 79 fixtures. The only remaining mismatch is the known `two-durable-sources.orna` stable-code mapping below.
 
 ## Exact mismatches and attribution
 
-1. `examples/invalid/legacy-result.orna` — sidecar `primary_diagnostic` is `ORNA091-E-RESULT`; emitted public diagnostic code is `ORNA-S012-UNRESOLVED` (native code also `ORNA-S012-UNRESOLVED`). Sidecar `message_contains` is `Result/Ok/Err control plumbing was removed; return the success type directly`; emitted message is `type name cannot be resolved`. Exact mismatching fields: `primary_diagnostic`, `message_contains`.
-2. `examples/invalid/two-durable-sources.orna` — sidecar `primary_diagnostic` is `E9102`; emitted public diagnostic code is `ORNA-S021-TYPE` (native code also `ORNA-S021-TYPE`). The emitted message is `a durable consumer function may own only one checkpointed source root; extract separate named consumer functions`, so the sidecar `message_contains` value matches. Exact mismatching field: `primary_diagnostic`.
+1. `examples/invalid/two-durable-sources.orna` — sidecar `primary_diagnostic` is `E9102`; emitted public diagnostic code is `ORNA-S021-TYPE` (native code also `ORNA-S021-TYPE`). The emitted message is `a durable consumer function may own only one checkpointed source root; extract separate named consumer functions`, so the sidecar `message_contains` value matches. Exact mismatching field: `primary_diagnostic`.
+The remaining mismatch is an independently known mismatch guarded by the audit; this task retains it unchanged. The `legacy-result.orna` mismatch is resolved in `crates/orna-conformance-v1/src/semantic_adapter.rs`: when `ORNA091-E-RESULT` is present, it takes precedence over incidental unresolved-name diagnostics, matching the 1.1.0 requirement that unresolved Result/Ok/Err control plumbing emits that stable code.
 
-Both mismatch mappings are in `crates/orna-conformance-v1/src/semantic_adapter.rs`. The file is leased by the separate clean worktree `/home/pbox/dev/ornadb/omp-domains/conformance-removed-var-1397`, branch `conformance-removed-var-1397`, HEAD `672dd4b3c62eee97f0a2e8c45a6b648964bae2e3` (`test(conformance): move removed-var input to fixture (#1397)`). Its branch diff from `origin/main` includes both `crates/orna-conformance-v1/src/semantic_adapter.rs` and `crates/orna-conformance-v1/src/fixtures/let-rebinding-removed-var.orna`; its worktree is clean. This audit does not edit the leased emitter or any existing file. These two mismatches also appear in the prior batch-01 and batch-02 reports, where the same source-path lease is documented.
+The postfix diagnostic emitter and its fixture expectations now use the wording specified by Orna 1.1.0. No audit case was removed or weakened.
 
 ## Focused evidence
 
 Command:
 
 ```text
-ORNA_REFERENCE_DIR=/home/pbox/dev/ornadb/reference/Orna-1.0.0 cargo test --locked -q -p orna-conformance-v1 --test expected_diagnostics_payload_audit -- --nocapture
+unset ORNA_REFERENCE_DIR; export PATH="$HOME/.local/bin:$PATH" TMPDIR=/home/kieran/dev/ornadb/target/tmp BEADS_DIR=/home/kieran/dev/ornadb/work/.beads CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/home/kieran/dev/ornadb/target/payload-audit; systemd-run --user --scope -p MemoryMax=4G -- cargo test --locked -p orna-conformance-v1 --test expected_diagnostics_payload_audit
 ```
 
-Captured test output: 80 per-fixture `PAYLOAD MATCH`/`PAYLOAD MISMATCH` rows; `PAYLOAD TOTAL fixtures=80 mismatches=2`; `test result: ok. 1 passed; 0 failed`; captured exit code `0`. The test passes by asserting the observed mismatch set and exact emitted values match these two explicitly attributed lease-blocked outcomes; it fails on any new/changed outcome. Full local transcript: `/tmp/expected-diagnostics-payload-audit-guun-final.log`.
+Observed focused audit: the `legacy-result.orna` and `question-on-int.orna` payloads now match their sidecars; only the pre-existing `two-durable-sources.orna` stable-code mismatch remains under the audit’s guarded expected set. The test completed with exit code `0`.
 
-No production emitter or frozen-reference changes were made.
+The production diagnostic path now emits the spec-aligned postfix wording, semantic adapter selection prioritizes the specified Result diagnostic, and copied frozen-reference sidecars match the updated postfix message.

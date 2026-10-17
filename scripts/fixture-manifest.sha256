@@ -509,7 +509,7 @@ cd6f6351f2786b2d0870c052b54b4a97db369493e42d1eb97d321b46650e46cc  crates/orna-co
 91d6156f9236f574d5fdb3334b788dd013fcb993e0fe63c95fd2a3fec6e9e90b  crates/orna-conformance-v1/tests/fixtures/reference/source/35-references.md
 7b6fc36817360c24259bbd2eead054f3aa0af907ffb4d1d3a8d07b27232784b1  crates/orna-conformance-v1/tests/fixtures/reference/source/manifest.json
 9928937147b16f8c5cf9f577bf81bdac2b3b15ecda8794c90643fdedf563ca9d  crates/orna-conformance-v1/tests/fixtures/reference/sys-reference.html
-fc81d58432e0249e71803206d09137703716e4a6637d4b798c7c11d311efd8ae  crates/orna-conformance-v1/tests/fixtures/reference/tests/conformance-manifest.json
+ead86480eabb0d386117180003069a2ca34d0e3e6518c27e7d8d61f9684f2f0f  crates/orna-conformance-v1/tests/fixtures/reference/tests/conformance-manifest.json
 b8de22a7c0b111bd66904653744799a874efb6be2e72f756827cde7536045ff4  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/affine-addition.orna.json
 5cb32ecf522b884be7b6269e27015dbfec45c6d14644bbe6c1e22301c3b73c4f  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/affine-sum.orna.json
 9daafa5ec419fd623bb98db22c8272b01c034708dd76dd359377bcf71c89b6d3  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/ambiguous-consumer.orna.json
@@ -553,7 +553,7 @@ b77d566618b0de214a1c0d477d3a813988394f427f69d5529848a4f1977bdef1  crates/orna-co
 f337594234d66e0e67037a97f18a84562801daeaf328d3a46a3c3fe2ca5c0b53  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-match.orna.json
 96c6938e6f93fd3d89c020952b16ef025dfcc444de73075d0cc64ff5fc942feb  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-opaque.orna.json
 be20c1e3a5ac0aadb48b26462966e29ba01854b97ab44c410df3b4b08564a884  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-pipe-lambda.orna.json
-6fd2c39737815167c325c3b0eb08b017b906eb811a9530efd58efb6c02918ad5  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-postfix-question.orna.json
+cbc9ce87850cd700404c6a3e265011a0f165386b9f63af5a722726c92bf5c6e3  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-postfix-question.orna.json
 b99c1b966b27a59d91ed8d71d6d6eea4a9a62825a1bb5d8474e7ad5145b5e0ff  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-refined-where.orna.json
 b045dcc6942b93c7c4232d41b1da5f0f6e4787a61a4131ce7182e7e1095dcd2d  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-result.orna.json
 f5317ccc1660be5fcb645a8101352633f40dc155474ed643c5b6f337fa6ced46  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-return-arrow.orna.json
@@ -591,7 +591,7 @@ babd541f809fd26df8603580c701f31fc196d796dfcc0d8784518e1a33886543  crates/orna-co
 99aa3aff173f3adde08acf5d0c5c81e569036854ea55afeb2e5467327878592f  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/unsafe-row-key-repeat.orna.json
 0ca1f6aa26b2ba49899017623ed0eb510a9f3f575074d9acf147280ddb044b39  crates/orna-conformance-v1/tests/fixtures/reference/tests/expected-diagnostics/wrong-field-type.orna.json
 0a1246335ef757a7f18c8661bc9c39a49b5ccd0477704c77c6bae43c2a8c8094  crates/orna-conformance-v1/tests/fixtures/reference/tests/float-vectors.json
-fd82672832318ceb8167906068bb91d8b6f3028a35528acb084bff730c14dc2e  crates/orna-conformance-v1/tests/fixtures/reference/tests/invalid-metadata.json
+6440095bd55b6567131740506670dcd3ce9ffb55a58bdcdc8cb9d9cddc10bd51  crates/orna-conformance-v1/tests/fixtures/reference/tests/invalid-metadata.json
 16b73a224efe971fa9b6190a860dac80611e987416872d1f6035c2994d247c12  crates/orna-conformance-v1/tests/fixtures/reference/tests/numeric-vectors.json
 773216efb8a81c9b55597be0711cca35f9dd0c5df5880ec1e93ed991abf5a7c7  crates/orna-conformance-v1/tests/fixtures/reference/tests/path-vectors.json
 84c5bf635614a64185f756d40a63876d129b1ea3fafc2bb0c24b4847c214739b  crates/orna-conformance-v1/tests/fixtures/reference/tests/project-manifest.json
@@ -5892,7 +5892,7 @@ cd6f6351f2786b2d0870c052b54b4a97db369493e42d1eb97d321b46650e46cc  crates/orna-tr
 91d6156f9236f574d5fdb3334b788dd013fcb993e0fe63c95fd2a3fec6e9e90b  crates/orna-traceability-v1/tests/fixtures/reference/source/35-references.md
 7b6fc36817360c24259bbd2eead054f3aa0af907ffb4d1d3a8d07b27232784b1  crates/orna-traceability-v1/tests/fixtures/reference/source/manifest.json
 9928937147b16f8c5cf9f577bf81bdac2b3b15ecda8794c90643fdedf563ca9d  crates/orna-traceability-v1/tests/fixtures/reference/sys-reference.html
-fc81d58432e0249e71803206d09137703716e4a6637d4b798c7c11d311efd8ae  crates/orna-traceability-v1/tests/fixtures/reference/tests/conformance-manifest.json
+ead86480eabb0d386117180003069a2ca34d0e3e6518c27e7d8d61f9684f2f0f  crates/orna-traceability-v1/tests/fixtures/reference/tests/conformance-manifest.json
 b8de22a7c0b111bd66904653744799a874efb6be2e72f756827cde7536045ff4  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/affine-addition.orna.json
 5cb32ecf522b884be7b6269e27015dbfec45c6d14644bbe6c1e22301c3b73c4f  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/affine-sum.orna.json
 9daafa5ec419fd623bb98db22c8272b01c034708dd76dd359377bcf71c89b6d3  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/ambiguous-consumer.orna.json
@@ -5936,7 +5936,7 @@ b77d566618b0de214a1c0d477d3a813988394f427f69d5529848a4f1977bdef1  crates/orna-tr
 f337594234d66e0e67037a97f18a84562801daeaf328d3a46a3c3fe2ca5c0b53  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-match.orna.json
 96c6938e6f93fd3d89c020952b16ef025dfcc444de73075d0cc64ff5fc942feb  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-opaque.orna.json
 be20c1e3a5ac0aadb48b26462966e29ba01854b97ab44c410df3b4b08564a884  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-pipe-lambda.orna.json
-6fd2c39737815167c325c3b0eb08b017b906eb811a9530efd58efb6c02918ad5  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-postfix-question.orna.json
+cbc9ce87850cd700404c6a3e265011a0f165386b9f63af5a722726c92bf5c6e3  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-postfix-question.orna.json
 b99c1b966b27a59d91ed8d71d6d6eea4a9a62825a1bb5d8474e7ad5145b5e0ff  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-refined-where.orna.json
 b045dcc6942b93c7c4232d41b1da5f0f6e4787a61a4131ce7182e7e1095dcd2d  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-result.orna.json
 f5317ccc1660be5fcb645a8101352633f40dc155474ed643c5b6f337fa6ced46  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/legacy-return-arrow.orna.json
@@ -5974,7 +5974,7 @@ babd541f809fd26df8603580c701f31fc196d796dfcc0d8784518e1a33886543  crates/orna-tr
 99aa3aff173f3adde08acf5d0c5c81e569036854ea55afeb2e5467327878592f  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/unsafe-row-key-repeat.orna.json
 0ca1f6aa26b2ba49899017623ed0eb510a9f3f575074d9acf147280ddb044b39  crates/orna-traceability-v1/tests/fixtures/reference/tests/expected-diagnostics/wrong-field-type.orna.json
 0a1246335ef757a7f18c8661bc9c39a49b5ccd0477704c77c6bae43c2a8c8094  crates/orna-traceability-v1/tests/fixtures/reference/tests/float-vectors.json
-fd82672832318ceb8167906068bb91d8b6f3028a35528acb084bff730c14dc2e  crates/orna-traceability-v1/tests/fixtures/reference/tests/invalid-metadata.json
+6440095bd55b6567131740506670dcd3ce9ffb55a58bdcdc8cb9d9cddc10bd51  crates/orna-traceability-v1/tests/fixtures/reference/tests/invalid-metadata.json
 16b73a224efe971fa9b6190a860dac80611e987416872d1f6035c2994d247c12  crates/orna-traceability-v1/tests/fixtures/reference/tests/numeric-vectors.json
 773216efb8a81c9b55597be0711cca35f9dd0c5df5880ec1e93ed991abf5a7c7  crates/orna-traceability-v1/tests/fixtures/reference/tests/path-vectors.json
 84c5bf635614a64185f756d40a63876d129b1ea3fafc2bb0c24b4847c214739b  crates/orna-traceability-v1/tests/fixtures/reference/tests/project-manifest.json
