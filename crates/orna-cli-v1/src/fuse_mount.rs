@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -117,18 +117,41 @@ impl MountWriter {
             mutation_id,
         )
         .map_err(|_| {
-            orna_runtime_v1::TableActivationError::Runtime(orna_runtime_v1::RuntimeError::InvalidTableMutation)
+            orna_runtime_v1::TableActivationError::Runtime(
+                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+            )
         })?;
-        let (mut mutation, bindings, resolved_schema) = admitted.into_mutation_and_bindings();
+        let (source_mutation, bindings, resolved_schema) = admitted.into_mutation_and_bindings();
+        // Text primary keys use their UTF-8 bytes in admitted mutations;
+        // other key kinds keep the canonical typed-key encoding.
+        let mutation_key_matches = match &row.key {
+            TypedKey::Text(key) => source_mutation.key() == key.as_bytes(),
+            _ => source_mutation.key() == coordinates.key(),
+        };
         if resolved_schema.table_object_id() != row.source.schema.table_object_id()
-            || mutation.key() != coordinates.key()
-            || mutation.table() != coordinates.table().table()
-            || mutation.table_object_id() != Some(coordinates.table().object_id())
+            || !mutation_key_matches
+            || source_mutation.table() != coordinates.table().table()
+            || source_mutation.table_object_id() != Some(coordinates.table().object_id())
         {
             return Err(orna_runtime_v1::TableActivationError::Runtime(
                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
             ));
         }
+        // Source-row admission creates insert-only mutations; this durable
+        // save already admitted the existing baseline, so write a replacement.
+        let replacement_value = source_mutation.value().ok_or(
+            orna_runtime_v1::TableActivationError::Runtime(
+                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+            ),
+        )?;
+        let mut mutation = orna_runtime_v1::TableMutation::new(
+            source_mutation.id(),
+            source_mutation.table().to_owned(),
+            coordinates.key().to_vec(),
+            Some(replacement_value.to_vec()),
+        )
+        .map_err(orna_runtime_v1::TableActivationError::Runtime)?
+        .with_table_object_id(coordinates.table().object_id());
         let mut pins = Vec::with_capacity(bindings.len());
         for binding in bindings {
             let (_, _, pin) = binding.into_parts();
@@ -152,10 +175,13 @@ impl MountWriter {
         let validator = transactional_loaded_project_candidate_validator(
             &self.project,
             coordinates.cwd_generation().clone(),
+            Arc::clone(&row.table_object_ids),
             EvaluatorLimits::default(),
         )
         .map_err(|_| {
-            orna_runtime_v1::TableActivationError::Runtime(orna_runtime_v1::RuntimeError::InvalidTableMutation)
+            orna_runtime_v1::TableActivationError::Runtime(
+                orna_runtime_v1::RuntimeError::InvalidTableMutation,
+            )
         })?;
         Ok((VfsSaveCandidate::new(replacement, validator), replacement_bytes))
     }
@@ -167,6 +193,7 @@ struct RowSaveContext {
     key: TypedKey,
     target: Arc<ManagedFile<RowMapSnapshot>>,
     table: RuntimeTableIdentity,
+    table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
     logical_path: String,
     expected_baseline_row: Mutex<Option<Vec<u8>>>,
 }
@@ -175,6 +202,7 @@ fn row_save_context(
     writer: &Arc<MountWriter>,
     source: &Arc<TableSource>,
     key: &TypedKey,
+    table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
     document_bytes: &[u8],
 ) -> Result<Arc<RowSaveContext>, String> {
     let declaration = source
@@ -218,6 +246,7 @@ fn row_save_context(
         target,
         table,
         logical_path,
+        table_object_ids,
         expected_baseline_row: Mutex::new(expected_baseline_row),
     }))
 }
@@ -448,6 +477,14 @@ impl WorkspaceFilesystem {
         let loader = ProjectLoader::default();
         let mut builder = FsBuilder::new();
         builder.writer = writer;
+        builder.table_object_ids = Arc::new(
+            tables
+                .iter()
+                .map(|(relation_id, qualified_name)| {
+                    (qualified_name.clone(), TableObjectId::new(*relation_id))
+                })
+                .collect(),
+        );
 
         for (relation_id, qualified_name) in tables {
             let schema = loader
@@ -498,6 +535,29 @@ impl WorkspaceFilesystem {
 }
 
 impl Filesystem for WorkspaceFilesystem {
+    fn init(
+        &mut self,
+        _request: &Request,
+        config: &mut fuser::KernelConfig,
+    ) -> std::io::Result<()> {
+        let editor = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writer
+            .is_some();
+        if editor {
+            config
+                .add_capabilities(fuser::InitFlags::FUSE_ATOMIC_O_TRUNC)
+                .map_err(|unsupported| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        format!("editor mount requires atomic O_TRUNC support: {unsupported:?}"),
+                    )
+                })?;
+        }
+        Ok(())
+    }
     fn lookup(&self, _request: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let mut state = self
             .state
@@ -553,7 +613,7 @@ impl Filesystem for WorkspaceFilesystem {
         }
     }
 
-    fn open(&self, _request: &Request, inode: INodeNo, _flags: fuser::OpenFlags, reply: ReplyOpen) {
+    fn open(&self, _request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
         let (save, scratch) = {
             let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             match state.nodes.get(&inode.0).map(|node| &node.kind) {
@@ -576,7 +636,23 @@ impl Filesystem for WorkspaceFilesystem {
             }
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        let pending_truncate = self
+            .pending_truncates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&inode.0);
+        let truncate_size = if flags.0 & libc::O_TRUNC != 0 {
+            Some(0)
+        } else {
+            pending_truncate
+        };
         if let Some(scratch) = scratch {
+            if let Some(size) = truncate_size
+                && save.writer.runtime.block_on(scratch.truncate(size)).is_err()
+            {
+                reply.error(Errno::EIO);
+                return;
+            }
             self.open_files
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -585,16 +661,11 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         let draft = Arc::new(save.writer.runtime.block_on(save.target.open_draft(usize::MAX)));
-        if let Some(size) = self
-            .pending_truncates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&inode.0)
+        if let Some(size) = truncate_size
+            && save.writer.runtime.block_on(draft.truncate(size)).is_err()
         {
-            if save.writer.runtime.block_on(draft.truncate(size)).is_err() {
-                reply.error(Errno::EIO);
-                return;
-            }
+            reply.error(Errno::EIO);
+            return;
         }
         self.open_files
             .lock()
@@ -1097,6 +1168,7 @@ struct FsBuilder {
     nodes: HashMap<u64, FsNode>,
     next_inode: u64,
     writer: Option<Arc<MountWriter>>,
+    table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
 }
 
 impl FsBuilder {
@@ -1113,6 +1185,7 @@ impl FsBuilder {
             nodes,
             next_inode: ROOT_INODE + 1,
             writer: None,
+            table_object_ids: Arc::new(BTreeMap::new()),
         }
     }
 
@@ -1652,7 +1725,13 @@ impl FsBuilder {
         let document_bytes = projection.document_text().as_bytes().to_vec();
         let document = match &self.writer {
             Some(writer) => NodeKind::Document {
-                save: row_save_context(writer, source, key, &document_bytes)?,
+                save: row_save_context(
+                    writer,
+                    source,
+                    key,
+                    Arc::clone(&self.table_object_ids),
+                    &document_bytes,
+                )?,
                 bytes: document_bytes,
             },
             None => NodeKind::Bytes(document_bytes),
