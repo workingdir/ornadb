@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use orna_syntax_v1::{Declaration, parse_module};
 use orna_sys_v1::{
-    ClockProviderError, EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError,
+    CaptureFileError, ClockProviderError, EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError,
     FilesystemProviderError, HttpProviderError, ProcessProviderError,
     system_host_binding_modules_json, system_host_binding_stubs, system_host_operation_registry,
     system_host_operation_registry_json, system_host_operation_registry_schema_json,
@@ -54,7 +54,7 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
 
     let registry = system_host_operation_registry();
     let operations = registry.operations().collect::<Vec<_>>();
-    assert_eq!(operations.len(), 20);
+    assert_eq!(operations.len(), 21);
     assert_eq!(
         registry
             .operation("std.io.environment.get")
@@ -94,6 +94,7 @@ fn embedded_host_registry_matches_deterministic_annotated_method_projection() {
         "std.io.fs.remove_file",
         "std.io.fs.copy_file",
         "std.io.fs.move_file",
+        "sys.blob.capture_file",
         "std.net.http.send",
         "std.net.http.start",
         "std.net.http.wait",
@@ -616,6 +617,11 @@ fn native_provider_error_taxonomies_match_the_generated_operation_vocabularies()
                 FilesystemProviderError::InvalidUtf8.code(),
                 FilesystemProviderError::Unavailable.code(),
                 FilesystemProviderError::OutputLimit.code(),
+                CaptureFileError::UnauthorizedRoot.failure_code(),
+                CaptureFileError::InvalidPath.failure_code(),
+                CaptureFileError::SourceUnavailable.failure_code(),
+                CaptureFileError::LimitExceeded.failure_code(),
+                CaptureFileError::SourceChanged.failure_code(),
             ]
             .to_vec(),
         ),
