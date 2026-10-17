@@ -966,9 +966,13 @@ fn request_rename(
                     && last.expected_text == pre_edit_text
             })
         }) {
-            chain.push(PendingIdentityRename { rename, requested_version, expected_text, applied_version: None });
+            chain.push(PendingIdentityRename {
+                rename, requested_version, pre_edit_text, expected_text, applied_version: None,
+            });
         } else {
-            pending.push(vec![PendingIdentityRename { rename, requested_version, expected_text, applied_version: None }]);
+            pending.push(vec![PendingIdentityRename {
+                rename, requested_version, pre_edit_text, expected_text, applied_version: None,
+            }]);
         }
     }
     let workspace_edit = WorkspaceEdit {
