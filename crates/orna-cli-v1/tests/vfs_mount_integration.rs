@@ -265,7 +265,8 @@ async fn mount_at_prior_commit_reads_path_changed_afterward() {
         1
     );
     let current = repository.head().unwrap().unwrap();
-    let historical_commit = current.to_string();
+    let historical_commit = current.clone();
+    let historical_commit_selector = historical_commit.to_string();
     let revised_row = format!(
         "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
     );
@@ -285,7 +286,7 @@ async fn mount_at_prior_commit_reads_path_changed_afterward() {
         ],
     );
     assert_ne!(
-        repository.head().unwrap().unwrap().to_string(),
+        repository.head().unwrap().unwrap(),
         historical_commit
     );
     let schema = orna_project_v1::ProjectLoader::default()
@@ -307,7 +308,7 @@ async fn mount_at_prior_commit_reads_path_changed_afterward() {
             "mount",
             mountpoint.to_str().unwrap(),
             "--at",
-            historical_commit.as_str(),
+            historical_commit_selector.as_str(),
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
