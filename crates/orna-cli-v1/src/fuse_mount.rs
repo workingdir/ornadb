@@ -252,16 +252,23 @@ fn row_save_context(
 }
 impl RowSaveContext {
     fn durable_save(&self) -> Result<VfsDurableSave, String> {
-        let cwd_generation = self.writer.cwd_generation()?;
-        let key = self
-            .key
-            .canonical_bytes()
-            .map_err(|error| format!("committed row key cannot be encoded: {error:?}"))?;
         let expected_baseline_row = self
             .expected_baseline_row
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        self.durable_save_with_baseline(expected_baseline_row)
+    }
+
+    fn durable_save_with_baseline(
+        &self,
+        expected_baseline_row: Option<Vec<u8>>,
+    ) -> Result<VfsDurableSave, String> {
+        let cwd_generation = self.writer.cwd_generation()?;
+        let key = self
+            .key
+            .canonical_bytes()
+            .map_err(|error| format!("committed row key cannot be encoded: {error:?}"))?;
         Ok(VfsDurableSave::new(
             self.writer.owner_id,
             cwd_generation,
@@ -329,8 +336,9 @@ impl RowSaveContext {
     fn commit_temporary(
         self: &Arc<Self>,
         scratch: &TemporarySave<RowMapSnapshot>,
+        expected_baseline_row: Option<Vec<u8>>,
     ) -> Result<(), String> {
-        let save = self.durable_save()?;
+        let save = self.durable_save_with_baseline(expected_baseline_row)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
@@ -687,6 +695,10 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EINVAL);
             return;
         };
+        if !is_replacement_scratch_name(name) {
+            reply.error(Errno::EROFS);
+            return;
+        }
         let (attr, save, scratch) = {
             let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if !matches!(state.nodes.get(&parent.0).map(|node| &node.kind), Some(NodeKind::Row(_))) {
@@ -707,13 +719,18 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
+            let baseline = save
+                .expected_baseline_row
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let scratch = Arc::new(save.writer.runtime.block_on(
                 save.target.begin_temporary_replacement(usize::MAX),
             ));
             let inode = match state.add_file(
                 parent.0,
                 name,
-                NodeKind::Temporary { bytes: Vec::new(), save: Arc::clone(&save), scratch: Arc::clone(&scratch) },
+                NodeKind::Temporary { bytes: Vec::new(), save: Arc::clone(&save), scratch: Arc::clone(&scratch), baseline },
             ) {
                 Ok(inode) => inode,
                 Err(_) => {
@@ -754,7 +771,7 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EROFS);
             return;
         }
-        let (source_inode, destination_inode, save, scratch) = {
+        let (source_inode, destination_inode, save, scratch, baseline) = {
             let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let source_inode = match state.lookup_child(parent.0, name) {
                 Ok(Some(inode)) => inode,
@@ -770,9 +787,9 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            let (save, scratch) = match state.nodes.get(&source_inode).map(|node| &node.kind) {
-                Some(NodeKind::Temporary { save, scratch, .. }) => {
-                    (Arc::clone(save), Arc::clone(scratch))
+            let (save, scratch, baseline) = match state.nodes.get(&source_inode).map(|node| &node.kind) {
+                Some(NodeKind::Temporary { save, scratch, baseline, .. }) => {
+                    (Arc::clone(save), Arc::clone(scratch), baseline.clone())
                 }
                 _ => {
                     reply.error(Errno::EROFS);
@@ -790,9 +807,9 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EXDEV);
                 return;
             }
-            (source_inode, destination_inode, save, scratch)
+            (source_inode, destination_inode, save, scratch, baseline)
         };
-        if save.commit_temporary(&scratch).is_err() {
+        if save.commit_temporary(&scratch, baseline).is_err() {
             reply.error(Errno::EIO);
             return;
         }
@@ -1826,6 +1843,7 @@ enum NodeKind {
         bytes: Vec<u8>,
         save: Arc<RowSaveContext>,
         scratch: Arc<TemporarySave<RowMapSnapshot>>,
+        baseline: Option<Vec<u8>>,
     },
     Blob {
         graph: Arc<NativeGraphContext>,
@@ -2196,6 +2214,10 @@ fn key_component(key: &TypedKey) -> Result<String, String> {
     Ok(project_component(&canonical_text))
 }
 
+fn is_replacement_scratch_name(name: &str) -> bool {
+    name.strip_prefix(".data.orna.")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix != "." && suffix != "..")
+}
 fn hex_bytes(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -2226,9 +2248,18 @@ fn key_directory(builder: &mut FsBuilder, parent: u64, key: &TypedKey) -> Result
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{FsBuilder, NodeKind, ROOT_INODE, key_directory};
+    use super::{FsBuilder, NodeKind, ROOT_INODE, is_replacement_scratch_name, key_directory};
     use orna_repository_v1::TypedKey;
     use orna_runtime_v1::vfs::project_component;
+
+    #[test]
+    fn only_replacement_shaped_sibling_names_are_candidates() {
+        assert!(is_replacement_scratch_name(".data.orna.tmp"));
+        assert!(is_replacement_scratch_name(".data.orna.12345"));
+        assert!(!is_replacement_scratch_name("unrelated"));
+        assert!(!is_replacement_scratch_name("backup"));
+        assert!(!is_replacement_scratch_name(".data.orna."));
+    }
 
     #[test]
     fn table_and_text_key_paths_use_runtime_components() {
