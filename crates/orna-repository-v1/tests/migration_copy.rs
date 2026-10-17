@@ -429,8 +429,8 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         defaults,
     )
     .unwrap();
-    let migrated_head = copy.source_commit().clone();
     let migrated = Repository::discover(copy.destination()).unwrap();
+    let migrated_head = migrated.head().unwrap().unwrap();
     assert_eq!(
         git_output(
             source.path(),
