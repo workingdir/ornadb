@@ -991,7 +991,36 @@ impl TableMutation {
         self.table_object_id = Some(object_id);
         self
     }
-
+    /// Replaces runtime key encodings without changing the mutation's semantic intent.
+    /// Re-key destinations must be supplied when this mutation already carries one.
+    pub fn with_reencoded_keys(
+        mut self,
+        key: Vec<u8>,
+        rekey_to: Option<Vec<u8>>,
+    ) -> Result<Self, RuntimeError> {
+        if self.rekey_to.is_some() != rekey_to.is_some() {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        validate_table_mutation(self.id, &self.table, &key, self.value.as_deref())?;
+        if let Some(destination) = &rekey_to {
+            validate_table_identity(&self.table, destination)?;
+            if *destination == key {
+                return Err(RuntimeError::InvalidTableMutation);
+            }
+        }
+        self.key = key;
+        self.rekey_to = rekey_to;
+        Ok(self)
+    }
+    /// Mutation identity, table identity, re-key intent, and protected-content evidence are retained.
+    pub fn with_reencoded_value(mut self, value: Vec<u8>) -> Result<Self, RuntimeError> {
+        if self.value.is_none() {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        validate_table_mutation(self.id, &self.table, &self.key, Some(&value))?;
+        self.value = Some(value);
+        Ok(self)
+    }
     pub fn key(&self) -> &[u8] {
         &self.key
     }
