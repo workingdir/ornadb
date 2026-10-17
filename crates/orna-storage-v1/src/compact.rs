@@ -693,10 +693,18 @@ fn validate_complete_writer_row(
     key: &CompactKeyIdentity,
     value: &[u8],
 ) -> Result<(), CompactBaseProjectionError> {
-    let key_components = decode_key_components(profile, key)
-        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
     let value = CanonicalValue::decode(value)
         .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+    complete_writer_row_fields(profile, key, &value).map(|_| ())
+}
+
+fn complete_writer_row_fields<'a>(
+    profile: &CompactOvbProfile,
+    key: &CompactKeyIdentity,
+    value: &'a CanonicalValue,
+) -> Result<BTreeMap<[u8; 16], &'a OvbRaw>, CompactBaseProjectionError> {
+    let key_components = decode_key_components(profile, key)
+        .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
     let OvbRaw::Tag(60009, payload) = value.raw() else {
         return Err(CompactBaseProjectionError::InvalidEvolutionValue);
     };
@@ -729,6 +737,7 @@ fn validate_complete_writer_row(
         .and_then(|schema| schema.get(&3).copied())
         .and_then(array)
         .ok_or(CompactBaseProjectionError::InvalidEvolutionValue)?;
+    let mut declared_field_ids = BTreeSet::new();
     for field in schema_fields {
         let OvbRaw::Array(parts) = field else {
             return Err(CompactBaseProjectionError::InvalidEvolutionValue);
@@ -740,11 +749,19 @@ fn validate_complete_writer_row(
             integer_value(role).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
         let field_id =
             uuid(field_id).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
-        if matches!(role, 0 | 1) && !row_fields.contains_key(&field_id) {
+        if !declared_field_ids.insert(field_id)
+            || (matches!(role, 0 | 1) && !row_fields.contains_key(&field_id))
+        {
             return Err(CompactBaseProjectionError::InvalidEvolutionValue);
         }
     }
-    Ok(())
+    if row_fields
+        .keys()
+        .any(|field_id| !declared_field_ids.contains(field_id))
+    {
+        return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+    }
+    Ok(row_fields)
 }
 
 /// Applies an already-authorized evolution plan to the verified compact base.
@@ -1473,6 +1490,59 @@ impl CompactOvbProfile {
         Ok(CompactKeyIdentity {
             encoded: bytes.to_vec(),
         })
+    }
+
+    /// Validates a complete compact row against its logical key and schema.
+    /// The compact record contains field identities, while the shared schema
+    /// validator accepts only the ordered role-1 field-value tuple.
+    pub fn validate_complete_row(
+        &self,
+        schema: &SchemaDescriptor,
+        canonical_key: &[u8],
+        canonical_row: &[u8],
+    ) -> Result<(), CompactBaseProjectionError> {
+        if schema.raw() != self.schema.raw() {
+            return Err(CompactBaseProjectionError::WrongSchema);
+        }
+        let key = self
+            .decode_key(canonical_key)
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionKey)?;
+        let row = CanonicalValue::decode(canonical_row)
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+        let row_fields = complete_writer_row_fields(self, &key, &row)?;
+        let schema_fields = integer_map(schema.raw())
+            .and_then(|schema| schema.get(&3).copied())
+            .and_then(array)
+            .ok_or(CompactBaseProjectionError::InvalidEvolutionValue)?;
+        let mut stored_fields = Vec::new();
+        for field in schema_fields {
+            let OvbRaw::Array(parts) = field else {
+                return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+            };
+            let [field_id, _, _, role, _] = parts.as_slice() else {
+                return Err(CompactBaseProjectionError::InvalidEvolutionValue);
+            };
+            let role =
+                integer_value(role).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+            if role == 1 {
+                let field_id =
+                    uuid(field_id).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+                stored_fields.push(
+                    row_fields
+                        .get(&field_id)
+                        .copied()
+                        .ok_or(CompactBaseProjectionError::InvalidEvolutionValue)?
+                        .clone(),
+                );
+            }
+        }
+        let stored_fields = CanonicalValue::new(OvbRaw::Array(stored_fields))
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?
+            .encode()
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+        schema
+            .validate_stored_row(self.table_id, canonical_key, &stored_fields)
+            .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)
     }
 
     /// Builds an immutable exact-key index from canonical key bytes supplied
@@ -2519,6 +2589,45 @@ mod tests {
             candidate_digest,
             mutations,
         }
+    }
+
+    #[test]
+    fn complete_compact_rows_validate_stored_types_and_key_binding() {
+        let profile = compact_fold_profile();
+        let schema = SchemaDescriptor::new(profile.schema().raw().clone()).unwrap();
+        let row = |key: i64, value: OvbRaw| {
+            CanonicalValue::new(OvbRaw::Tag(
+                60009,
+                Box::new(OvbRaw::Array(vec![
+                    OvbRaw::Null,
+                    OvbRaw::Array(vec![
+                        OvbRaw::Array(vec![uuid_raw(KEY_A), OvbRaw::Int(key.into())]),
+                        OvbRaw::Array(vec![uuid_raw(KEY_B), value]),
+                    ]),
+                ])),
+            ))
+            .unwrap()
+            .encode()
+            .unwrap()
+        };
+
+        let valid_row = row(1, OvbRaw::Text("valid".into()));
+        assert_eq!(
+            profile.validate_complete_row(&schema, &scalar_key(1), &valid_row),
+            Ok(())
+        );
+        assert_eq!(
+            profile.validate_complete_row(
+                &schema,
+                &scalar_key(1),
+                &row(1, OvbRaw::Int(2.into())),
+            ),
+            Err(CompactBaseProjectionError::InvalidEvolutionValue)
+        );
+        assert_eq!(
+            profile.validate_complete_row(&schema, &scalar_key(2), &valid_row),
+            Err(CompactBaseProjectionError::InvalidEvolutionKey)
+        );
     }
 
     #[test]
