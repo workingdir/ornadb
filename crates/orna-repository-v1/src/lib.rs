@@ -3520,10 +3520,14 @@ impl Repository {
         let result_path = self.runtime.root().join(format!("reviewed-result-{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
         if let Ok(recorded) = fs::read_to_string(&result_path) {
             let mut fields = recorded.lines();
-            let (Some(recorded_token), Some(recorded_message_digest), Some(recorded_commit)) =
-                (fields.next(), fields.next(), fields.next())
-            else {
+            let Some(recorded_token) = fields.next() else {
                 return Err(RepositoryError::LocalStateUnavailable);
+            };
+            let Some(recorded_message_digest) = fields.next() else {
+                return Err(RepositoryError::LocalStateUnavailable);
+            };
+            let Some(recorded_commit) = fields.next() else {
+                return Err(RepositoryError::StaleReviewedCandidate);
             };
             if fields.next().is_some() {
                 return Err(RepositoryError::LocalStateUnavailable);
