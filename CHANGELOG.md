@@ -12,6 +12,11 @@ been published.
 - The `mv` CLI command renames committed tables and retains their table and
   child-field IDs in uncommitted source and identity-manifest changes.
 
+- The trusted REPL exposes the root namespace as `main` unless a user module named
+  `main` exists, and admits `main.add` Blob rows using typed keys against the
+  committed format-3 schema. Captured scratch refs share the runtime owner and
+  are reclaimed when a later runtime reopen recovers a crashed session.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this

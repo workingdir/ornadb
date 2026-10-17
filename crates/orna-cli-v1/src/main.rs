@@ -2150,18 +2150,21 @@ struct ReplTransactions {
     tables: Vec<RuntimeTableIdentity>,
     capture_relation_id: [u8; 16],
     session_id: [u8; 16],
-    state: Option<RuntimeState>,
-    lease: Option<WriterLease>,
     host_bindings: Rc<RefCell<Option<SysHostBindingRegistry>>>,
+    lease: Option<WriterLease>,
+    // Drop the runtime owner lock only after capture candidates release their refs.
+    state: Option<RuntimeState>,
 }
 
 fn repl_transactions(
     repository: &orna_repository_v1::Repository,
     workspace_project: &orna_project_v1::LoadedProject,
 ) -> Option<ReplTransactions> {
+    let session_id = cli_request_nonce().to_be_bytes();
     let (commit, format_context) = repository
         .open_pinned_format_context_with_commit("HEAD")
         .ok()?;
+    let format_context = format_context.with_runtime_owner_id(session_id);
     if !format_context.supports_writes() || format_context.final_format_capability().is_err() {
         return None;
     }
@@ -2234,7 +2237,7 @@ fn repl_transactions(
         initial_digest,
         tables,
         capture_relation_id,
-        session_id: cli_request_nonce().to_be_bytes(),
+        session_id,
         state: None,
         lease: None,
         host_bindings: Rc::new(RefCell::new(None)),
@@ -2406,6 +2409,18 @@ fn run_repl_input(
     if current_commit != transactions.commit || !transactions.format_context.supports_writes() {
         return Err("ORNA-REPL-EFFECT".to_owned());
     }
+    if transactions.state.is_none() {
+        let state = transactions
+            .runtime
+            .block_on(RuntimeState::open_with_owner_id(
+                repository,
+                transactions.identity,
+                transactions.initial_digest,
+                transactions.session_id,
+            ))
+            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+        transactions.state = Some(state);
+    }
     let mut host_bindings = transactions.host_bindings.borrow_mut();
     if host_bindings.is_none() {
         let mut filesystem = FilesystemProvider::with_limits(65_536, 16)
@@ -2413,29 +2428,24 @@ fn run_repl_input(
         filesystem
             .allow_root(repository.worktree())
             .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-        let capability = repository
-            .capture_capability(transactions.capture_relation_id)
-            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-        *host_bindings = Some(
-            SysHostBindingRegistry::new(EnvironmentProvider::default())
-                .with_filesystem_provider(filesystem)
-                .with_repository_capture_capability(capability),
-        );
+        let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+            .with_filesystem_provider(filesystem);
+        if transactions
+            .state
+            .as_ref()
+            .is_some_and(|state| state.holds_runtime_owner_lock())
+        {
+            let capability = transactions
+                .format_context
+                .capture_capability(transactions.capture_relation_id)
+                .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+            bindings = bindings.with_repository_capture_capability(capability);
+        }
+        *host_bindings = Some(bindings);
     }
     let bindings = host_bindings
         .as_mut()
         .expect("host bindings initialized");
-    if transactions.state.is_none() {
-        let state = transactions
-            .runtime
-            .block_on(RuntimeState::open(
-                repository,
-                transactions.identity,
-                transactions.initial_digest,
-            ))
-            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-        transactions.state = Some(state);
-    }
     if transactions.lease.is_none() {
         let lease = transactions
             .runtime
