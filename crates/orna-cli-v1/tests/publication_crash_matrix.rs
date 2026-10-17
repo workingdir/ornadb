@@ -340,6 +340,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     let (directory, source, repository, state, _, relation_id, format_context) =
         seeded_project().await;
     let root = directory.path();
+    let initial_payload = std::fs::read(source.path().join("pixel.png")).unwrap();
     std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
     git(root, &["add", "--", "unrelated-tracked.txt"]);
     git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
@@ -366,6 +367,13 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
         "child never reached candidate; status: {:?}",
         child.try_wait().unwrap()
     );
+    let tail_payload = std::fs::read(Path::new(MEDIA_FIXTURES).join("pixel2.png")).unwrap();
+    assert_ne!(initial_payload, tail_payload, "the later fixture has different image bytes");
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("pixel2.png"),
+        source.path().join("pixel.png"),
+    )
+    .unwrap();
 
     let (identity, _) = cli_runtime_identity(&repository);
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
@@ -385,13 +393,14 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
         writer,
         &mut bindings,
         &expression,
-        "Object/song.orna",
+        "Object/image.orna",
         [43; 16],
         RequestIdentity { session_id: [41; 16], request_id: [42; 16] },
         relation_id,
         &format_context,
     )
     .await;
+    drop(bindings);
 
     child.kill().expect("SIGKILL publication child");
     let status = child.wait().expect("wait for killed publication child");
@@ -410,12 +419,47 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
         .expect("recover the candidate after process death");
     assert!(recovered_index.is_some(), "prepared candidate was not recovered");
     assert!(repository.read_publication_journal().unwrap().is_none());
+    let read_published_payload = || {
+        let format = repository.open_format_context().unwrap();
+        let row_map = format.load_row_map(relation_id).unwrap();
+        let graph = format.open_native_graph(&row_map).unwrap();
+        let scope = graph.open_read_scope().unwrap();
+        let rows = graph
+            .range_rows(
+                &orna_repository_v1::KeyRange::new(None, None, 16).unwrap(),
+                &scope,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1, "the image key remains one row");
+        let descriptor = rows[0]
+            .value()
+            .dependencies()
+            .iter()
+            .find(|dependency| dependency.kind() == orna_repository_v1::NativeObjectKind::Tree)
+            .expect("published image retains its blob descriptor")
+            .oid()
+            .to_owned();
+        let blob = graph
+            .read_stored_blob_value(&rows[0], &descriptor, &scope)
+            .unwrap();
+        let reference = blob.reference();
+        graph
+            .read_blob_range(
+                reference,
+                0..reference.content_identity().length(),
+                &scope,
+            )
+            .unwrap()
+            .bytes()
+            .to_vec()
+    };
     assert_ne!(head(&repository), base.as_str(), "frozen range was not recovered");
     assert_eq!(
         committed_store_rows(&repository, relation_id).len(),
         1,
         "recovery published only the frozen row, not the newer tail"
     );
+    assert_eq!(read_published_payload(), initial_payload, "recovery leaves the frozen blob visible");
     assert!(
         recovered.pending_count().await.unwrap() > 0,
         "newer mutation remains pending after frozen-range recovery"
@@ -438,7 +482,8 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     let tail = cli(root, &["publish"]);
     assert!(tail.status.success(), "later tail publish failed: {}", String::from_utf8_lossy(&tail.stderr));
     assert_ne!(head(&repository), recovered_head, "pending later tail was not publishable");
-    assert_eq!(committed_store_rows(&repository, relation_id).len(), 2);
+    assert_eq!(committed_store_rows(&repository, relation_id).len(), 1);
+    assert_eq!(read_published_payload(), tail_payload, "later tail replaces the frozen value only after recovery");
     let completed = RuntimeState::open(&repository, identity, digest).await.unwrap();
     assert_eq!(completed.pending_count().await.unwrap(), 0);
     drop(completed);
