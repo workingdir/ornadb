@@ -21,7 +21,12 @@ use std::{
 };
 
 use fs2::FileExt;
-use orna_value_v1::{BlobMetadata, MediaAnnotation, Raw, SchemaDescriptor};
+use orna_value_v1::{
+    AvailabilityState, BlobMetadata, BlobResolver, ContentReference, Error as ValueError,
+    Format3Context, Format3Quota, GitHash, MediaAnnotation,
+    NativeOid as ValueNativeOid, OwnerLifetime, Raw, SchemaDescriptor,
+    Snapshot as ValueSnapshot,
+};
 use sha2::{Digest, Sha256};
 
 
@@ -419,6 +424,102 @@ impl RepositoryCaptureCapability {
             .protect_captured_blob(candidate, &self.scope)?;
         self.graph
             .accept_protected_blob_pin_with_annotation(pin, media_type, suffix)
+    }
+}
+
+impl RepositoryCaptureCapability {
+    /// Issues value-layer authority for this graph's exact repository snapshot.
+    pub(crate) fn value_context(&self, pin: ValueSnapshot) -> Result<Format3Context, ValueError> {
+        let version = self.graph.row_snapshot.version();
+        let schema_root = ValueNativeOid::from_bytes(version.schema().schema_oid().as_bytes())?;
+        let store_root = ValueNativeOid::from_bytes(self.graph.store_root.as_bytes())?;
+        let git_hash = match self.graph.algorithm {
+            GitHashAlgorithm::Sha1 => GitHash::Sha1,
+            GitHashAlgorithm::Sha256 => GitHash::Sha256,
+        };
+        let resolver: Arc<dyn BlobResolver> = Arc::new(RepositoryValueResolver {
+            graph: Arc::clone(&self.graph),
+            scope: self.scope.clone(),
+            pin: pin.clone(),
+        });
+        let quota = Format3Quota::new(MAX_RANGE_READ_BYTES, 0)?;
+        Format3Context::from_persisted(
+            self.graph.database_id,
+            pin,
+            git_hash,
+            schema_root,
+            store_root,
+            AvailabilityState::Available,
+            OwnerLifetime::new(self.graph.owner_id),
+            quota,
+            resolver,
+        )
+    }
+}
+
+struct RepositoryValueResolver {
+    graph: Arc<NativeGraphContext>,
+    scope: RepositoryReadScope,
+    pin: ValueSnapshot,
+}
+
+impl BlobResolver for RepositoryValueResolver {
+    fn read_range(
+        &self,
+        reference: &ContentReference,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>, ValueError> {
+        let context = reference.context();
+        let schema_oid = self.graph.row_snapshot.version().schema().schema_oid();
+        if context.pin() != &self.pin
+            || context.database_uuid() != self.graph.database_id
+            || context.owner().id() != self.graph.owner_id
+            || context.schema_root().as_bytes() != schema_oid.as_bytes()
+            || context.store_root().as_bytes() != self.graph.store_root.as_bytes()
+        {
+            return Err(ValueError::InvalidContext);
+        }
+        let descriptor_oid = NativeOid::new(
+            self.graph.algorithm,
+            reference.descriptor_oid().as_bytes(),
+        )
+        .map_err(graph_error_to_value_error)?;
+        let identity = crate::blob_store::ContentIdentity::new(
+            reference.identity().length(),
+            reference.identity().sha256(),
+        )
+        .map_err(|_| ValueError::InvalidValue)?;
+        let admitted = AdmittedBlobReference {
+            context: self.graph.identity,
+            database_id: self.graph.database_id,
+            owner_id: self.graph.owner_id,
+            snapshot_id: self.graph.snapshot_id,
+            descriptor_oid,
+            identity,
+        };
+        let end = offset.checked_add(length).ok_or(ValueError::InvalidRange)?;
+        let range = self
+            .graph
+            .read_blob_range(&admitted, offset..end, &self.scope)
+            .map_err(graph_error_to_value_error)?;
+        Ok(range.bytes)
+    }
+}
+
+fn graph_error_to_value_error(error: GraphError) -> ValueError {
+    match error {
+        GraphError::InvalidRange => ValueError::InvalidRange,
+        GraphError::ReadQuotaExceeded
+        | GraphError::MetadataQuotaExceeded
+        | GraphError::InventoryQuotaExceeded => ValueError::QuotaExceeded,
+        GraphError::ReadCancelled => ValueError::Cancelled,
+        GraphError::ContentIdentityMismatch
+        | GraphError::ChunkDigestMismatch
+        | GraphError::GitObjectHashMismatch => ValueError::ContentDigestMismatch,
+        GraphError::InvalidOidWidth { .. } | GraphError::MalformedOid => ValueError::InvalidOid,
+        GraphError::ContextMismatch => ValueError::InvalidContext,
+        _ => ValueError::ContentUnavailable,
     }
 }
 
@@ -1208,17 +1309,8 @@ impl NativeGraphContext {
 
         let mut fields = Vec::with_capacity(values.len());
         for (field_id, value) in field_ids.into_iter().zip(values) {
-            let blob_metadata = if matches!(&value, CborValue::Tag(60111, _)) {
-                let mut encoded = Vec::new();
-                CborValue::Array(vec![value]).encode(&mut encoded);
-                let single_field = crate::row_store::RowValue::decode_canonical_fields(encoded)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                crate::row_store::AdmittedRow::issue(version, row.key().clone(), single_field)
-                    .blob_metadata(0)
-                    .map_err(|_| GraphError::NonCanonicalData)?
-            } else {
-                None
-            };
+            let blob_metadata = crate::row_store::blob_field_metadata(&value)
+                .map_err(|_| GraphError::NonCanonicalData)?;
             fields.push(AdmittedRowField {
                 field_id,
                 blob_metadata,
@@ -1396,6 +1488,23 @@ impl NativeGraphContext {
         active: &mut BTreeSet<NativeOid>,
     ) -> Result<CborValue, GraphError> {
         match value {
+            CborValue::Tag(60013, payload) => {
+                let CborValue::Array(mut fields) = *payload else {
+                    return Err(GraphError::NonCanonicalData);
+                };
+                match fields.as_slice() {
+                    [CborValue::Unsigned(0)] => {
+                        Ok(CborValue::Tag(60013, Box::new(CborValue::Array(fields))))
+                    }
+                    [CborValue::Unsigned(1), _] => {
+                        let value = fields.pop().ok_or(GraphError::NonCanonicalData)?;
+                        let value = self.to_sov_value(value, scope, objects, active)?;
+                        fields.push(value);
+                        Ok(CborValue::Tag(60013, Box::new(CborValue::Array(fields))))
+                    }
+                    _ => Err(GraphError::NonCanonicalData),
+                }
+            }
             CborValue::Tag(60111, payload) => {
                 let CborValue::Array(fields) = *payload else {
                     return Err(GraphError::NonCanonicalData);
@@ -10317,14 +10426,23 @@ fn stored_field_object_ids(descriptor: &SchemaDescriptor) -> Result<Vec<[u8; 16]
     Ok(identities)
 }
 
-/// Collects every OVB-2 Blob value reachable inside a canonical stored row
-/// value, in the order the value holds them.
-///
-/// A row's fields are not named here: the annotation is chosen by matching a
-/// Blob value's own recorded content identity against the descriptor the row
-/// references, so the value is the sole authority. An empty dependency list on
-/// such a value is kept, because the two encodings carry the same annotation
-/// and identity and the caller detects the ambiguity.
+/// Reads the payload of a canonical Orna option value.
+fn option_payload_value(value: &CborValue) -> Result<Option<&CborValue>, GraphError> {
+    let CborValue::Tag(60013, payload) = value else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let CborValue::Array(fields) = payload.as_ref() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    match fields.as_slice() {
+        [CborValue::Unsigned(0)] => Ok(None),
+        [CborValue::Unsigned(1), value] => Ok(Some(value)),
+        _ => Err(GraphError::NonCanonicalData),
+    }
+}
+
+/// Collects normalized Blob metadata reachable inside a canonical stored row.
+/// Option None contributes nothing; Some recursively visits its value.
 fn collect_blob_value_fields(
     value: &CborValue,
     output: &mut Vec<(
@@ -10333,6 +10451,10 @@ fn collect_blob_value_fields(
     )>,
 ) -> Result<(), GraphError> {
     match value {
+        CborValue::Tag(60013, _) => match option_payload_value(value)? {
+            None => Ok(()),
+            Some(value) => collect_blob_value_fields(value, output),
+        },
         CborValue::Tag(60112, payload) => {
             let CborValue::Array(fields) = payload.as_ref() else {
                 return Err(GraphError::NonCanonicalData);
@@ -10493,6 +10615,11 @@ fn collect_overflow_oids(
     output: &mut BTreeSet<NativeOid>,
 ) -> Result<(), GraphError> {
     match value {
+        CborValue::Tag(60013, _) => {
+            if let Some(value) = option_payload_value(value)? {
+                collect_overflow_oids(value, algorithm, output)?;
+            }
+        }
         CborValue::Tag(60113, payload) => {
             output.insert(overflow_tag_oid(payload, algorithm)?);
         }
@@ -10565,6 +10692,11 @@ fn collect_row_dependencies(
     dependencies: &mut BTreeMap<NativeObjectId, NativeObjectKind>,
 ) -> Result<(), GraphError> {
     match value {
+        CborValue::Tag(60013, _) => {
+            if let Some(value) = option_payload_value(value)? {
+                collect_row_dependencies(value, dependencies)?;
+            }
+        }
         CborValue::Tag(60111, payload) => {
             let CborValue::Array(fields) = payload.as_ref() else {
                 return Err(GraphError::NonCanonicalData);
@@ -10649,6 +10781,16 @@ fn direct_blob_reference_count(value: &CborValue) -> Result<usize, GraphError> {
     match value {
         CborValue::Tag(60111, _) => Ok(1),
         CborValue::Tag(60113, _) => Ok(0),
+        CborValue::Tag(60013, payload) => {
+            let CborValue::Array(fields) = payload.as_ref() else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            match fields.as_slice() {
+                [CborValue::Unsigned(0)] => Ok(0),
+                [CborValue::Unsigned(1), value] => direct_blob_reference_count(value),
+                _ => Err(GraphError::NonCanonicalData),
+            }
+        },
         CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
         CborValue::Array(values) => values.iter().try_fold(0usize, |count, value| {
             count
@@ -10858,7 +11000,7 @@ impl<'a> CborReader<'a> {
                 Ok(CborValue::Map(entries))
             }
             6 => {
-                if !matches!(length, 60110..=60113) {
+                if !matches!(length, 60013 | 60110..=60113) {
                     return Err(GraphError::NonCanonicalData);
                 }
                 Ok(CborValue::Tag(length, Box::new(self.value()?)))
@@ -11174,5 +11316,78 @@ fn head(output: &mut Vec<u8>, major: u8, value: u64) {
             output.push(base | 27);
             output.extend_from_slice(&value.to_be_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod option_value_tests {
+    use super::*;
+
+    fn rov3_blob(descriptor: Vec<u8>) -> CborValue {
+        CborValue::Tag(
+            60111,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(7),
+                CborValue::Bytes(vec![0x22; 32]),
+                CborValue::Text("audio/mpeg".into()),
+                CborValue::Null,
+                CborValue::Bytes(descriptor),
+            ])),
+        )
+    }
+
+    fn option_none() -> CborValue {
+        CborValue::Tag(60013, Box::new(CborValue::Array(vec![CborValue::Unsigned(0)])))
+    }
+
+    #[test]
+    fn optional_blob_metadata_traversal_handles_none_and_some() {
+        let mut metadata = Vec::new();
+        collect_blob_value_fields(&option_none(), &mut metadata).unwrap();
+        assert!(metadata.is_empty());
+
+        let blob_metadata = CborValue::Tag(
+            60112,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(7),
+                CborValue::Bytes(vec![0x22; 32]),
+                CborValue::Text("audio/mpeg".into()),
+                CborValue::Null,
+            ])),
+        );
+        let option_some = CborValue::Tag(
+            60013,
+            Box::new(CborValue::Array(vec![CborValue::Unsigned(1), blob_metadata])),
+        );
+        collect_blob_value_fields(&option_some, &mut metadata).unwrap();
+        assert_eq!(metadata.len(), 1);
+    }
+
+    #[test]
+    fn optional_blob_row_dependencies_handle_none_and_some() {
+        let mut none = Vec::new();
+        CborValue::Array(vec![option_none()]).encode(&mut none);
+        assert!(row_fields_dependencies(&none).unwrap().is_empty());
+
+        let mut some = Vec::new();
+        CborValue::Array(vec![CborValue::Tag(
+            60013,
+            Box::new(CborValue::Array(vec![CborValue::Unsigned(1), rov3_blob(vec![0x44; 20])])),
+        )])
+        .encode(&mut some);
+        assert_eq!(row_fields_dependencies(&some).unwrap().len(), 1);
+    }
+    #[test]
+    fn direct_blob_reference_count_traverses_option_some_values() {
+        assert_eq!(direct_blob_reference_count(&option_none()).unwrap(), 0);
+        let references = (0..33)
+            .map(|_| {
+                CborValue::Tag(
+                    60013,
+                    Box::new(CborValue::Array(vec![CborValue::Unsigned(1), rov3_blob(vec![0x44; 20])])),
+                )
+            })
+            .collect();
+        assert_eq!(direct_blob_reference_count(&CborValue::Array(references)).unwrap(), 33);
     }
 }

@@ -1,4 +1,5 @@
 {
     payload: sys.blob.capture_file(__MEDIA_ROOT__, "tone.wav", 65536),
     content: "Field recording: a short tonal sample captured at the north ridge station.",
+    cover: null,
 }
