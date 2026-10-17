@@ -868,6 +868,9 @@ impl HistoricalFormatContext {
     pub const fn snapshot_id(&self) -> &[u8; 32] {
         &self.snapshot_id
     }
+    pub(crate) fn commit_oid_hex(&self) -> &str {
+        self.context.snapshot.commit.as_str()
+    }
 
     /// The admitted repository-format dispatch at the pinned commit.
     pub const fn repository_format(&self) -> RepositoryFormat {
@@ -1035,6 +1038,15 @@ impl Repository {
             private_candidate: Some(candidate.clone()),
         };
         self.open_format_context_at(&snapshot)
+    }
+
+    /// Reads the parsed repository-format number for an immutable private candidate.
+    pub fn private_candidate_repository_format_number(
+        &self,
+        candidate: &crate::PrivateCommit,
+    ) -> Result<u8, FormatContextError> {
+        self.open_private_candidate_format_context(candidate)
+            .map(|context| context.repository_format_number())
     }
 
     /// Opens and validates format metadata at the current immutable HEAD.
