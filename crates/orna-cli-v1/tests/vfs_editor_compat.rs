@@ -10,7 +10,7 @@ use std::{
 };
 
 use orna_evaluator_v1::SysHostBindingRegistry;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::RuntimeState;
 use orna_sys_v1::EnvironmentProvider;
 use tempfile::TempDir;
 
@@ -111,14 +111,11 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
             "Music/london.orna",
             initial,
         );
-    let runtime_identity = RuntimeIdentity {
-        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
-        repository_id: [0x81; 16],
-    };
-    let state = RuntimeState::open(&repository, runtime_identity, [0x82; 32])
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
-    let writer = state.acquire_lease([0x83; 16]).await.unwrap();
+    let writer = state.acquire_lease(runtime_identity.repository_id).await.unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
     commit_source_captures_for_table(
         &repository,
