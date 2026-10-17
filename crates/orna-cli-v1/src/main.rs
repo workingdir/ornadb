@@ -2476,7 +2476,6 @@ fn run_repl_input(
         repository,
         format_context: &transactions.format_context,
         runtime_context: snapshot.context(),
-        table_rows: snapshot.table_rows(),
         request,
     };
     let (value, successor, activation) = transactions

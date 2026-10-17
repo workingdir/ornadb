@@ -11,7 +11,6 @@ pub struct ReplTransactionScope<'a> {
     pub repository: &'a Repository,
     pub format_context: &'a RepositoryFormatContext,
     pub runtime_context: &'a RuntimeActivationContext,
-    pub table_rows: &'a RuntimeTableRows,
     pub request: RequestIdentity,
 }
 
@@ -27,8 +26,7 @@ impl ApplicationAuthority {
         bindings: &mut SysHostBindingRegistry,
     ) -> Result<(Option<CanonicalValue>, AdmittedReplSession, StagedActivation), ApplicationError> {
         let (tables, table_ids, defaults, functions) = admitted_project_tables(self, scope)?;
-        // The effect handler consumes full row maps. Seed from the source-bound committed store,
-        // then overlay the complete runtime snapshot, whose values are stored-field arrays.
+        // The effect handler consumes full row maps, so project the source-bound committed store into that form.
         let captured_rows = committed_table_rows(scope, &tables, &table_ids)?;
         let tables_for_storage = tables.clone();
         let ids_for_storage = table_ids.clone();
@@ -145,7 +143,7 @@ fn committed_table_rows(
         let graph = scope.format_context.open_native_graph(&row_map)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         let read_scope = graph.open_read_scope().map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let (field_names, stored_field_names) = stored_field_names(binding.descriptor().raw())?;
+        let (field_names, _) = stored_field_names(binding.descriptor().raw())?;
         let admission = table_schema.admission.as_ref().ok_or(ApplicationError::InvalidTableMetadata)?;
         let mut committed = BTreeMap::<Vec<u8>, Vec<u8>>::new();
         let mut lower = None;
@@ -195,69 +193,11 @@ fn committed_table_rows(
             if next_lower == lower { break; }
             lower = next_lower;
         }
-        let mut rows = committed;
-        if let Some(runtime_rows) = scope.table_rows.get(table_name) {
-            rows.clear();
-            for (runtime_key, runtime_value) in runtime_rows {
-                let (key_values, canonical_key) = runtime_snapshot_key(runtime_key, &admission.keys)?;
-                let row_value = CanonicalValue::decode(runtime_value).map_err(|_| ApplicationError::InvalidTableMetadata)?;
-                let row_map = match row_value.raw() {
-                    OvbRaw::Map(_) => row_value,
-                    OvbRaw::Array(values) if values.len() == stored_field_names.len() => {
-                        let mut fields = Vec::with_capacity(admission.keys.len() + values.len());
-                        for ((name, _), value) in admission.keys.iter().zip(key_values) {
-                            fields.push((OvbRaw::Text(name.clone()), value));
-                        }
-                        for (name, value) in stored_field_names.iter().zip(values) {
-                            fields.push((OvbRaw::Text(name.clone()), value.clone()));
-                        }
-                        fields.sort_by(|(left, _), (right, _)| match (left, right) {
-                            (OvbRaw::Text(left), OvbRaw::Text(right)) => canonical_text_key_order(left, right),
-                            _ => std::cmp::Ordering::Equal,
-                        });
-                        CanonicalValue::new(OvbRaw::Map(fields)).map_err(|_| ApplicationError::InvalidTableMetadata)?
-                    }
-                    _ => return Err(ApplicationError::InvalidTableMetadata),
-                };
-                let row_bytes = row_map.encode().map_err(|_| ApplicationError::InvalidTableMetadata)?;
-                rows.insert(canonical_key, row_bytes);
-            }
-        }
-        result.insert(table_name.clone(), rows.into_iter().collect());
+        result.insert(table_name.clone(), committed.into_iter().collect());
     }
     Ok(result)
 }
 
-fn runtime_snapshot_key(
-    key: &[u8],
-    key_fields: &[(String, Type)],
-) -> Result<(Vec<OvbRaw>, Vec<u8>), ApplicationError> {
-    let key_values = match key_fields {
-        [(_, Type::Text)] => vec![OvbRaw::Text(
-            std::str::from_utf8(key).map_err(|_| ApplicationError::InvalidTableMetadata)?.to_owned(),
-        )],
-        [_] => vec![CanonicalValue::decode(key)
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?
-            .raw()
-            .clone()],
-        fields if !fields.is_empty() => {
-            let value = CanonicalValue::decode(key).map_err(|_| ApplicationError::InvalidTableMetadata)?;
-            match value.raw() {
-                OvbRaw::Array(values) if values.len() == fields.len() => values.clone(),
-                _ => return Err(ApplicationError::InvalidTableMetadata),
-            }
-        }
-        _ => return Err(ApplicationError::InvalidTableMetadata),
-    };
-    let canonical_key = CanonicalValue::new(if key_values.len() == 1 {
-        key_values[0].clone()
-    } else {
-        OvbRaw::Array(key_values.clone())
-    })
-    .and_then(|value| value.encode())
-    .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-    Ok((key_values, canonical_key))
-}
 fn stored_field_names(descriptor: &OvbRaw) -> Result<(BTreeMap<[u8; 16], String>, Vec<String>), ApplicationError> {
     let OvbRaw::Map(entries) = descriptor else { return Err(ApplicationError::InvalidTableMetadata); };
     let fields = entries.iter().find_map(|(key, value)| (key == &OvbRaw::Int(BigInt::from(3))).then_some(value))
