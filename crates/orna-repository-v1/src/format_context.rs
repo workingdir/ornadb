@@ -1010,6 +1010,15 @@ impl Repository {
         self.open_format_context_at(&snapshot)
     }
 
+    /// Reads the parsed repository-format number for an immutable private candidate.
+    pub fn private_candidate_repository_format_number(
+        &self,
+        candidate: &crate::PrivateCommit,
+    ) -> Result<u8, FormatContextError> {
+        self.open_private_candidate_format_context(candidate)
+            .map(|context| context.repository_format_number())
+    }
+
     /// Opens and validates format metadata at the current immutable HEAD.
     /// Worktree-only metadata is not silently treated as a committed snapshot.
     pub fn open_format_context(&self) -> Result<RepositoryFormatContext, FormatContextError> {
