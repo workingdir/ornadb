@@ -3463,7 +3463,7 @@
       "kind": "relation",
       "availability": "durable-observation",
       "key": "id",
-      "purpose": "Structured diagnostic independent of renderer; redacted is descriptive, and secret-bearing messages are redacted at protocol boundaries.",
+      "purpose": "Structured diagnostic independent of renderer.",
       "fields": [
         {
           "name": "reference",
