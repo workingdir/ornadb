@@ -1192,6 +1192,64 @@ mod mv_tests {
     }
 
     #[test]
+    fn checked_table_directory_reports_existing_and_missing_paths() {
+        let directory = tempdir().unwrap();
+        let existing = directory.path().join("warehouse/Media");
+        fs::create_dir_all(&existing).unwrap();
+
+        assert_eq!(
+            checked_project_table_directory(directory.path(), "warehouse.Media").unwrap(),
+            (existing, true)
+        );
+        let (missing_leaf, exists) =
+            checked_project_table_directory(directory.path(), "warehouse.Missing").unwrap();
+        assert_eq!(missing_leaf, directory.path().join("warehouse/Missing"));
+        assert!(!exists);
+        let (missing_ancestor, exists) =
+            checked_project_table_directory(directory.path(), "missing.Namespace.Media").unwrap();
+        assert_eq!(
+            missing_ancestor,
+            directory.path().join("missing/Namespace/Media")
+        );
+        assert!(!exists);
+    }
+
+    #[test]
+    fn checked_table_directory_rejects_regular_file_leaf() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("Media"), b"not a directory").unwrap();
+
+        let error = checked_project_table_directory(directory.path(), "Media").unwrap_err();
+
+        assert_eq!(error.title, "loose-row directory is unavailable or unsafe");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_table_directory_rejects_symlink_leaf_and_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        fs::create_dir(target.path().join("Media")).unwrap();
+        symlink(target.path(), directory.path().join("Media")).unwrap();
+        symlink(target.path(), directory.path().join("linked")).unwrap();
+
+        assert_eq!(
+            checked_project_table_directory(directory.path(), "Media")
+                .unwrap_err()
+                .title,
+            "loose-row directory is unavailable or unsafe"
+        );
+        assert_eq!(
+            checked_project_table_directory(directory.path(), "linked.Media")
+                .unwrap_err()
+                .title,
+            "loose-row directory is unavailable or unsafe"
+        );
+    }
+
+    #[test]
     fn row_directory_rollback_moves_only_the_expected_directory() {
         let directory = tempdir().unwrap();
         let old_path = directory.path().join("Media");
