@@ -1,4 +1,5 @@
 {
     payload: sys.blob.capture_file(__MEDIA_ROOT__, "pixel.png", 65536),
     content: "Survey image: the calibration panel photographed at the north ridge station.",
+    cover: null,
 }
