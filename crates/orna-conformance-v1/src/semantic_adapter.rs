@@ -2238,6 +2238,7 @@ impl DurableTransactionalEvaluator {
             &admitted.table_fields,
             &admitted.table_assertions,
             &admitted.module_assertions,
+            Arc::new(BTreeMap::new()),
             self.limits,
         );
         match state
@@ -2438,6 +2439,7 @@ impl DurableTransactionalEvaluator {
             &admitted.table_fields,
             &admitted.table_assertions,
             &admitted.module_assertions,
+            Arc::new(BTreeMap::new()),
             self.limits,
         );
         match state
@@ -2608,6 +2610,7 @@ impl DurableTransactionalEvaluator {
             &admitted.table_fields,
             &admitted.table_assertions,
             &admitted.module_assertions,
+            Arc::new(BTreeMap::new()),
             self.limits,
         );
         match state
@@ -3624,6 +3627,7 @@ impl DurableTransactionalEvaluator {
             &admitted.table_fields,
             &admitted.table_assertions,
             &admitted.module_assertions,
+            Arc::new(BTreeMap::new()),
             self.limits,
         );
         match state
@@ -3745,6 +3749,7 @@ impl DurableTransactionalEvaluator {
             &admitted.table_fields,
             &admitted.table_assertions,
             &admitted.module_assertions,
+            Arc::new(BTreeMap::new()),
             self.limits,
         );
         let outcome = StageOutcome::Passed;
@@ -4305,7 +4310,99 @@ struct TransactionalTableCandidateValidator {
     module_assertions: ModuleAssertions,
     functions: Functions,
     limits: EvaluatorLimits,
+    table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
     tables: Vec<String>,
+}
+
+pub fn transactional_table_candidate_validator(
+    unit: &SourceUnit,
+    entry: &str,
+    cwd_generation: orna_repository_v1::CwdGeneration,
+    limits: EvaluatorLimits,
+) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
+    let admitted = admit_transaction_source_inner(unit, limits, entry, false)
+        .map_err(|failure| *failure)?;
+    Ok(Box::new(TransactionalTableCandidateValidator::new(
+        cwd_generation,
+        &admitted.functions,
+        &admitted.key_fields,
+        &admitted.float_fields,
+        &admitted.table_fields,
+        &admitted.table_assertions,
+        &admitted.module_assertions,
+        Arc::new(BTreeMap::new()),
+        limits,
+    )))
+}
+
+/// Builds a transaction validator from every committed project module. This
+/// keeps mounted row saves on the same cross-module assertion and effect
+/// admission path as project-backed transactions.
+pub fn transactional_loaded_project_candidate_validator(
+    loaded: &orna_project_v1::LoadedProject,
+    cwd_generation: orna_repository_v1::CwdGeneration,
+    table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
+    limits: EvaluatorLimits,
+) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
+    let mut modules = loaded
+        .modules()
+        .iter()
+        .map(|module| SourceUnit {
+            fixture_id: "vfs-mounted-row".into(),
+            source_id: format!("mounted/{}", module.logical_path),
+            parse_as: "module_unit".into(),
+            source: module.source.clone(),
+        })
+        .collect::<Vec<_>>();
+    modules.extend(loaded.standard_sources().iter().map(|(path, source)| SourceUnit {
+        fixture_id: "vfs-mounted-row".into(),
+        source_id: path.clone(),
+        parse_as: "module_unit".into(),
+        source: source.clone(),
+    }));
+
+    let stdlib = loaded.standard_profile().map(|profile| {
+        let sources = loaded
+            .standard_sources()
+            .iter()
+            .map(|(path, source)| (path.clone(), serde_json::Value::String(source.clone())))
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::json!({
+            "snapshot": profile.snapshot(),
+            "sources": serde_json::Value::Object(sources),
+        })
+    });
+    let project = ProjectUnit {
+        fixture_id: "vfs-mounted-row".into(),
+        project_id: "mounted".into(),
+        environment_id: None,
+        modules,
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "none".into(),
+                stdlib,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    };
+    let admitted = admit_transaction_project(&project, limits, "")
+        .map_err(|failure| *failure)?;
+    Ok(Box::new(TransactionalTableCandidateValidator::new(
+        cwd_generation,
+        &admitted.functions,
+        &admitted.key_fields,
+        &admitted.float_fields,
+        &admitted.table_fields,
+        &admitted.table_assertions,
+        &admitted.module_assertions,
+        table_object_ids,
+        limits,
+    )))
 }
 
 impl TransactionalTableCandidateValidator {
@@ -4317,6 +4414,7 @@ impl TransactionalTableCandidateValidator {
         table_fields: &TableFields,
         table_assertions: &TableAssertions,
         module_assertions: &ModuleAssertions,
+        table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
         limits: EvaluatorLimits,
     ) -> Self {
         let mut tables = key_fields.keys().cloned().collect::<BTreeSet<_>>();
@@ -4330,6 +4428,7 @@ impl TransactionalTableCandidateValidator {
         }
         Self {
             cwd_generation,
+            table_object_ids,
             table_assertions: table_assertions.clone(),
             module_assertions: module_assertions.clone(),
             functions: lower_relation_bindings(functions, key_fields, float_fields, table_fields),
@@ -4342,6 +4441,9 @@ impl TransactionalTableCandidateValidator {
 impl TableActivationCandidateValidator for TransactionalTableCandidateValidator {
     fn tables(&self) -> &[String] {
         &self.tables
+    }
+    fn table_object_ids(&self) -> BTreeMap<String, orna_runtime_v1::TableObjectId> {
+        self.table_object_ids.as_ref().clone()
     }
 
     fn cwd_generation(&self) -> &orna_repository_v1::CwdGeneration {
@@ -6087,6 +6189,15 @@ fn admit_transaction_source(
     limits: EvaluatorLimits,
     entry: &str,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
+    admit_transaction_source_inner(unit, limits, entry, true)
+}
+
+fn admit_transaction_source_inner(
+    unit: &SourceUnit,
+    limits: EvaluatorLimits,
+    entry: &str,
+    require_entry: bool,
+) -> Result<AdmittedTransaction, AdmissionFailure> {
     if let Err(error) = limits.check_source(&unit.source) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
     }
@@ -6146,7 +6257,7 @@ fn admit_transaction_source(
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
     }
-    if !functions.contains_key(entry) {
+    if require_entry && !functions.contains_key(entry) {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "configured transaction entry function is not present".into(),
         }));
@@ -6347,7 +6458,8 @@ fn admit_transaction_project(
             functions.entry(alias).or_insert(function);
         }
     }
-    if !functions.contains_key(entry) {
+    // Candidate validation can admit a project without executing a transaction entry.
+    if !entry.is_empty() && !functions.contains_key(entry) {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "configured qualified project transaction entry function is not present".into(),
         }));
