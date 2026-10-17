@@ -590,7 +590,7 @@ impl BlobResolver for UnreadableFixtureResolver {
     }
 }
 
-fn persisted_format3_context(
+pub fn persisted_format3_context(
     repository: &Repository,
     commit: &str,
     schema_root: &str,

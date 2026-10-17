@@ -3104,8 +3104,26 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
     ) -> Result<IndexGeneration, RepositoryError> {
-        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false)
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false, |_| {})
     }
+    /// Executes publication and observes durable ref/index journal stages.
+    pub fn publish_candidate_with_stage_hook(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        journal: &mut PublicationJournal,
+        on_stage: impl FnMut(PublicationJournalStage),
+    ) -> Result<IndexGeneration, RepositoryError> {
+        self.publish_candidate_impl_with_migration(
+            expected_index,
+            candidate,
+            journal,
+            false,
+            false,
+            on_stage,
+        )
+    }
+
 
     /// Explicitly publishes a caller-built format-3 migration from a captured
     /// format-1/2 snapshot through the shared durable PUB-3 journal.
@@ -3176,7 +3194,7 @@ impl Repository {
             return Err(RepositoryError::InvalidFormatMigration);
         }
 
-        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, true)
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, true, |_| {})
     }
 
     /// The common PUB-1 ref/index/worktree machinery. Compact candidates are
@@ -3195,6 +3213,7 @@ impl Repository {
             journal,
             permit_compact,
             false,
+            |_| {},
         )
     }
 
@@ -3205,6 +3224,7 @@ impl Repository {
         journal: &mut PublicationJournal,
         permit_compact: bool,
         permit_legacy_migration: bool,
+        mut on_stage: impl FnMut(PublicationJournalStage),
     ) -> Result<IndexGeneration, RepositoryError> {
         if journal.migration_continuity().is_some() != permit_legacy_migration
             || journal.migration_annotation_defaults().is_some() != permit_legacy_migration
@@ -3275,6 +3295,7 @@ impl Repository {
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
         self.write_publication_journal_locked(journal)?;
+        on_stage(PublicationJournalStage::RefAdvanced);
         let reconciled = self.reconcile_published_index_locked(
             expected_index,
             candidate,
@@ -3285,6 +3306,7 @@ impl Repository {
 
         journal.advance(PublicationJournalStage::IndexReconciled)?;
         self.write_publication_journal_locked(journal)?;
+        on_stage(PublicationJournalStage::IndexReconciled);
         for index in 0..journal.entries().len() {
             self.materialize_publication_entry_locked(journal, index)?;
         }
