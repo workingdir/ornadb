@@ -14,8 +14,8 @@ use std::{
 };
 
 use orna_repository_v1::{
-    CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef,
-    OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
+    CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, FormatContextError,
+    GitCommitRef, OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
 };
 use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
@@ -848,6 +848,13 @@ impl ProjectLoader {
         {
             return Err(ProjectLoadError::StandardSnapshotMismatch);
         }
+        let has_format3_database = snapshot.has_database_metadata
+            && repository
+                .open_format_context_at_selector(commit.as_str())
+                .map_err(ProjectLoadError::FormatContext)?
+                .repository_format_number()
+                == 3;
+
         let mut project = load_reachable_project(
             self.limits,
             standard_profile,
@@ -863,7 +870,7 @@ impl ProjectLoader {
             },
             |segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, total_bytes| {
-                if snapshot.has_format3_database {
+                if has_format3_database {
                     Ok(Vec::new())
                 } else {
                     discover_committed_rows(
@@ -962,6 +969,12 @@ impl ProjectLoader {
         {
             return Err(ProjectLoadError::StandardSnapshotMismatch);
         }
+        let has_format3_database = snapshot.has_database_metadata
+            && repository
+                .private_candidate_repository_format_number(candidate)
+                .map_err(ProjectLoadError::FormatContext)?
+                == 3;
+
         let mut project = load_reachable_project(
             self.limits,
             standard_profile,
@@ -977,7 +990,7 @@ impl ProjectLoader {
             },
             |segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, total_bytes| {
-                if snapshot.has_format3_database {
+                if has_format3_database {
                     Ok(Vec::new())
                 } else {
                     discover_private_candidate_rows(
@@ -1504,6 +1517,7 @@ fn standard_runtime_closure(
 #[derive(Debug)]
 pub enum ProjectLoadError {
     Repository(RepositoryError),
+    FormatContext(FormatContextError),
     RootUnavailable,
     UnsafePath,
     Symlink,
@@ -1529,6 +1543,7 @@ impl fmt::Display for ProjectLoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Repository(_) => "could not discover the Git worktree",
+            Self::FormatContext(_) => "repository format metadata is invalid",
             Self::RootUnavailable => "could not resolve the Git worktree",
             Self::UnsafePath => "project contains an unsafe module path",
             Self::Symlink => "project module path contains a symbolic link",
@@ -1562,6 +1577,7 @@ impl Error for ProjectLoadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Repository(error) => Some(error),
+            Self::FormatContext(error) => Some(error),
             _ => None,
         }
     }
@@ -1651,7 +1667,7 @@ struct ValidatedSnapshotTree {
     source_paths: BTreeSet<String>,
     row_paths: BTreeSet<String>,
     has_standard_gitlink: bool,
-    has_format3_database: bool,
+    has_database_metadata: bool,
 }
 
 fn validate_committed_tree(
@@ -1688,7 +1704,7 @@ fn validate_snapshot_tree(
         entry.path().as_path() == Path::new("stdlib/std")
             && entry.kind() == CommittedTreeEntryKind::Submodule
     });
-    let has_format3_database = entries.iter().any(|entry| {
+    let has_database_metadata = entries.iter().any(|entry| {
         entry.path().as_path() == Path::new(".orna/database.orna")
             && matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
     });
@@ -1709,7 +1725,7 @@ fn validate_snapshot_tree(
         source_paths,
         row_paths,
         has_standard_gitlink,
-        has_format3_database,
+        has_database_metadata,
     })
 }
 
