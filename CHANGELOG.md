@@ -6,6 +6,9 @@ been published.
 
 ## Unreleased
 
+- Replacing a mounted top-level Blob file updates that field's immutable
+  descriptor through the durable row-save transaction while retaining the
+  existing row key and the previous content for already-open handles.
 - The CLI `add --row TABLE KEY` command stages the source for one matching loose
   row. Reviewed candidate commit support remains open under ornadb-mmsa.7; its
   state-bound contract is tracked separately in ornadb-mmsa.46.
