@@ -141,6 +141,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::Migrate(ref arguments) => run_migrate(&parsed.endpoint, arguments),
         Command::Publish(ref arguments) => cli_publish::run(&parsed.endpoint, arguments),
         Command::Annotate(arguments) => cli_annotate::run(&arguments),
+        Command::AddRow { ref table, ref key } => cli_stage::add_row(&parsed.endpoint, table, key),
         Command::Status {
             format: StatusFormat::Human,
         } => run_status_human(&parsed.endpoint, parsed.color.stdout_enabled()),
