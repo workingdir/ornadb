@@ -96,12 +96,17 @@ fn write_and_sync(path: &Path, document: &str) -> std::io::Result<()> {
     file.sync_all()
 }
 
-#[tokio::test]
-async fn editor_saves_use_the_validated_vfs_row_path() {
-    if !require_fuse_or_skip() {
-        return;
-    }
+struct EditorMount {
+    _mounted: MountedProcess,
+    repository: orna_repository_v1::Repository,
+    relation_id: [u8; 16],
+    row_directory: PathBuf,
+    data_path: PathBuf,
+    _mount_parent: TempDir,
+    _repository_directory: TempDir,
+}
 
+async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
     let source = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
     let initial = "{ title: \"Original\", artist: \"Kieran\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
@@ -115,7 +120,12 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
-    let writer = state.acquire_lease(runtime_identity.repository_id).await.unwrap();
+    let lease_owner = if foreign_owner {
+        [0x83; 16]
+    } else {
+        runtime_identity.repository_id
+    };
+    let writer = state.acquire_lease(lease_owner).await.unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
     commit_source_captures_for_table(
         &repository,
@@ -178,6 +188,28 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(std::fs::read_to_string(&data_path).unwrap().contains("Original"));
+    EditorMount {
+        _mounted: mounted,
+        repository,
+        relation_id,
+        row_directory,
+        data_path,
+        _mount_parent: mount_parent,
+        _repository_directory: repository_directory,
+    }
+}
+
+#[tokio::test]
+async fn editor_saves_use_the_validated_vfs_row_path() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let repository = &fixture.repository;
+    let relation_id = fixture.relation_id;
+    let row_directory = &fixture.row_directory;
+    let data_path = &fixture.data_path;
+    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Original"));
     let mut private_writer = OpenOptions::new()
         .read(true)
         .write(true)
@@ -239,4 +271,40 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
         durable_after_rejection, durable_before_rejection,
         "rejected editor draft must leave the durable row unchanged",
     );
+}
+
+#[tokio::test]
+async fn editor_saves_reject_a_foreign_writer_lease() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(true).await;
+    let durable_before = format3::committed_store_rows(&fixture.repository, fixture.relation_id);
+
+    let error = write_and_sync(
+        &fixture.data_path,
+        "{ title: \"Rejected\", artist: \"Kieran\", }\n",
+    )
+    .expect_err("a foreign writer lease must reject an editor save");
+    assert_eq!(error.raw_os_error(), Some(5));
+    assert!(
+        std::fs::read_to_string(&fixture.data_path)
+            .unwrap()
+            .contains("Original")
+    );
+    let durable_after = format3::committed_store_rows(&fixture.repository, fixture.relation_id);
+    assert_eq!(
+        durable_after,
+        durable_before,
+        "rejected save must preserve the durable row",
+    );
+
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&fixture.repository);
+    let state = RuntimeState::open(&fixture.repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    assert!(matches!(
+        state.acquire_lease(runtime_identity.repository_id).await,
+        Err(orna_runtime_v1::RuntimeError::LeaseHeld),
+    ));
 }

@@ -14,7 +14,7 @@ use std::{
 };
 
 use orna_evaluator_v1::SysHostBindingRegistry;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
+use orna_runtime_v1::RuntimeState;
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
@@ -219,14 +219,14 @@ async fn snapshot_mount_projects_row_document_and_reads_blob_ranges() {
             &row_source,
         );
 
-    let runtime_identity = RuntimeIdentity {
-        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
-        repository_id: [0x71; 16],
-    };
-    let state = RuntimeState::open(&repository, runtime_identity, [0x72; 32])
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
-    let writer = state.acquire_lease([0x73; 16]).await.unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(4 << 20, 16).unwrap();
     filesystem.allow_root(media_root.path()).unwrap();
@@ -470,14 +470,14 @@ async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
             &row_source,
         );
 
-    let runtime_identity = RuntimeIdentity {
-        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
-        repository_id: [0x91; 16],
-    };
-    let state = RuntimeState::open(&repository, runtime_identity, [0x92; 32])
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
-    let writer = state.acquire_lease([0x93; 16]).await.unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(media_root.path()).unwrap();
@@ -613,14 +613,14 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_rows(source, "Music", &source_rows);
 
-    let runtime_identity = RuntimeIdentity {
-        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
-        repository_id: [0x81; 16],
-    };
-    let state = RuntimeState::open(&repository, runtime_identity, [0x82; 32])
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
-    let writer = state.acquire_lease([0x83; 16]).await.unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(media_root.path()).unwrap();
