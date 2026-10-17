@@ -301,6 +301,17 @@ fn typed_key_path_leaves(key: &orna_repository_v1::TypedKey) -> Option<Vec<Strin
     (!leaves.is_empty()).then_some(leaves)
 }
 
+/// Test-only subprocess barrier. When unset, publication has no extra work.
+/// Integration tests set an exact boundary and marker path; the parent then
+/// SIGKILLs this process after the marker is durable. Kept in the CLI rather
+/// than a library so normal library callers never inherit ambient test state.
+fn publication_crash_barrier(boundary: &str) {
+    let Ok(selected) = std::env::var("ORNA_TEST_PUBLICATION_CRASH_AT") else { return; };
+    if selected != boundary { return; }
+    let Ok(marker) = std::env::var("ORNA_TEST_PUBLICATION_CRASH_MARKER") else { return; };
+    std::fs::write(marker, boundary).expect("write publication crash marker");
+    loop { std::thread::park(); }
+}
 /// Names an already-committed snapshot as the publication result for a frozen
 /// range with no visible change. The commit is the current `HEAD`, so the
 /// completion receipt never claims an object the range did not produce.
@@ -626,6 +637,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             .map_err(|error| {
                 publish_error("runtime tail could not be frozen", format!("{error:?}"))
             })?;
+        publication_crash_barrier("capture");
         let frozen = state
             .pending_table_mutations_through(&freeze)
             .await
@@ -635,6 +647,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     format!("{error:?}"),
                 )
             })?;
+        publication_crash_barrier("row");
         let head = repository
             .head()
             .map_err(|error| {
@@ -671,6 +684,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         .map_err(|error| {
             describe_storage_failure("publication candidate could not be prepared", &error)
         })?;
+        publication_crash_barrier("candidate");
         let Some(mut coordinator) = prepared else {
             // Every row in the frozen range already matches the committed
             // snapshot, so there is no visible change to publish. Consume the
@@ -691,12 +705,14 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         coordinator.publish(&repository).map_err(|error| {
             describe_storage_failure("publication commit could not be advanced", &error)
         })?;
+        publication_crash_barrier("ref-index");
         coordinator
             .complete(&repository, &state, &freeze)
             .await
             .map_err(|error| {
                 describe_storage_failure("published runtime range could not be consumed", &error)
             })?;
+        publication_crash_barrier("tail");
         let commit = repository
             .head()
             .map_err(|error| {
