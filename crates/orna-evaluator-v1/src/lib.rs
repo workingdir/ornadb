@@ -47,7 +47,7 @@ mod ui;
 mod unicode_16_case_properties;
 
 #[cfg(feature = "project-repl")]
-pub use admitted_repl::{AdmittedReplSession, ReplError, RepositoryScope};
+pub use admitted_repl::{AdmittedReplSession, ReplError, RepositoryScope, StagedReplActivation};
 pub use cancellation::CancellationToken;
 use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
@@ -1588,7 +1588,9 @@ pub fn evaluate_repl(
     }
     match parsed.value {
         ReplInput::Expression(expression) => evaluate_parsed(&expression, environment, limits),
-        ReplInput::Item(_) => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        ReplInput::ExpressionStatement(_) | ReplInput::Item(_) => {
+            Err(error("ORNA-EVAL-UNSUPPORTED"))
+        }
     }
 }
 
@@ -2666,6 +2668,59 @@ impl Value {
         }
         (fallback_format, fallback_context.cloned())
     }
+    fn discard_result(self) -> Result<(), EvaluationError> {
+        match self {
+            Self::Error(failure) => Err(failure),
+            Self::Range { lower, upper, .. } => {
+                if let Some(lower) = lower {
+                    (*lower).discard_result()?;
+                }
+                if let Some(upper) = upper {
+                    (*upper).discard_result()?;
+                }
+                Ok(())
+            }
+            Self::List(values) | Self::Tuple(values) => {
+                for value in values {
+                    value.discard_result()?;
+                }
+                Ok(())
+            }
+            Self::Stream {
+                values,
+                position,
+                provider,
+                ..
+            } => {
+                if provider.is_some() {
+                    return Ok(());
+                }
+                for value in values.into_iter().skip(position) {
+                    value.discard_result()?;
+                }
+                Ok(())
+            }
+            Self::Record(values) => {
+                for value in values.into_values() {
+                    value.discard_result()?;
+                }
+                Ok(())
+            }
+            Self::NominalRecord { fields, .. } => {
+                for (_, value) in fields {
+                    value.discard_result()?;
+                }
+                Ok(())
+            }
+            Self::Enum { payload, .. } | Self::Option(payload) => {
+                if let Some(value) = payload {
+                    (*value).discard_result()?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
     fn canonical(self) -> Result<CanonicalValue, EvaluationError> {
         if let Self::Error(failure) = self {
             return Err(failure);
@@ -3345,6 +3400,17 @@ impl Scope {
         context: &mut Context,
     ) -> Result<Self, EvaluationError> {
         Self::from_environment_with_nominals(environment, &NominalDefinitions::new(), context)
+    }
+
+    fn from_repl_environment(
+        environment: &Environment,
+        contextual_environment: &BTreeMap<String, ContextValue>,
+        context: &mut Context,
+    ) -> Result<Self, EvaluationError> {
+        let mut scope = Self::from_environment(environment, context)?;
+        let contextual_scope = Self::from_context_environment(contextual_environment, context)?;
+        scope.0.extend(contextual_scope.0);
+        Ok(scope)
     }
 
     fn from_ovb2_environment(
