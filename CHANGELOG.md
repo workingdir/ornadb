@@ -6,6 +6,9 @@ been published.
 
 ## Unreleased
 
+- The CLI `add --row TABLE KEY` command stages the source for one matching loose
+  row. Reviewed candidate commit support remains open under ornadb-mmsa.7; its
+  state-bound contract is tracked separately in ornadb-mmsa.46.
 - Source identity reconciliation accepts explicit rename mappings and preserves
   existing IDs across authorized name changes. Unassisted renames remain
   delete-plus-create, and retired IDs are never reused.
@@ -22,8 +25,12 @@ been published.
   row does not block neighboring rows.
 - FUSE workspace mounts hold a private, per-worktree reference to their pinned
   snapshot so reads survive HEAD changes and garbage collection. SIGINT,
-  SIGTERM, and SIGHUP clean up mounts, while orna unmount can detach orphaned
-  mounts.
+  SIGTERM, and SIGHUP clean up mounts, while orna unmount DIR can detach
+  orphaned mounts when DIR is relative to the command's current working
+  directory.
+- `mount DIR --at SELECTOR` now starts a read-only FUSE session pinned to the
+  resolved commit, so its mounted paths continue to read that historical state
+  after workspace HEAD advances.
 - FUSE teardown serializes daemon and CLI cleanup so concurrent detach paths do
   not race to remove the same view pin and record.
 - The trusted REPL exposes the root namespace as `main` unless a user module named
