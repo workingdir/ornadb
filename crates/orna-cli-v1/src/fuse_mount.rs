@@ -43,17 +43,20 @@ struct MountWriter {
 
 impl MountWriter {
     fn open(repository: &Repository, commit: &GitCommitRef) -> Result<Arc<Self>, String> {
-        let (identity, initial_digest) = super::runtime_identity(repository)
+        let (requested_identity, initial_digest) = super::runtime_identity(repository)
             .map_err(|error| format!("repository runtime identity is unavailable: {error}"))?;
-        let owner_id = super::invocation_owner_id(identity);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .map_err(|error| format!("mounted editor runtime could not be created: {error}"))?;
         let state = runtime
-            .block_on(RuntimeState::open(repository, identity, initial_digest))
+            .block_on(RuntimeState::open(repository, requested_identity, initial_digest))
             .map_err(|error| format!("mounted editor runtime could not be opened: {error:?}"))?;
+        let identity = runtime
+            .block_on(state.identity())
+            .map_err(|error| format!("mounted editor runtime identity is unavailable: {error:?}"))?;
+        let owner_id = super::invocation_owner_id(identity);
         let project = ProjectLoader::default()
             .load_committed_snapshot(repository, commit)
             .map_err(|error| format!("committed source project could not be loaded: {error:?}"))?;
