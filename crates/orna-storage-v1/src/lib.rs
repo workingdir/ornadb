@@ -1296,10 +1296,7 @@ fn project_runtime_mutation(
                 ValueFormat::Rov3,
                 value_context,
             )
-            .map_err(|error| {
-                eprintln!("projection: decode ROV3 row relation={relation_id:?}: {error:?}");
-                Error::RepositoryUnavailable
-            })?;
+            .map_err(|_| Error::RepositoryUnavailable)?;
             let fields = if schema
                 .descriptor
                 .validate_stored_row(relation_id, row_key, bytes)
@@ -1313,10 +1310,7 @@ fn project_runtime_mutation(
                      Raw::Array(vec![decoded.raw().clone()]),
                  )
                  .and_then(|value| value.encode())
-                 .map_err(|error| {
-                     eprintln!("projection: encode single stored field relation={relation_id:?}: {error:?}");
-                     Error::RepositoryUnavailable
-                 })?;
+                 .map_err(|_| Error::RepositoryUnavailable)?;
                  fields
              } else {
                 bytes.to_vec()
@@ -1411,14 +1405,10 @@ fn build_frozen_publication_store_root(
             );
         }
         if let Some(value) = row.next {
-            operations.push(RowIndexMutation::insert_canonical(&key, &value).map_err(
-                |error| {
-                    eprintln!(
-                        "projection: insert row relation={relation_id:?}: {error:?}"
-                    );
-                    Error::RepositoryUnavailable
-                },
-            )?);
+            operations.push(
+                RowIndexMutation::insert_canonical(&key, &value)
+                    .map_err(|_| Error::RepositoryUnavailable)?,
+            );
         }
     }
 
