@@ -409,6 +409,7 @@ pub enum ItemKind {
 pub enum ReplInput {
     Item(Item),
     Expression(Expr),
+    ExpressionStatement(Expr),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
@@ -944,7 +945,14 @@ pub fn parse_repl(source: &str) -> Parse<ReplInput> {
     ) {
         p.item(false).map(ReplInput::Item)
     } else {
-        p.expr().map(ReplInput::Expression)
+        p.expr().map(|expression| {
+            if p.is_punct(";") {
+                p.bump();
+                ReplInput::ExpressionStatement(expression)
+            } else {
+                ReplInput::Expression(expression)
+            }
+        })
     };
     p.finish();
     Parse {
@@ -989,7 +997,9 @@ pub fn parse_repl_with_file(source: &str, file: impl Into<String>) -> Parse<Repl
     let file = file.into();
     match &mut parsed.value {
         ReplInput::Item(item) => annotate_item(item, source, &file),
-        ReplInput::Expression(expr) => annotate_expr(expr, source, &file),
+        ReplInput::Expression(expr) | ReplInput::ExpressionStatement(expr) => {
+            annotate_expr(expr, source, &file)
+        }
     }
     annotate_diagnostics(&mut parsed.diagnostics, source, &file);
     parsed
@@ -5322,6 +5332,14 @@ mod tests {
         let nesting_limit = parse_repl(cases[9]);
         assert!(!nesting_limit.is_incomplete());
         assert!(nesting_limit.is_malformed());
+    }
+
+    #[test]
+    fn classifies_semicolon_terminated_repl_expressions_as_statements() {
+        let statement = parse_repl("1;");
+        assert!(statement.is_ok(), "{:?}", statement.diagnostics);
+        assert!(matches!(statement.value, ReplInput::ExpressionStatement(_)));
+        assert!(!parse_repl("1;;").is_ok());
     }
 
     #[test]

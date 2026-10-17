@@ -4351,22 +4351,39 @@ impl RuntimeState {
         identity: RuntimeIdentity,
         initial_digest: [u8; 32],
     ) -> Result<Self, RuntimeError> {
+        Self::open_with_owner_id(
+            repository,
+            identity,
+            initial_digest,
+            *Uuid::new_v4().as_bytes(),
+        )
+        .await
+    }
+
+    /// Opens the runtime with an owner identity shared with the component
+    /// issuing its owner-scoped graph references. A busy owner lock still
+    /// opens the runtime as a secondary participant.
+    pub async fn open_with_owner_id(
+        repository: &Repository,
+        identity: RuntimeIdentity,
+        initial_digest: [u8; 32],
+        owner_id: [u8; 16],
+    ) -> Result<Self, RuntimeError> {
         repository
             .runtime_paths()
             .ensure_exists()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let runtime_owner_lock =
-            match repository.acquire_runtime_owner_lock(*Uuid::new_v4().as_bytes()) {
-                Ok(owner_lock) => Some(owner_lock),
-                // The owner lock is the takeover lock that reclaims a departed
-                // owner's protected pins. It says nothing about the state
-                // database or the writer lease, so a second live runtime in the
-                // same worktree opens as a secondary participant instead of
-                // refusing every verb that needs the runtime. Reclamation stays
-                // with the owner that holds the lock.
-                Err(RepositoryError::RepositoryBusy) => None,
-                Err(_) => return Err(RuntimeError::StorageUnavailable),
-            };
+        let runtime_owner_lock = match repository.acquire_runtime_owner_lock(owner_id) {
+            Ok(owner_lock) => Some(owner_lock),
+            // The owner lock is the takeover lock that reclaims a departed
+            // owner's protected pins. It says nothing about the state
+            // database or the writer lease, so a second live runtime in the
+            // same worktree opens as a secondary participant instead of
+            // refusing every verb that needs the runtime. Reclamation stays
+            // with the owner that holds the lock.
+            Err(RepositoryError::RepositoryBusy) => None,
+            Err(_) => return Err(RuntimeError::StorageUnavailable),
+        };
         let graph_repository_id = current_graph_repository_id(repository, identity.database_id)?;
         Self::open_path_with_graph_repository_id(
             &repository.runtime_paths().state_db(),
@@ -4465,6 +4482,11 @@ impl RuntimeState {
         Ok(state)
     }
 
+    /// Whether this state owns the repository runtime lock used to reclaim
+    /// scratch references for its owner identity.
+    pub fn holds_runtime_owner_lock(&self) -> bool {
+        self.runtime_owner_lock.is_some()
+    }
     /// The runtime links the baked module roles at startup. Extension loading
     /// is not part of this 1.0 runtime surface.
     pub fn system_provider_roles(&self) -> &orna_sys_v1::ProviderRoleRegistry {
