@@ -4326,6 +4326,74 @@ pub fn transactional_table_candidate_validator(
     )))
 }
 
+/// Builds a transaction validator from every committed project module. This
+/// keeps mounted row saves on the same cross-module assertion and effect
+/// admission path as project-backed transactions.
+pub fn transactional_loaded_project_candidate_validator(
+    loaded: &orna_project_v1::LoadedProject,
+    cwd_generation: orna_repository_v1::CwdGeneration,
+    limits: EvaluatorLimits,
+) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
+    let mut modules = loaded
+        .modules()
+        .iter()
+        .map(|module| SourceUnit {
+            fixture_id: "vfs-mounted-row".into(),
+            source_id: format!("mounted/{}", module.logical_path),
+            parse_as: "module_unit".into(),
+            source: module.source.clone(),
+        })
+        .collect::<Vec<_>>();
+    modules.extend(loaded.standard_sources().iter().map(|(path, source)| SourceUnit {
+        fixture_id: "vfs-mounted-row".into(),
+        source_id: path.clone(),
+        parse_as: "module_unit".into(),
+        source: source.clone(),
+    }));
+
+    let stdlib = loaded.standard_profile().map(|profile| {
+        let sources = loaded
+            .standard_sources()
+            .iter()
+            .map(|(path, source)| (path.clone(), serde_json::Value::String(source.clone())))
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::json!({
+            "snapshot": profile.snapshot(),
+            "sources": serde_json::Value::Object(sources),
+        })
+    });
+    let project = ProjectUnit {
+        fixture_id: "vfs-mounted-row".into(),
+        project_id: "mounted".into(),
+        environment_id: None,
+        modules,
+        loose_rows: Vec::new(),
+        expectations: ProjectExpectations {
+            environment: ProjectEnvironment {
+                network: false,
+                credentials: false,
+                intrinsics: "none".into(),
+                stdlib,
+                initial_tables: "empty".into(),
+            },
+            steps: Vec::new(),
+            negative_cases: Vec::new(),
+        },
+    };
+    let admitted = admit_transaction_project(&project, limits, "")
+        .map_err(|failure| *failure)?;
+    Ok(Box::new(TransactionalTableCandidateValidator::new(
+        cwd_generation,
+        &admitted.functions,
+        &admitted.key_fields,
+        &admitted.float_fields,
+        &admitted.table_fields,
+        &admitted.table_assertions,
+        &admitted.module_assertions,
+        limits,
+    )))
+}
+
 impl TransactionalTableCandidateValidator {
     fn new(
         cwd_generation: orna_repository_v1::CwdGeneration,
