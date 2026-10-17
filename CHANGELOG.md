@@ -128,9 +128,10 @@ release gate has passed.
   admitted with. The candidate metadata lookup rejects a row whose spelling is
   not canonical MIME-1, or that differs from the admitted pair, so a transfer
   record cannot report an annotation the pin never admitted.
-- The CLI publication boundary resolves each frozen row against its committed
-  source schema before staging files or writing a commit. Invalid or
-  unresolvable rows fail closed while preserving the pending range.
+- The CLI publication boundary validates format-3 rows against the pinned
+  committed table binding and derives portable loose-row paths from typed
+  keys; legacy formats retain committed-source path resolution. Invalid rows
+  fail closed while preserving the pending range.
 - `orna history <relation> --diff <from> <to>` decodes source-owned Object row
   fields against each endpoint's committed schema and compares stored Blob
   annotations without fetching payloads.
