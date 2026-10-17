@@ -86,12 +86,12 @@ pub(super) enum Command {
         mountpoint: PathBuf,
         selector: String,
     },
-    /// mount DIR --cwd: read-only view of the current committed workspace.
+    /// mount DIR --cwd: writable current-workspace view with validated row saves.
     MountCwd {
         mountpoint: PathBuf,
     },
 
-    /// `mount status [--json]`: the attached read-only views.
+    /// `mount status [--json]`: the attached mount views.
     MountStatus {
         json: bool,
     },

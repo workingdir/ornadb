@@ -1,13 +1,9 @@
-//! `orna mount DIR --at SELECTOR`, `orna mount status [--json]` and
-//! `orna unmount DIR`: the VFS-1 read-only view surface.
+//! `orna mount DIR --at SELECTOR`, `orna mount DIR --cwd`, status and unmount.
 //!
-//! An `--at` view resolves its selector exactly once and is always read-only
-//! (profiles/vfs-1.md). Attaching records the view in the repository runtime,
-//! so `mount status` can report a format-1/2 migration reader beside a
-//! format-3 workspace view, and every view keeps its own snapshot identity and
-//! record. Read-only means this command never writes to the attached snapshot
-//! or to the workspace; the only mutation is the mount record, and `unmount`
-//! removes exactly that record.
+//! An `--at` view resolves its selector exactly once and stays read-only. `--cwd`
+//! mounts the current committed workspace and sends document and sibling-temp
+//! saves through validated durable-row admission. Both modes record the mounted
+//! snapshot in the repository runtime, and `unmount` removes exactly that record.
 
 use std::path::Path;
 #[cfg(target_os = "linux")]
@@ -127,7 +123,7 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
         }
     };
     let source = format!("orna-{}", status.view_hex());
-    let session = match crate::fuse_mount::spawn_read_only(
+    let session = match crate::fuse_mount::spawn_editor(
         &repository,
         &commit,
         view.context(),
