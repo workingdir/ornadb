@@ -1588,7 +1588,9 @@ pub fn evaluate_repl(
     }
     match parsed.value {
         ReplInput::Expression(expression) => evaluate_parsed(&expression, environment, limits),
-        ReplInput::Item(_) => Err(error("ORNA-EVAL-UNSUPPORTED")),
+        ReplInput::ExpressionStatement(_) | ReplInput::Item(_) => {
+            Err(error("ORNA-EVAL-UNSUPPORTED"))
+        }
     }
 }
 
@@ -2665,6 +2667,59 @@ impl Value {
             return (ValueFormat::Ovb2, None);
         }
         (fallback_format, fallback_context.cloned())
+    }
+    fn discard_result(self) -> Result<(), EvaluationError> {
+        match self {
+            Self::Error(failure) => Err(failure),
+            Self::Range { lower, upper, .. } => {
+                if let Some(lower) = lower {
+                    (*lower).discard_result()?;
+                }
+                if let Some(upper) = upper {
+                    (*upper).discard_result()?;
+                }
+                Ok(())
+            }
+            Self::List(values) | Self::Tuple(values) => {
+                for value in values {
+                    value.discard_result()?;
+                }
+                Ok(())
+            }
+            Self::Stream {
+                values,
+                position,
+                provider,
+                ..
+            } => {
+                if provider.is_some() {
+                    return Ok(());
+                }
+                for value in values.into_iter().skip(position) {
+                    value.discard_result()?;
+                }
+                Ok(())
+            }
+            Self::Record(values) => {
+                for value in values.into_values() {
+                    value.discard_result()?;
+                }
+                Ok(())
+            }
+            Self::NominalRecord { fields, .. } => {
+                for (_, value) in fields {
+                    value.discard_result()?;
+                }
+                Ok(())
+            }
+            Self::Enum { payload, .. } | Self::Option(payload) => {
+                if let Some(value) = payload {
+                    (*value).discard_result()?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
     fn canonical(self) -> Result<CanonicalValue, EvaluationError> {
         if let Self::Error(failure) = self {
