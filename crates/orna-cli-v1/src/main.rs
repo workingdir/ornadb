@@ -12,6 +12,7 @@ mod cli_row_key;
 mod cli_export;
 mod cli_import;
 mod cli_mount;
+mod cli_stage;
 #[cfg(target_os = "linux")]
 mod fuse_mount;
 mod cli_annotate;
@@ -22,7 +23,7 @@ mod media_range;
 mod repl;
 
 use cli_args::{
-    Command, Invocation, LegendFormat, Parsed, StatusFormat, parse_cli, requested_color_mode,
+    Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode,
     requested_debug_mode,
 };
 use cli_dispatch::execute;
