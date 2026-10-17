@@ -803,6 +803,9 @@ impl HistoricalFormatContext {
     pub const fn snapshot_id(&self) -> &[u8; 32] {
         &self.snapshot_id
     }
+    pub(crate) fn commit_oid_hex(&self) -> &str {
+        self.context.snapshot.commit.as_str()
+    }
 
     /// The admitted repository-format dispatch at the pinned commit.
     pub const fn repository_format(&self) -> RepositoryFormat {

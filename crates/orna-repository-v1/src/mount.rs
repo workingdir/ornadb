@@ -24,7 +24,7 @@ use crate::{HistoricalFormatContext, Repository, RuntimePaths};
 /// runtime, so a view identifier never collides with a snapshot or store digest.
 const MOUNT_VIEW_DOMAIN: &[u8] = b"orna.repository.mount.view.v1\0";
 /// First line of every mount-view record.
-const MOUNT_RECORD_MAGIC: &str = "orna-mount-view 1";
+const MOUNT_RECORD_MAGIC: &str = "orna-mount-view 2";
 
 /// Why a mount view could not be attached or reported.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +41,8 @@ pub enum MountError {
     RecordInvalid,
     /// No view is attached at that mountpoint.
     NotAttached,
+    /// The immutable commit could not be durably pinned for this view.
+    SnapshotPinUnavailable,
 }
 
 impl std::fmt::Display for MountError {
@@ -54,6 +56,7 @@ impl std::fmt::Display for MountError {
             }
             Self::RecordInvalid => formatter.write_str("retained mount-view record is invalid"),
             Self::NotAttached => formatter.write_str("no mount view is attached there"),
+            Self::SnapshotPinUnavailable => formatter.write_str("snapshot could not be pinned for the mount"),
         }
     }
 }
@@ -78,6 +81,8 @@ pub struct MountView {
     repository: Repository,
     mountpoint: PathBuf,
     selector: String,
+    owner_id: [u8; 16],
+    pin_oid_hex: String,
     view_id: [u8; 32],
     context: HistoricalFormatContext,
 }
@@ -126,15 +131,33 @@ impl MountView {
         identity.update([0u8]);
         identity.update(context.snapshot_id());
         let view_id: [u8; 32] = identity.finalize().into();
+        let owner_id = *crate::Uuid::new_v4().as_bytes();
+        let pin_oid_hex = crate::native_graph::create_mount_snapshot_pin(
+            repository,
+            &owner_id,
+            &view_id,
+            context.commit_oid_hex(),
+        )
+        .map_err(|_| MountError::SnapshotPinUnavailable)?;
 
         let view = Self {
             repository: repository.clone(),
             mountpoint: resolved_mountpoint,
             selector: selector.to_owned(),
+            owner_id,
+            pin_oid_hex,
             view_id,
             context,
         };
-        view.write_record()?;
+        if let Err(error) = view.write_record() {
+            let _ = crate::native_graph::delete_mount_snapshot_pin(
+                repository,
+                &owner_id,
+                &view_id,
+                &pin_oid_hex,
+            );
+            return Err(error);
+        }
         Ok(view)
     }
 
@@ -184,11 +207,13 @@ impl MountView {
         let directory = mount_registry_dir(paths);
         fs::create_dir_all(&directory).map_err(|_| MountError::HostFilesystem)?;
         let record = format!(
-            "{MOUNT_RECORD_MAGIC}\nmountpoint {}\nselector {}\nsnapshot {}\nview {}\nformat {}\nlegacy {}\nread_only true\n",
+            "{MOUNT_RECORD_MAGIC}\nmountpoint {}\nselector {}\nsnapshot {}\nview {}\nowner {}\npin {}\nformat {}\nlegacy {}\nread_only true\n",
             self.mountpoint.display(),
             self.selector,
             hex(self.context.snapshot_id()),
             hex(&self.view_id),
+            hex(&self.owner_id),
+            self.pin_oid_hex.as_str(),
             self.context.repository_format_number(),
             self.context.is_legacy_format(),
         );
@@ -216,9 +241,18 @@ impl MountView {
             || record.snapshot != *self.context.snapshot_id()
             || record.format != self.context.repository_format_number()
             || record.legacy != self.context.is_legacy_format()
+            || record.owner_id != self.owner_id
+            || record.pin_oid_hex != self.pin_oid_hex
         {
             return Err(MountError::RecordInvalid);
         }
+        crate::native_graph::verify_mount_snapshot_pin(
+            &self.repository,
+            &self.owner_id,
+            &self.view_id,
+            &self.pin_oid_hex,
+        )
+        .map_err(|_| MountError::RecordInvalid)?;
         Ok(MountStatus {
             mountpoint: record.mountpoint,
             snapshot: record.snapshot,
@@ -235,9 +269,20 @@ impl MountView {
         };
         // Only the view that owns the current record removes it: a replacement
         // view attached at the same mountpoint keeps its own evidence.
-        if MountRecord::parse(&bytes)?.view != self.view_id {
+        let record = MountRecord::parse(&bytes)?;
+        if record.view != self.view_id
+            || record.owner_id != self.owner_id
+            || record.pin_oid_hex != self.pin_oid_hex
+        {
             return Ok(());
         }
+        crate::native_graph::delete_mount_snapshot_pin(
+            &self.repository,
+            &self.owner_id,
+            &self.view_id,
+            &self.pin_oid_hex,
+        )
+        .map_err(|_| MountError::SnapshotPinUnavailable)?;
         fs::remove_file(&path).map_err(|_| MountError::HostFilesystem)
     }
 }
@@ -305,6 +350,8 @@ struct MountRecord {
     mountpoint: PathBuf,
     selector: String,
     snapshot: [u8; 32],
+    owner_id: [u8; 16],
+    pin_oid_hex: String,
     view: [u8; 32],
     format: u8,
     legacy: bool,
@@ -321,6 +368,8 @@ impl MountRecord {
         let mut selector = None;
         let mut snapshot = None;
         let mut view = None;
+        let mut owner_id = None;
+        let mut pin_oid_hex = None;
         let mut format = None;
         let mut legacy = None;
         for line in lines {
@@ -332,6 +381,8 @@ impl MountRecord {
                 "selector" => selector = Some(value.to_owned()),
                 "snapshot" => snapshot = Some(parse_hex32(value)?),
                 "view" => view = Some(parse_hex32(value)?),
+                "owner" => owner_id = Some(parse_hex16(value)?),
+                "pin" => pin_oid_hex = Some(parse_mount_pin_oid(value)?),
                 "format" => {
                     format = Some(value.parse::<u8>().map_err(|_| MountError::RecordInvalid)?)
                 }
@@ -351,6 +402,8 @@ impl MountRecord {
             selector: selector.ok_or(MountError::RecordInvalid)?,
             snapshot: snapshot.ok_or(MountError::RecordInvalid)?,
             view: view.ok_or(MountError::RecordInvalid)?,
+            owner_id: owner_id.ok_or(MountError::RecordInvalid)?,
+            pin_oid_hex: pin_oid_hex.ok_or(MountError::RecordInvalid)?,
             format: format.ok_or(MountError::RecordInvalid)?,
             legacy: legacy.ok_or(MountError::RecordInvalid)?,
         })
@@ -369,6 +422,28 @@ fn parse_hex32(value: &str) -> Result<[u8; 32], MountError> {
     Ok(bytes)
 }
 
+fn parse_hex16(value: &str) -> Result<[u8; 16], MountError> {
+    if value.len() != 32 {
+        return Err(MountError::RecordInvalid);
+    }
+    let mut bytes = [0u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| MountError::RecordInvalid)?;
+    }
+    Ok(bytes)
+}
+
+fn parse_mount_pin_oid(value: &str) -> Result<String, MountError> {
+    let algorithm = match value.len() {
+        40 => crate::native_graph::GitHashAlgorithm::Sha1,
+        64 => crate::native_graph::GitHashAlgorithm::Sha256,
+        _ => return Err(MountError::RecordInvalid),
+    };
+    crate::native_graph::NativeOid::from_hex(algorithm, value)
+        .map(|oid| oid.to_hex())
+        .map_err(|_| MountError::RecordInvalid)
+}
 fn mount_registry_dir(paths: &RuntimePaths) -> PathBuf {
     paths.root().join("mounts")
 }
@@ -409,6 +484,13 @@ impl Repository {
             }
             let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
             let record = MountRecord::parse(&bytes)?;
+            crate::native_graph::verify_mount_snapshot_pin(
+                self,
+                &record.owner_id,
+                &record.view,
+                &record.pin_oid_hex,
+            )
+            .map_err(|_| MountError::RecordInvalid)?;
             statuses.push(MountStatus {
                 mountpoint: record.mountpoint,
                 snapshot: record.snapshot,
@@ -447,8 +529,15 @@ impl Repository {
         let bytes = fs::read(mount_record_path(self.runtime_paths(), &resolved))
             .map_err(|_| MountError::HostFilesystem)?;
         let parsed = MountRecord::parse(&bytes)?;
+        crate::native_graph::verify_mount_snapshot_pin(
+            self,
+            &parsed.owner_id,
+            &parsed.view,
+            &parsed.pin_oid_hex,
+        )
+        .map_err(|_| MountError::RecordInvalid)?;
         let context = self
-            .open_format_context_at_selector(&parsed.selector)
+            .open_format_context_at_selector(&parsed.pin_oid_hex)
             .map_err(MountError::Format)?;
         // The recorded coordinate is re-verified, not trusted: a record whose
         // format or legacy flag no longer describes the resolved commit is
@@ -463,6 +552,8 @@ impl Repository {
             repository: self.clone(),
             mountpoint: resolved,
             selector: parsed.selector,
+            owner_id: parsed.owner_id,
+            pin_oid_hex: parsed.pin_oid_hex,
             view_id: parsed.view,
             context,
         })
@@ -480,13 +571,33 @@ impl Repository {
         let resolved = mountpoint
             .canonicalize()
             .unwrap_or_else(|_| mountpoint.clone());
-        let status = self
-            .mount_status()?
-            .into_iter()
-            .find(|status| status.mountpoint == resolved)
-            .ok_or(MountError::NotAttached)?;
-        fs::remove_file(mount_record_path(self.runtime_paths(), &resolved))
-            .map_err(|_| MountError::HostFilesystem)?;
+        let record_path = mount_record_path(self.runtime_paths(), &resolved);
+        let bytes = fs::read(&record_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                MountError::NotAttached
+            } else {
+                MountError::HostFilesystem
+            }
+        })?;
+        let record = MountRecord::parse(&bytes)?;
+        if record.mountpoint != resolved {
+            return Err(MountError::RecordInvalid);
+        }
+        let status = MountStatus {
+            mountpoint: record.mountpoint,
+            snapshot: record.snapshot,
+            view: record.view,
+            format: record.format,
+            legacy: record.legacy,
+        };
+        crate::native_graph::delete_mount_snapshot_pin(
+            self,
+            &record.owner_id,
+            &record.view,
+            &record.pin_oid_hex,
+        )
+        .map_err(|_| MountError::SnapshotPinUnavailable)?;
+        fs::remove_file(&record_path).map_err(|_| MountError::HostFilesystem)?;
         Ok(status)
     }
 }
