@@ -234,11 +234,11 @@ async fn commit_capture(
         .resolve_committed_source_table_schema(repository, source_commit, TableObjectId::new(relation_id))
         .expect("resolve the Object table from its committed identity");
     let logical_path = format!("Object/{source_key}.orna");
-    let row = project
-        .loose_rows()
-        .iter()
-        .find(|row| row.logical_path() == logical_path)
+    let row_source = repository
+        .read_committed_file(source_commit, &logical_path, 1 << 20)
         .expect("the committed project contains this source Object row");
+    let row_source = std::str::from_utf8(&row_source)
+        .expect("the committed source Object row is valid UTF-8");
 
     let value = evaluate_expression_ovb2_with_effects(
         expression,
@@ -250,8 +250,8 @@ async fn commit_capture(
     let blob_binding = bindings.accept_captured_blob_for_row(&value).unwrap();
     let admitted = admit_source_row_with_owner_fields(
         &project,
-        row.logical_path(),
-        row.source(),
+        &logical_path,
+        row_source,
         &schema,
         format_context,
         vec![("payload".to_owned(), blob_binding)],
