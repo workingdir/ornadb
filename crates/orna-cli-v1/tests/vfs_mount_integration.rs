@@ -6,6 +6,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom},
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Stdio},
     thread,
@@ -71,6 +72,23 @@ fn run_unmount(repository: &Path, mountpoint: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+fn git_output(repository: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(repository)
+        .args(args)
+        .output()
+        .unwrap_or_else(|error| panic!("run git {args:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8(output.stdout)
+        .expect("git output is UTF-8")
+        .trim()
+        .to_owned()
 }
 
 fn mount_options(mountpoint: &Path) -> String {
@@ -176,13 +194,22 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         return;
     }
     let media_root = TempDir::new().unwrap();
-    let expected = b"ID3-orna-range-read-test-content";
-    std::fs::write(media_root.path().join("tone.mp3"), expected).unwrap();
+    let payload_len = 3 * 1_048_576 + 17;
+    let mut entropy = 0x0123_4567_89ab_cdef_u64;
+    let expected = (0..payload_len)
+        .map(|_| {
+            entropy = entropy
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (entropy >> 32) as u8
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(media_root.path().join("tone.mp3"), &expected).unwrap();
     let source =
         "pub table Music(id: Str) { title: Str, artist: Str, content: Blob, cover: Blob?, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
     let row_source = format!(
-        "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 65536),\n    cover: null,\n}}\n"
+        "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
@@ -201,12 +228,12 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         .unwrap();
     let writer = state.acquire_lease([0x73; 16]).await.unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
-    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(4 << 20, 16).unwrap();
     filesystem.allow_root(media_root.path()).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 4194304)");
     let blob_captures = [("content", capture.as_str())];
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
@@ -226,6 +253,7 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         &capture_rows,
     )
     .await;
+    drop(state);
 
     assert_eq!(
         format3::committed_store_rows(&repository, relation_id).len(),
@@ -324,12 +352,227 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         );
     }
 
+    let write_open_error = OpenOptions::new()
+        .write(true)
+        .open(&blob_path)
+        .expect_err("opening a projected Blob for writing must fail");
+    assert_eq!(
+        write_open_error.raw_os_error(),
+        Some(30),
+        "write-open must fail with Linux EROFS",
+    );
+    let create_dir_error = std::fs::create_dir(mountpoint.join("Music/london/new-directory"))
+        .expect_err("creating a directory in the mount must fail");
+    assert_eq!(
+        create_dir_error.raw_os_error(),
+        Some(30),
+        "mkdir must fail with Linux EROFS",
+    );
+    let remove_file_error =
+        std::fs::remove_file(&data_path).expect_err("removing a projected file must fail");
+    assert_eq!(
+        remove_file_error.raw_os_error(),
+        Some(30),
+        "unlink must fail with Linux EROFS",
+    );
+    let chmod_error = std::fs::set_permissions(&blob_path, std::fs::Permissions::from_mode(0o600))
+        .expect_err("changing permissions in the mount must fail");
+    assert_eq!(
+        chmod_error.raw_os_error(),
+        Some(30),
+        "chmod must fail with Linux EROFS",
+    );
+
+    let current_commit = current.to_string();
+    let parent_ref = format!("{current_commit}^");
+    let parent = git_output(
+        repository_directory.path(),
+        &["rev-parse", parent_ref.as_str()],
+    );
+    let parent_tree_ref = format!("{parent}^{{tree}}");
+    let parent_tree = git_output(
+        repository_directory.path(),
+        &["rev-parse", parent_tree_ref.as_str()],
+    );
+    let moved_head = git_output(
+        repository_directory.path(),
+        &[
+            "commit-tree",
+            parent_tree.as_str(),
+            "-m",
+            "move FUSE test HEAD",
+        ],
+    );
+    git_output(
+        repository_directory.path(),
+        &["update-ref", "HEAD", moved_head.as_str()],
+    );
+    assert_ne!(moved_head, current_commit);
+    assert_eq!(
+        git_output(repository_directory.path(), &["rev-parse", "HEAD"]),
+        moved_head,
+        "the worktree HEAD moved away from the mounted commit",
+    );
+    git_output(repository_directory.path(), &["gc", "--prune=now"]);
+    git_output(repository_directory.path(), &["repack", "-ad"]);
+    assert_eq!(
+        std::fs::read_to_string(&data_path).unwrap(),
+        expected_document,
+        "the mounted snapshot remains visible after HEAD moves and GC",
+    );
+
     let mut blob = File::open(&blob_path).expect("open projected Blob");
-    let start = 7usize;
-    let mut actual = [0u8; 9];
-    blob.seek(SeekFrom::Start(start as u64)).unwrap();
-    let count = blob.read(&mut actual).unwrap();
-    assert_eq!(&actual[..count], &expected[start..start + count]);
+    assert_eq!(
+        blob.metadata().unwrap().len() as usize,
+        expected.len(),
+        "the projected Blob size comes from its stored descriptor",
+    );
+    let boundary_range_len = 1_048_576 + 1;
+    let mut actual = vec![0u8; boundary_range_len];
+    blob.seek(SeekFrom::Start(0)).unwrap();
+    blob.read_exact(&mut actual).unwrap();
+    assert_eq!(actual.as_slice(), &expected[..boundary_range_len]);
+
+    drop(blob);
+    run_unmount(repository_directory.path(), &mountpoint);
+    let status = mounted.child.wait().unwrap();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = mounted.child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    assert!(
+        status.success(),
+        "mount process exits cleanly after unmount; status={status:?}; stderr={stderr}"
+    );
+}
+
+#[tokio::test]
+async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
+    if !fuse_test_available() {
+        return;
+    }
+
+    let media_root = TempDir::new().unwrap();
+    let expected = b"corrupt-chunk-read-test-content";
+    let source_file = media_root.path().join("tone.mp3");
+    std::fs::write(&source_file, expected).unwrap();
+    let source = "pub table Music(id: Str) { content: Blob, }\n";
+    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
+    let row_source =
+        format!("{{\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 65536),\n}}\n");
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            source,
+            "Music",
+            "Music/london.orna",
+            &row_source,
+        );
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x91; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x92; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x93; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(media_root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let blob_captures = [("content", capture.as_str())];
+    let capture_rows = [media_commit::SourceCaptureRow {
+        key: "london",
+        blob_fields: &blob_captures,
+        source_row: None,
+        ordinal: 0x91,
+        insert_only: true,
+    }];
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &capture_rows,
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let blob_path = mountpoint.join("Music/london/content.mp3");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !blob_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return;
+            }
+            panic!("mount exited {status}: {stderr}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "FUSE mount did not expose the Blob; root=[{}], Music=[{}], london=[{}]",
+            directory_entries(&mountpoint),
+            directory_entries(&mountpoint.join("Music")),
+            directory_entries(&mountpoint.join("Music/london")),
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let chunk_oid = git_output(
+        repository_directory.path(),
+        &["hash-object", source_file.to_str().unwrap()],
+    );
+    let objects = repository_directory.path().join(git_output(
+        repository_directory.path(),
+        &["rev-parse", "--git-path", "objects"],
+    ));
+    let chunk_path = objects.join(&chunk_oid[..2]).join(&chunk_oid[2..]);
+    assert!(
+        chunk_path.is_file(),
+        "captured chunk is stored as a loose object"
+    );
+    std::fs::set_permissions(&chunk_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&chunk_path, b"corrupt Git loose object bytes").unwrap();
+
+    let mut blob = File::open(&blob_path).expect("open projected Blob");
+    let mut byte = [0u8; 1];
+    let error = blob
+        .read_exact(&mut byte)
+        .expect_err("a corrupt chunk object must not return data");
+    assert_eq!(
+        error.raw_os_error(),
+        Some(5),
+        "a corrupt chunk object must surface as Linux EIO",
+    );
 
     drop(blob);
     run_unmount(repository_directory.path(), &mountpoint);
@@ -668,4 +911,3 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         "a directory request to the dead FUSE mount should fail with ENOTCONN"
     );
 }
-
