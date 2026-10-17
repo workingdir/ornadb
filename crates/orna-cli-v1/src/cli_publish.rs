@@ -786,8 +786,9 @@ mod tests {
             row_key.canonical_bytes().expect("canonical row-map key")
         );
         assert_eq!(
-            typed_key_path_leaves(&row_key).as_deref(),
-            Some(["london".to_owned()].as_slice())
+            orna_repository_v1::TypedKey::decode_canonical(mutation.key())
+                .expect("canonical typed key"),
+            row_key
         );
     }
     #[test]
