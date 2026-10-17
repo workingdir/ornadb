@@ -195,15 +195,33 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
         panic!("stored Music row is not an array");
     };
     assert_eq!(fields.len(), 2, "the primary key is stored in the index, not the row array");
-    assert!(matches!(&fields[0], Raw::Text(_)), "stored Music title field is a Str");
+    let mut title_field_count = 0;
     let mut blob_field_count = 0;
+    let mut blob_field = None;
     for field in fields {
-        let value = ContextValue::new_in_context(&value_context, ValueFormat::Rov3, field.clone())
-            .expect("construct stored Music row field");
-        if value.blob().is_ok() {
-            blob_field_count += 1;
+        match field {
+            Raw::Text(title) => {
+                title_field_count += 1;
+                assert_eq!(
+                    title.as_str(),
+                    "Live in London",
+                    "stored Music title matches the inserted row"
+                );
+            }
+            _ => {
+                let value = ContextValue::new_in_context(&value_context, ValueFormat::Rov3, field.clone())
+                    .expect("construct stored Music row content field");
+                value.blob().expect("stored Music content field is a Blob");
+                blob_field_count += 1;
+                blob_field = Some(field.clone());
+            }
         }
     }
+    assert_eq!(
+        title_field_count,
+        1,
+        "stored Music row has exactly one Text title field"
+    );
     assert_eq!(
         blob_field_count,
         1,
@@ -212,7 +230,7 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let encoded_blob = ContextValue::new_in_context(
         &value_context,
         ValueFormat::Rov3,
-        fields[1].clone(),
+        blob_field.expect("stored Music row has a Blob content field"),
     )
     .expect("construct content field value")
     .encode()
