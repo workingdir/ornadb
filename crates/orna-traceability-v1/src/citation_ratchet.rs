@@ -95,7 +95,7 @@ fn rust_files(root: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 fn test_code<'a>(path: &Path, source: &'a str) -> Vec<&'a str> {
-    if path.components().any(|part| part.as_os_str() == "tests") { return vec![source]; }
+    let is_test_file = path.components().any(|part| part.as_os_str() == "tests");
     let mut code = Vec::new();
     let mut cursor = 0;
     while let Some(attr) = source[cursor..].find("#[cfg(test)]") {
@@ -104,6 +104,21 @@ fn test_code<'a>(path: &Path, source: &'a str) -> Vec<&'a str> {
         let open = start + open_rel;
         if let Some(end) = matching_brace(source, open) { code.push(&source[start..=end]); cursor = end + 1; }
         else { break; }
+    }
+    // Outside cfg(test) modules, only explicit #[test] function bodies qualify, regardless of file location.
+    if is_test_file {
+        cursor = 0;
+        while let Some(attr) = source[cursor..].find("#[test]") {
+            let start = cursor + attr;
+            let Some(open_rel) = source[start..].find('{') else { break; };
+            let open = start + open_rel;
+            if let Some(end) = matching_brace(source, open) {
+                code.push(&source[start..=end]);
+                cursor = end + 1;
+            } else {
+                break;
+            }
+        }
     }
     code
 }
@@ -138,6 +153,19 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
                 let terminator = format!("\"{}", "#".repeat(hashes));
                 if let Some(end) = source[quote + 1..].find(&terminator) { i = quote + 1 + end + terminator.len(); continue; }
                 return None;
+            }
+        }
+        if bytes[i] == b'\'' || (bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'\'')) {
+            let quote = if bytes[i] == b'b' { i + 1 } else { i };
+            let content = quote + 1;
+            let end = if bytes.get(content) == Some(&b'\\') {
+                content + 2
+            } else {
+                source.get(content..).and_then(|s| s.chars().next()).map_or(content, |ch| content + ch.len_utf8())
+            };
+            if bytes.get(end) == Some(&b'\'') {
+                i = end + 1;
+                continue;
             }
         }
         if bytes[i] == b'"' || (bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'"')) {
@@ -196,12 +224,30 @@ mod tests {
         let catalogue = root.join("requirements.json");
         fs::write(&catalogue, r#"[{"id":"REQ-001","chapter":"one"},{"id":"REQ-002","chapter":"one"},{"id":"REQ-003","chapter":"two"}]"#).unwrap();
         fs::write(root.join("crates/a/src/lib.rs"), "const PROD: &str = \"REQ-002\"; #[cfg(test)] mod tests { const TEST: &str = \"{ REQ-001 }\"; }").unwrap();
-        fs::write(root.join("crates/a/tests/a.rs"), "// REQ-003").unwrap();
+        fs::write(root.join("crates/a/tests/a.rs"), "const HELPER: &str = \"REQ-002\"; #[test] fn actual_test() { let _ = \"REQ-003\"; }").unwrap();
         fs::write(root.join("crates/a/tests/fixtures/ignored.rs"), "// REQ-002").unwrap();
         let result = cite_requirements(&catalogue, root).unwrap();
         assert_eq!(result.cited_ids, ["REQ-001", "REQ-003"].into_iter().map(str::to_owned).collect());
         assert_eq!(result.chapters["one"], ChapterCounts { cited: 1, uncited: 1 });
         assert_eq!(result.chapters["two"], ChapterCounts { cited: 1, uncited: 0 });
+    }
+
+    #[test]
+    fn test_code_selects_only_cfg_test_modules_not_surrounding_or_tests_directory_code() {
+        let source = r##"#[cfg(test)] mod first { const A: &str = "REQ-IN"; } #[cfg(test)] mod second { const B: &str = "REQ-AFTER"; }"##;
+        let selected = test_code(Path::new("src/lib.rs"), source);
+        assert_eq!(selected.len(), 2);
+        assert!(selected[0].contains("REQ-IN"));
+        assert!(selected[1].contains("REQ-AFTER"));
+        assert!(test_code(Path::new("tests/integration.rs"), "const HELPER: &str = \"REQ-TESTS\"; #[test] fn actual() { let _ = \"REQ-TESTS\"; }").len() == 1);
+        assert!(test_code(Path::new("tests/integration.rs"), "fn f() { // REQ-TESTS\n }").is_empty());
+    }
+
+    #[test]
+    fn matching_brace_ignores_char_byte_and_string_literal_closers() {
+        let source = r####"{ fn borrow<'a>(_: &'a str) {} let a = '}'; let b = b'}'; let c = "}"; let d = br#"}"#; } trailing"####;
+        let end = matching_brace(source, 0).unwrap();
+        assert_eq!(&source[end + 1..], " trailing");
     }
 
     #[test]
