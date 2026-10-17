@@ -69,6 +69,25 @@ fn compact_schema_fingerprint(schema: &SchemaDescriptor) -> [u8; 32] {
     digest.finalize().into()
 }
 
+fn compact_row_value() -> Vec<u8> {
+    let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+    CanonicalValue::new(OvbRaw::Tag(
+        60009,
+        Box::new(OvbRaw::Array(vec![
+            OvbRaw::Null,
+            OvbRaw::Array(vec![OvbRaw::Array(vec![
+                OvbRaw::Tag(
+                    37,
+                    Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+                ),
+                OvbRaw::Int(1.into()),
+            ])]),
+        ])),
+    ))
+    .unwrap()
+    .encode()
+    .unwrap()
+}
 
 fn compact_columns() -> Vec<u8> {
     let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
@@ -508,12 +527,7 @@ async fn publish_recovers_compact_journal_without_receipt_before_tail_selection(
         [0xf1; 16],
         "media",
         CanonicalValue::int(1.into()).encode().unwrap(),
-        Some(
-            CanonicalValue::new(OvbRaw::Array(Vec::new()))
-                .unwrap()
-                .encode()
-                .unwrap(),
-        ),
+        Some(compact_row_value()),
     )
     .unwrap()
     .with_table_object_id(TableObjectId::new(*table.as_bytes()));
@@ -579,12 +593,7 @@ async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
         [0xf4; 16],
         "media",
         CanonicalValue::int(1.into()).encode().unwrap(),
-        Some(
-            CanonicalValue::new(OvbRaw::Array(Vec::new()))
-                .unwrap()
-                .encode()
-                .unwrap(),
-        ),
+        Some(compact_row_value()),
     )
     .unwrap()
     .with_table_object_id(TableObjectId::new(*table.as_bytes()));

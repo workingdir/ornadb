@@ -453,18 +453,11 @@ async fn recover_pending_publication(
         ));
     }
     for mutation in &mutations {
-        if let Some(fields) = mutation.value() {
-            descriptor
-                .validate_stored_row(table_id, mutation.key(), fields)
-                .map_err(|error| {
-                    publish_error(
-                        "compact publication row is invalid for its committed schema",
-                        format!("{error:?}; journal and pending tail were preserved"),
-                    )
-                })?;
-            if let Some(new_key) = mutation.rekey_to() {
+        if let Some(row) = mutation.value() {
+            let rekey_to = mutation.rekey_to();
+            if rekey_to.is_some() {
                 descriptor
-                    .validate_stored_row(table_id, new_key, fields)
+                    .validate_stored_key(table_id, mutation.key())
                     .map_err(|error| {
                         publish_error(
                             "compact publication rekey is invalid for its committed schema",
@@ -472,6 +465,23 @@ async fn recover_pending_publication(
                         )
                     })?;
             }
+            profile
+                .validate_complete_row(
+                    &descriptor,
+                    rekey_to.unwrap_or_else(|| mutation.key()),
+                    row,
+                )
+                .map_err(|error| {
+                    let message = if rekey_to.is_some() {
+                        "compact publication rekey is invalid for its committed schema"
+                    } else {
+                        "compact publication row is invalid for its committed schema"
+                    };
+                    publish_error(
+                        message,
+                        format!("{error:?}; journal and pending tail were preserved"),
+                    )
+                })?;
         }
     }
     let table_identity = PublicationTableIdentity {
