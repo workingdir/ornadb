@@ -1311,6 +1311,7 @@ name = "orna-cli-v1"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "fuser",
  "getrandom 0.3.4",
  "orna-application-v1",
@@ -1330,6 +1331,7 @@ dependencies = [
  "orna-syntax-v1",
  "orna-sys-v1",
  "orna-value-v1",
+ "parquet",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
