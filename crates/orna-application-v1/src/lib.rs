@@ -8,8 +8,8 @@
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    PureFunction, RelationPage, ReplError, StepBudget, SysHostBindingRegistry, invoke_named,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, Ovb2EffectHandler,
+    PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget, SysHostBindingRegistry, invoke_named,
     invoke_named_with_effects, reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
@@ -45,6 +45,9 @@ use std::{
     sync::{Arc, Mutex},
     time::UNIX_EPOCH,
 };
+
+mod repl_transaction;
+pub use repl_transaction::ReplTransactionScope;
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
 const TABLE_ID_DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST-TABLE-IDENTITIES\0";

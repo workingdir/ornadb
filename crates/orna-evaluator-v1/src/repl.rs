@@ -6,7 +6,7 @@ use orna_foundation_v1::CanonicalValue;
 use orna_syntax_v1::{
     AssignmentTarget, Declaration, Expr, Pattern, ReplInput, Statement, UseTail, parse_repl,
 };
-use orna_value_v1::Raw;
+use orna_value_v1::{ContextValue, Format3Context, Raw, ValueFormat};
 
 use crate::{
     CancellationToken, Context, Environment, EvaluationError, Functions, Limits, PureFunction,
@@ -23,6 +23,7 @@ pub struct ReplSession {
     limits: Limits,
     environment: Environment,
     functions: Functions,
+    contextual_environment: BTreeMap<String, ContextValue>,
     aliases: BTreeMap<String, String>,
     wildcard_bindings: BTreeMap<String, String>,
     wildcard_ambiguities: BTreeMap<String, BTreeSet<String>>,
@@ -54,6 +55,7 @@ impl ReplSession {
             limits,
             environment: Environment::new(),
             functions: Functions::new(),
+            contextual_environment: BTreeMap::new(),
             aliases: BTreeMap::new(),
             wildcard_bindings: BTreeMap::new(),
             wildcard_ambiguities: BTreeMap::new(),
@@ -92,6 +94,7 @@ impl ReplSession {
             environment,
             functions,
             aliases: BTreeMap::new(),
+            contextual_environment: BTreeMap::new(),
             wildcard_bindings: BTreeMap::new(),
             wildcard_ambiguities: BTreeMap::new(),
             session_functions: BTreeSet::new(),
@@ -148,22 +151,35 @@ impl ReplSession {
         Ok(result)
     }
 
-    /// Executes one already admitted effectful expression against a candidate
+    /// Executes one already admitted effectful input against a candidate
     /// session. The candidate is published only after every effect handler
-    /// call and the expression complete successfully.
+    /// call and the input complete successfully.
     pub fn submit_admitted_with_effects(
         &mut self,
         input: &ReplInput,
         effects: &mut dyn crate::EffectHandler,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        let ReplInput::Expression(expression) = input else {
-            return Err(error("ORNA-EVAL-UNSUPPORTED"));
-        };
         let mut candidate = self.clone();
-        let value = candidate.evaluate_with_effects(expression, effects)?;
-        candidate.last_success = Some(value.clone());
+        let result = match input {
+            ReplInput::Expression(expression) => {
+                let value = candidate.evaluate_with_effects(expression, effects)?;
+                candidate.last_success = Some(value.clone());
+                Some(value)
+            }
+            ReplInput::ExpressionStatement(expression) => {
+                candidate.evaluate_discarded(expression, None, Some(effects))?;
+                None
+            }
+            ReplInput::Item(item) => match &item.declaration {
+                Declaration::Let { pattern, value, .. } => {
+                    candidate.let_binding(pattern, value, None, Some(effects))?;
+                    None
+                }
+                _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+            },
+        };
         *self = candidate;
-        Ok(Some(value))
+        Ok(result)
     }
 
     /// Executes one already-admitted input with an explicit operation token.
@@ -199,6 +215,10 @@ impl ReplSession {
                 self.last_success = Some(value.clone());
                 Ok(Some(value))
             }
+            ReplInput::ExpressionStatement(expression) => {
+                self.evaluate_discarded(&expression, None, None)?;
+                Ok(None)
+            }
             ReplInput::Item(item) => {
                 let mut candidate = self.clone();
                 candidate.declare(item.declaration)?;
@@ -222,6 +242,10 @@ impl ReplSession {
                 self.last_success = Some(value.clone());
                 Ok(Some(value))
             }
+            ReplInput::ExpressionStatement(expression) => {
+                self.evaluate_discarded(expression, cancellation, None)?;
+                Ok(None)
+            }
             ReplInput::Item(item) => {
                 self.declare_admitted(&item.declaration, cancellation)?;
                 Ok(None)
@@ -244,6 +268,7 @@ impl ReplSession {
         cancellation: Option<&CancellationToken>,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, cancellation, None)
+            .and_then(crate::Value::canonical)
     }
 
     fn evaluate_with_effects(
@@ -252,6 +277,17 @@ impl ReplSession {
         effects: &mut dyn crate::EffectHandler,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, None, Some(effects))
+            .and_then(crate::Value::canonical)
+    }
+
+    fn evaluate_discarded(
+        &self,
+        expression: &Expr,
+        cancellation: Option<&CancellationToken>,
+        effects: Option<&mut dyn crate::EffectHandler>,
+    ) -> Result<(), EvaluationError> {
+        self.evaluate_inner(expression, cancellation, effects)?
+            .discard_result()
     }
 
     fn evaluate_inner(
@@ -259,7 +295,7 @@ impl ReplSession {
         expression: &Expr,
         cancellation: Option<&CancellationToken>,
         effects: Option<&mut dyn crate::EffectHandler>,
-    ) -> Result<CanonicalValue, EvaluationError> {
+    ) -> Result<crate::Value, EvaluationError> {
         self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
@@ -286,14 +322,18 @@ impl ReplSession {
             cancellation,
         };
         context.items(self.functions.len())?;
-        let mut scope = Scope::from_environment(&environment, &mut context)?;
+        let mut scope = Scope::from_repl_environment(
+            &environment,
+            &self.contextual_environment,
+            &mut context,
+        )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
         scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
-        value.canonical()
+        Ok(value)
     }
 
     fn declare(&mut self, declaration: Declaration) -> Result<(), EvaluationError> {
@@ -338,7 +378,7 @@ impl ReplSession {
                 tail.clone(),
             ),
             Declaration::Let { pattern, value, .. } => {
-                self.let_binding(pattern, value, cancellation)
+                self.let_binding(pattern, value, cancellation, None)
             }
             Declaration::Function { signature, body } => {
                 // Generic execution has no bounded runtime implementation.
@@ -389,12 +429,15 @@ impl ReplSession {
         pattern: &Pattern,
         expression: &Expr,
         cancellation: Option<&CancellationToken>,
+        effects: Option<&mut dyn crate::EffectHandler>,
     ) -> Result<(), EvaluationError> {
         self.reject_ambiguous_expression(expression)?;
         let mut environment = self.environment.clone();
         if let Some(value) = &self.last_success {
             environment.insert("$_".into(), value.clone());
         }
+        let value_format = ValueFormat::Ovb1;
+        let value_context: Option<Format3Context> = None;
         let mut context = Context {
             limits: self.limits,
             steps: 0,
@@ -404,12 +447,16 @@ impl ReplSession {
             repl_bindings: true,
             restrict_function_names: true,
             reject_unhandled_field_calls: true,
-            effects: None,
+            effects,
             namespace: None,
             transfer: None,
             cancellation,
         };
-        let mut scope = Scope::from_environment(&environment, &mut context)?;
+        let mut scope = Scope::from_repl_environment(
+            &environment,
+            &self.contextual_environment,
+            &mut context,
+        )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
         scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
@@ -427,17 +474,28 @@ impl ReplSession {
             self.release_wildcard_for_local(&name);
             self.namespace_bindings.remove(&name);
         }
-        self.environment = scope
-            .0
-            .into_iter()
-            .map(|(name, value)| value.canonical().map(|value| (name, value)))
-            .collect::<Result<_, _>>()?;
+        let mut environment = Environment::new();
+        let mut contextual_environment = BTreeMap::new();
+        for (name, value) in scope.0 {
+            let (format, _) = value.contextual_profile(value_format, value_context.as_ref());
+            if format == ValueFormat::Ovb1 {
+                environment.insert(name, value.canonical()?);
+            } else {
+                contextual_environment.insert(
+                    name,
+                    Context::contextual_value(value, value_format, value_context.as_ref())?,
+                );
+            }
+        }
+        self.environment = environment;
+        self.contextual_environment = contextual_environment;
         self.check_retained()?;
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
         Ok(())
     }
+
 
     fn import(&mut self, path: &str, tail: UseTail) -> Result<(), EvaluationError> {
         match tail {
@@ -477,6 +535,13 @@ impl ReplSession {
                 return Err(error("ORNA-EVAL-NAME"));
             }
             self.aliases.insert(alias.into(), canonical.into());
+            return self.check_retained();
+        }
+        if let Some(value) = self.contextual_environment.get(canonical).cloned() {
+            if self.binding_taken(alias) {
+                return Err(error("ORNA-EVAL-NAME"));
+            }
+            self.contextual_environment.insert(alias.into(), value);
             return self.check_retained();
         }
         if let Some(value) = self.environment.get(canonical).cloned() {
@@ -654,6 +719,7 @@ impl ReplSession {
 
     fn binding_taken(&self, name: &str) -> bool {
         self.environment.contains_key(name)
+            || self.contextual_environment.contains_key(name)
             || self.functions.contains_key(name)
             || self.aliases.contains_key(name)
             || matches!(name, "$_" | "$?")
@@ -661,6 +727,7 @@ impl ReplSession {
 
     fn alias_taken(&self, name: &str, target: &str) -> bool {
         self.environment.contains_key(name)
+            || self.contextual_environment.contains_key(name)
             || self.aliases.contains_key(name)
             || (self.functions.contains_key(name) && name != target)
             || matches!(name, "$_" | "$?")
@@ -670,7 +737,8 @@ impl ReplSession {
         let count = self
             .environment
             .len()
-            .checked_add(self.functions.len())
+            .checked_add(self.contextual_environment.len())
+            .and_then(|count| count.checked_add(self.functions.len()))
             .and_then(|count| count.checked_add(self.aliases.len()))
             .and_then(|count| {
                 self.wildcard_ambiguities
@@ -1448,6 +1516,32 @@ mod tests {
                 .submit(include_str!("fixtures/repl-inline-source-ba1da4b7.orna"))
                 .unwrap(),
             Some(Value::int(42.into()))
+        );
+    }
+
+    #[test]
+    fn semicolon_terminated_expressions_discard_results_without_replacing_last_result() {
+        let mut session = ReplSession::new(Limits::default());
+        assert_eq!(
+            session.submit("40").expect("first expression"),
+            Some(Value::int(40.into())),
+        );
+        assert_eq!(session.submit("2;").expect("statement"), None);
+        assert_eq!(
+            session.submit("$_").expect("previous result remains available"),
+            Some(Value::int(40.into())),
+        );
+    }
+
+    #[test]
+    fn discarded_results_still_propagate_nested_evaluation_errors() {
+        let value = crate::Value::List(vec![crate::Value::Error(error("ORNA-EVAL-UNSUPPORTED"))]);
+        assert_eq!(
+            value
+                .discard_result()
+                .expect_err("nested errors are not discarded")
+                .code(),
+            "ORNA-EVAL-UNSUPPORTED",
         );
     }
 
