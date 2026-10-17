@@ -149,7 +149,18 @@ fn validate_candidate_source_rows(
                     "table identity, descriptor, database or snapshot conflicts with the selected snapshot; the pending range was preserved",
                 ));
             }
-            let key = orna_repository_v1::TypedKey::decode_canonical(mutation.key()).map_err(
+            let key_bytes = orna_storage_v1::canonicalize_runtime_key(
+                binding.descriptor(),
+                table_id.bytes(),
+                mutation.key(),
+            )
+            .map_err(|error| {
+                publish_error(
+                    "source row key is not canonical",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+            let key = orna_repository_v1::TypedKey::decode_canonical(&key_bytes).map_err(
                 |error| {
                     publish_error(
                         "source row key is not canonical",
@@ -161,7 +172,7 @@ fn validate_candidate_source_rows(
                 Some(fields) => {
                     binding
                         .descriptor()
-                        .validate_stored_row(table_id.bytes(), mutation.key(), fields)
+                        .validate_stored_row(table_id.bytes(), &key_bytes, fields)
                         .map_err(|error| {
                             publish_error(
                                 "source row does not match its committed schema",
@@ -169,17 +180,20 @@ fn validate_candidate_source_rows(
                             )
                         })?;
                     if let Some(new_key) = mutation.rekey_to() {
-                        orna_repository_v1::TypedKey::decode_canonical(new_key).map_err(
-                            |error| {
-                                publish_error(
-                                    "source row rekey is not canonical",
-                                    format!("{error:?}; the pending range was preserved"),
-                                )
-                            },
-                        )?;
+                        let new_key_bytes = orna_storage_v1::canonicalize_runtime_key(
+                            binding.descriptor(),
+                            table_id.bytes(),
+                            new_key,
+                        )
+                        .map_err(|error| {
+                            publish_error(
+                                "source row rekey is not canonical",
+                                format!("{error:?}; the pending range was preserved"),
+                            )
+                        })?;
                         binding
                             .descriptor()
-                            .validate_stored_row(table_id.bytes(), new_key, fields)
+                            .validate_stored_row(table_id.bytes(), &new_key_bytes, fields)
                             .map_err(|error| {
                                 publish_error(
                                     "source row rekey does not match its committed schema",
@@ -191,7 +205,7 @@ fn validate_candidate_source_rows(
                 None => {
                     binding
                         .descriptor()
-                        .validate_stored_key(table_id.bytes(), mutation.key())
+                        .validate_stored_key(table_id.bytes(), &key_bytes)
                         .map_err(|error| {
                             publish_error(
                                 "source row key does not match its committed schema",
