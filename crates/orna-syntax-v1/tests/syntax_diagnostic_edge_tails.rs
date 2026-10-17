@@ -44,7 +44,7 @@ fn postfix_question_on_name_gets_the_removed_operator_diagnostic() {
     assert_eq!(diagnostic.code, "ORNA091-E-POSTFIX-QUESTION");
     assert_eq!(
         diagnostic.message,
-        "remove postfix `?`; failure propagation is automatic"
+        "postfix propagation `?` was removed; failures propagate automatically"
     );
     let question = source.find('?').expect("fixture has a question mark");
     assert_eq!(diagnostic.span.start, question);

@@ -55,6 +55,10 @@ pub(super) enum Command {
     Status {
         format: StatusFormat,
     },
+    AddRow {
+        table: String,
+        key: String,
+    },
     Fetch {
         remote: String,
         branch: String,
@@ -82,12 +86,12 @@ pub(super) enum Command {
         mountpoint: PathBuf,
         selector: String,
     },
-    /// mount DIR --cwd: read-only view of the current committed workspace.
+    /// mount DIR --cwd: writable current-workspace view with validated row saves.
     MountCwd {
         mountpoint: PathBuf,
     },
 
-    /// `mount status [--json]`: the attached read-only views.
+    /// `mount status [--json]`: the attached mount views.
     MountStatus {
         json: bool,
     },
@@ -310,6 +314,29 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 ));
             }
             Command::Init(target)
+        }
+        Some("add") => {
+            if words.next() != Some("--row") {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "`add` requires `--row`",
+                    "use `add --row TABLE KEY` to stage one logical row",
+                ));
+            }
+            let table = words.next().ok_or_else(|| {
+                Diagnostic::usage("E1001", "`add --row` needs a table", "use `add --row TABLE KEY`")
+            })?;
+            let key = words.next().ok_or_else(|| {
+                Diagnostic::usage("E1001", "`add --row` needs a key", "use `add --row TABLE KEY`")
+            })?;
+            if words.next().is_some() {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "unexpected trailing arguments for `add`",
+                    "use `add --row TABLE KEY` with exactly one table and key",
+                ));
+            }
+            Command::AddRow { table: table.to_owned(), key: key.to_owned() }
         }
         Some("status") => {
             let local_format = match words.next() {

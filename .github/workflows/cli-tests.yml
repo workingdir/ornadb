@@ -33,6 +33,8 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Test the orna-cli-v1 integration suite
+        env:
+          ORNA_REQUIRE_FUSE: "1"
         run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture
   repository-v1-lib-tests:
     runs-on: ubuntu-latest
