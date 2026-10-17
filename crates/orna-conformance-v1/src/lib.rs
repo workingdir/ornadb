@@ -697,9 +697,9 @@ impl Corpus {
             ));
         }
         let required: BTreeSet<_> = self.requirements.iter().map(|r| r.id.as_str()).collect();
-        if required.len() != self.requirements.len() || self.requirements.len() != 870 {
+        if required.len() != self.requirements.len() || self.requirements.len() != 947 {
             return Err(CorpusError(
-                "requirements corpus must contain 870 unique entries".into(),
+                "requirements corpus must contain 947 unique entries".into(),
             ));
         }
         let mapped: BTreeSet<_> = self

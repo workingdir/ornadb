@@ -1,0 +1,24 @@
+{
+  "retired": [
+    {
+      "id": "ORNA-PATH-006",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-012",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PROJECT-001",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PROJECT-003",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    }
+  ]
+}
