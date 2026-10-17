@@ -1,4 +1,4 @@
-//! Gate E.1: the workspace view is a real Linux FUSE mount backed by the
+//! Gate E.1: a historical format-3 view is a real Linux FUSE mount backed by the
 //! published row graph, and Blob reads are served as verified byte ranges.
 
 #![cfg(target_os = "linux")]
@@ -194,7 +194,7 @@ fn mountinfo_contains(mountpoint: &Path) -> bool {
 }
 
 #[tokio::test]
-async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
+async fn mount_at_prior_commit_reads_path_changed_afterward() {
     if !fuse_test_available() {
         return;
     }
@@ -265,6 +265,18 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         1
     );
     let current = repository.head().unwrap().unwrap();
+    let historical_commit = current.to_string();
+    let revised_row = format!(
+        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
+    );
+    std::fs::write(repository_directory.path().join("Music/london.orna"), &revised_row)
+        .unwrap();
+    format3::git(repository_directory.path(), &["add", "Music/london.orna"]);
+    format3::git(
+        repository_directory.path(),
+        &["commit", "--quiet", "-m", "update source row after historical commit"],
+    );
+    assert_ne!(repository.head().unwrap().unwrap().to_string(), historical_commit);
     let schema = orna_project_v1::ProjectLoader::default()
         .resolve_committed_source_table_schema(
             &repository,
@@ -283,12 +295,13 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
             repository_directory.path().to_str().unwrap(),
             "mount",
             mountpoint.to_str().unwrap(),
-            "--cwd",
+            "--at",
+            historical_commit.as_str(),
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start mount --cwd");
+        .expect("start mount --at historical commit");
     let mut mounted = MountedProcess {
         child,
         mountpoint: mountpoint.clone(),
