@@ -748,6 +748,19 @@ async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
     std::fs::set_permissions(&chunk_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::write(&chunk_path, b"corrupt Git loose object bytes").unwrap();
 
+    let metadata = Command::new("cat")
+        .arg(mountpoint.join("Music/london/data.orna"))
+        .output()
+        .expect("read row metadata after corrupting the media chunk");
+    assert!(
+        metadata.status.success(),
+        "metadata read must not fetch corrupt media payload"
+    );
+    let metadata = String::from_utf8(metadata.stdout).unwrap();
+    assert!(metadata.contains(
+        "content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" }"
+    ));
+
     let mut blob = File::open(&blob_path).expect("open projected Blob");
     let mut byte = [0u8; 1];
     let error = blob
