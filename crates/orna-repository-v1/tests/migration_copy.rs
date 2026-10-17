@@ -4,8 +4,8 @@ mod test_support;
 use std::{fs, path::Path, process::Command};
 
 use orna_repository_v1::{
-    LegacyAnnotationCandidate, LegacyAnnotationInventory, MigrationAnnotationDefaults,
-    MigrationContinuityRecord, Repository, migration_copy,
+    LegacyAnnotationCandidate, MigrationAnnotationDefaults, MigrationContinuityRecord, Repository,
+    migration_copy::{self, LegacyAnnotationInventory},
 };
 use tempfile::TempDir;
 
@@ -403,6 +403,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         source.path(),
         &["status", "--porcelain=v2", "--untracked-files=all"],
     );
+    let source_index = repository.index_generation().unwrap();
     let committed_bytes = git_output(
         source.path(),
         &["show", &format!("{source_head}:tracked.txt")],
@@ -428,7 +429,8 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         defaults,
     )
     .unwrap();
-
+    let migrated_head = copy.source_commit().clone();
+    let migrated = Repository::discover(copy.destination()).unwrap();
     assert_eq!(
         git_output(
             source.path(),
