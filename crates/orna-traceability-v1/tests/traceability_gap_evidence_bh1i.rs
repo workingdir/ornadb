@@ -192,6 +192,32 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
+const RETIRED_REQUIREMENTS: &[&str] = &["ORNA-PATH-006", "ORNA-PATH-012", "ORNA-PROJECT-001", "ORNA-PROJECT-003"];
+
+fn active_rows() -> impl Iterator<Item = &'static Row> {
+    ROWS.iter().filter(|row| !RETIRED_REQUIREMENTS.contains(&row.requirement))
+}
+
+fn assert_superseded_requirements(root: &Path) {
+    let changes: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("provenance/requirement-changes.json"))
+            .expect("read authoritative requirement changes"),
+    )
+    .expect("parse authoritative requirement changes");
+    let retired = changes["retired"].as_array().expect("retired requirement array");
+    for requirement in RETIRED_REQUIREMENTS {
+        let entry = retired
+            .iter()
+            .find(|entry| entry["id"] == *requirement)
+            .expect("legacy requirement is recorded as retired");
+        assert_eq!(entry["previous_source"], "source/07-tables.md");
+        assert!(entry["reason"].as_str().is_some_and(|reason| {
+            reason.contains("Superseded by the final single-row-store/native graph/VFS contract")
+                && reason.contains("compatibility archive")
+        }));
+    }
+}
+
 fn declare_fixtures(root: &Path) {
     let evidence_path = root.join("tests/requirement-evidence.json");
     let mut evidence: Value = serde_json::from_str(
@@ -201,7 +227,7 @@ fn declare_fixtures(root: &Path) {
     let entries = evidence["requirements"]
         .as_array_mut()
         .expect("requirement evidence array");
-    for row in ROWS {
+    for row in active_rows() {
         let entry = entries
             .iter_mut()
             .find(|entry| entry["requirement"] == row.requirement)
@@ -224,6 +250,7 @@ fn declare_fixtures(root: &Path) {
 #[test]
 fn ten_fixture_typecheck_boundaries_remain_per_requirement() {
     let copied = ReferenceCopy::new();
+    assert_superseded_requirements(copied.path());
     let corpus = Corpus::load(copied.path()).expect("copied frozen corpus loads");
     assert_eq!(
         corpus
@@ -237,8 +264,7 @@ fn ten_fixture_typecheck_boundaries_remain_per_requirement() {
     let harness = Harness::new(corpus);
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
     let run = harness.run(&mut adapter);
-    let bindings = ROWS
-        .iter()
+    let bindings = active_rows()
         .map(|row| FixtureStageBinding {
             requirement_id: row.requirement.into(),
             fixture_id: row.fixture_id.into(),
@@ -252,9 +278,9 @@ fn ten_fixture_typecheck_boundaries_remain_per_requirement() {
         .engine_witnesses(&run, &bindings)
         .expect("each selected fixture typecheck produced bounded execution evidence");
     let report = generate_with_engine_witnesses(copied.path(), &witnesses)
-        .expect("the traceability consumer preserves ten distinct rows");
+        .expect("the traceability consumer preserves current requirement rows");
 
-    for row in ROWS {
+    for row in active_rows() {
         let requirement = report
             .requirements
             .iter()
@@ -278,7 +304,8 @@ fn ten_fixture_typecheck_boundaries_remain_per_requirement() {
         );
     }
     println!(
-        "ORNA-TEST-004 rows={} full_requirement_passes=0 frozen_register=unchanged",
-        ROWS.len()
+        "ORNA-TEST-004 rows={} retired_ids={} full_requirement_passes=0 frozen_register=unchanged",
+        active_rows().count(),
+        RETIRED_REQUIREMENTS.len()
     );
 }
