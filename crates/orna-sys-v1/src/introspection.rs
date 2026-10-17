@@ -3763,7 +3763,7 @@ fn explain_query_core_with_wal_rotation_chains(
         add_window_pushdown_chain_details(&mut operators[current].details, &window_identity);
     }
     for (planned_position, (declared_position, join)) in
-        planned_query_join_order(&query.joins).into_iter().enumerate()
+        planned_query_join_order(query).into_iter().enumerate()
     {
         let decorrelated_subquery = declared_position
             .checked_sub(declared_join_count)
@@ -7487,17 +7487,60 @@ fn source_cardinality(statistics: Option<&QuerySourceStatistics>) -> Cardinality
 /// Selects a deterministic physical order for the right-hand join inputs.
 /// ORNA permits internal reordering when results and observable order are
 /// preserved, but does not prescribe a cost heuristic. This explain-only
-/// adapter ranks fully estimated scans by rows plus 4-KiB byte blocks, then
-/// keeps tied and sparse inputs in declaration order. The executor remains
-/// responsible for restoring any declared result ordering.
-fn planned_query_join_order(joins: &[QueryJoinDescription]) -> Vec<(usize, &QueryJoinDescription)> {
+/// adapter ranks complete row-and-byte estimates for a simple pipeline. It
+/// preserves declared order when partial or mutable statistics, cardinality
+/// overflow risk, or downstream operators can make cumulative estimates
+/// order-sensitive. Fully unknown scans follow known-cost joins.
+
+fn planned_query_join_order(query: &QueryPlanDescription) -> Vec<(usize, &QueryJoinDescription)> {
+    let joins = &query.joins;
+    let scan_work = |statistics: &QuerySourceStatistics| {
+        statistics
+            .estimated_rows
+            .zip(statistics.estimated_bytes)
+            .map(|(rows, bytes)| u128::from(rows) + u128::from(ceil_div(bytes, 4096)))
+    };
+    let has_partial_or_mutable_statistics = query
+        .source_statistics
+        .iter()
+        .chain(joins.iter().filter_map(|join| join.statistics.as_ref()))
+        .any(|statistics| {
+            statistics.mutable_branch.is_some()
+                || statistics.estimated_rows.is_some() != statistics.estimated_bytes.is_some()
+        });
+    let has_complex_pipeline = query.predicate.is_some()
+        || query.distinct
+        || !query.ordering.is_empty()
+        || query.limit.is_some()
+        || !query.mutations.is_empty()
+        || query.materialize_into.is_some();
+    let has_boundary_scan_work = query
+        .source_statistics
+        .iter()
+        .chain(joins.iter().filter_map(|join| join.statistics.as_ref()))
+        .filter_map(scan_work)
+        .any(|work| work >= u128::from(u64::MAX));
+    let maximum_input_rows = query
+        .source_statistics
+        .iter()
+        .chain(joins.iter().filter_map(|join| join.statistics.as_ref()))
+        .filter_map(|statistics| statistics.estimated_rows)
+        .max()
+        .unwrap_or_default();
+    let has_join_cardinality_overflow_risk =
+        u128::from(maximum_input_rows) * u128::from(maximum_input_rows)
+            > u128::from(u64::MAX);
+    if has_partial_or_mutable_statistics
+        || has_complex_pipeline
+        || has_boundary_scan_work
+        || has_join_cardinality_overflow_risk
+    {
+        return joins.iter().enumerate().collect();
+    }
+
     let mut ordered = joins.iter().enumerate().collect::<Vec<_>>();
     ordered.sort_by_key(|(declared_position, join)| {
-        let work = join
-            .statistics
-            .as_ref()
-            .and_then(|statistics| statistics.estimated_rows.zip(statistics.estimated_bytes))
-            .map(|(rows, bytes)| u128::from(rows) + u128::from(ceil_div(bytes, 4096)));
+        let work = join.statistics.as_ref().and_then(scan_work);
         (work.is_none(), work.unwrap_or_default(), *declared_position)
     });
     ordered
@@ -11518,7 +11561,7 @@ fn query_paired_bounded_window_spill_window_chain_fold(
         estimated_io_work: Some(0),
         overflowed: false,
     };
-    for (_, join) in planned_query_join_order(&query.joins) {
+    for (_, join) in planned_query_join_order(query) {
         let Some(pair) = join_pair_identity_for_join(join, pairs) else {
             continue;
         };
@@ -11688,7 +11731,7 @@ fn query_paired_bounded_window_spill_chain_window_fold(
         overflowed: false,
     };
 
-    for (_, join) in planned_query_join_order(&query.joins) {
+    for (_, join) in planned_query_join_order(query) {
         let Some(pair) = join_pair_identity_for_join(join, pairs) else {
             continue;
         };
