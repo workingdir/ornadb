@@ -467,9 +467,7 @@ async fn publish_projects_a_new_format3_row_from_its_typed_key_without_source_lo
         .trim_end()
         .replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
     let logical_key = "runtime/../only";
-    let key = orna_repository_v1::TypedKey::Text(logical_key.to_owned())
-        .canonical_bytes()
-        .unwrap();
+    let key = logical_key.as_bytes().to_vec();
     let projection_path =
         orna_storage_v1::LoosePath::for_key("Object", &[logical_key.to_owned()]).unwrap();
     let projection = root_path.join(projection_path.as_managed_path().as_path());
