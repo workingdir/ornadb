@@ -1986,8 +1986,22 @@ impl RuntimePublicationCoordinator {
     /// Executes repository ref, index, and worktree boundaries. The journal
     /// intentionally remains at `WorktreeReconciled` after this returns.
     pub fn publish(&mut self, repository: &Repository) -> Result<IndexGeneration, Error> {
+        self.publish_with_stage_hook(repository, |_| {})
+    }
+
+    /// Observes durable ref and index journal stages.
+    pub fn publish_with_stage_hook(
+        &mut self,
+        repository: &Repository,
+        on_stage: impl FnMut(orna_repository_v1::PublicationJournalStage),
+    ) -> Result<IndexGeneration, Error> {
         repository
-            .publish_candidate(&self.expected_index, &self.candidate, &mut self.journal)
+            .publish_candidate_with_stage_hook(
+                &self.expected_index,
+                &self.candidate,
+                &mut self.journal,
+                on_stage,
+            )
             .map_err(map_publication_repository_error)
     }
 
