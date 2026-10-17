@@ -1,6 +1,8 @@
 //! Bounded, logical traceability for the published Orna 1.0.0 reference bundle.
 //! The report intentionally contains identifiers and statuses, never source bodies or host paths.
 
+pub mod citation_ratchet;
+
 use orna_conformance_v1::{
     EngineWitnesses, EvidenceStatus, ImplementationEvidenceAggregate,
     ImplementationEvidenceOverlay, ImplementationEvidenceSource, ScenarioExecutionWitnesses, Stage,
@@ -709,9 +711,9 @@ fn validate(
     scenarios: &Scenarios,
     models: &Models,
 ) -> Result<()> {
-    if requirements.len() != 870 || !unique(requirements.iter().map(|r| r.id.as_str())) {
+    if requirements.len() != 947 || !unique(requirements.iter().map(|r| r.id.as_str())) {
         return Err(err(
-            "requirements must contain exactly 870 unique identifiers",
+            "requirements must contain exactly 947 unique identifiers",
         ));
     }
     if requirements
@@ -722,11 +724,11 @@ fn validate(
             "requirements contain an empty chapter or source identifier",
         ));
     }
-    if evidence.requirements.len() != 870
+    if evidence.requirements.len() != 947
         || !unique(evidence.requirements.iter().map(|e| e.requirement.as_str()))
     {
         return Err(err(
-            "requirement evidence must contain exactly 870 unique identifiers",
+            "requirement evidence must contain exactly 947 unique identifiers",
         ));
     }
     let ids = requirements
@@ -1182,9 +1184,9 @@ mod tests {
         }
     }
     #[test]
-    fn covers_all_870_requirements() {
+    fn covers_all_947_requirements() {
         let report = generate(corpus()).expect("valid corpus");
-        assert_eq!(report.requirements.len(), 870);
+        assert_eq!(report.requirements.len(), 947);
         assert!(
             report
                 .requirements

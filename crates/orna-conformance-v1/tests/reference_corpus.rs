@@ -6,7 +6,7 @@ fn loads_the_complete_unchanged_reference_corpus() {
     assert_eq!(corpus.manifest.fixtures.len(), 167);
     assert_eq!(corpus.invalid_metadata.fixtures.len(), 80);
     assert_eq!(corpus.vectors.len(), 6);
-    assert_eq!(corpus.requirements.len(), 870);
+    assert_eq!(corpus.requirements.len(), 947);
     assert!(corpus.diagnostics.values().all(|diagnostic| {
         diagnostic.version == "1.0.0" && diagnostic.status == "expected-not-executed"
     }));
@@ -29,7 +29,7 @@ fn requirement_evidence_keeps_all_authoritative_not_executed_markers() {
         .as_array()
         .expect("requirement evidence entries are an array");
 
-    assert_eq!(entries.len(), 870);
+    assert_eq!(entries.len(), 947);
     assert!(entries.iter().all(|entry| {
         entry["implementation_result"] == "not executed"
             && entry["full_implementation_coverage_claimed"] == false
