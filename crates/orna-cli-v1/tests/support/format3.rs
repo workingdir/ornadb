@@ -158,6 +158,7 @@ pub async fn publish_source_rows(
     repository: &Repository,
     state: &RuntimeState,
     paths_by_key: &std::collections::BTreeMap<Vec<u8>, LoosePath>,
+    publish_id: [u8; 16],
 ) {
     let checkpoint = state
         .latest_checkpoint()
@@ -168,7 +169,7 @@ pub async fn publish_source_rows(
         .publish_pending(
             repository,
             state,
-            [0x96; 16],
+            publish_id,
             &checkpoint,
             |mutation| {
                 Ok(paths_by_key
@@ -599,6 +600,34 @@ fn persisted_format3_context(
         algorithm,
         NativeOid::from_bytes(&git_oid_bytes(schema_root)).unwrap(),
         NativeOid::from_bytes(&git_oid_bytes(store_root)).unwrap(),
+        AvailabilityState::Available,
+        OwnerLifetime::new([0x66; 16]),
+        Format3Quota::new(16, 1 << 20).unwrap(),
+        Arc::new(UnreadableFixtureResolver),
+    )
+    .unwrap()
+}
+
+/// Creates a payload-unreadable context pinned to an arbitrary repository commit.
+pub fn format3_context_for_snapshot(repository: &Repository, commit: &str) -> Format3Context {
+    let database_id = *repository
+        .open_format_context()
+        .unwrap()
+        .require_database_id()
+        .unwrap()
+        .as_bytes();
+    let algorithm = GitHash::Sha1;
+    let root = NativeOid::from_bytes(&[0x55; 20]).unwrap();
+    Format3Context::from_persisted(
+        database_id,
+        Snapshot::Commit {
+            database: database_id,
+            algorithm,
+            oid: git_oid_bytes(commit),
+        },
+        algorithm,
+        root.clone(),
+        root,
         AvailabilityState::Available,
         OwnerLifetime::new([0x66; 16]),
         Format3Quota::new(16, 1 << 20).unwrap(),

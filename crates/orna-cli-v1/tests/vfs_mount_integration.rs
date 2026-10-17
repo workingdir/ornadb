@@ -125,6 +125,14 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
     let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let blob_captures = [("content", capture.as_str())];
+    let capture_rows = [media_commit::SourceCaptureRow {
+        key: "london",
+        blob_fields: &blob_captures,
+        source_row: None,
+        ordinal: 0x80,
+        insert_only: true,
+    }];
     media_commit::commit_source_captures_for_table(
         &repository,
         &state,
@@ -133,8 +141,7 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
         relation_id,
         &format_context,
         "Music",
-        "content",
-        &[(&capture, "london", 0x80)],
+        &capture_rows,
     )
     .await;
 
