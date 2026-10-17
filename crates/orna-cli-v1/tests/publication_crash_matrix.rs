@@ -503,7 +503,38 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     assert_eq!(std::fs::read(&unstaged_path).unwrap(), b"unstaged before crash\n");
     let recovered_head = head(&repository);
     drop(recovered);
+    let store_path = root.join(".orna/store/data");
+    let mut edited_store = std::fs::read(&store_path).expect("recovered store data exists");
+    assert!(!edited_store.is_empty(), "the recovered store data has bytes to edit");
+    edited_store[0] ^= 0x01;
+    std::fs::write(&store_path, &edited_store).unwrap();
+    let store_status_before_publish =
+        git_output(root, &["status", "--short", "--", ".orna/store/data"], None);
 
+    let attempted_tail = cli(root, &["publish"]);
+    let store_status_after_publish =
+        git_output(root, &["status", "--short", "--", ".orna/store/data"], None);
+    assert!(
+        String::from_utf8_lossy(&store_status_before_publish).contains(".orna/store/data")
+            || String::from_utf8_lossy(&store_status_after_publish).contains(".orna/store/data"),
+        "a user edit under .orna/store remains visible to Git after recovery and publish"
+    );
+    assert_eq!(
+        std::fs::read(&store_path).unwrap(),
+        edited_store,
+        "later publish replaced a user edit under .orna/store"
+    );
+    if !attempted_tail.status.success() {
+        assert_eq!(
+            head(&repository),
+            recovered_head,
+            "a detected .orna/store edit must not advance HEAD"
+        );
+    }
+    let indexed_store = git_output(root, &["show", ":.orna/store/data"], None);
+    std::fs::write(&store_path, indexed_store).unwrap();
+
+    drop(attempted_tail);
     let tail = cli(root, &["publish"]);
     assert!(tail.status.success(), "later tail publish failed: {}", String::from_utf8_lossy(&tail.stderr));
     assert_ne!(head(&repository), recovered_head, "pending later tail was not publishable");
