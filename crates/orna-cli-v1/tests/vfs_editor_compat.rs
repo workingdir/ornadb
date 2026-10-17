@@ -236,6 +236,37 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     .expect("in-place editor save must validate and sync");
     assert!(std::fs::read_to_string(&data_path).unwrap().contains("In place"));
 
+
+    let arbitrary = row_directory.join("unrelated");
+    assert!(
+        File::create(&arbitrary).is_err(),
+        "an arbitrary sibling create must not become a row-save candidate",
+    );
+
+    let stale_temporary = row_directory.join(".data.orna.stale-tmp");
+    let mut stale_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&stale_temporary)
+        .expect("editor creates a replacement scratch");
+    stale_file
+        .write_all(b"{ title: \"Stale candidate\", artist: \"Kieran\", }\n")
+        .unwrap();
+    stale_file.sync_all().unwrap();
+    drop(stale_file);
+    write_and_sync(
+        &data_path,
+        "{ title: \"New baseline\", artist: \"Kieran\", }\n",
+    )
+    .expect("later row save advances the baseline");
+    assert!(
+        std::fs::rename(&stale_temporary, &data_path).is_err(),
+        "rename must reject a scratch whose captured row baseline is stale",
+    );
+    assert!(
+        std::fs::read_to_string(&data_path).unwrap().contains("New baseline"),
+        "stale rename must preserve the newer accepted row",
+    );
     let temporary = row_directory.join(".data.orna.editor-tmp");
     let mut file = OpenOptions::new()
         .write(true)
