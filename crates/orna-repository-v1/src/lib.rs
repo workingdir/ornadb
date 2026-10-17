@@ -238,6 +238,64 @@ pub struct PrivateCommit {
     commit: GitCommitRef,
 }
 
+/// Opaque, repository-local review of one exact staged index generation.
+/// Construction is restricted to this crate so callers cannot forge a review.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReviewedCandidateReview {
+    database_id: Uuid,
+    runtime_id: Uuid,
+    pending_generation: u64,
+    repository_format: RepositoryFormat,
+    head_ref: Option<String>,
+    cwd: CwdGeneration,
+    cwd_snapshot_descriptor: Vec<u8>,
+    candidate_paths: Vec<String>,
+    index_bytes_digest: [u8; 32],
+    index_tree: IndexTreeRef,
+    token: [u8; 32],
+}
+
+impl ReviewedCandidateReview {
+    pub(crate) fn token(&self) -> &[u8; 32] {
+        &self.token
+    }
+}
+
+fn append_cbor_head(bytes: &mut Vec<u8>, major: u8, value: u64) {
+    let prefix = major << 5;
+    match value {
+        0..=23 => bytes.push(prefix | value as u8),
+        24..=0xff => bytes.extend_from_slice(&[prefix | 24, value as u8]),
+        0x100..=0xffff => { bytes.push(prefix | 25); bytes.extend_from_slice(&(value as u16).to_be_bytes()); }
+        0x1_0000..=0xffff_ffff => { bytes.push(prefix | 26); bytes.extend_from_slice(&(value as u32).to_be_bytes()); }
+        _ => { bytes.push(prefix | 27); bytes.extend_from_slice(&value.to_be_bytes()); }
+    }
+}
+
+fn append_cbor_bytes(bytes: &mut Vec<u8>, value: &[u8]) { append_cbor_head(bytes, 2, value.len() as u64); bytes.extend_from_slice(value); }
+fn append_cbor_text(bytes: &mut Vec<u8>, value: &str) { append_cbor_head(bytes, 3, value.len() as u64); bytes.extend_from_slice(value.as_bytes()); }
+fn append_cbor_optional_text(bytes: &mut Vec<u8>, value: Option<&str>) { match value { Some(value) => append_cbor_text(bytes, value), None => bytes.push(0xf6) } }
+
+fn reviewed_candidate_token(review: &ReviewedCandidateReview) -> [u8; 32] {
+    let mut payload = Vec::with_capacity(256 + review.cwd_snapshot_descriptor.len());
+    append_cbor_head(&mut payload, 4, 11);
+    append_cbor_bytes(&mut payload, review.database_id.as_bytes());
+    append_cbor_bytes(&mut payload, review.runtime_id.as_bytes());
+    append_cbor_optional_text(&mut payload, review.cwd.head().map(GitCommitRef::as_str));
+    append_cbor_optional_text(&mut payload, review.head_ref.as_deref());
+    append_cbor_text(&mut payload, review.index_tree.as_str());
+    append_cbor_bytes(&mut payload, &review.index_bytes_digest);
+    append_cbor_head(&mut payload, 4, review.candidate_paths.len() as u64);
+    for path in &review.candidate_paths { append_cbor_text(&mut payload, path); }
+    append_cbor_bytes(&mut payload, &review.cwd_snapshot_descriptor);
+    append_cbor_head(&mut payload, 0, review.pending_generation);
+    append_cbor_head(&mut payload, 0, u64::from(review.repository_format.number()));
+    let mut digest = Sha256::new();
+    digest.update(b"orna.commit-review-worktree.v1\0");
+    digest.update(payload);
+    digest.finalize().into()
+}
+
 const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
 const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
 const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
@@ -3393,8 +3451,167 @@ impl Repository {
         Ok(())
     }
 
-    /// Executes the non-crashing PUB-1 publication path over one prepared
-    /// journal. Every durable stage is written before the next boundary; a
+    /// Captures the actual index tree and CWD observation without mutating
+    /// the ordinary index, worktree, or branch.
+    pub(crate) fn review_staged_candidate(
+        &self,
+        database_id: Uuid,
+        runtime_id: Uuid,
+        pending_generation: u64,
+        repository_format: RepositoryFormat,
+        runtime: RuntimeGeneration,
+        cwd_snapshot_descriptor: Vec<u8>,
+    ) -> Result<ReviewedCandidateReview, RepositoryError> {
+        let _coordination_lock = self.acquire_coordination_lock()?;
+        let cwd = self.cwd_generation_locked(runtime)?;
+        let index_tree = cwd.index.tree().cloned().ok_or(RepositoryError::UnbornHead)?;
+        let index = self.git_path("index")?;
+        let index_bytes = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if self.index_tree_from_file(&index)? != Some(index_tree.clone())
+            || self.head()? != cwd.head().cloned()
+            || self.current_branch()? != cwd.branch().map(str::to_owned)
+        {
+            return Err(RepositoryError::StaleCwd);
+        }
+        let mut path_diff = self.command();
+        path_diff.args(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z"]).arg(cwd.head().ok_or(RepositoryError::UnbornHead)?.as_str()).arg(index_tree.as_str());
+        let candidate_paths = self.run(path_diff)?.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()).map(|path| String::from_utf8(path.to_vec()).map_err(|_| RepositoryError::UnsafeManagedPath)).collect::<Result<Vec<_>, _>>()?;
+        let mut review = ReviewedCandidateReview {
+            database_id, runtime_id, pending_generation, repository_format,
+            head_ref: cwd.branch().map(str::to_owned), cwd, cwd_snapshot_descriptor, candidate_paths,
+            index_bytes_digest: Sha256::digest(&index_bytes).into(), index_tree, token: [0; 32],
+        };
+        review.token = reviewed_candidate_token(&review);
+        Ok(review)
+    }
+
+    pub(crate) fn commit_reviewed_candidate(
+        &self, review: &ReviewedCandidateReview, admitted_index_tree: &IndexTreeRef,
+        pending_generation: u64, runtime_intent_id: [u8; 16], message: &str,
+    ) -> Result<GitCommitRef, RepositoryError> {
+        self.commit_reviewed_candidate_with_stage_hook(
+            review, admitted_index_tree, pending_generation, runtime_intent_id, message, |_| {},
+        )
+    }
+
+    fn commit_reviewed_candidate_with_stage_hook(
+        &self,
+        review: &ReviewedCandidateReview,
+        admitted_index_tree: &IndexTreeRef,
+        pending_generation: u64,
+        runtime_intent_id: [u8; 16],
+        message: &str,
+        on_stage: impl FnMut(PublicationJournalStage),
+    ) -> Result<GitCommitRef, RepositoryError> {
+        if review.token != reviewed_candidate_token(review)
+            || admitted_index_tree != &review.index_tree
+            || pending_generation != review.pending_generation
+            || runtime_intent_id == [0; 16]
+            || message.is_empty()
+            || message.contains('\0')
+        {
+            return Err(RepositoryError::StaleReviewedCandidate);
+        }
+        if review.candidate_paths.is_empty() {
+            return Err(RepositoryError::SysGitNothingToCommit);
+        }
+        let token_hex = review.token.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let message_digest_hex = Sha256::digest(message.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let result_path = self.runtime.root().join(format!("reviewed-result-{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
+        if let Ok(recorded) = fs::read_to_string(&result_path) {
+            let mut fields = recorded.lines();
+            let Some(recorded_token) = fields.next() else {
+                return Err(RepositoryError::LocalStateUnavailable);
+            };
+            let Some(recorded_message_digest) = fields.next() else {
+                return Err(RepositoryError::LocalStateUnavailable);
+            };
+            let Some(recorded_commit) = fields.next() else {
+                return Err(RepositoryError::StaleReviewedCandidate);
+            };
+            if fields.next().is_some() {
+                return Err(RepositoryError::LocalStateUnavailable);
+            }
+            if recorded_token != token_hex || recorded_message_digest != message_digest_hex {
+                return Err(RepositoryError::StaleReviewedCandidate);
+            }
+            return self.snapshot_from_native_oid(recorded_commit.trim().to_owned());
+        }
+        let actual_cwd = self.cwd_generation(review.cwd.runtime())?;
+        let index = self.git_path("index")?;
+        let index_bytes = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if actual_cwd != review.cwd
+            || self.current_branch()? != review.head_ref
+            || Sha256::digest(&index_bytes).as_slice() != review.index_bytes_digest
+        {
+            return Err(RepositoryError::StaleReviewedCandidate);
+        }
+        let old_head = review.cwd.head().ok_or(RepositoryError::UnbornHead)?.clone();
+        let mut commit_tree = self.command();
+        commit_tree
+            .args(["commit-tree", admitted_index_tree.as_str(), "-p", old_head.as_str(), "-m"])
+            .arg(message);
+        let candidate = PrivateCommit {
+            tree: admitted_index_tree.clone(),
+            commit: self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?,
+        };
+        let anchor = format!("refs/orna/review-candidates/{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        let mut pin = self.command();
+        pin.args(["update-ref", anchor.as_str(), candidate.commit().as_str()]);
+        self.run(pin)?;
+        let context = self.open_private_candidate_format_context(&candidate)
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        if context.repository_format() != review.repository_format
+            || context.repository_format() != RepositoryFormat::Format3
+            || context.validate_schema_root().is_err()
+            || context.validate_store_root().is_err()
+        {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        let mut diff = self.command();
+        diff.args(["diff", "--no-renames", "--name-only", "-z"]).arg(old_head.as_str()).arg(candidate.commit().as_str());
+        let changed_paths = self.run(diff)?.stdout;
+        let mut entries = Vec::new();
+        for raw_path in changed_paths.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+            let path = std::str::from_utf8(raw_path).map_err(|_| RepositoryError::UnsafeManagedPath)?;
+            let path = ManagedPath::new(path)?;
+            let target = self.managed_target(&path)?;
+            let current = self.read_managed_file(&target)?;
+            entries.push(PublicationJournalEntry::new(path, current.clone(), current));
+        }
+        if entries.is_empty() { return Err(RepositoryError::SysGitNothingToCommit); }
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            old_head, candidate.commit().clone(), review.index_tree.clone(), runtime_intent_id, entries,
+        )?;
+        self.publish_candidate_impl_with_migration(
+            &review.cwd.index, &candidate, &mut journal, false, false, Some(review), on_stage,
+        )?;
+        self.mark_runtime_complete(runtime_intent_id, &mut journal)?;
+        fs::write(&result_path, format!("{token_hex}\n{message_digest_hex}\n{}", candidate.commit().as_str()))
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(candidate.commit().clone())
+    }
+
+    fn verify_reviewed_candidate_locked(
+        &self,
+        review: &ReviewedCandidateReview,
+    ) -> Result<(), RepositoryError> {
+        if review.token != reviewed_candidate_token(review) {
+            return Err(RepositoryError::StaleReviewedCandidate);
+        }
+        let actual = self.cwd_generation_locked(review.cwd.runtime())?;
+        let index = self.git_path("index")?;
+        let bytes = fs::read(index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if actual != review.cwd
+            || self.current_branch()? != review.head_ref
+            || actual.index.tree() != Some(&review.index_tree)
+            || Sha256::digest(bytes).as_slice() != review.index_bytes_digest
+        {
+            return Err(RepositoryError::StaleReviewedCandidate);
+        }
+        Ok(())
+    }
+
     /// returned error leaves the journal available for recovery.
     pub fn publish_candidate(
         &self,
@@ -3402,7 +3619,7 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
     ) -> Result<IndexGeneration, RepositoryError> {
-        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false, |_| {})
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false, None, |_| {})
     }
     /// Executes publication and observes durable ref/index journal stages.
     pub fn publish_candidate_with_stage_hook(
@@ -3418,6 +3635,7 @@ impl Repository {
             journal,
             false,
             false,
+            None,
             on_stage,
         )
     }
@@ -3492,7 +3710,7 @@ impl Repository {
             return Err(RepositoryError::InvalidFormatMigration);
         }
 
-        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, true, |_| {})
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, true, None, |_| {})
     }
 
     /// The common PUB-1 ref/index/worktree machinery. Compact candidates are
@@ -3511,6 +3729,7 @@ impl Repository {
             journal,
             permit_compact,
             false,
+            None,
             |_| {},
         )
     }
@@ -3522,6 +3741,7 @@ impl Repository {
         journal: &mut PublicationJournal,
         permit_compact: bool,
         permit_legacy_migration: bool,
+        review: Option<&ReviewedCandidateReview>,
         mut on_stage: impl FnMut(PublicationJournalStage),
     ) -> Result<IndexGeneration, RepositoryError> {
         if journal.migration_continuity().is_some() != permit_legacy_migration
@@ -3545,6 +3765,7 @@ impl Repository {
             self.verify_compact_publication_binding(journal, candidate)?;
         }
         let _coordination_lock = self.acquire_coordination_lock()?;
+        if let Some(review) = review { self.verify_reviewed_candidate_locked(review)?; }
         self.require_no_pending_checkout_recovery_locked()?;
         self.ensure_no_git_operation_in_progress()?;
         // A retained PUB-1 journal is the sole recovery authority for its
@@ -3565,12 +3786,24 @@ impl Repository {
         let index = self.git_path("index")?;
         let base_index = self.capture_index_for_expected(expected_index, &index)?;
         let lock_binding = journal.lock_binding()?;
-        self.write_publication_journal_locked(journal)?;
-        // Own Git's writer lock before exposing the new ref. This closes the
+        // Own Git's writer lock before persisting a prepared intent so lock contention
+        // cannot strand a timestamped journal that blocks a fresh retry. This closes the
         // post-ref/pre-index race where an ordinary Git writer could publish
         // the captured, stale index.
         let git_lock = GitIndexLock::acquire_owned(index.with_extension("lock"), lock_binding)?;
+        self.write_publication_journal_locked(journal)?;
         self.ensure_no_git_operation_in_progress()?;
+        if let Some(review) = review {
+            let bytes = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            if Sha256::digest(bytes).as_slice() != review.index_bytes_digest
+                || self.head()? != review.cwd.head().cloned()
+                || self.current_branch()? != review.head_ref
+                || self.worktree_state()? != *review.cwd.worktree()
+            {
+                drop(git_lock);
+                return Err(RepositoryError::StaleReviewedCandidate);
+            }
+        }
         // A managed file may have changed after preparation but before the
         // publication boundary.  Refuse that known conflict before advancing
         // the ref; the later worktree check still protects the unavoidable
@@ -8769,12 +9002,14 @@ pub enum RepositoryError {
     InvalidCompactManifest,
     UnsafeManagedPath,
     NoManagedPaths,
+    SysGitNothingToCommit,
     UnbornHead,
     StaleIndex {
         expected: IndexGeneration,
         actual: IndexGeneration,
     },
     StaleCwd,
+    StaleReviewedCandidate,
     ManagedContentConflict,
     /// Recovery found a pathname or private quarantine state that changed
     /// while it was being reconciled. The unexpected bytes remain on disk.
@@ -8827,11 +9062,13 @@ impl fmt::Display for RepositoryError {
             Self::InvalidCompactManifest => f.write_str("invalid compact storage manifest"),
             Self::UnsafeManagedPath => f.write_str("unsafe managed path"),
             Self::NoManagedPaths => f.write_str("at least one managed path is required"),
+            Self::SysGitNothingToCommit => f.write_str("sys.git.nothing_to_commit"),
             Self::UnbornHead => f.write_str("cannot create a branch from an unborn HEAD"),
             Self::StaleIndex { .. } => {
                 f.write_str("Git index changed since the expected generation")
             }
             Self::StaleCwd => f.write_str("Git CWD changed during observation"),
+            Self::StaleReviewedCandidate => f.write_str("reviewed commit candidate is stale or forged"),
             Self::ManagedContentConflict => {
                 f.write_str("managed worktree content changed since capture")
             }
@@ -10464,6 +10701,231 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_candidate_publication_recovers_and_clears_its_journal() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let staged = b"module main;\n// reviewed\n";
+        fs::write(root.path().join("main.orna"), staged).unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([4; 16]), super::Uuid::from_bytes([5; 16]), 11,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(12), vec![0x81, 0x00],
+        ).unwrap();
+        let head = review.cwd.head().unwrap().clone();
+        let path = ManagedPath::new("main.orna").unwrap();
+        let candidate = repository.build_private_commit(
+            &head, &[ManagedFileChange::new(path.clone(), Some(staged.to_vec()))], "reviewed",
+        ).unwrap();
+        assert_eq!(candidate.tree, review.index_tree);
+        let intent = [6; 16];
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head, candidate.commit().clone(), review.index_tree.clone(), intent,
+            vec![PublicationJournalEntry::new(path, Some(staged.to_vec()), Some(staged.to_vec()))],
+        ).unwrap();
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            repository.publish_candidate_impl_with_migration(
+                &review.cwd.index, &candidate, &mut journal, false, false, Some(&review),
+                |stage| if stage == PublicationJournalStage::RefAdvanced { panic!("simulated interruption") },
+            ).unwrap();
+        }));
+        assert!(interrupted.is_err());
+        assert_eq!(repository.read_publication_journal().unwrap().unwrap().stage(), PublicationJournalStage::RefAdvanced);
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::RuntimeCompletionRequired)
+        ));
+        let mut recovered = repository.read_publication_journal().unwrap().unwrap();
+        assert_eq!(recovered.stage(), PublicationJournalStage::WorktreeReconciled);
+        assert_eq!(recovered.runtime_intent_id(), Some(intent));
+        assert!(recovered.compact_manifest().is_none());
+        repository.mark_runtime_complete(intent, &mut recovered).unwrap();
+        assert!(repository.read_publication_journal().unwrap().is_none());
+        assert_eq!(repository.head().unwrap(), Some(candidate.commit().clone()));
+    }
+
+    #[test]
+    fn reviewed_candidate_commit_preserves_unstaged_work_and_replays_result() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/database.orna"), include_str!("../tests/fixtures/format-context/database-final.orna")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"store root one").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let staged = b"module main;\n// admitted\n";
+        fs::write(root.path().join("main.orna"), staged).unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        fs::write(root.path().join("unrelated.txt"), b"unstaged").unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([10; 16]), super::Uuid::from_bytes([11; 16]), 3,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(4), vec![0x81, 0x00],
+        ).unwrap();
+        let intent = [12; 16];
+        let committed = repository.commit_reviewed_candidate(
+            &review, &review.index_tree, 3, intent, "reviewed",
+        ).unwrap();
+        assert_eq!(repository.head().unwrap(), Some(committed.clone()));
+        assert_eq!(repository.index_generation().unwrap().tree(), Some(&review.index_tree));
+        assert_eq!(repository.read_committed_file(&committed, "main.orna", 1 << 20).unwrap(), staged);
+        assert_eq!(fs::read(root.path().join("unrelated.txt")).unwrap(), b"unstaged");
+        assert!(!git(root.path(), &["status", "--porcelain"]).is_empty());
+        git(root.path(), &["commit", "--allow-empty", "-m", "later unrelated commit"]);
+        assert_ne!(repository.head().unwrap(), Some(committed.clone()));
+        let mut mismatched_review = review.clone();
+        mismatched_review.cwd_snapshot_descriptor.push(0xff);
+        mismatched_review.token = super::reviewed_candidate_token(&mismatched_review);
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&mismatched_review, &review.index_tree, 3, intent, "reviewed"),
+            Err(RepositoryError::StaleReviewedCandidate)
+        ));
+        let replay = repository.commit_reviewed_candidate(
+            &review, &review.index_tree, 3, intent, "reviewed",
+        ).unwrap();
+        assert_eq!(replay, committed);
+    }
+
+    #[test]
+    fn reviewed_candidate_replay_requires_the_original_message() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/database.orna"), include_str!("../tests/fixtures/format-context/database-final.orna")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"store root one").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        fs::write(root.path().join("main.orna"), "module main;\n// admitted\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([10; 16]), super::Uuid::from_bytes([11; 16]), 3,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(4), vec![0x81, 0x00],
+        ).unwrap();
+        let intent = [12; 16];
+        let committed = repository.commit_reviewed_candidate(
+            &review, &review.index_tree, 3, intent, "reviewed",
+        ).unwrap();
+
+        let replay = repository.commit_reviewed_candidate(
+            &review, &review.index_tree, 3, intent, "reviewed",
+        ).unwrap();
+        assert_eq!(replay, committed);
+        assert!(matches!(
+            repository.commit_reviewed_candidate(
+                &review, &review.index_tree, 3, intent, "corrected message",
+            ),
+            Err(RepositoryError::StaleReviewedCandidate)
+        ));
+    }
+    #[test]
+    fn reviewed_candidate_retries_after_index_lock_contention() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/database.orna"), include_str!("../tests/fixtures/format-context/database-final.orna")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"store root one").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+        fs::write(root.path().join("main.orna"), "module main;\n// lock retry\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([20; 16]), super::Uuid::from_bytes([21; 16]), 5,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(6), vec![0x81, 0x00],
+        ).unwrap();
+        let index = repository.git_path("index").unwrap();
+        let lock = index.with_extension("lock");
+        fs::write(&lock, b"occupied").unwrap();
+        assert!(repository.commit_reviewed_candidate(&review, &review.index_tree, 5, [22; 16], "reviewed").is_err());
+        fs::remove_file(&lock).unwrap();
+        assert!(repository.commit_reviewed_candidate(&review, &review.index_tree, 5, [22; 16], "reviewed").is_ok());
+        assert!(repository.read_publication_journal().unwrap().is_none());
+    }
+
+    #[test]
+    fn reviewed_candidate_empty_commit_returns_nothing_to_commit() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([30; 16]), super::Uuid::from_bytes([31; 16]), 8,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(9), vec![0x81, 0x00],
+        ).unwrap();
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&review, &review.index_tree, 8, [32; 16], "reviewed"),
+            Err(RepositoryError::SysGitNothingToCommit)
+        ));
+    }
+
+     #[test]
+    fn reviewed_candidate_rejects_forged_and_stale_index_reviews() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+        fs::write(root.path().join("main.orna"), "module main;\n// staged\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let head_before = repository.head().unwrap();
+        let index_before = repository.index_generation().unwrap();
+        let worktree_before = repository.worktree_state().unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([1; 16]),
+            super::Uuid::from_bytes([2; 16]),
+            7,
+            super::RepositoryFormat::Format3,
+            RuntimeGeneration::new(9),
+            vec![0x81, 0x00],
+        ).unwrap();
+        assert_eq!(repository.head().unwrap(), head_before);
+        assert_eq!(repository.index_generation().unwrap(), index_before);
+        assert_eq!(repository.worktree_state().unwrap(), worktree_before);
+        assert_eq!(review.index_tree, index_before.tree().unwrap().clone());
+        assert_ne!(review.token(), &[0; 32]);
+
+        let mut forged = review.clone();
+        forged.pending_generation += 1;
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&forged, &forged.index_tree, 8, [3; 16], "reviewed"),
+            Err(RepositoryError::StaleReviewedCandidate)
+        ));
+
+        fs::write(root.path().join("main.orna"), "module main;\n// newer staged\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&review, &review.index_tree, 7, [3; 16], "reviewed"),
+            Err(RepositoryError::StaleReviewedCandidate)
+        ));
+        assert_eq!(repository.head().unwrap(), head_before);
+    }
+
+     #[test]
     fn deletion_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
