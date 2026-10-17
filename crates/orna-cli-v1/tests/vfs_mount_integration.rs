@@ -189,7 +189,7 @@ fn mountinfo_contains(mountpoint: &Path) -> bool {
 }
 
 #[tokio::test]
-async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
+async fn snapshot_mount_projects_row_document_and_reads_blob_ranges() {
     if !fuse_test_available() {
         return;
     }
@@ -272,18 +272,20 @@ async fn cwd_mount_projects_row_document_and_reads_blob_ranges() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
+    let current_selector = current.to_string();
     let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
             "mount",
             mountpoint.to_str().unwrap(),
-            "--cwd",
+            "--at",
+            current_selector.as_str(),
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start mount --cwd");
+        .expect("start mount --at current commit");
     let mut mounted = MountedProcess {
         child,
         mountpoint: mountpoint.clone(),
