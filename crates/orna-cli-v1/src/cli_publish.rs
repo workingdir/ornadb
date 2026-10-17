@@ -702,9 +702,19 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 })?;
             return Ok::<_, Diagnostic>(None);
         };
-        coordinator.publish(&repository).map_err(|error| {
-            describe_storage_failure("publication commit could not be advanced", &error)
-        })?;
+        coordinator
+            .publish_with_stage_hook(&repository, |stage| match stage {
+                orna_repository_v1::PublicationJournalStage::RefAdvanced => {
+                    publication_crash_barrier("ref-cas")
+                }
+                orna_repository_v1::PublicationJournalStage::IndexReconciled => {
+                    publication_crash_barrier("index")
+                }
+                _ => {}
+            })
+            .map_err(|error| {
+                describe_storage_failure("publication commit could not be advanced", &error)
+            })?;
         publication_crash_barrier("ref-index");
         coordinator
             .complete(&repository, &state, &freeze)
