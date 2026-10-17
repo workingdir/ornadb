@@ -6,7 +6,7 @@ use std::{
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_runtime_v1::{RuntimeState, RuntimeTableIdentity, TableObjectId};
 use orna_semantic_v1::{Catalogue, ModuleInput};
-use orna_value_v1::{ContextValue, Raw, Value, ValueFormat};
+use orna_value_v1::{Blob, ContextValue, Raw, ValueFormat};
 
 const MUSIC_SOURCE: &str = r#"pub table media(id: Str) {
     title: Str,
@@ -72,6 +72,33 @@ fn scratch_refs(directory: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+fn protected_ref_owner_id(directory: &std::path::Path) -> [u8; 16] {
+    let output = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)", "refs/orna/pins"])
+        .current_dir(directory)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("list repository protected-content refs");
+    assert!(output.status.success());
+    let references = String::from_utf8(output.stdout).expect("Git ref names are UTF-8");
+    let owner_hex = references
+        .lines()
+        .next()
+        .and_then(|reference| reference.strip_prefix("refs/orna/pins/"))
+        .and_then(|reference| reference.split('/').next())
+        .expect("captured row retains an owner-scoped protected-content ref");
+    assert_eq!(owner_hex.len(), 32, "owner ID is a 16-byte hexadecimal value");
+    let mut owner_id = [0; 16];
+    for (index, pair) in owner_hex.as_bytes().chunks_exact(2).enumerate() {
+        owner_id[index] = u8::from_str_radix(
+            std::str::from_utf8(pair).expect("owner reference is ASCII"),
+            16,
+        )
+        .expect("owner reference is hexadecimal");
+    }
+    owner_id
+}
+
 fn capture_input(root: &std::path::Path) -> String {
     format!(
         "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);",
@@ -98,16 +125,13 @@ async fn committed_media_row(
     relation_id: [u8; 16],
     key: &str,
 ) -> Option<Vec<u8>> {
-    let encoded_key = Value::new(Raw::Text(key.to_owned()))
-        .expect("typed media key")
-        .encode()
-        .expect("encode typed media key");
+    let logical_key = key.as_bytes();
     state
         .committed_table_rows(&format!("oid:{}", relation_id.iter().map(|b| format!("{b:02x}")).collect::<String>()))
         .await
         .expect("read CWD media rows")
         .into_iter()
-        .find_map(|(row_key, row)| (row_key == encoded_key).then_some(row))
+        .find_map(|(row_key, row)| (row_key.as_slice() == logical_key).then_some(row))
 }
 
 #[tokio::test]
@@ -146,6 +170,7 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
         "logical row key should be a Str in the REPL result: {stdout}"
     );
 
+    let runtime_owner_id = protected_ref_owner_id(root);
     let (identity, initial_digest) = cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, identity, initial_digest)
         .await
@@ -155,7 +180,8 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
         .unwrap_or_else(|| panic!("committed media row exists; REPL output: {stdout}"));
     let format = repository
         .open_format_context()
-        .expect("open committed format-3 context");
+        .expect("open committed format-3 context")
+        .with_runtime_owner_id(runtime_owner_id);
     let value_context = format
         .open_value_context(relation_id)
         .expect("issue native-graph-backed value context");
@@ -165,21 +191,32 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
         panic!("stored Music row is not an array");
     };
     assert_eq!(fields.len(), 2, "the primary key is stored in the index, not the row array");
-    let encoded_blob = ContextValue::new_in_context(
-        &value_context,
-        ValueFormat::Rov3,
-        fields[1].clone(),
+    let mut blobs = fields.iter().filter_map(|field| {
+        ContextValue::new_in_context(&value_context, ValueFormat::Rov3, field.clone())
+            .ok()?
+            .blob()
+            .ok()
+    });
+    let blob = blobs
+        .next()
+        .expect("stored Music row has a Blob content field");
+    assert!(
+        blobs.next().is_none(),
+        "stored Music row has exactly one Blob content field"
+    );
+    let descriptor_oid = blob
+        .descriptor_oid()
+        .expect("stored content field retains its native descriptor")
+        .clone();
+    let reference = value_context
+        .reference(blob.content_identity(), descriptor_oid)
+        .expect("bind the descriptor to the owner-scoped repository resolver");
+    let blob = Blob::from_reference_with_annotation(
+        reference,
+        blob.media_type(),
+        blob.suffix(),
     )
-    .expect("construct content field value")
-    .encode()
-    .expect("encode content field value");
-    let blob_value = ContextValue::decode_in_context(
-        &encoded_blob,
-        ValueFormat::Rov3,
-        &value_context,
-    )
-    .expect("decode the stored Blob reference");
-    let blob = blob_value.blob().expect("content field is a Blob");
+    .expect("bind stored Blob metadata to the repository resolver");
     assert_eq!(blob.media_type(), "audio/mpeg");
     assert_eq!(blob.read_to_end().expect("read protected captured bytes"), payload);
 }
