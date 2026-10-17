@@ -412,9 +412,31 @@ fn run_mv(
             repository.worktree(),
             rename.new_qualified_name(),
         )?;
+        let old_table_path = rename.old_qualified_name().replace('.', "/");
         if new_directory_exists && !(source_already_renamed && !old_directory_exists) {
             return Err(mv_loose_row_destination_error());
         }
+
+        let row_directory_moved = old_directory_exists
+            && if source_already_renamed {
+                let mut table_paths = project
+                    .loose_rows()
+                    .iter()
+                    .map(|row| row.table_path().to_owned())
+                    .collect::<std::collections::BTreeSet<_>>();
+                table_paths.insert(old_table_path.clone());
+                table_directory_has_owned_loose_row(
+                    repository.worktree(),
+                    &old_table_directory,
+                    &old_table_path,
+                    &table_paths,
+                )?
+            } else {
+                project
+                    .loose_rows()
+                    .iter()
+                    .any(|row| row.table_path() == old_table_path)
+            };
 
         if let Some(original_source) = original_source.as_deref() {
             if write_source_atomically(
@@ -439,8 +461,7 @@ fn run_mv(
             }
         }
 
-        let mut row_directory_moved = false;
-        if old_directory_exists {
+        if row_directory_moved {
             if fs::rename(&old_table_directory, &new_table_directory).is_err() {
                 let source_restored = original_source.as_deref().map_or(true, |original| {
                     restore_source_after_failed_write(
@@ -454,7 +475,6 @@ fn run_mv(
                 }
                 return Err(mv_loose_row_path_error());
             }
-            row_directory_moved = true;
             if sync_parent_directory(&old_table_directory).is_err() {
                 let rows_restored = restore_table_directory(
                     &old_table_directory,
@@ -649,6 +669,81 @@ fn checked_project_table_directory(
     Ok((path, !missing))
 }
 
+// The current project omits rows under the old name during source-first recovery.
+// Mirror the loader's longest table-path ownership rule for those pending rows.
+fn table_directory_has_owned_loose_row(
+    root: &Path,
+    table_directory: &Path,
+    table_path: &str,
+    table_paths: &std::collections::BTreeSet<String>,
+) -> Result<bool, Diagnostic> {
+    let mut pending = vec![table_directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory).map_err(|_| mv_loose_row_path_error())?;
+        for entry in entries {
+            let path = entry
+                .map_err(|_| mv_loose_row_path_error())?
+                .path();
+            let metadata = fs::symlink_metadata(&path).map_err(|_| mv_loose_row_path_error())?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !metadata.is_file()
+                || path.extension().and_then(|extension| extension.to_str()) != Some("orna")
+            {
+                continue;
+            }
+            let Some(logical_path) = worktree_logical_path(root, &path) else {
+                return Err(mv_loose_row_path_error());
+            };
+            if loose_row_table_owner(&logical_path, table_paths) == Some(table_path) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn worktree_logical_path(root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => name.to_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
+}
+
+fn loose_row_table_owner<'a>(
+    logical_path: &str,
+    table_paths: &'a std::collections::BTreeSet<String>,
+) -> Option<&'a str> {
+    let mut selected = None;
+    for table_path in table_paths {
+        let Some(suffix) = logical_path
+            .strip_prefix(table_path)
+            .and_then(|suffix| suffix.strip_prefix('/'))
+        else {
+            continue;
+        };
+        if suffix.is_empty()
+            || !suffix.ends_with(".orna")
+            || suffix.split('/').any(|component| component.is_empty())
+        {
+            continue;
+        }
+        if selected.is_none_or(|previous: &str| table_path.len() > previous.len()) {
+            selected = Some(table_path.as_str());
+        }
+    }
+    selected
+}
 fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
