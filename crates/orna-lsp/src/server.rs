@@ -118,7 +118,7 @@ struct ServerState {
     documents: HashMap<Uri, Document>,
     semantic_tokens: HashMap<Uri, SemanticTokenSnapshot>,
     next_semantic_token_result: u64,
-    pending_identity_renames: HashMap<Uri, Vec<ObjectIdentityRename>>,
+    pending_identity_renames: HashMap<Uri, Vec<Vec<ObjectIdentityRename>>>,
 }
 
 struct SemanticTokenSnapshot {
@@ -803,12 +803,14 @@ fn identity_rename_for_request(
     let table = qualify(&old_name);
     let pending = state.pending_identity_renames.get(uri).map(Vec::as_slice).unwrap_or(&[]);
 
-    if pending.iter().any(|rename| rename.kind() == ObjectKind::Table && rename.new_qualified_name() == table) {
+    if pending.iter().filter_map(|chain| chain.last()).any(|rename| {
+        rename.kind() == ObjectKind::Table && rename.new_qualified_name() == table
+    }) {
         return Some(ObjectIdentityRename::new(ObjectKind::Table, table, qualify(new_name)));
     }
 
     let suffix = format!(".{old_name}");
-    let mut pending_fields = pending.iter().filter(|rename| {
+    let mut pending_fields = pending.iter().filter_map(|chain| chain.last()).filter(|rename| {
         let target = rename.new_qualified_name();
         rename.kind() == ObjectKind::Field
             && target.ends_with(&suffix)
@@ -840,15 +842,29 @@ fn identity_rename_for_request(
 }
 
 fn persist_pending_rename_identity(state: &mut ServerState, uri: &Uri) {
-    let Some(renames) = state.pending_identity_renames.remove(uri) else { return; };
+    let Some(chains) = state.pending_identity_renames.remove(uri) else { return; };
     let Ok(url) = url::Url::parse(uri.as_str()) else { return; };
     let Ok(path) = url.to_file_path() else { return; };
     let Ok(repository) = Repository::discover(&path) else { return; };
     let Ok(project) = ProjectLoader::default().load(&repository) else { return; };
     let modules = project.into_modules();
     let Ok(Some(previous)) = ObjectIdentityManifest::read_worktree(&repository) else { return; };
-    let applicable = renames.into_iter().filter(|rename| {
-        ObjectIdentityManifest::reconcile_with_renames(&modules, Some(&previous), std::slice::from_ref(rename)).is_ok()
+    let applicable = chains.into_iter().filter_map(|chain| {
+        let first = chain.first()?;
+        let mut furthest_saved_rename = None;
+        for step in &chain {
+            let rename = ObjectIdentityRename::new(
+                first.kind(),
+                first.old_qualified_name(),
+                step.new_qualified_name(),
+            );
+            if ObjectIdentityManifest::reconcile_with_renames(
+                &modules, Some(&previous), std::slice::from_ref(&rename),
+            ).is_ok() {
+                furthest_saved_rename = Some(rename);
+            }
+        }
+        furthest_saved_rename
     }).collect::<Vec<_>>();
     if applicable.is_empty() { return; }
     let _ = ObjectIdentityManifest::reconcile_and_write_worktree_with_renames(
@@ -899,16 +915,15 @@ fn request_rename(
     };
     if let Some(rename) = identity_rename_for_request(state, &uri, position, &params.new_name) {
         let pending = state.pending_identity_renames.entry(uri.clone()).or_default();
-        if let Some(existing) = pending.iter_mut().find(|existing| {
-            existing.kind() == rename.kind()
-                && existing.new_qualified_name() == rename.old_qualified_name()
+        if let Some(chain) = pending.iter_mut().find(|chain| {
+            chain.last().is_some_and(|last| {
+                last.kind() == rename.kind()
+                    && last.new_qualified_name() == rename.old_qualified_name()
+            })
         }) {
-            let original = existing.old_qualified_name().to_owned();
-            *existing = ObjectIdentityRename::new(
-                rename.kind(), original, rename.new_qualified_name().to_owned(),
-            );
+            chain.push(rename);
         } else {
-            pending.push(rename);
+            pending.push(vec![rename]);
         }
     }
     let workspace_edit = WorkspaceEdit {
@@ -2720,6 +2735,39 @@ mod persisted_object_rename_tests {
 
         let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
         assert_eq!(updated.id(ObjectKind::Table, "Vault"), Some(&original_id));
+    }
+
+    #[test]
+    fn declined_followup_rename_saves_latest_applied_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success());
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let source_path = directory.path().join("main.orna");
+        fs::write(&source_path, source).unwrap();
+        let repository = Repository::discover(directory.path()).unwrap();
+        let module = ModuleInput::new("main.orna", source);
+        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
+            &repository, std::slice::from_ref(&module),
+        ).unwrap();
+        let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
+        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let mut state = ServerState::new();
+        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        let declined_response = request_rename(&mut state, rename_request(uri.clone(), "Vault")).unwrap();
+        assert!(!declined_response.is_null());
+        drop(declined_response);
+        fs::write(&source_path, &saved_source).unwrap();
+        did_save(&mut state, &uri);
+
+        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
     }
 
     #[test]
