@@ -18,12 +18,14 @@ fn main() -> ExitCode {
 fn cited(args: Vec<std::ffi::OsString>) -> ExitCode {
     let mut baseline_path = None;
     let mut cited_output = None;
+    let mut locations_output = None;
     let mut crates_root = PathBuf::from(".");
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--baseline") => baseline_path = args.next().map(PathBuf::from),
             Some("--cited-output") => cited_output = args.next().map(PathBuf::from),
+            Some("--locations-output") => locations_output = args.next().map(PathBuf::from),
             Some("--crates-root") => {
                 let Some(root) = args.next() else { return usage("missing value for --crates-root") };
                 crates_root = PathBuf::from(root);
@@ -41,6 +43,9 @@ fn cited(args: Vec<std::ffi::OsString>) -> ExitCode {
     };
     if let Some(path) = cited_output {
         if let Err(error) = write_json(&path, &report.cited_ids) { eprintln!("cannot write cited IDs to {}: {error}", path.display()); return ExitCode::FAILURE; }
+    }
+    if let Some(path) = locations_output {
+        if let Err(error) = write_json(&path, &report.locations) { eprintln!("cannot write citation locations to {}: {error}", path.display()); return ExitCode::FAILURE; }
     }
     for (chapter, counts) in &report.chapters { println!("{chapter}: cited={}, uncited={}", counts.cited, counts.uncited); }
     println!("total: cited={}, uncited={}", report.cited_ids.len(), report.uncited_ids.len());
@@ -70,5 +75,5 @@ fn write_json(path: &std::path::Path, value: &impl serde::Serialize) -> Result<(
 
 fn usage(message: &str) -> ExitCode { eprintln!("{message}"); print_help(); ExitCode::FAILURE }
 fn print_help() {
-    eprintln!("Usage: orna-traceability-v1 cited --baseline <file> [--crates-root <workspace>] [--cited-output <file>]\nCounts requirement-ID citations in Rust test code; this counts citations, not proof of conformance. The baseline stores max_uncited and the previously cited_ids.");
+    eprintln!("Usage: orna-traceability-v1 cited --baseline <file> [--crates-root <workspace>] [--cited-output <file>] [--locations-output <file>]\nCounts requirement-ID citations in Rust test code; this counts citations, not proof of conformance. The baseline stores max_uncited and previously cited_ids. The optional locations output maps each cited ID to files and lines.");
 }
