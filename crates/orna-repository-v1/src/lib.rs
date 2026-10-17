@@ -3515,9 +3515,16 @@ impl Repository {
         if review.candidate_paths.is_empty() {
             return Err(RepositoryError::SysGitNothingToCommit);
         }
+        let token_hex = review.token.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let result_path = self.runtime.root().join(format!("reviewed-result-{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>()));
         if let Ok(recorded) = fs::read_to_string(&result_path) {
-            return self.snapshot_from_native_oid(recorded.trim().to_owned());
+            let Some((recorded_token, recorded_commit)) = recorded.split_once('\n') else {
+                return Err(RepositoryError::LocalStateUnavailable);
+            };
+            if recorded_token != token_hex {
+                return Err(RepositoryError::StaleReviewedCandidate);
+            }
+            return self.snapshot_from_native_oid(recorded_commit.trim().to_owned());
         }
         let actual_cwd = self.cwd_generation(review.cwd.runtime())?;
         let index = self.git_path("index")?;
@@ -3569,7 +3576,8 @@ impl Repository {
             &review.cwd.index, &candidate, &mut journal, false, false, Some(review), on_stage,
         )?;
         self.mark_runtime_complete(runtime_intent_id, &mut journal)?;
-        fs::write(&result_path, candidate.commit().as_str()).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        fs::write(&result_path, format!("{token_hex}\n{}", candidate.commit().as_str()))
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         Ok(candidate.commit().clone())
     }
 
@@ -10764,6 +10772,13 @@ mod tests {
         assert!(!git(root.path(), &["status", "--porcelain"]).is_empty());
         git(root.path(), &["commit", "--allow-empty", "-m", "later unrelated commit"]);
         assert_ne!(repository.head().unwrap(), Some(committed.clone()));
+        let mut mismatched_review = review.clone();
+        mismatched_review.cwd_snapshot_descriptor.push(0xff);
+        mismatched_review.token = super::reviewed_candidate_token(&mismatched_review);
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&mismatched_review, &review.index_tree, 3, intent, "reviewed"),
+            Err(RepositoryError::StaleReviewedCandidate)
+        ));
         let replay = repository.commit_reviewed_candidate(
             &review, &review.index_tree, 3, intent, "reviewed",
         ).unwrap();
