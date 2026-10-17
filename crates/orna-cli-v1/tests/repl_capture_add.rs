@@ -150,6 +150,39 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     assert_eq!(blob.read_to_end().expect("read protected captured bytes"), payload);
 }
 
+#[tokio::test]
+async fn repl_capture_add_accepts_a_key_beyond_the_legacy_path_component_limit() {
+    let (directory, repository, _) = format3_repository(MUSIC_SOURCE);
+    let root = directory.path();
+    let key = "x".repeat(201);
+    std::fs::write(root.join("recording.mp3"), b"long key capture")
+        .expect("write synthetic media");
+    let head_before = git_head(root);
+    let input = format!(
+        "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add({key:?}, \"Long-key recording\", audio)",
+        root = root.to_string_lossy().as_ref(),
+    );
+
+    let output = run_repl(root, &input);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}\n{:?}", output.stderr);
+    assert!(!stdout.contains("ORNA-REPL-EFFECT"), "trusted REPL rejected long key: {stdout}");
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    assert_eq!(git_head(root), head_before, "REPL must not publish a Git commit");
+
+    let (identity, initial_digest) = cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, identity, initial_digest)
+        .await
+        .expect("reopen runtime after long-key insert");
+    assert!(
+        state
+            .committed_table_row("media", key.as_bytes())
+            .await
+            .expect("read long-key row after restart")
+            .is_some(),
+        "the typed key remains durable without a legacy loose-row filename",
+    );
+}
 #[test]
 fn repl_capture_candidate_is_released_when_the_session_exits() {
     let (directory, _repository, _) = format3_repository(MUSIC_SOURCE);
