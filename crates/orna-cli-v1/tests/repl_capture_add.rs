@@ -92,6 +92,7 @@ fn git_head(directory: &std::path::Path) -> String {
         .trim()
         .to_owned()
 }
+
 async fn committed_media_row(
     state: &RuntimeState,
     relation_id: [u8; 16],
@@ -101,8 +102,10 @@ async fn committed_media_row(
         .expect("typed media key")
         .encode()
         .expect("encode typed media key");
-    committed_admitted_rows(state, "media", relation_id)
+    state
+        .committed_table_rows(&format!("oid:{}", relation_id.iter().map(|b| format!("{b:02x}")).collect::<String>()))
         .await
+        .expect("read CWD media rows")
         .into_iter()
         .find_map(|(row_key, row)| (row_key == encoded_key).then_some(row))
 }
