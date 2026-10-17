@@ -798,14 +798,35 @@ fn identity_rename_for_request(
     let relative = path.strip_prefix(root).ok()?;
     let logical_path = relative.to_string_lossy().replace('\\', "/");
     let old_name = identifier_at(&document.text, position)?;
-    let previous = ObjectIdentityManifest::read_worktree(&repository).ok()??;
     let namespace = module_namespace(&logical_path);
     let qualify = |name: &str| if namespace.is_empty() { name.to_owned() } else { format!("{namespace}.{name}") };
     let table = qualify(&old_name);
+    let pending = state.pending_identity_renames.get(uri).map(Vec::as_slice).unwrap_or(&[]);
+
+    if pending.iter().any(|rename| rename.kind() == ObjectKind::Table && rename.new_qualified_name() == table) {
+        return Some(ObjectIdentityRename::new(ObjectKind::Table, table, qualify(new_name)));
+    }
+
+    let suffix = format!(".{old_name}");
+    let mut pending_fields = pending.iter().filter(|rename| {
+        let target = rename.new_qualified_name();
+        rename.kind() == ObjectKind::Field
+            && target.ends_with(&suffix)
+            && target[..target.len() - suffix.len()].starts_with(&namespace)
+    });
+    if let Some(rename) = pending_fields.next() {
+        if pending_fields.next().is_some() { return None; }
+        let current = rename.new_qualified_name();
+        let parent = &current[..current.len() - old_name.len()];
+        return Some(ObjectIdentityRename::new(
+            ObjectKind::Field, current, format!("{parent}{new_name}"),
+        ));
+    }
+
+    let previous = ObjectIdentityManifest::read_worktree(&repository).ok()??;
     let (kind, old_qualified, new_qualified) = if previous.id(ObjectKind::Table, &table).is_some() {
         (ObjectKind::Table, table, qualify(new_name))
     } else {
-        let suffix = format!(".{old_name}");
         let mut matches = previous.records().iter().filter(|record| {
             !record.is_retired() && record.kind() == ObjectKind::Field && record.qualified_name().ends_with(&suffix)
                 && record.qualified_name()[..record.qualified_name().len() - suffix.len()].starts_with(&namespace)
@@ -877,7 +898,18 @@ fn request_rename(
         return Ok(serde_json::Value::Null);
     };
     if let Some(rename) = identity_rename_for_request(state, &uri, position, &params.new_name) {
-        state.pending_identity_renames.entry(uri.clone()).or_default().push(rename);
+        let pending = state.pending_identity_renames.entry(uri.clone()).or_default();
+        if let Some(existing) = pending.iter_mut().find(|existing| {
+            existing.kind() == rename.kind()
+                && existing.new_qualified_name() == rename.old_qualified_name()
+        }) {
+            let original = existing.old_qualified_name().to_owned();
+            *existing = ObjectIdentityRename::new(
+                rename.kind(), original, rename.new_qualified_name().to_owned(),
+            );
+        } else {
+            pending.push(rename);
+        }
     }
     let workspace_edit = WorkspaceEdit {
         changes: Some(changes),
@@ -2632,16 +2664,93 @@ mod persisted_object_rename_tests {
         );
     }
 
-    fn rename_request(uri: Uri) -> Request {
+    fn rename_request(uri: Uri, new_name: &str) -> Request {
         Request::new(
             1.into(),
             "textDocument/rename".to_owned(),
             serde_json::json!({
                 "textDocument": { "uri": uri },
                 "position": { "line": 0, "character": 11 },
-                "newName": "Archive",
+                "newName": new_name,
             }),
         )
+    }
+    fn apply_rename(state: &mut ServerState, uri: &Uri, new_name: &str, version: i32) -> String {
+        let response = request_rename(state, rename_request(uri.clone(), new_name)).unwrap();
+        let workspace_edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        let source = state.document(uri).unwrap().text.clone();
+        let edits = workspace_edit.changes.unwrap().remove(uri).unwrap();
+        let renamed_source = apply_text_edits(&source, &edits).unwrap();
+        notify(state, Notification {
+            method: "textDocument/didChange".to_owned(),
+            params: serde_json::json!({
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": &renamed_source }],
+            }),
+        });
+        renamed_source
+    }
+
+    #[test]
+    fn sequential_unsaved_renames_preserve_original_object_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success());
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let source_path = directory.path().join("main.orna");
+        fs::write(&source_path, source).unwrap();
+        let repository = Repository::discover(directory.path()).unwrap();
+        let module = ModuleInput::new("main.orna", source);
+        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
+            &repository, std::slice::from_ref(&module),
+        ).unwrap();
+        let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
+        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let mut state = ServerState::new();
+        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+
+        apply_rename(&mut state, &uri, "Archive", 2);
+        let vault_source = apply_rename(&mut state, &uri, "Vault", 3);
+        fs::write(&source_path, &vault_source).unwrap();
+        did_save(&mut state, &uri);
+
+        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        assert_eq!(updated.id(ObjectKind::Table, "Vault"), Some(&original_id));
+    }
+
+    #[test]
+    fn sequential_rename_chain_not_saved_does_not_persist_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap()
+            .success());
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let source_path = directory.path().join("main.orna");
+        fs::write(&source_path, source).unwrap();
+        let repository = Repository::discover(directory.path()).unwrap();
+        let module = ModuleInput::new("main.orna", source);
+        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
+            &repository, std::slice::from_ref(&module),
+        ).unwrap();
+        let manifest_path = directory.path().join(".orna/object-identities.cbor");
+        let original_bytes = fs::read(&manifest_path).unwrap();
+        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let mut state = ServerState::new();
+        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+
+        apply_rename(&mut state, &uri, "Archive", 2);
+        apply_rename(&mut state, &uri, "Vault", 3);
+        did_save(&mut state, &uri);
+
+        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
+        assert_eq!(fs::read(&manifest_path).unwrap(), original_bytes);
     }
 
     #[test]
@@ -2666,7 +2775,7 @@ mod persisted_object_rename_tests {
         let mut state = ServerState::new();
         state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
 
-        let response = request_rename(&mut state, rename_request(uri.clone())).unwrap();
+        let response = request_rename(&mut state, rename_request(uri.clone(), "Archive")).unwrap();
         let manifest_path = directory.path().join(".orna/object-identities.cbor");
         assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
 
@@ -2711,7 +2820,7 @@ mod persisted_object_rename_tests {
         let mut state = ServerState::new();
         state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
 
-        let lost_response = request_rename(&mut state, rename_request(uri.clone())).unwrap();
+        let lost_response = request_rename(&mut state, rename_request(uri.clone(), "Archive")).unwrap();
         assert!(!lost_response.is_null());
         drop(lost_response);
         assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
