@@ -376,6 +376,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     .unwrap();
 
     let (identity, _) = cli_runtime_identity(&repository);
+    let current_format_context = format3_context_for_snapshot(&repository, base.as_str());
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
@@ -397,7 +398,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
         [43; 16],
         RequestIdentity { session_id: [41; 16], request_id: [42; 16] },
         relation_id,
-        &format_context,
+        &current_format_context,
     )
     .await;
     drop(bindings);
