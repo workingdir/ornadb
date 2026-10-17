@@ -163,14 +163,14 @@ d2eff8224767cc3bf267832033969153720cf1c42f90de2ab577848520fdda64  crates/orna-cl
 2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-cli-v1/tests/fixtures/media/import-song.orna
 410747f3537e97950eab436d90a83d96e8c0ce1567efa5c1745044c3e29d75cd  crates/orna-cli-v1/tests/fixtures/media/manifest.sha256
 038d9e7fbf912679d14e68b0087e1ca71047e016c50c4b272ae4bce38d5dedcb  crates/orna-cli-v1/tests/fixtures/media/offline-edit-image.orna
-32e3aced7464bc7714dedd28632d227104d85903b45e5d1fd4a424cad53a5ce0  crates/orna-cli-v1/tests/fixtures/media/offline-query-main.orna
+b3c5402be1c2391ffcc2974a321756b9e51a4acdca5a2a382fdaae09c46a297f  crates/orna-cli-v1/tests/fixtures/media/offline-query-main.orna
 afe832e833deefae760f4150435628df172b32eefc043cd161bf7f90b4f89486  crates/orna-cli-v1/tests/fixtures/media/overflow.orna
 137630611e28a270c44bfa2947877bb3f739af22a4e3f6e6b28a2f2df342a528  crates/orna-cli-v1/tests/fixtures/media/pixel.png
 b3bf823c9f23f783af4ea63edefdd1cc9f5c7fce7b5fe1384507d728c584569c  crates/orna-cli-v1/tests/fixtures/media/pixel2.png
 038d9e7fbf912679d14e68b0087e1ca71047e016c50c4b272ae4bce38d5dedcb  crates/orna-cli-v1/tests/fixtures/media/reimport-image-capture.orna
 a8a7352ee31e6c22c0a1de063a98a175f58b997ada0b5340d44abed861d4a7c9  crates/orna-cli-v1/tests/fixtures/media/replace-image-capture.orna
 4946be7a074f4fdccecd4947a174d18eaed8a042cdc08576ec134433c59860d5  crates/orna-cli-v1/tests/fixtures/media/source-image.orna
-8b88b9f5a71037ce919d09923498510d6cc3b44bd346ae555e57432902df8c85  crates/orna-cli-v1/tests/fixtures/media/source-song.orna
+3b03a74c0d48d9b54c81236ee03e2d92cdd69229a0e71fc0d76f2e9e392c9544  crates/orna-cli-v1/tests/fixtures/media/source-song.orna
 c3a9237224f5d1f5d26acb76c80c9618dcd53b2f4ff295f0c4c0c2a7f553d891  crates/orna-cli-v1/tests/fixtures/media/tone.wav
 48b66dcabe2299760274ccdac406845c211f98fcee42fe4af7327e8b02a462dc  crates/orna-cli-v1/tests/fixtures/mount/legacy-main.orna
 026c08136f7e4fcd673e59522652df2363b1b437b051d38e82bcd69ba00e4500  crates/orna-cli-v1/tests/fixtures/project-core-main.orna

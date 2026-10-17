@@ -13,7 +13,9 @@ been published.
   child-field IDs in uncommitted source and identity-manifest changes. It moves
   the associated loose-row directory and can resume after a source rename is
   interrupted before the manifest update.
-
+- Optional Blob fields preserve `Some` bindings through source-row admission,
+  metadata queries, history diffs and offline export; overflow verification counts
+  nested Blob references through `Some` without reading payload bytes.
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this

@@ -1,4 +1,5 @@
 pub table Object(id: Str) {
     payload: Blob,
     content: Str,
+    cover: Blob?,
 }
