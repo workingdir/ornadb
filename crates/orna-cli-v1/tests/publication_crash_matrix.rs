@@ -171,5 +171,10 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
         assert!(second.status.success(), "second publish after {boundary} failed: {}", String::from_utf8_lossy(&second.stderr));
         assert_eq!(head(&repository), once, "publication repeated after {boundary}");
         assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
+        println!(
+            "{boundary}: SIGKILL recovery_publish_exit={}, second_publish_exit={}",
+            resumed.status.code().unwrap(),
+            second.status.code().unwrap()
+        );
     }
 }
