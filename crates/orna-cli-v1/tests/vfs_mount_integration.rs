@@ -57,13 +57,18 @@ impl Drop for MountedProcess {
 }
 
 fn run_unmount(repository: &Path, mountpoint: &Path) {
+    run_unmount_from(repository, Path::new("."), mountpoint);
+}
+
+fn run_unmount_from(repository: &Path, working_directory: &Path, mountpoint: &Path) {
     let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .current_dir(working_directory)
         .args([
             "--db",
             repository.to_str().expect("repository path is UTF-8"),
             "unmount",
-            mountpoint.to_str().expect("mountpoint is UTF-8"),
         ])
+        .arg(mountpoint)
         .output()
         .expect("run `orna unmount`");
     assert!(
@@ -898,7 +903,11 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
     let dead_mount_error = std::fs::read_dir(&mountpoint)
         .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>().map(|_| ()))
         .err();
-    run_unmount(repository_directory.path(), &mountpoint);
+    run_unmount_from(
+        repository_directory.path(),
+        mount_parent.path(),
+        Path::new("library"),
+    );
 
     assert!(
         !mountinfo_contains(&mountpoint),
