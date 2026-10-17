@@ -118,6 +118,29 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     assert_eq!(content.transfer_record().database_id(), schema.database_id());
     ContextValue::decode_in_context(content.encoded_value(), ValueFormat::Rov3, &value_context)
         .expect("captured Blob must decode under the committed database context");
+    // Keep the original content-only admission path covered: the nullable cover
+    // is an explicit source value, not an omitted field or a captured Blob.
+    let content_only_capture = evaluate_expression_ovb2_with_effects(
+        &capture,
+        &Default::default(),
+        Limits::default(),
+        &mut bindings,
+    )
+    .unwrap();
+    let content_only = bindings
+        .accept_captured_blob_for_row(&content_only_capture)
+        .unwrap();
+    admit_source_row(
+        &project,
+        "music/london.orna",
+        r#"{ title: "Field recording", artist: "Kieran", cover: null, }"#,
+        &schema,
+        &value_context,
+        vec![("content".to_owned(), content_only)],
+        [0x32; 16],
+    )
+    .expect("a content-bound Music row admits its explicit null cover");
+
     let admitted = admit_source_row(
         &project,
         "music/london.orna",
@@ -218,6 +241,23 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let restored_s = restored.to_str().unwrap();
     let restore = run(outside.path(), &["export", archive_s, "--restore", restored_s, "--worktree"]);
     assert_eq!(restore.status.code(), Some(0), "restore failed: {}", stderr(&restore));
+    let restored_query = run(&restored, &["query", &relation, "--format", "json"]);
+    assert_eq!(
+        restored_query.status.code(),
+        Some(0),
+        "restored query failed: {}",
+        stderr(&restored_query)
+    );
+    let restored_report: serde_json::Value =
+        serde_json::from_slice(&restored_query.stdout).unwrap();
+    assert_eq!(restored_report["media_payload_bytes_read"], 0);
+    let restored_listings = restored_report["listings"].as_array().unwrap();
+    let restored_cover_listing = restored_listings
+        .iter()
+        .find(|item| item["key"] == "london" && item["media_type"] == "image/png")
+        .expect("offline restore retains the Music.cover listing");
+    assert_eq!(restored_cover_listing["length"], cover_bytes.len() as u64);
+    assert_eq!(restored_cover_listing["sha256"], hex(&expected_cover_sha));
     assert!(String::from_utf8(git_output(&restored, &["remote"], None)).unwrap().trim().is_empty());
     let copied = Repository::discover(&restored).unwrap();
     let rows = committed_store_rows(&copied, relation_id);
@@ -243,5 +283,19 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let actual = graph.read_blob_range(stored.reference(), 0..original.len() as u64, &scope).unwrap().bytes().to_vec();
     assert_eq!(actual, original);
     assert_eq!(Sha256::digest(actual).as_slice(), expected_sha);
+    let stored_cover = dependencies.iter().find_map(|dependency| {
+        if dependency.kind() != orna_repository_v1::NativeObjectKind::Tree {
+            return None;
+        }
+        let stored = graph.read_stored_blob_value(&row, dependency.oid(), &scope).ok()?;
+        (stored.annotation().media_type() == "image/png").then_some(stored)
+    }).expect("Music.cover retains its stored annotated reference");
+    let actual_cover = graph
+        .read_blob_range(stored_cover.reference(), 0..cover_bytes.len() as u64, &scope)
+        .unwrap()
+        .bytes()
+        .to_vec();
+    assert_eq!(actual_cover, cover_bytes);
+    assert_eq!(Sha256::digest(actual_cover).as_slice(), expected_cover_sha);
 
 }
