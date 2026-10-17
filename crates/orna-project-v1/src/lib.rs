@@ -639,7 +639,25 @@ fn admit_source_row_with_owner_fields_inner(
         return Err(ProjectLoadError::InvalidSourceRow);
     }
     let owner_field_names = owner_field_values.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
-    let mut reserved_field_names = blob_bindings.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+    let parsed_row = parse_row(source);
+    if !parsed_row.diagnostics.is_empty() {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let Expr::Record {
+        fields: parsed_fields, ..
+    } = parsed_row.value
+    else {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    };
+    let source_field_names = parsed_fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut reserved_field_names = blob_bindings
+        .iter()
+        .filter(|(name, _)| !source_field_names.contains(name.as_str()))
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
     reserved_field_names.extend(owner_field_names.iter().cloned());
     let lowered = lower_row_unit_with_owner_fields(&analysis, &input, &reserved_field_names)
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
@@ -676,6 +694,25 @@ fn admit_stored_source_row(
     if &descriptor_table_id != schema.table.table_object_id() {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
+    schema
+        .descriptor()
+        .validate_stored_key(*schema.table.table_object_id(), &canonical_key)
+        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    let mut key_fields = fields.iter().filter(|field| field.role == 0);
+    let is_text_primary_key = match (key_fields.next(), key_fields.next()) {
+        (Some(field), None) => field.is_text,
+        _ => false,
+    };
+    let mutation_key = if is_text_primary_key {
+        let key = Value::decode(&canonical_key)
+            .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+        let Raw::Text(key) = key.raw() else {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        };
+        key.as_bytes().to_vec()
+    } else {
+        canonical_key.clone()
+    };
     let mut pending_owner_fields = BTreeMap::new();
     for (name, value) in owner_field_values {
         if pending_owner_fields.insert(name, value).is_some() {
@@ -728,7 +765,12 @@ fn admit_stored_source_row(
             if !matches!(decoded.raw(), Raw::Tag(ROV3_BLOB_TAG, _)) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
-            stored_fields.push(decoded.into_raw());
+            let encoded_blob = decoded.into_raw();
+            stored_fields.push(if field.is_optional_blob {
+                Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(1.into()), encoded_blob])))
+            } else {
+                encoded_blob
+            });
             retained_bindings.push(SourceBlobFieldBinding {
                 field_object_id: field.id,
                 encoded_value,
@@ -767,11 +809,11 @@ fn admit_stored_source_row(
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
 
     let table_name = schema.declaration_name().to_owned();
-    let mut mutation = TableMutation::new(
+    let mut mutation = TableMutation::insert(
         mutation_id,
         table_name.clone(),
-        canonical_key.clone(),
-        Some(canonical_fields.clone()),
+        mutation_key,
+        canonical_fields.clone(),
     )
     .map_err(|_| ProjectLoadError::InvalidSourceRow)?
     .with_table_object_id(schema.table_object_id());
@@ -796,6 +838,7 @@ struct SourceSchemaField {
     role: u64,
     is_blob: bool,
     is_optional_blob: bool,
+    is_text: bool,
 }
 
 fn source_schema_blob_optional(ty: &Raw) -> Option<bool> {
@@ -846,6 +889,12 @@ fn source_schema_fields(
             role,
             is_blob: blob_optional.is_some(),
             is_optional_blob: blob_optional == Some(true),
+            is_text: matches!(
+                ty,
+                Raw::Array(parts)
+                    if matches!(parts.as_slice(), [Raw::Int(kind), Raw::Text(name)]
+                        if kind.to_string() == "0" && name == "Str")
+            ),
         });
     }
     Ok((table_id, fields))

@@ -636,6 +636,7 @@ impl RepositoryFormatContext {
             .map_err(CaptureCapabilityError::Graph)?;
         RepositoryCaptureCapability::new(graph, scope).map_err(CaptureCapabilityError::Graph)
     }
+
     /// Opens a snapshot-pinned format-3 value context for one relation.
     ///
     /// The graph-backed resolver stays bound to this repository context's
@@ -905,6 +906,14 @@ impl HistoricalFormatContext {
         relation_id: [u8; 16],
     ) -> Result<RowMapSnapshot, FormatContextError> {
         self.context.load_row_map(relation_id)
+    }
+
+    /// Opens a value context bound to this historical snapshot and relation.
+    pub fn open_value_context(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<Format3Context, FormatContextError> {
+        self.context.open_value_context(relation_id)
     }
 
     /// Resolves the committed descriptor selected by relation ID without

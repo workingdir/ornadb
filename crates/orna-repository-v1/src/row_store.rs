@@ -622,7 +622,8 @@ impl TypedKey {
         Ok(output)
     }
 
-    pub(crate) fn decode_canonical(bytes: &[u8]) -> Result<Self, RowStoreError> {
+    /// Decodes the canonical typed-key encoding used by format-3 row maps.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self, RowStoreError> {
         if bytes.len() > KEY_CANONICAL_LIMIT {
             return Err(RowStoreError::KeyTooLarge(bytes.len()));
         }
@@ -633,6 +634,7 @@ impl TypedKey {
         }
         Ok(key)
     }
+
 
     fn from_cbor(value: CborValue) -> Result<Self, RowStoreError> {
         match value {
@@ -1507,11 +1509,21 @@ pub(crate) fn decode_canonical_fields_of(encoded: &[u8]) -> Result<Vec<CborValue
 /// A field that is not a Blob in canonical shape is not a Blob: it yields
 /// `None` rather than being reported or rejected. A field that *is* a tagged
 /// Blob but whose payload is malformed is a real error, not a silent miss.
-fn blob_field_metadata(field: &CborValue) -> Result<Option<BlobMetadata>, RowStoreError> {
-    if !matches!(field, CborValue::Tag(ROV3_BLOB_TAG, _)) {
-        return Ok(None);
+pub(crate) fn blob_field_metadata(field: &CborValue) -> Result<Option<BlobMetadata>, RowStoreError> {
+    match field {
+        CborValue::Tag(60013, payload) => {
+            let CborValue::Array(option) = payload.as_ref() else {
+                return Err(RowStoreError::InvalidCanonicalRowValue);
+            };
+            match option.as_slice() {
+                [CborValue::Unsigned(0)] => Ok(None),
+                [CborValue::Unsigned(1), value] => blob_field_metadata(value),
+                _ => Err(RowStoreError::InvalidCanonicalRowValue),
+            }
+        }
+        CborValue::Tag(ROV3_BLOB_TAG, _) => decode_blob_field_metadata(field).map(Some),
+        _ => Ok(None),
     }
-    decode_blob_field_metadata(field).map(Some)
 }
 
 fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStoreError> {

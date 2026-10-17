@@ -4,12 +4,14 @@ use std::{
     process::{Command, Output},
 };
 
-use orna_project_v1::{ObjectIdentityManifest, ObjectKind};
+use orna_project_v1::{ObjectIdentityManifest, ObjectKind, ProjectLoader};
 use orna_repository_v1::Repository;
 use orna_semantic_v1::ModuleInput;
 use tempfile::TempDir;
 
 const SOURCE: &str = "pub table Media(id: Str) { payload: Blob, size: Int, }";
+const SOURCE_WITH_ROW: &str = "pub table Media(id: Str) { name: Str, age: Int, }";
+const ROW_SOURCE: &str = "{ name: \"reachable\", age: 42 }";
 
 fn run_cli(directory: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
@@ -78,6 +80,296 @@ fn initialized_project_with_source(source: &str) -> (TempDir, ObjectIdentityMani
     (directory, manifest)
 }
 
+fn initialized_project_with_loose_row() -> (TempDir, ObjectIdentityManifest) {
+    let (directory, manifest) = initialized_project_with_source(SOURCE_WITH_ROW);
+    let row_path = directory.path().join("Media/north/42.orna");
+    fs::create_dir_all(row_path.parent().unwrap()).expect("loose row directory");
+    fs::write(&row_path, ROW_SOURCE).expect("loose row");
+    git_succeeds(directory.path(), &["add", "--all"]);
+    git_succeeds(
+        directory.path(),
+        &["commit", "--quiet", "-m", "initial loose row"],
+    );
+    (directory, manifest)
+}
+
+#[test]
+fn mv_moves_loose_rows_to_the_renamed_table_directory() {
+    let (directory, _) = initialized_project_with_loose_row();
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+    assert!(output.status.success(), "mv stderr: {:?}", output.stderr);
+    assert!(!directory.path().join("Media").exists());
+    assert_eq!(
+        fs::read(directory.path().join("Archive/north/42.orna")).unwrap(),
+        ROW_SOURCE.as_bytes()
+    );
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let project = ProjectLoader::default()
+        .load(&repository)
+        .expect("renamed project loads");
+    assert_eq!(project.loose_rows().len(), 1);
+    assert_eq!(
+        project.loose_rows()[0].logical_path(),
+        "Archive/north/42.orna"
+    );
+}
+#[test]
+fn mv_renames_orp_only_table_without_creating_loose_row_directory() {
+    let (directory, _) = initialized_project();
+    assert!(!directory.path().join("Media").exists());
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+
+    assert!(output.status.success(), "mv stderr: {:?}", output.stderr);
+    assert!(!directory.path().join("Media").exists());
+    assert!(!directory.path().join("Archive").exists());
+}
+
+#[test]
+fn mv_leaves_table_directory_with_only_notes_in_place() {
+    let (directory, _) = initialized_project();
+    let notes_directory = directory.path().join("Media");
+    fs::create_dir(&notes_directory).expect("table notes directory");
+    fs::write(notes_directory.join("notes.txt"), b"keep me").expect("table note");
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+
+    assert!(output.status.success(), "mv stderr: {:?}", output.stderr);
+    assert_eq!(fs::read(notes_directory.join("notes.txt")).unwrap(), b"keep me");
+    assert!(!directory.path().join("Archive").exists());
+}
+
+#[test]
+fn mv_resumes_after_source_write_before_manifest_write() {
+    let (directory, initial_manifest) = initialized_project_with_loose_row();
+    let source_path = directory.path().join("main.orna");
+    let source_after_crash = SOURCE_WITH_ROW.replace("table Media", "table Archive");
+    fs::write(&source_path, &source_after_crash).expect("simulate source-only rename");
+    let source_metadata = fs::metadata(&source_path).expect("source metadata");
+    let manifest_path = directory.path().join(".orna/object-identities.cbor");
+    let manifest_before_recovery = fs::read(&manifest_path).expect("old manifest");
+    assert_eq!(manifest_before_recovery, initial_manifest.encode().unwrap());
+    assert!(initial_manifest.id(ObjectKind::Table, "Media").is_some());
+    assert!(initial_manifest.id(ObjectKind::Table, "Archive").is_none());
+    let table_id = *initial_manifest
+        .id(ObjectKind::Table, "Media")
+        .expect("active source table identity");
+    let name_id = *initial_manifest
+        .id(ObjectKind::Field, "Media.name")
+        .expect("active source name field identity");
+    let age_id = *initial_manifest
+        .id(ObjectKind::Field, "Media.age")
+        .expect("active source age field identity");
+    let old_row_path = directory.path().join("Media/north/42.orna");
+    let row_contents = fs::read(&old_row_path).expect("old loose row");
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+    assert!(output.status.success(), "mv stderr: {:?}", output.stderr);
+    assert_eq!(
+        fs::read(&source_path).unwrap(),
+        source_after_crash.as_bytes()
+    );
+    assert_eq!(
+        fs::read(directory.path().join("Archive/north/42.orna")).unwrap(),
+        row_contents
+    );
+    assert!(!old_row_path.exists());
+    let renamed_manifest = ObjectIdentityManifest::read_worktree(
+        &Repository::discover(directory.path()).expect("repository"),
+    )
+    .expect("manifest read")
+    .expect("renamed manifest");
+    assert_eq!(
+        renamed_manifest.id(ObjectKind::Table, "Archive"),
+        Some(&table_id)
+    );
+    assert_eq!(
+        renamed_manifest.id(ObjectKind::Field, "Archive.name"),
+        Some(&name_id)
+    );
+    assert_eq!(
+        renamed_manifest.id(ObjectKind::Field, "Archive.age"),
+        Some(&age_id)
+    );
+    assert!(renamed_manifest.id(ObjectKind::Field, "Media.name").is_none());
+    assert!(renamed_manifest.id(ObjectKind::Field, "Media.age").is_none());
+    assert_ne!(manifest_before_recovery, fs::read(&manifest_path).unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let recovered_metadata = fs::metadata(&source_path).expect("recovered source metadata");
+        assert_eq!(source_metadata.ino(), recovered_metadata.ino());
+    }
+}
+
+#[test]
+fn mv_resumes_after_source_and_row_directory_were_renamed() {
+    let (directory, initial_manifest) = initialized_project_with_loose_row();
+    let source_path = directory.path().join("main.orna");
+    let source_after_crash = SOURCE_WITH_ROW.replace("table Media", "table Archive");
+    fs::write(&source_path, &source_after_crash).expect("simulate source rename");
+    let source_metadata = fs::metadata(&source_path).expect("source metadata");
+    fs::rename(
+        directory.path().join("Media"),
+        directory.path().join("Archive"),
+    )
+    .expect("simulate row-directory rename");
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+
+    assert!(output.status.success(), "mv stderr: {:?}", output.stderr);
+    assert_eq!(
+        fs::read(&source_path).unwrap(),
+        source_after_crash.as_bytes()
+    );
+    assert_eq!(
+        fs::read(directory.path().join("Archive/north/42.orna")).unwrap(),
+        ROW_SOURCE.as_bytes()
+    );
+    assert!(!directory.path().join("Media").exists());
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let manifest = ObjectIdentityManifest::read_worktree(&repository)
+        .expect("manifest read")
+        .expect("updated manifest");
+    assert_eq!(
+        manifest.id(ObjectKind::Table, "Archive"),
+        initial_manifest.id(ObjectKind::Table, "Media")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let recovered_metadata = fs::metadata(&source_path).expect("recovered source metadata");
+        assert_eq!(source_metadata.ino(), recovered_metadata.ino());
+    }
+}
+
+#[test]
+fn mv_refuses_an_existing_loose_row_destination() {
+    let (directory, _) = initialized_project_with_loose_row();
+    let source_path = directory.path().join("main.orna");
+    let manifest_path = directory.path().join(".orna/object-identities.cbor");
+    let source_before = fs::read(&source_path).unwrap();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let row_before = fs::read(directory.path().join("Media/north/42.orna")).unwrap();
+    let destination = directory.path().join("Archive");
+    fs::create_dir(&destination).expect("existing destination");
+    fs::write(destination.join("preserve.txt"), b"existing").unwrap();
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+    assert!(!output.status.success(), "destination collision should fail");
+    assert_eq!(fs::read(&source_path).unwrap(), source_before);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    assert_eq!(
+        fs::read(directory.path().join("Media/north/42.orna")).unwrap(),
+        row_before
+    );
+    assert_eq!(fs::read(destination.join("preserve.txt")).unwrap(), b"existing");
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_refuses_a_symlinked_loose_row_directory() {
+    use std::os::unix::fs::symlink;
+
+    let (directory, _) = initialized_project_with_source(SOURCE_WITH_ROW);
+    let source_path = directory.path().join("main.orna");
+    let manifest_path = directory.path().join(".orna/object-identities.cbor");
+    let source_before = fs::read(&source_path).unwrap();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let external = tempfile::tempdir().expect("external row directory");
+    fs::write(external.path().join("north.orna"), b"external").unwrap();
+    symlink(external.path(), directory.path().join("Media")).expect("row-directory symlink");
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "symlinked path should fail");
+    assert!(
+        stderr.contains("E2100") && stderr.contains("project source could not be loaded"),
+        "unexpected loader diagnostic: {stderr}"
+    );
+    assert_eq!(fs::read(&source_path).unwrap(), source_before);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    assert_eq!(fs::read(external.path().join("north.orna")).unwrap(), b"external");
+    assert!(!directory.path().join("Archive").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_refuses_a_symlinked_row_destination() {
+    use std::os::unix::fs::symlink;
+
+    let (directory, _) = initialized_project_with_source(SOURCE_WITH_ROW);
+    let source_path = directory.path().join("main.orna");
+    let manifest_path = directory.path().join(".orna/object-identities.cbor");
+    let source_before = fs::read(&source_path).unwrap();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let external = tempfile::tempdir().expect("external destination");
+    fs::write(external.path().join("preserve.txt"), b"external").unwrap();
+    let destination = directory.path().join("Archive");
+    symlink(external.path(), &destination).expect("destination symlink");
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "symlink destination should fail");
+    assert!(
+        stderr.contains("E2100") && stderr.contains("project source could not be loaded"),
+        "unexpected loader diagnostic: {stderr}"
+    );
+    assert_eq!(fs::read(&source_path).unwrap(), source_before);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    assert_eq!(fs::read(external.path().join("preserve.txt")).unwrap(), b"external");
+    assert!(fs::symlink_metadata(destination).unwrap().file_type().is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_rolls_back_source_manifest_and_loose_rows_when_manifest_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, _) = initialized_project_with_loose_row();
+    let source_path = directory.path().join("main.orna");
+    let manifest_dir = directory.path().join(".orna");
+    let manifest_path = manifest_dir.join("object-identities.cbor");
+    let source_before = fs::read(&source_path).unwrap();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let row_before = fs::read(directory.path().join("Media/north/42.orna")).unwrap();
+    fs::set_permissions(&manifest_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+
+    fs::set_permissions(&manifest_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!output.status.success(), "manifest write should fail");
+    assert_eq!(fs::read(&source_path).unwrap(), source_before);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    assert_eq!(
+        fs::read(directory.path().join("Media/north/42.orna")).unwrap(),
+        row_before
+    );
+    assert!(!directory.path().join("Archive").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn mv_rolls_back_when_source_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (directory, _) = initialized_project();
+    let source_path = directory.path().join("main.orna");
+    let manifest_path = directory.path().join(".orna/object-identities.cbor");
+    let source_before = fs::read(&source_path).unwrap();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let output = run_cli(directory.path(), &["mv", "Media", "Archive"]);
+
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!output.status.success(), "source write should fail");
+    assert_eq!(fs::read(&source_path).unwrap(), source_before);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    assert!(!directory.path().join("Archive").exists());
+}
 #[test]
 fn mv_renames_a_committed_table_and_preserves_table_and_child_field_ids() {
     let (directory, initial_manifest) = initialized_project();
