@@ -1,14 +1,112 @@
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
-use orna_repository_v1::{CompactManifest, Uuid};
+use orna_repository_v1::{CompactManifest, Repository, Uuid};
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState, TableMutation};
 use orna_storage_v1::{
-    plan_compact_consolidation, plan_compact_scan, plan_storage_placement,
-    plan_storage_rewrite, CompactKeyRange, CompactOvbProfile,
+    lower_runtime_table_mutations, plan_compact_consolidation, plan_compact_scan,
+    plan_storage_placement, plan_storage_rewrite, CompactKeyRange, CompactOvbProfile,
     EditableBaseRow, HybridBaseState, PhysicalPlacement, PlacementAction, PlacementCandidate,
     StoragePlacementError, StoragePreference, StorageProfile, StorageRewriteError,
-    StorageRewriteTarget, PlacementReason, FrozenBatch, LooseMutation, LooseProjection, LooseRow,
-    MutationId, AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES, AUTOMATIC_EDITABLE_MAX_ROWS,
+    StorageRewriteTarget, PlacementReason, FrozenBatch, LooseProjection, LooseRow,
+    AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES, AUTOMATIC_EDITABLE_MAX_ROWS,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
+use std::{fs, path::Path, process::Command};
+use tempfile::TempDir;
+
+fn git(directory: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(directory)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn repository() -> (TempDir, Repository) {
+    let root = TempDir::new().unwrap();
+    git(root.path(), &["init", "-b", "main"]);
+    git(root.path(), &["config", "user.email", "test@example.com"]);
+    git(root.path(), &["config", "user.name", "Orna test"]);
+    git(root.path(), &["config", "commit.gpgsign", "false"]);
+    fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+    git(root.path(), &["add", "main.orna"]);
+    git(root.path(), &["commit", "-m", "initial"]);
+    let repository = Repository::discover(root.path()).unwrap();
+    (root, repository)
+}
+
+async fn lower_case_alias_batch(
+    mutations: Vec<TableMutation>,
+    expected_upper: Option<Vec<u8>>,
+) -> FrozenBatch {
+    let (_root, repository) = repository();
+    let runtime = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [11; 16],
+            repository_id: [12; 16],
+        },
+        [13; 32],
+    )
+    .await
+    .unwrap();
+    let lease = runtime.acquire_lease([14; 16]).await.unwrap();
+    let context = runtime.begin_activation().await.unwrap();
+    let mutation_count = u64::try_from(mutations.len()).unwrap();
+    runtime
+        .commit_table_activation(
+            lease,
+            &context,
+            &mutations,
+            [15; 32],
+            &orna_runtime_v1::NoFault,
+        )
+        .await
+        .unwrap();
+    let checkpoint = runtime.latest_checkpoint().await.unwrap().unwrap();
+    assert_eq!(checkpoint.mutation_sequence, mutation_count);
+    let freeze = runtime
+        .freeze([16; 16], &checkpoint)
+        .await
+        .unwrap();
+    let pending = runtime
+        .pending_table_mutations_through(&freeze)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), mutations.len());
+
+    let upper_key = text_key("Alice");
+    let lower_key = text_key("alice");
+    let upper_path = editable_path("Alice");
+    let lower_path = editable_path("alice");
+    lower_runtime_table_mutations(
+        &freeze,
+        &pending,
+        |mutation| {
+            if mutation.key() == upper_key.as_slice() {
+                Ok(upper_path.clone())
+            } else if mutation.key() == lower_key.as_slice() {
+                Ok(lower_path.clone())
+            } else {
+                panic!("unexpected case-alias test key")
+            }
+        },
+        |path| {
+            if path == &upper_path {
+                Ok(expected_upper.clone())
+            } else {
+                Ok(None)
+            }
+        },
+    )
+    .unwrap()
+}
+
+
 
 const EDITABLE_ROW: &str = include_str!("fixtures/storage-placement-row.orna");
 const BATCH_BOUNDARY_DELETE_ROW: &str =
@@ -1222,8 +1320,8 @@ fn one_unrepresentable_automatic_insert_closes_the_new_row_batch() {
     assert!(LooseRow::new(CASE_COLLISION_UPPER_ROW.as_bytes().to_vec()).is_ok());
 }
 
-#[test]
-fn deleting_a_case_alias_source_frees_the_path_for_an_editable_reinsert() {
+#[tokio::test]
+async fn deleting_a_case_alias_source_frees_the_path_for_an_editable_reinsert() {
     let profile = profile_for_key_type(Uuid::from_u128(6), "Str");
     let upper_key = text_key("Alice");
     let lower_key = text_key("alice");
@@ -1256,79 +1354,74 @@ fn deleting_a_case_alias_source_frees_the_path_for_an_editable_reinsert() {
     assert_eq!(plan.decisions()[1].action(), PlacementAction::Insert);
     assert_eq!(plan.decisions()[1].placement(), PhysicalPlacement::Editable);
 
-    let old_row = LooseRow::new(CASE_COLLISION_UPPER_ROW.as_bytes().to_vec()).unwrap();
-    let mut initial = LooseProjection::default();
-    initial
-        .project(
-            &FrozenBatch::new(
-                MutationId::new("initial-case-row").unwrap(),
-                vec![LooseMutation {
-                    id: MutationId::new("initial-case-row-write").unwrap(),
-                    path: upper_path.clone(),
-                    expected: None,
-                    next: Some(old_row.clone()),
-                }],
-                1,
+    let initial = lower_case_alias_batch(
+        vec![
+            TableMutation::new(
+                [1; 16],
+                "Placement",
+                text_key("Alice"),
+                Some(CASE_COLLISION_UPPER_ROW.as_bytes().to_vec()),
             )
             .unwrap(),
-        )
-        .unwrap();
-    let delete = LooseMutation {
-        id: MutationId::new("delete-upper-case-row").unwrap(),
-        path: upper_path.clone(),
-        expected: Some(old_row.hash()),
-        next: None,
-    };
-    let insert = LooseMutation {
-        id: MutationId::new("insert-lower-case-row").unwrap(),
-        path: lower_path.clone(),
-        expected: None,
-        next: Some(LooseRow::new(CASE_COLLISION_LOWER_ROW.as_bytes().to_vec()).unwrap()),
-    };
+        ],
+        None,
+    )
+    .await;
+    let mut initial_projection = LooseProjection::default();
+    initial_projection.project(&initial).unwrap();
+    let delete = TableMutation::new([2; 16], "Placement", text_key("Alice"), None).unwrap();
+    let insert = TableMutation::new(
+        [3; 16],
+        "Placement",
+        text_key("alice"),
+        Some(CASE_COLLISION_LOWER_ROW.as_bytes().to_vec()),
+    )
+    .unwrap();
 
     for mutations in [
         vec![delete.clone(), insert.clone()],
-        vec![insert.clone(), delete.clone()],
+        vec![insert, delete],
     ] {
-        let mut projection = initial.clone();
-        projection
-            .project(
-                &FrozenBatch::new(
-                    MutationId::new("case-row-replacement").unwrap(),
-                    mutations,
-                    2,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let batch = lower_case_alias_batch(
+            mutations,
+            Some(CASE_COLLISION_UPPER_ROW.as_bytes().to_vec()),
+        )
+        .await;
+        let mut projection = initial_projection.clone();
+        projection.project(&batch).unwrap();
         assert_eq!(projection.entries().count(), 1);
         assert!(projection.row(&lower_path).is_some());
         assert!(projection.row(&upper_path).is_none());
     }
 }
 
-#[test]
-fn loose_projection_rejects_fixture_aliases_without_partial_application() {
+#[tokio::test]
+async fn loose_projection_rejects_fixture_aliases_without_partial_application() {
     let upper = parse_row(CASE_COLLISION_UPPER_ROW);
     let lower = parse_row(CASE_COLLISION_LOWER_ROW);
     assert!(upper.diagnostics.is_empty(), "{:#?}", upper.diagnostics);
     assert!(lower.diagnostics.is_empty(), "{:#?}", lower.diagnostics);
 
-    let mutation = |mutation_id: &str, key: &str, body: &str| LooseMutation {
-        id: MutationId::new(mutation_id).unwrap(),
-        path: orna_storage_v1::LoosePath::for_key("Placement", &[key.to_owned()]).unwrap(),
-        expected: None,
-        next: Some(LooseRow::new(body.as_bytes().to_vec()).unwrap()),
-    };
-    let batch = FrozenBatch::new(
-        MutationId::new("case-alias-batch").unwrap(),
+    let batch = lower_case_alias_batch(
         vec![
-            mutation("upper-row", "Alice", CASE_COLLISION_UPPER_ROW),
-            mutation("lower-row", "alice", CASE_COLLISION_LOWER_ROW),
+            TableMutation::new(
+                [4; 16],
+                "Placement",
+                text_key("Alice"),
+                Some(CASE_COLLISION_UPPER_ROW.as_bytes().to_vec()),
+            )
+            .unwrap(),
+            TableMutation::new(
+                [5; 16],
+                "Placement",
+                text_key("alice"),
+                Some(CASE_COLLISION_LOWER_ROW.as_bytes().to_vec()),
+            )
+            .unwrap(),
         ],
-        1,
+        None,
     )
-    .unwrap();
+    .await;
     let mut projection = LooseProjection::default();
 
     assert_eq!(
@@ -1337,6 +1430,7 @@ fn loose_projection_rejects_fixture_aliases_without_partial_application() {
     );
     assert_eq!(projection.entries().count(), 0);
 }
+
 
 #[test]
 fn rewrite_preview_is_generation_bound_and_proves_an_empty_logical_diff() {
