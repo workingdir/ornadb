@@ -79,9 +79,11 @@ fn row_path(
     )
 }
 
-/// Resolves mutations against the pinned format-3 row map before falling back
-/// to a committed loose source row. A mutation that already exists in the
-/// native store need not have a loose source file.
+/// Validates format-3 mutations against the pinned graph and its committed
+/// source binding, then derives their loose projection from the typed key.
+/// Resolving a committed loose row by scanning source paths is reserved for
+/// legacy repository formats; format-3 keys remain independent of host filename
+/// rules (ORNA-KEY-004).
 fn validate_candidate_source_rows(
     repository: &orna_repository_v1::Repository,
     head: &orna_repository_v1::GitCommitRef,
@@ -90,89 +92,15 @@ fn validate_candidate_source_rows(
     let loader = orna_project_v1::ProjectLoader::default();
     let format = repository
         .open_pinned_format_context(head.as_str())
-        .map_err(|error| publish_error("format-3 row map could not be opened", format!("{error:?}; the pending range was preserved")))?;
+        .map_err(|error| {
+            publish_error(
+                "repository format context could not be opened",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
     let mut row_paths = BTreeMap::new();
     for mutation in mutations {
-        let table_id = mutation.table_object_id().ok_or_else(|| {
-            publish_error(
-                "source row could not be admitted for publication",
-                "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
-            )
-        })?;
-        let schema = loader
-            .resolve_committed_source_table_schema(repository, head, table_id)
-            .map_err(|error| publish_error("source row schema could not be resolved", format!("{error:?}; the pending range was preserved")))?;
-        if schema.declaration_name() != mutation.table() || schema.table_object_id() != table_id {
-            return Err(publish_error(
-                "source row table identity does not match its committed schema",
-                "table name or TableObjectId conflicts with the selected snapshot; the pending range was preserved",
-            ));
-        }
-        let fields = mutation.value().ok_or_else(|| {
-            publish_error(
-                "source row has no complete stored-field tuple",
-                "source-owned publication requires the admitted ROV-3 fields; the pending range was preserved",
-            )
-        })?;
-        schema
-            .descriptor()
-            .validate_stored_row(table_id.bytes(), mutation.key(), fields)
-            .map_err(|error| publish_error("source row does not match its committed schema", format!("{error:?}; the pending range was preserved")))?;
-        if let Some(new_key) = mutation.rekey_to() {
-            schema
-                .descriptor()
-                .validate_stored_row(table_id.bytes(), new_key, fields)
-                .map_err(|error| publish_error("source row rekey does not match its committed schema", format!("{error:?}; the pending range was preserved")))?;
-        }
-
-        let row_map = format
-            .load_row_map(table_id.bytes())
-            .map_err(|error| {
-                publish_error(
-                    "format-3 row map could not be loaded",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-        let key = orna_repository_v1::TypedKey::decode_canonical(mutation.key()).map_err(|error| {
-            publish_error(
-                "source row key is not canonical",
-                format!("{error:?}; the pending range was preserved"),
-            )
-        })?;
-        let graph = format
-            .open_native_graph(&row_map)
-            .map_err(|error| {
-                publish_error(
-                    "format-3 native graph could not be opened",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-        let scope = graph.open_read_scope().map_err(|error| {
-            publish_error(
-                "format-3 native graph read scope could not be opened",
-                format!("{error:?}; the pending range was preserved"),
-            )
-        })?;
-        let native_row = graph.lookup_row(&key, &scope).map_err(|error| {
-            publish_error(
-                "format-3 native row lookup failed",
-                format!("{error:?}; the pending range was preserved"),
-            )
-        })?;
-        let path = if let Some(row) = native_row {
-            let leaves = typed_key_path_leaves(row.key()).ok_or_else(|| {
-                publish_error(
-                    "native row key cannot be projected to a loose path",
-                    "the committed typed key is not representable by the source path codec; the pending range was preserved",
-                )
-            })?;
-            LoosePath::for_key(mutation.table(), &leaves).map_err(|error| {
-                publish_error(
-                    "source row could not be admitted for publication",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?
-        } else {
+        let path = if format.repository_format() != orna_repository_v1::RepositoryFormat::Format3 {
             let projection = loader
                 .resolve_committed_loose_row_projection(repository, head, mutation)
                 .map_err(|error| {
@@ -182,6 +110,139 @@ fn validate_candidate_source_rows(
                     )
                 })?;
             row_path(&projection)?
+        } else {
+            let table_id = mutation.table_object_id().ok_or_else(|| {
+                publish_error(
+                    "source row could not be admitted for publication",
+                    "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
+                )
+            })?;
+            let schema = loader
+                .resolve_committed_source_table_schema(repository, head, table_id)
+                .map_err(|error| {
+                    publish_error(
+                        "source row schema could not be resolved",
+                        format!("{error:?}; the pending range was preserved"),
+                    )
+                })?;
+            let binding = schema.binding();
+            let snapshot_id = format.snapshot_pin().snapshot_id();
+            let database_id = format.require_database_id().map_err(|error| {
+                publish_error(
+                    "format-3 database identity could not be verified",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+            if schema.declaration_name() != mutation.table()
+                || schema.table_object_id() != table_id
+                || schema.source_commit() != head
+                || schema.snapshot_id() != &snapshot_id
+                || schema.database_id() != database_id.as_bytes()
+                || binding.database_id() != database_id
+                || binding.snapshot_id() != &snapshot_id
+                || *binding.table_object_id() != table_id.bytes()
+                || binding.declaration_name() != Some(schema.declaration_name())
+                || binding.descriptor() != schema.descriptor()
+            {
+                return Err(publish_error(
+                    "source row table binding does not match its committed format-3 context",
+                    "table identity, descriptor, database or snapshot conflicts with the selected snapshot; the pending range was preserved",
+                ));
+            }
+            let key = orna_repository_v1::TypedKey::decode_canonical(mutation.key()).map_err(
+                |error| {
+                    publish_error(
+                        "source row key is not canonical",
+                        format!("{error:?}; the pending range was preserved"),
+                    )
+                },
+            )?;
+            match mutation.value() {
+                Some(fields) => {
+                    binding
+                        .descriptor()
+                        .validate_stored_row(table_id.bytes(), mutation.key(), fields)
+                        .map_err(|error| {
+                            publish_error(
+                                "source row does not match its committed schema",
+                                format!("{error:?}; the pending range was preserved"),
+                            )
+                        })?;
+                    if let Some(new_key) = mutation.rekey_to() {
+                        orna_repository_v1::TypedKey::decode_canonical(new_key).map_err(
+                            |error| {
+                                publish_error(
+                                    "source row rekey is not canonical",
+                                    format!("{error:?}; the pending range was preserved"),
+                                )
+                            },
+                        )?;
+                        binding
+                            .descriptor()
+                            .validate_stored_row(table_id.bytes(), new_key, fields)
+                            .map_err(|error| {
+                                publish_error(
+                                    "source row rekey does not match its committed schema",
+                                    format!("{error:?}; the pending range was preserved"),
+                                )
+                            })?;
+                    }
+                }
+                None => {
+                    binding
+                        .descriptor()
+                        .validate_stored_key(table_id.bytes(), mutation.key())
+                        .map_err(|error| {
+                            publish_error(
+                                "source row key does not match its committed schema",
+                                format!("{error:?}; the pending range was preserved"),
+                            )
+                        })?;
+                }
+            }
+            let row_map = format.load_row_map(table_id.bytes()).map_err(|error| {
+                publish_error(
+                    "format-3 row map could not be loaded",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+            let graph = format.open_native_graph(&row_map).map_err(|error| {
+                publish_error(
+                    "format-3 native graph could not be opened",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+            let scope = graph.open_read_scope().map_err(|error| {
+                publish_error(
+                    "format-3 native graph read scope could not be opened",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+            let committed_descriptor = graph.read_schema_descriptor(&scope).map_err(|error| {
+                publish_error(
+                    "format-3 committed table binding could not be read",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
+            if &committed_descriptor != binding.descriptor() {
+                return Err(publish_error(
+                    "source row table binding does not match its committed format-3 context",
+                    "the native graph descriptor conflicts with the source binding; the pending range was preserved",
+                ));
+            }
+
+            let leaves = typed_key_path_leaves(&key).ok_or_else(|| {
+                publish_error(
+                    "source row key cannot be projected to a loose path",
+                    "the admitted typed key has no path projection; the pending range was preserved",
+                )
+            })?;
+            LoosePath::for_key(mutation.table(), &leaves).map_err(|error| {
+                publish_error(
+                    "source row could not be admitted for publication",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?
         };
         if row_paths.insert(mutation.id(), path).is_some() {
             return Err(publish_error(
@@ -201,9 +262,13 @@ fn typed_key_path_leaves(key: &orna_repository_v1::TypedKey) -> Option<Vec<Strin
             TypedKey::Int(value) => leaves.push(value.to_string()),
             TypedKey::UInt(value) => leaves.push(value.to_string()),
             TypedKey::Bool(value) => leaves.push(value.to_string()),
-            TypedKey::Bytes(value) => leaves.push(value.iter().map(|byte| format!("{byte:02x}")).collect()),
+            TypedKey::Bytes(value) => {
+                leaves.push(value.iter().map(|byte| format!("{byte:02x}")).collect())
+            }
             TypedKey::Tuple(values) => {
-                for value in values { append(value, leaves)?; }
+                for value in values {
+                    append(value, leaves)?;
+                }
             }
             TypedKey::Null => return None,
         }
