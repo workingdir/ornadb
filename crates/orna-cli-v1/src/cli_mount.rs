@@ -361,8 +361,12 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
 
 #[cfg(target_os = "linux")]
 fn canonical_mountpoint_or_original(path: &Path) -> std::path::PathBuf {
-    if let Ok(canonical) = fs::canonicalize(path) {
-        return canonical;
+    match fs::canonicalize(path) {
+        Ok(canonical) => return canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {
+            return path.to_path_buf();
+        }
+        Err(_) => {}
     }
     let parent = path
         .parent()
