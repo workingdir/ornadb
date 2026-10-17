@@ -6,14 +6,39 @@ been published.
 
 ## Unreleased
 
+- The CLI `add --row TABLE KEY` command stages the source for one matching loose
+  row. Reviewed candidate commit support remains open under ornadb-mmsa.7; its
+  state-bound contract is tracked separately in ornadb-mmsa.46.
 - Source identity reconciliation accepts explicit rename mappings and preserves
   existing IDs across authorized name changes. Unassisted renames remain
   delete-plus-create, and retired IDs are never reused.
 - The `mv` CLI command renames committed tables and retains their table and
-  child-field IDs in uncommitted source and identity-manifest changes.
+  child-field IDs in uncommitted source and identity-manifest changes. It moves
+  the associated loose-row directory and can resume after a source rename is
+  interrupted before the manifest update.
+
 - Optional Blob fields preserve `Some` bindings through source-row admission,
   metadata queries, history diffs and offline export; overflow verification counts
   nested Blob references through `Some` without reading payload bytes.
+- FUSE workspace mounts page through the pinned row index on listing, resolve
+  known keys by the index, and isolate projection errors as EIO so one corrupt
+  row does not block neighboring rows.
+- FUSE workspace mounts hold a private, per-worktree reference to their pinned
+  snapshot so reads survive HEAD changes and garbage collection. SIGINT,
+  SIGTERM, and SIGHUP clean up mounts, while orna unmount DIR can detach
+  orphaned mounts when DIR is relative to the command's current working
+  directory.
+- `mount DIR --at SELECTOR` now starts a read-only FUSE session pinned to the
+  resolved commit, so its mounted paths continue to read that historical state
+  after workspace HEAD advances.
+- FUSE teardown serializes daemon and CLI cleanup so concurrent detach paths do
+  not race to remove the same view pin and record.
+- The trusted REPL exposes the root namespace as `main` unless a user module named
+  `main` exists, and admits `main.add` Blob rows using typed keys against the
+  committed format-3 schema. A semicolon-terminated capture/add submission
+  suppresses the row result while retaining one durable runtime transaction.
+  Captured scratch refs share the runtime owner and are reclaimed when a later
+  runtime reopen recovers a crashed session.
 
 ## 1.0.0 — release inventory (publication pending)
 
@@ -74,14 +99,21 @@ release gate has passed.
 - The CLI exposes function invocation, a bounded local function-backed REPL
   route, daemon/server administration, runtime description, source
   check/diff/apply, raw calls, USER state, inspection, and security
-  administration. The local REPL route does not establish engine execution for
-  the canonical `ORNA-REPL-001..006` requirements. `--explain`, argument
-  files, canonical output, JSON/table/CSV presenters, and bounded invocation
-  tracing are implemented where the selected route supports them.
+  administration. A local format-3 REPL with writable, identity-admitted source
+  matching `HEAD` can commit a Blob capture and its source-row table insert as
+  one durable runtime transaction without publishing a Git commit. Other
+  effectful REPL submissions fail closed when matching format-3 transaction
+  authority is unavailable. This does not establish engine
+  execution for the canonical `ORNA-REPL-001..006` requirements. `--explain`,
+  argument files, canonical output, JSON/table/CSV presenters, and bounded
+  invocation tracing are implemented where the selected route supports them.
 - On Linux, `orna mount DIR --cwd` mounts the current committed workspace
-  through host FUSE as a read-only view (`ro,nodev,nosuid,noexec`), pinned to
-  the selected commit. `orna unmount DIR` releases its kernel mount and view
-  record; `orna mount DIR --at SELECTOR` attaches a record-only snapshot view.
+  through host FUSE and allows validated in-place row-document saves, including
+  editors that open with `O_TRUNC`. Existing rows are validated and replaced
+  before durable data changes; sibling temporary files renamed over `data.orna`
+  remain supported. `orna unmount DIR` releases the kernel mount and its view
+  record; `orna mount DIR --at SELECTOR` remains a read-only, record-only
+  snapshot view.
 - Committed snapshot loading preserves nested module import candidates while
   keeping format-3 row documents out of loose-row source discovery.
 - USER state is principal-scoped and typed. Local peer authentication supplies
@@ -131,6 +163,10 @@ release gate has passed.
   admitted with. The candidate metadata lookup rejects a row whose spelling is
   not canonical MIME-1, or that differs from the admitted pair, so a transfer
   record cannot report an annotation the pin never admitted.
+- The CLI publication boundary validates format-3 rows against the pinned
+  committed table binding and derives portable loose-row paths from typed
+  keys; legacy formats retain committed-source path resolution. Invalid rows
+  fail closed while preserving the pending range.
 - `orna history <relation> --diff <from> <to>` decodes source-owned Object row
   fields against each endpoint's committed schema and compares stored Blob
   annotations without fetching payloads.

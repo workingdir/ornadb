@@ -333,6 +333,7 @@ pub struct RepositoryFormatContext {
     format: RepositoryFormat,
     database_id: Option<DatabaseId>,
     snapshot: RepositorySnapshotPin,
+    runtime_owner_id: Option<[u8; 16]>,
 }
 
 /// Owner-issued proof that a repository's admitted context is the final
@@ -435,6 +436,13 @@ impl RepositoryFormatContext {
         self.format.supports_writes()
     }
 
+    /// Binds graph-scoped values and scratch capture refs to a live runtime
+    /// owner. Callers must supply the same identity held by that runtime
+    /// owner lock so a later runtime reopen can reclaim refs left by a crash.
+    pub fn with_runtime_owner_id(mut self, owner_id: [u8; 16]) -> Self {
+        self.runtime_owner_id = Some(owner_id);
+        self
+    }
     /// The opaque immutable snapshot pin retained by this context.
     pub fn snapshot_pin(&self) -> &RepositorySnapshotPin {
         &self.snapshot
@@ -574,13 +582,15 @@ impl RepositoryFormatContext {
         let repository_id: [u8; 32] = repository_hash.finalize().into();
 
         let authority = rows.authority();
-        let mut owner_hash = Sha256::new();
-        owner_hash.update(b"orna.repository.graph.owner.v1\0");
-        owner_hash.update(authority);
-        let owner_digest = owner_hash.finalize();
-        let mut owner_id = [0u8; 16];
-        owner_id.copy_from_slice(&owner_digest[..16]);
-
+        let owner_id = self.runtime_owner_id.unwrap_or_else(|| {
+            let mut owner_hash = Sha256::new();
+            owner_hash.update(b"orna.repository.graph.owner.v1\0");
+            owner_hash.update(authority);
+            let owner_digest = owner_hash.finalize();
+            let mut owner_id = [0u8; 16];
+            owner_id.copy_from_slice(&owner_digest[..16]);
+            owner_id
+        });
         let mut identity_hash = Sha256::new();
         identity_hash.update(b"orna.repository.graph.context.v1\0");
         identity_hash.update(repository_id);
@@ -605,6 +615,26 @@ impl RepositoryFormatContext {
             rows.clone(),
         )
         .map_err(|_| FormatContextError::GraphContextInvalid)
+    }
+
+    /// Issues capture authority using this admitted snapshot and its graph
+    /// owner identity. A runtime-scoped context therefore writes scratch refs
+    /// under the owner that will reclaim them after a crash.
+    pub fn capture_capability(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<RepositoryCaptureCapability, CaptureCapabilityError> {
+        let row_map = self
+            .load_row_map(relation_id)
+            .map_err(CaptureCapabilityError::Format)?;
+        let graph = std::sync::Arc::new(
+            self.open_native_graph(&row_map)
+                .map_err(CaptureCapabilityError::Format)?,
+        );
+        let scope = graph
+            .open_read_scope()
+            .map_err(CaptureCapabilityError::Graph)?;
+        RepositoryCaptureCapability::new(graph, scope).map_err(CaptureCapabilityError::Graph)
     }
 
     /// Opens a snapshot-pinned format-3 value context for one relation.
@@ -838,7 +868,14 @@ impl HistoricalFormatContext {
     pub const fn snapshot_id(&self) -> &[u8; 32] {
         &self.snapshot_id
     }
+    /// The repository-verified native Git commit resolved for this context.
+    pub fn commit(&self) -> &crate::GitCommitRef {
+        &self.context.snapshot.commit
+    }
 
+    pub(crate) fn commit_oid_hex(&self) -> &str {
+        self.context.snapshot.commit.as_str()
+    }
     /// The admitted repository-format dispatch at the pinned commit.
     pub const fn repository_format(&self) -> RepositoryFormat {
         self.context.repository_format()
@@ -1007,6 +1044,15 @@ impl Repository {
         self.open_format_context_at(&snapshot)
     }
 
+    /// Reads the parsed repository-format number for an immutable private candidate.
+    pub fn private_candidate_repository_format_number(
+        &self,
+        candidate: &crate::PrivateCommit,
+    ) -> Result<u8, FormatContextError> {
+        self.open_private_candidate_format_context(candidate)
+            .map(|context| context.repository_format_number())
+    }
+
     /// Opens and validates format metadata at the current immutable HEAD.
     /// Worktree-only metadata is not silently treated as a committed snapshot.
     pub fn open_format_context(&self) -> Result<RepositoryFormatContext, FormatContextError> {
@@ -1082,21 +1128,9 @@ impl Repository {
         &self,
         relation_id: [u8; 16],
     ) -> Result<RepositoryCaptureCapability, CaptureCapabilityError> {
-        let format = self
-            .open_format_context()
-            .map_err(CaptureCapabilityError::Format)?;
-        let row_map = format
-            .load_row_map(relation_id)
-            .map_err(CaptureCapabilityError::Format)?;
-        let graph = std::sync::Arc::new(
-            format
-                .open_native_graph(&row_map)
-                .map_err(CaptureCapabilityError::Format)?,
-        );
-        let scope = graph
-            .open_read_scope()
-            .map_err(CaptureCapabilityError::Graph)?;
-        RepositoryCaptureCapability::new(graph, scope).map_err(CaptureCapabilityError::Graph)
+        self.open_format_context()
+            .map_err(CaptureCapabilityError::Format)?
+            .capture_capability(relation_id)
     }
 
     /// Opens and validates metadata at a previously repository-pinned
@@ -1247,6 +1281,7 @@ fn parse_context(
             format,
             database_id: None,
             snapshot,
+            runtime_owner_id: None,
         }),
         (Some(database), None) => match parse_database_record(database)? {
             DatabaseRecord::Format3(database_id) => Ok(RepositoryFormatContext {
@@ -1254,6 +1289,7 @@ fn parse_context(
                 format: RepositoryFormat::Format3,
                 database_id: Some(database_id),
                 snapshot,
+                runtime_owner_id: None,
             }),
             DatabaseRecord::LegacySidecar(_) => Err(FormatContextError::MetadataInvalid),
         },
@@ -1264,6 +1300,7 @@ fn parse_context(
                 format,
                 database_id: Some(database_id),
                 snapshot,
+                runtime_owner_id: None,
             }),
         },
     }

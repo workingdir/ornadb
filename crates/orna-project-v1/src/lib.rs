@@ -14,8 +14,8 @@ use std::{
 };
 
 use orna_repository_v1::{
-    CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef,
-    OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
+    CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, FormatContextError,
+    GitCommitRef, OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
 };
 use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
@@ -403,6 +403,127 @@ impl LoadedProject {
     }
 
 }
+/// Admit a completed format-3 row by its typed key and value, without deriving
+/// a loose-row filename that has no authority in the native row store.
+pub fn admit_format3_row(
+    project: &LoadedProject,
+    canonical_key: &[u8],
+    row: &Raw,
+    schema: &ResolvedTableSchema,
+    context: &Format3Context,
+    blob_bindings: Vec<(String, OrpBlobBinding)>,
+    mutation_id: [u8; 16],
+) -> Result<AdmittedSourceRow, ProjectLoadError> {
+    if project.source_commit() != Some(schema.source_commit())
+        || project.source_snapshot_id().as_ref() != Some(schema.snapshot_id())
+        || !format_context_matches_source_schema(
+            context,
+            schema.database_id(),
+            schema.source_commit().as_str(),
+        )
+    {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    if blob_bindings
+        .iter()
+        .any(|(_, binding)| binding.transfer_record().database_id() != schema.database_id())
+    {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+
+    let (descriptor_table_id, fields) = source_schema_fields(schema.descriptor())?;
+    if &descriptor_table_id != schema.table.table_object_id() {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let key_ids = match raw_map_value(schema.descriptor().raw(), "2") {
+        Some(Raw::Array(ids)) => ids
+            .iter()
+            .map(|id| committed_uuid(id).ok_or(ProjectLoadError::InvalidSourceRow))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(ProjectLoadError::InvalidSourceRow),
+    };
+    if key_ids.is_empty() {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+
+    let Raw::Map(entries) = row else {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    };
+    let mut row_fields = BTreeMap::new();
+    for (key, value) in entries {
+        let Raw::Text(name) = key else {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        };
+        if row_fields.insert(name.as_str(), value).is_some() {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        }
+    }
+
+    let key_fields = key_ids
+        .iter()
+        .map(|id| {
+            fields
+                .iter()
+                .find(|field| field.id == *id && field.role == 0)
+                .ok_or(ProjectLoadError::InvalidSourceRow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let typed_key = Value::decode(canonical_key).map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    let key_matches = if let [field] = key_fields.as_slice() {
+        row_fields
+            .get(field.name.as_str())
+            .is_some_and(|value| *value == typed_key.raw())
+    } else {
+        match typed_key.raw() {
+            Raw::Array(components) if components.len() == key_fields.len() => key_fields
+                .iter()
+                .zip(components)
+                .all(|(field, component)| {
+                    row_fields
+                        .get(field.name.as_str())
+                        .is_some_and(|value| *value == component)
+                }),
+            _ => false,
+        }
+    };
+    if !key_matches {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let key_field_names = key_fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let stored_field_names = fields
+        .iter()
+        .filter(|field| field.role == 1)
+        .map(|field| field.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if row_fields.keys().any(|name| {
+        !key_field_names.contains(*name) && !stored_field_names.contains(*name)
+    }) {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
+    let stored_row_fields = fields
+        .iter()
+        .filter(|field| field.role == 1)
+        .filter_map(|field| {
+            row_fields
+                .get(field.name.as_str())
+                .map(|value| (field.name.as_str(), *value))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    admit_stored_source_row(
+        schema,
+        context,
+        canonical_key.to_vec(),
+        &stored_row_fields,
+        blob_bindings,
+        Vec::new(),
+        mutation_id,
+    )
+}
+
 /// Admit a source row expression and accepted captured Blob bindings as one
 /// canonical mutation. This variant accepts no source-owner scalar fields.
 pub fn admit_source_row(
@@ -544,13 +665,38 @@ fn admit_source_row_with_owner_fields_inner(
         return Err(ProjectLoadError::InvalidSourceRow);
     }
 
+    let row_fields = lowered
+        .fields
+        .iter()
+        .map(|(name, value)| (name.as_str(), value))
+        .collect::<BTreeMap<_, _>>();
+    admit_stored_source_row(
+        schema,
+        context,
+        lowered.canonical_key,
+        &row_fields,
+        blob_bindings,
+        owner_field_values,
+        mutation_id,
+    )
+}
+
+fn admit_stored_source_row(
+    schema: &ResolvedTableSchema,
+    context: &Format3Context,
+    canonical_key: Vec<u8>,
+    row_fields: &BTreeMap<&str, &Raw>,
+    blob_bindings: Vec<(String, OrpBlobBinding)>,
+    owner_field_values: Vec<(String, Raw)>,
+    mutation_id: [u8; 16],
+) -> Result<AdmittedSourceRow, ProjectLoadError> {
     let (descriptor_table_id, fields) = source_schema_fields(schema.descriptor())?;
     if &descriptor_table_id != schema.table.table_object_id() {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
     schema
         .descriptor()
-        .validate_stored_key(*schema.table.table_object_id(), &lowered.canonical_key)
+        .validate_stored_key(*schema.table.table_object_id(), &canonical_key)
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     let mut key_fields = fields.iter().filter(|field| field.role == 0);
     let is_text_primary_key = match (key_fields.next(), key_fields.next()) {
@@ -558,24 +704,28 @@ fn admit_source_row_with_owner_fields_inner(
         _ => false,
     };
     let mutation_key = if is_text_primary_key {
-        let key = Value::decode(&lowered.canonical_key)
+        let key = Value::decode(&canonical_key)
             .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
         let Raw::Text(key) = key.raw() else {
             return Err(ProjectLoadError::InvalidSourceRow);
         };
         key.as_bytes().to_vec()
     } else {
-        lowered.canonical_key.clone()
+        canonical_key.clone()
     };
-    for field_name in &owner_field_names {
-        if !fields
-            .iter()
-            .any(|field| field.name == *field_name && field.role == 1 && !field.is_blob)
-        {
+    let mut pending_owner_fields = BTreeMap::new();
+    for (name, value) in owner_field_values {
+        if pending_owner_fields.insert(name, value).is_some() {
             return Err(ProjectLoadError::InvalidSourceRow);
         }
     }
-    let mut pending_owner_fields = owner_field_values.into_iter().collect::<BTreeMap<_, _>>();
+    if pending_owner_fields.keys().any(|name| {
+        !fields
+            .iter()
+            .any(|field| field.name == *name && field.role == 1 && !field.is_blob)
+    }) {
+        return Err(ProjectLoadError::InvalidSourceRow);
+    }
     let owner_field_count = pending_owner_fields.len();
     let mut pending_bindings = BTreeMap::new();
     for (field_name, binding) in blob_bindings {
@@ -587,6 +737,7 @@ fn admit_source_row_with_owner_fields_inner(
             return Err(ProjectLoadError::InvalidSourceRow);
         }
     }
+
     let mut stored_fields = Vec::new();
     let mut retained_bindings = Vec::new();
     for field in fields.iter().filter(|field| field.role == 1) {
@@ -596,14 +747,16 @@ fn admit_source_row_with_owner_fields_inner(
             }
             let Some(binding) = pending_bindings.remove(&field.id) else {
                 if field.is_optional_blob
-                    && lowered.fields.get(&field.name) == Some(&Raw::Null)
+                    && row_fields
+                        .get(field.name.as_str())
+                        .is_some_and(|value| **value == Raw::Null)
                 {
                     stored_fields.push(Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))));
                     continue;
                 }
                 return Err(ProjectLoadError::InvalidSourceRow);
             };
-            if lowered.fields.contains_key(&field.name) {
+            if row_fields.contains_key(field.name.as_str()) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
             let encoded_value = binding.encoded_value().to_vec();
@@ -629,14 +782,14 @@ fn admit_source_row_with_owner_fields_inner(
             }
             let value = pending_owner_fields
                 .remove(&field.name)
-                .or_else(|| lowered.fields.get(&field.name).cloned())
+                .or_else(|| row_fields.get(field.name.as_str()).map(|value| (**value).clone()))
                 .ok_or(ProjectLoadError::InvalidSourceRow)?;
             stored_fields.push(value);
         }
     }
     if !pending_bindings.is_empty()
         || !pending_owner_fields.is_empty()
-        || lowered.fields.len() + retained_bindings.len() + owner_field_count
+        || row_fields.len() + retained_bindings.len() + owner_field_count
             != fields.iter().filter(|field| field.role == 1).count()
     {
         return Err(ProjectLoadError::InvalidSourceRow);
@@ -650,7 +803,7 @@ fn admit_source_row_with_owner_fields_inner(
         .descriptor()
         .validate_stored_row(
             *schema.table.table_object_id(),
-            &lowered.canonical_key,
+            &canonical_key,
             &canonical_fields,
         )
         .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
@@ -671,7 +824,7 @@ fn admit_source_row_with_owner_fields_inner(
     }
     Ok(AdmittedSourceRow {
         resolved_schema: schema.clone(),
-        canonical_key: lowered.canonical_key,
+        canonical_key,
         canonical_fields,
         blob_bindings: retained_bindings,
         mutation,
@@ -848,6 +1001,13 @@ impl ProjectLoader {
         {
             return Err(ProjectLoadError::StandardSnapshotMismatch);
         }
+        let has_format3_database = snapshot.has_database_metadata
+            && repository
+                .open_format_context_at_selector(commit.as_str())
+                .map_err(ProjectLoadError::FormatContext)?
+                .repository_format_number()
+                == 3;
+
         let mut project = load_reachable_project(
             self.limits,
             standard_profile,
@@ -863,7 +1023,7 @@ impl ProjectLoader {
             },
             |segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, total_bytes| {
-                if snapshot.has_format3_database {
+                if has_format3_database {
                     Ok(Vec::new())
                 } else {
                     discover_committed_rows(
@@ -962,6 +1122,12 @@ impl ProjectLoader {
         {
             return Err(ProjectLoadError::StandardSnapshotMismatch);
         }
+        let has_format3_database = snapshot.has_database_metadata
+            && repository
+                .private_candidate_repository_format_number(candidate)
+                .map_err(ProjectLoadError::FormatContext)?
+                == 3;
+
         let mut project = load_reachable_project(
             self.limits,
             standard_profile,
@@ -977,7 +1143,7 @@ impl ProjectLoader {
             },
             |segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, total_bytes| {
-                if snapshot.has_format3_database {
+                if has_format3_database {
                     Ok(Vec::new())
                 } else {
                     discover_private_candidate_rows(
@@ -1504,6 +1670,7 @@ fn standard_runtime_closure(
 #[derive(Debug)]
 pub enum ProjectLoadError {
     Repository(RepositoryError),
+    FormatContext(FormatContextError),
     RootUnavailable,
     UnsafePath,
     Symlink,
@@ -1529,6 +1696,7 @@ impl fmt::Display for ProjectLoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Repository(_) => "could not discover the Git worktree",
+            Self::FormatContext(_) => "repository format metadata is invalid",
             Self::RootUnavailable => "could not resolve the Git worktree",
             Self::UnsafePath => "project contains an unsafe module path",
             Self::Symlink => "project module path contains a symbolic link",
@@ -1562,6 +1730,7 @@ impl Error for ProjectLoadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Repository(error) => Some(error),
+            Self::FormatContext(error) => Some(error),
             _ => None,
         }
     }
@@ -1651,7 +1820,7 @@ struct ValidatedSnapshotTree {
     source_paths: BTreeSet<String>,
     row_paths: BTreeSet<String>,
     has_standard_gitlink: bool,
-    has_format3_database: bool,
+    has_database_metadata: bool,
 }
 
 fn validate_committed_tree(
@@ -1688,7 +1857,7 @@ fn validate_snapshot_tree(
         entry.path().as_path() == Path::new("stdlib/std")
             && entry.kind() == CommittedTreeEntryKind::Submodule
     });
-    let has_format3_database = entries.iter().any(|entry| {
+    let has_database_metadata = entries.iter().any(|entry| {
         entry.path().as_path() == Path::new(".orna/database.orna")
             && matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
     });
@@ -1709,7 +1878,7 @@ fn validate_snapshot_tree(
         source_paths,
         row_paths,
         has_standard_gitlink,
-        has_format3_database,
+        has_database_metadata,
     })
 }
 

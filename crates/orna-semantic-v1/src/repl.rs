@@ -56,10 +56,21 @@ impl ReplContext {
         if !analysis.is_ok() {
             return Err(analysis.diagnostics.clone());
         }
+        let mut modules = analysis.modules.clone();
+        let main_namespace = Namespace(vec!["main".into()]);
+        if !modules.contains_key(&main_namespace) {
+            if let Some(mut root) = modules.get(&Namespace(Vec::new())).cloned() {
+                // The trusted REPL walkthrough addresses root functions as `main.add`.
+                // A source module named `main` remains authoritative when present.
+                root.namespace = main_namespace.clone();
+                root.implicit = true;
+                modules.insert(main_namespace, root);
+            }
+        }
         Ok(Self {
             identity: Arc::new(()),
             revision: 0,
-            modules: analysis.modules.clone(),
+            modules,
             symbols: BTreeMap::new(),
             imports: Vec::new(),
             last_result: None,
@@ -91,10 +102,12 @@ impl ReplContext {
         next.revision = revision;
         let mut diagnostics = Vec::new();
         let (ty, effects) = match input {
-            ReplInput::Expression(expression) => {
+            ReplInput::Expression(expression) | ReplInput::ExpressionStatement(expression) => {
                 let scope = self.scope(&self.imports, &self.symbols, &mut diagnostics);
                 let inferred = infer(expression, &scope, &BTreeMap::new(), &mut diagnostics);
-                next.last_result = Some(inferred.ty.clone());
+                if matches!(input, ReplInput::Expression(_)) {
+                    next.last_result = Some(inferred.ty.clone());
+                }
                 (Some(inferred.ty), inferred.effects)
             }
             ReplInput::Item(item) => match &item.declaration {
@@ -288,6 +301,24 @@ mod tests {
             include_str!("fixtures/repl-failed-project-analysis.orna"),
         )]);
         assert!(ReplContext::from_analysis(&analysis).is_err());
+    }
+
+    #[test]
+    fn root_main_alias_is_available_unless_a_source_main_module_exists() {
+        let root_source = "pub fn add(value: Int) = \"root\";";
+        let root_analysis = analyze(&[ModuleInput::new("main.orna", root_source)]);
+        let root_context = ReplContext::from_analysis(&root_analysis).expect("valid root project");
+        assert_eq!(staged(&root_context, "main.add(1)").ty, Some(Type::Text));
+
+        let main_analysis = analyze(&[
+            ModuleInput::new("main.orna", root_source),
+            ModuleInput::new("main/main.orna", "pub fn add(value: Int) = value + 1;"),
+        ]);
+        let mut main_context =
+            ReplContext::from_analysis(&main_analysis).expect("valid project main module");
+        let import = staged(&main_context, "use main;");
+        main_context.commit(import).expect("user module import commits");
+        assert_eq!(staged(&main_context, "main.add(1)").ty, Some(Type::Int));
     }
 
     #[test]

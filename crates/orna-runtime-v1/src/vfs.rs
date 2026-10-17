@@ -2451,11 +2451,17 @@ impl VfsDurableSave {
 /// relation identity and typed key the candidate row must address. Owned, so a
 /// caller's async candidate builder borrows nothing from the admission.
 pub struct VfsSaveCoordinates {
+    cwd_generation: CwdGeneration,
     table: RuntimeTableIdentity,
     key: Vec<u8>,
 }
 
 impl VfsSaveCoordinates {
+    /// The CWD generation captured with this save admission.
+    pub fn cwd_generation(&self) -> &CwdGeneration {
+        &self.cwd_generation
+    }
+
     /// The admitted committed identity of the saved row's relation.
     pub fn table(&self) -> &RuntimeTableIdentity {
         &self.table
@@ -2553,6 +2559,7 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
     /// caller's candidate builder can own them across its own await points.
     pub fn coordinates(&self) -> VfsSaveCoordinates {
         VfsSaveCoordinates {
+            cwd_generation: self.save.cwd_generation.clone(),
             table: self.save.table.clone(),
             key: self.save.key.clone(),
         }

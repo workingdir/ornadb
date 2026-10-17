@@ -11,6 +11,11 @@ const MAX_INSPECT_DEPTH: usize = 4;
 const MAX_INSPECT_ITEMS: usize = 16;
 const MAX_INSPECT_TEXT: usize = 256;
 const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :quit";
+
+type ReplSubmissionHandler<'a> =
+    dyn FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, String> + 'a;
+
+
 #[derive(Clone, Copy)]
 pub(super) enum AnsiColor {
     Green,
@@ -294,6 +299,7 @@ pub fn run<R: BufRead, W: Write>(
         None::<&dyn SnapshotSessionLoader<Error = ()>>,
         None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
         false,
+        None,
     )
 }
 
@@ -315,6 +321,7 @@ pub fn run_with_snapshot_loader<R: BufRead, W: Write, L: SnapshotSessionLoader +
         Some(loader),
         None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
         false,
+        None,
     )
 }
 
@@ -337,6 +344,35 @@ pub fn run_with_snapshot_loader_and_color<
         Some(loader),
         None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
         color_enabled,
+        None,
+    )
+}
+
+/// Run an admitted REPL with a host-provided submission adapter. The adapter is
+/// discarded after successful snapshot replacement because its transaction
+/// authority is bound to the initial committed source snapshot.
+pub fn run_with_snapshot_loader_and_color_and_submitter<
+    R: BufRead,
+    W: Write,
+    L: SnapshotSessionLoader + ?Sized,
+    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, String>,
+>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: &L,
+    submitter: &mut S,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let submitter: &mut ReplSubmissionHandler<'_> = submitter;
+    run_loop(
+        reader,
+        writer,
+        session,
+        Some(loader),
+        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+        color_enabled,
+        Some(submitter),
     )
 }
 
@@ -356,6 +392,7 @@ pub fn run_with_watch<R: BufRead, W: Write, S: WatchFrameSource + ?Sized>(
         None::<&dyn SnapshotSessionLoader<Error = ()>>,
         Some(WatchBinding { source, state }),
         false,
+        None,
     )
 }
 
@@ -380,6 +417,7 @@ pub fn run_with_loader_and_watch<
         Some(loader),
         Some(WatchBinding { source, state }),
         false,
+        None,
     )
 }
 
@@ -395,6 +433,7 @@ fn run_loop<
     loader: Option<&L>,
     mut watch: Option<WatchBinding<'_, S>>,
     color_enabled: bool,
+    mut submitter: Option<&mut ReplSubmissionHandler<'_>>,
 ) -> io::Result<()> {
     loop {
         pump_watch_frames(&mut watch, writer, color_enabled)?;
@@ -443,7 +482,10 @@ fn run_loop<
                         continue;
                     };
                     match target.and_then(|target| loader.load_snapshot(target).map_err(|_| ())) {
-                        Ok(candidate) => *session = candidate,
+                        Ok(candidate) => {
+                            *session = candidate;
+                            submitter = None;
+                        }
                         Err(()) => write_repl_error(writer, "ORNA-REPL-AT", color_enabled)?,
                     }
                 } else if let Some(rest) = parse_watch_source(command) {
@@ -451,10 +493,14 @@ fn run_loop<
                 } else if source.trim_start().starts_with(':') {
                     write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
                 } else {
-                    match session.submit(&source) {
+                    let result = match submitter.as_deref_mut() {
+                        Some(submit) => submit(session, &source),
+                        None => session.submit(&source).map_err(|error| error.code().to_owned()),
+                    };
+                    match result {
                         Ok(Some(value)) => write_repl_value(writer, &value, color_enabled)?,
                         Ok(None) => {}
-                        Err(error) => write_repl_error(writer, error.code(), color_enabled)?,
+                        Err(code) => write_repl_error(writer, &code, color_enabled)?,
                     }
                 }
             }
