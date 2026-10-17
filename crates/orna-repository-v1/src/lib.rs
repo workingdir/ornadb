@@ -3843,7 +3843,6 @@ impl Repository {
             return Ok(None);
         };
         self.reclaim_abandoned_publication_index_lock(&journal)?;
-        let candidate = self.candidate_from_journal(&journal)?;
         let base_tree = journal
             .base_index_tree()
             .cloned()
@@ -3852,6 +3851,22 @@ impl Repository {
             head: Some(journal.old_head().clone()),
             tree: Some(base_tree),
         };
+        let commit_expression = format!("{}^{{commit}}", journal.new_head().as_str());
+        let candidate_commit = self.commit_optional(&commit_expression)?;
+        if journal.stage() == PublicationJournalStage::Prepared
+            && candidate_commit.is_none()
+            && self.head()?.as_ref() == Some(journal.old_head())
+        {
+            let actual = self.index_generation()?;
+            if actual == expected_index {
+                self.clear_publication_journal_locked()?;
+                return Ok(Some(actual));
+            }
+        }
+        let candidate = self.candidate_from_journal_with_commit(
+            &journal,
+            candidate_commit.ok_or(RepositoryError::InvalidPublicationJournal)?,
+        )?;
 
         if journal.stage() == PublicationJournalStage::Prepared
             && self.head()?.as_ref() == Some(journal.old_head())
@@ -3958,6 +3973,14 @@ impl Repository {
         let commit = self
             .commit_optional(&commit_expression)?
             .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        self.candidate_from_journal_with_commit(journal, commit)
+    }
+
+    fn candidate_from_journal_with_commit(
+        &self,
+        journal: &PublicationJournal,
+        commit: GitCommitRef,
+    ) -> Result<PrivateCommit, RepositoryError> {
         if &commit != journal.new_head() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }

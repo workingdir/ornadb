@@ -6,6 +6,10 @@ been published.
 
 ## Unreleased
 
+- Missing unrooted prepared publication commits can be discarded during recovery
+  only when HEAD and the base index still match, preserving frozen runtime
+  mutations for candidate rebuild and retry after Git garbage collection.
+
 - Publication reconciliation materializes native-store changes from the candidate
   tree and clears obsolete skip-worktree flags, keeping user edits visible to Git
   after recovery.
