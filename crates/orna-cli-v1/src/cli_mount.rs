@@ -68,6 +68,13 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
             return Err(mount_error("Mount record could not be verified", error.to_string()));
         }
     };
+    let signal_handler = match MountSignalHandler::new() {
+        Ok(handler) => handler,
+        Err(error) => {
+            let _ = view.detach();
+            return Err(mount_error("Mount signal handling could not be started", error));
+        }
+    };
     let source = format!("orna-{}", status.view_hex());
     let session = match crate::fuse_mount::spawn_read_only(
         &repository,
@@ -78,18 +85,138 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
     ) {
         Ok(session) => session,
         Err(error) => {
+            drop(signal_handler);
             let _ = view.detach();
             return Err(mount_error("Mount was refused", error));
         }
     };
     if writeln!(io::stdout().lock(), "{}", human_row(&status)).is_err() {
-        let _ = session.umount_and_join();
-        let _ = view.detach();
+        let session_cleanup = session.umount_and_join();
+        drop(signal_handler);
+        let detach_result = view.detach();
+        if let Err(error) = session_cleanup {
+            return Err(mount_error("FUSE cleanup failed", error.to_string()));
+        }
+        if let Err(error) = detach_result {
+            return Err(mount_error("Mount view could not be detached", error.to_string()));
+        }
         return Err(stdout_error());
     }
-    session
-        .join()
-        .map_err(|error| mount_error("Mount session ended unexpectedly", error.to_string()))
+    let session_result = signal_handler.join(session, status.mountpoint());
+    let detach_result = view.detach();
+    session_result.map_err(|error| mount_error("Mount session ended unexpectedly", error))?;
+    detach_result.map_err(|error| mount_error("Mount view could not be detached", error.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+struct MountSignalHandler {
+    runtime: tokio::runtime::Runtime,
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+    hangup: tokio::signal::unix::Signal,
+}
+
+#[cfg(target_os = "linux")]
+impl MountSignalHandler {
+    fn new() -> Result<Self, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("signal runtime could not be created: {error}"))?;
+        let (interrupt, terminate, hangup) = {
+            let _entered = runtime.enter();
+            use tokio::signal::unix::{signal, SignalKind};
+            (
+                signal(SignalKind::interrupt())
+                    .map_err(|error| format!("SIGINT handler could not be installed: {error}"))?,
+                signal(SignalKind::terminate())
+                    .map_err(|error| format!("SIGTERM handler could not be installed: {error}"))?,
+                signal(SignalKind::hangup())
+                    .map_err(|error| format!("SIGHUP handler could not be installed: {error}"))?,
+            )
+        };
+        Ok(Self {
+            runtime,
+            interrupt,
+            terminate,
+            hangup,
+        })
+    }
+
+    fn join(
+        self,
+        session: fuser::BackgroundSession,
+        mountpoint: &Path,
+    ) -> Result<(), String> {
+        let Self {
+            runtime,
+            mut interrupt,
+            mut terminate,
+            mut hangup,
+        } = self;
+        let mountpoint = mountpoint.to_path_buf();
+        let mut session = Some(session);
+        runtime.block_on(async move {
+            let received_signal = loop {
+                if session
+                    .as_ref()
+                    .is_some_and(|session| session.guard.is_finished())
+                {
+                    break None;
+                }
+                tokio::select! {
+                    Some(()) = interrupt.recv() => break Some("SIGINT"),
+                    Some(()) = terminate.recv() => break Some("SIGTERM"),
+                    Some(()) = hangup.recv() => break Some("SIGHUP"),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                }
+            };
+
+            if let Some(signal) = received_signal {
+                let still_mounted = session
+                    .as_ref()
+                    .is_some_and(|session| !session.guard.is_finished());
+                if still_mounted {
+                    let unmount = std::process::Command::new("fusermount3")
+                        .args(["-u", "--"])
+                        .arg(&mountpoint)
+                        .output();
+                    let unmount_error = match unmount {
+                        Ok(output) if output.status.success() => None,
+                        Ok(output) => Some(format!(
+                            "fusermount3 failed after {signal}: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        )),
+                        Err(error) => Some(format!(
+                            "fusermount3 could not run after {signal}: {error}"
+                        )),
+                    };
+                    if let Some(error) = unmount_error
+                        && session
+                            .as_ref()
+                            .is_some_and(|session| !session.guard.is_finished())
+                    {
+                        let fallback = session
+                            .take()
+                            .expect("live FUSE session is retained")
+                            .umount_and_join();
+                        return match fallback {
+                            Ok(()) => Err(error),
+                            Err(fallback_error) => Err(format!(
+                                "{error}; FUSE session cleanup also failed: {fallback_error}"
+                            )),
+                        };
+                    }
+                }
+            }
+
+            session
+                .take()
+                .expect("FUSE session is retained until it is joined")
+                .join()
+                .map_err(|error| format!("FUSE session join failed: {error}"))
+        })
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
