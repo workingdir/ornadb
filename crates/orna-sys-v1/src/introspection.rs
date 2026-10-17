@@ -7520,16 +7520,20 @@ fn planned_query_join_order(query: &QueryPlanDescription) -> Vec<(usize, &QueryJ
         .chain(joins.iter().filter_map(|join| join.statistics.as_ref()))
         .filter_map(scan_work)
         .any(|work| work >= u128::from(u64::MAX));
-    let source_rows = query
+    let has_join_cardinality_overflow_risk = query
         .source_statistics
         .as_ref()
         .and_then(scan_work)
         .and_then(|rows| u64::try_from(rows).ok())
-        .unwrap_or(1);
-    let has_join_cardinality_overflow_risk = joins.iter().try_fold(source_rows, |product, join| {
-        let input_rows = scan_work(join.statistics.as_ref()?)?;
-        product.checked_mul(u64::try_from(input_rows).ok()?)
-    }).is_none();
+        .map_or(true, |source_rows| {
+            joins
+                .iter()
+                .try_fold(source_rows, |product, join| {
+                    let input_rows = scan_work(join.statistics.as_ref()?)?;
+                    product.checked_mul(u64::try_from(input_rows).ok()?)
+                })
+                .is_none()
+        });
     if has_partial_or_mutable_statistics
         || has_complex_pipeline
         || has_boundary_scan_work

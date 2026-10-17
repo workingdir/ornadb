@@ -3217,6 +3217,44 @@ fn join_planner_preserves_declared_order_when_cumulative_cardinality_overflows()
         surfaced_base_overflow_sources,
         ["table:base-first", "table:base-second", "table:base-third"]
     );
+    let unknown_base_sources = [
+        obj("table:unknown-first"),
+        obj("table:unknown-second"),
+        obj("table:unknown-third"),
+    ];
+    let unknown_base = explain_query(&QueryPlanDescription {
+        snapshot: SnapshotRef::descriptive("snapshot:unknown-base-statistics"),
+        source: obj("table:unknown-base"),
+        source_statistics: None,
+        joins: unknown_base_sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| QueryJoinDescription {
+                source: source.clone(),
+                statistics: Some(stats(100_000, (3 - index as u64) * 4_096)),
+                predicate: None,
+            })
+            .collect(),
+        predicate: None,
+        projections: Vec::new(),
+        distinct: false,
+        ordering: Vec::new(),
+        limit: None,
+        mutations: Vec::new(),
+        materialize_into: None,
+    })
+    .expect("query with unknown base statistics");
+    let surfaced_unknown_base_sources = unknown_base
+        .nodes()
+        .iter()
+        .filter(|node| node.kind() == PlanNodeKind::Scan)
+        .filter_map(|node| node.object().map(|object| object.as_str()))
+        .filter(|source| *source != "table:unknown-base")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        surfaced_unknown_base_sources,
+        ["table:unknown-first", "table:unknown-second", "table:unknown-third"]
+    );
 }
 #[test]
 fn explain_rejects_conflicting_function_edges_and_over_limit_query_shapes() {
