@@ -5180,6 +5180,38 @@ impl Repository {
         self.update_managed_index(expected, paths, ManagedIndexOperation::Add, None)
     }
 
+    /// Stages the exact managed-file bytes already captured by a caller.
+    ///
+    /// The candidate index is built off-index and atomically installed only if
+    /// the observed index generation remains current. Git path filters and the
+    /// file mode are preserved while the staged blob comes from `contents`,
+    /// not from a second worktree read.
+    pub fn stage_managed_contents(
+        &self,
+        expected: &IndexGeneration,
+        path: &ManagedPath,
+        contents: &[u8],
+    ) -> Result<IndexGeneration, RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        let actual = self.index_generation()?;
+        if &actual != expected {
+            return Err(RepositoryError::StaleIndex {
+                expected: expected.clone(),
+                actual,
+            });
+        }
+        let target = self.managed_target(path)?;
+        if self.read_managed_file(&target)?.as_deref() != Some(contents) {
+            return Err(RepositoryError::ManagedContentConflict);
+        }
+        self.update_managed_index(
+            expected,
+            std::slice::from_ref(path),
+            ManagedIndexOperation::AddContents(contents),
+            None,
+        )
+    }
+
     /// Unstages exactly `paths`, retaining their worktree bytes.  This is the
     /// inverse scoped index primitive and is intentionally not `reset --hard`.
     pub fn unstage_managed(
@@ -5201,9 +5233,9 @@ impl Repository {
         self.update_managed_index(expected, paths, ManagedIndexOperation::Unstage, None)
     }
 
-    /// Test-only interleaving seam. Production callers must use
-    /// [`Self::stage_managed`]; this makes a normal Git writer race
-    /// deterministic without weakening the production protocol.
+    /// Test-only interleaving seam. Production callers use stage_managed or
+    /// stage_managed_contents; this makes a normal Git writer race deterministic
+    /// without weakening the production protocol.
     #[doc(hidden)]
     pub fn stage_managed_with_test_hook(
         &self,
@@ -6141,8 +6173,32 @@ impl Repository {
     }
 
     fn hash_object(&self, bytes: &[u8]) -> Result<String, RepositoryError> {
+        self.hash_object_with_path(bytes, None)
+    }
+
+    fn hash_object_at_path(
+        &self,
+        bytes: &[u8],
+        path: &ManagedPath,
+    ) -> Result<String, RepositoryError> {
+        self.hash_object_with_path(bytes, Some(path))
+    }
+
+    fn hash_object_with_path(
+        &self,
+        bytes: &[u8],
+        path: Option<&ManagedPath>,
+    ) -> Result<String, RepositoryError> {
         let mut command = self.command();
-        command.args(["hash-object", "-w", "--stdin"]);
+        command.args(["hash-object", "-w"]);
+        if let Some(path) = path {
+            let path = path
+                .as_path()
+                .to_str()
+                .ok_or(RepositoryError::UnsafeManagedPath)?;
+            command.arg(format!("--path={path}"));
+        }
+        command.arg("--stdin");
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         let mut child = command
@@ -6708,7 +6764,7 @@ impl Repository {
         &self,
         expected: &IndexGeneration,
         paths: &[ManagedPath],
-        operation: ManagedIndexOperation,
+        operation: ManagedIndexOperation<'_>,
         mut before_install: Option<&mut dyn FnMut()>,
     ) -> Result<IndexGeneration, RepositoryError> {
         self.ensure_atomic_index_install_supported()?;
@@ -6744,7 +6800,7 @@ impl Repository {
         let mut command = self.command();
         command.env("GIT_INDEX_FILE", &candidate);
         match operation {
-            ManagedIndexOperation::Add => {
+            ManagedIndexOperation::Add | ManagedIndexOperation::AddContents(_) => {
                 command.arg("add");
             }
             ManagedIndexOperation::Unstage => {
@@ -6758,6 +6814,12 @@ impl Repository {
         if let Err(error) = self.run(command) {
             let _ = fs::remove_file(&candidate);
             return Err(error);
+        }
+        if let ManagedIndexOperation::AddContents(contents) = operation {
+            if let Err(error) = self.prepare_index_contents(&candidate, &paths[0], contents) {
+                let _ = fs::remove_file(&candidate);
+                return Err(error);
+            }
         }
         if let Some(hook) = before_install.as_mut() {
             hook();
@@ -6797,6 +6859,53 @@ impl Repository {
         .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         drop(git_lock);
         self.index_generation()
+    }
+    fn index_file_mode(&self, index: &Path, path: &ManagedPath) -> Result<&'static str, RepositoryError> {
+        let mut command = self.command();
+        command
+            .env("GIT_INDEX_FILE", index)
+            .args(["--literal-pathspecs", "ls-files", "--stage", "-z", "--"])
+            .arg(path.as_path());
+        let output = self.run(command)?.stdout;
+        let entry = output
+            .split(|byte| *byte == 0)
+            .find(|entry| !entry.is_empty())
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let header = entry
+            .split(|byte| *byte == b'\t')
+            .next()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let mode = header
+            .split(|byte| *byte == b' ')
+            .next()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        match mode {
+            b"100644" => Ok("100644"),
+            b"100755" => Ok("100755"),
+            _ => Err(RepositoryError::UnsafeManagedPath),
+        }
+    }
+
+    fn prepare_index_contents(
+        &self,
+        index: &Path,
+        path: &ManagedPath,
+        contents: &[u8],
+    ) -> Result<(), RepositoryError> {
+        let mode = self.index_file_mode(index, path)?;
+        let object = self.hash_object_at_path(contents, path)?;
+        let path = path
+            .as_path()
+            .to_str()
+            .ok_or(RepositoryError::UnsafeManagedPath)?;
+        let cacheinfo = format!("{mode},{object},{path}");
+        let mut command = self.command();
+        command
+            .env("GIT_INDEX_FILE", index)
+            .args(["--literal-pathspecs", "update-index", "--add", "--cacheinfo"])
+            .arg(cacheinfo);
+        self.run(command)?;
+        Ok(())
     }
 
     fn git_path(&self, name: &str) -> Result<PathBuf, RepositoryError> {
@@ -6920,8 +7029,9 @@ impl Repository {
 }
 
 #[derive(Clone, Copy)]
-enum ManagedIndexOperation {
+enum ManagedIndexOperation<'contents> {
     Add,
+    AddContents(&'contents [u8]),
     Unstage,
 }
 
