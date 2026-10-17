@@ -152,9 +152,9 @@ impl MountView {
         if let Err(error) = view.write_record() {
             let _ = crate::native_graph::delete_mount_snapshot_pin(
                 repository,
-                &owner_id,
-                &view_id,
-                &pin_oid_hex,
+                &view.owner_id,
+                &view.view_id,
+                &view.pin_oid_hex,
             );
             return Err(error);
         }
