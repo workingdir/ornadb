@@ -45,6 +45,7 @@ async fn commit_capture(
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
     logical_path: &str,
+    insert_only: bool,
     owner_id: [u8; 16],
     request: RequestIdentity,
     relation_id: [u8; 16],
@@ -77,10 +78,24 @@ async fn commit_capture(
     ).unwrap();
     let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
     assert_eq!(resolved_schema.table_object_id(), TableObjectId::new(relation_id));
-    let mut mutation = TableMutation::insert(
-        source_mutation.id(), source_mutation.table().to_owned(),
-        source_mutation.key().to_vec(), source_mutation.value().unwrap().to_vec(),
-    ).unwrap().with_table_object_id(TableObjectId::new(relation_id));
+    let source_value = source_mutation.value().unwrap().to_vec();
+    let mut mutation = if insert_only {
+        TableMutation::insert(
+            source_mutation.id(),
+            source_mutation.table().to_owned(),
+            source_mutation.key().to_vec(),
+            source_value,
+        )
+    } else {
+        TableMutation::new(
+            source_mutation.id(),
+            source_mutation.table().to_owned(),
+            source_mutation.key().to_vec(),
+            Some(source_value),
+        )
+    }
+    .unwrap()
+    .with_table_object_id(TableObjectId::new(relation_id));
     for binding in &source_bindings {
         mutation = mutation.with_protected_content_pin(binding.pin()).unwrap();
     }
@@ -232,6 +247,7 @@ async fn capture_crash_child() {
                 &mut bindings,
                 &expression,
                 "Object/image.orna",
+                true,
                 [33; 16],
                 RequestIdentity { session_id: [21; 16], request_id: [22; 16] },
                 relation_id,
@@ -276,6 +292,7 @@ async fn seeded_project() -> (
         &mut bindings,
         &expression,
         "Object/image.orna",
+        true,
         [33; 16],
         RequestIdentity { session_id: [21; 16], request_id: [22; 16] },
         relation_id,
@@ -337,7 +354,7 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
 
 #[tokio::test]
 async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
-    let (directory, source, repository, state, _, relation_id, format_context) =
+    let (directory, source, repository, state, source_commit, relation_id, format_context) =
         seeded_project().await;
     let root = directory.path();
     let initial_payload = std::fs::read(source.path().join("pixel.png")).unwrap();
@@ -376,7 +393,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     .unwrap();
 
     let (identity, _) = cli_runtime_identity(&repository);
-    let current_format_context = format3_context_for_snapshot(&repository, base.as_str());
+    let source_format_context = format_context;
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
@@ -389,16 +406,17 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
     commit_capture(
         &repository,
-        &base,
+        &source_commit,
         &state,
         writer,
         &mut bindings,
         &expression,
         "Object/image.orna",
+        false,
         [43; 16],
         RequestIdentity { session_id: [41; 16], request_id: [42; 16] },
         relation_id,
-        &current_format_context,
+        &source_format_context,
     )
     .await;
     drop(bindings);
