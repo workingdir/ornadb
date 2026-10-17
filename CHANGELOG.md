@@ -28,6 +28,9 @@ been published.
   SIGTERM, and SIGHUP clean up mounts, while orna unmount DIR can detach
   orphaned mounts when DIR is relative to the command's current working
   directory.
+- `mount DIR --at SELECTOR` now starts a read-only FUSE session pinned to the
+  resolved commit, so its mounted paths continue to read that historical state
+  after workspace HEAD advances.
 - FUSE teardown serializes daemon and CLI cleanup so concurrent detach paths do
   not race to remove the same view pin and record.
 - The trusted REPL exposes the root namespace as `main` unless a user module named
