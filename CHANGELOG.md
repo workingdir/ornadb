@@ -10,7 +10,9 @@ been published.
   existing IDs across authorized name changes. Unassisted renames remain
   delete-plus-create, and retired IDs are never reused.
 - The `mv` CLI command renames committed tables and retains their table and
-  child-field IDs in uncommitted source and identity-manifest changes.
+  child-field IDs in uncommitted source and identity-manifest changes. It moves
+  the associated loose-row directory and can resume after a source rename is
+  interrupted before the manifest update.
 
 ## 1.0.0 — release inventory (publication pending)
 
