@@ -269,14 +269,25 @@ async fn mount_at_prior_commit_reads_path_changed_afterward() {
     let revised_row = format!(
         "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
     );
-    std::fs::write(repository_directory.path().join("Music/london.orna"), &revised_row)
-        .unwrap();
+    std::fs::write(
+        repository_directory.path().join("Music/london.orna"),
+        &revised_row,
+    )
+    .unwrap();
     format3::git(repository_directory.path(), &["add", "Music/london.orna"]);
     format3::git(
         repository_directory.path(),
-        &["commit", "--quiet", "-m", "update source row after historical commit"],
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "update source row after historical commit",
+        ],
     );
-    assert_ne!(repository.head().unwrap().unwrap().to_string(), historical_commit);
+    assert_ne!(
+        repository.head().unwrap().unwrap().to_string(),
+        historical_commit
+    );
     let schema = orna_project_v1::ProjectLoader::default()
         .resolve_committed_source_table_schema(
             &repository,
@@ -464,6 +475,161 @@ async fn mount_at_prior_commit_reads_path_changed_afterward() {
     );
 }
 
+#[tokio::test]
+async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_identity() {
+    if !fuse_test_available() {
+        return;
+    }
+
+    let media_root = TempDir::new().unwrap();
+    let original = b"original-mounted-content";
+    let replacement = b"replacement-mounted-content-with-a-new-hash";
+    let source_file = media_root.path().join("tone.mp3");
+    std::fs::write(&source_file, original).unwrap();
+    let source = "pub table Music(id: Str) { content: Blob, }\n";
+    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
+    let row_source =
+        format!("{{\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 65536),\n}}\n");
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            source,
+            "Music",
+            "Music/london.orna",
+            &row_source,
+        );
+
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(media_root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let blob_captures = [("content", capture.as_str())];
+    let capture_rows = [media_commit::SourceCaptureRow {
+        key: "london",
+        blob_fields: &blob_captures,
+        source_row: None,
+        ordinal: 0x91,
+        insert_only: true,
+    }];
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &capture_rows,
+    )
+    .await;
+
+    let table = orna_runtime_v1::RuntimeTableIdentity::new(
+        "Music",
+        orna_runtime_v1::TableObjectId::new(relation_id),
+    )
+    .unwrap();
+    let tables = [table];
+    let before = state
+        .begin_admitted_table_activation(&tables)
+        .await
+        .unwrap();
+    let old_row = before
+        .query_exact("Music", b"london")
+        .unwrap()
+        .unwrap()
+        .to_vec();
+    drop(before);
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let blob_path = mountpoint.join("Music/london/content.mp3");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !blob_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return;
+            }
+            panic!("mount exited {status}: {stderr}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "FUSE mount did not expose the captured Blob"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let scratch_path = mountpoint.join("Music/london/.content.mp3.replace");
+    std::fs::write(&scratch_path, replacement).unwrap();
+    if let Err(error) = std::fs::rename(&scratch_path, &blob_path) {
+        run_unmount(repository_directory.path(), &mountpoint);
+        let _ = mounted.child.wait();
+        let mut stderr = String::new();
+        if let Some(mut pipe) = mounted.child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        panic!("mounted Blob replacement rename failed: {error}; stderr={stderr}");
+    }
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+
+    run_unmount(repository_directory.path(), &mountpoint);
+    let status = mounted.child.wait().unwrap();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = mounted.child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    assert!(
+        status.success(),
+        "mount process exits cleanly after replacement and unmount; status={status:?}; stderr={stderr}"
+    );
+
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let after = state
+        .begin_admitted_table_activation(&tables)
+        .await
+        .unwrap();
+    let new_row = after.query_exact("Music", b"london").unwrap().unwrap();
+    assert_ne!(
+        old_row.as_slice(),
+        new_row,
+        "the same row key must now carry the replacement Blob descriptor/hash"
+    );
+}
 #[tokio::test]
 async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
     if !fuse_test_available() {
