@@ -98,20 +98,20 @@ fn test_code<'a>(path: &Path, source: &'a str) -> Vec<&'a str> {
     let is_test_file = path.components().any(|part| part.as_os_str() == "tests");
     let mut code = Vec::new();
     let mut cursor = 0;
-    while let Some(attr) = source[cursor..].find("#[cfg(test)]") {
-        let start = cursor + attr;
-        let Some(open_rel) = source[start..].find('{') else { break; };
-        let open = start + open_rel;
-        if let Some(end) = matching_brace(source, open) { code.push(&source[start..=end]); cursor = end + 1; }
-        else { break; }
+    while let Some(start) = find_code_pattern(source, cursor, b"#[cfg(test)]") {
+        let Some(open) = find_code_byte(source, start, b'{') else { break; };
+        if let Some(end) = matching_brace(source, open) {
+            code.push(&source[start..=end]);
+            cursor = end + 1;
+        } else {
+            break;
+        }
     }
     // Outside cfg(test) modules, only explicit #[test] function bodies qualify, regardless of file location.
     if is_test_file {
         cursor = 0;
-        while let Some(attr) = source[cursor..].find("#[test]") {
-            let start = cursor + attr;
-            let Some(open_rel) = source[start..].find('{') else { break; };
-            let open = start + open_rel;
+        while let Some(start) = find_code_pattern(source, cursor, b"#[test]") {
+            let Some(open) = find_code_byte(source, start, b'{') else { break; };
             if let Some(end) = matching_brace(source, open) {
                 code.push(&source[start..=end]);
                 cursor = end + 1;
@@ -123,59 +123,115 @@ fn test_code<'a>(path: &Path, source: &'a str) -> Vec<&'a str> {
     code
 }
 
+fn find_code_pattern(source: &str, mut i: usize, pattern: &[u8]) -> Option<usize> {
+    let bytes = source.as_bytes();
+    while i + pattern.len() <= bytes.len() {
+        if let Some(end) = skip_non_code(source, i) {
+            i = end;
+        } else if bytes[i..].starts_with(pattern) {
+            return Some(i);
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn find_code_byte(source: &str, mut i: usize, target: u8) -> Option<usize> {
+    let bytes = source.as_bytes();
+    while i < bytes.len() {
+        if let Some(end) = skip_non_code(source, i) {
+            i = end;
+        } else if bytes[i] == target {
+            return Some(i);
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+// Return the end of a comment or literal at i, so all code scanners share one lexer.
+fn skip_non_code(source: &str, i: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes[i..].starts_with(b"//") {
+        return Some(i + bytes[i..].iter().position(|byte| *byte == b'\n').unwrap_or(bytes.len() - i));
+    }
+    if bytes[i..].starts_with(b"/*") {
+        let mut cursor = i + 2;
+        let mut depth = 1usize;
+        while cursor < bytes.len() && depth > 0 {
+            if bytes[cursor..].starts_with(b"/*") { depth += 1; cursor += 2; }
+            else if bytes[cursor..].starts_with(b"*/") { depth -= 1; cursor += 2; }
+            else { cursor += 1; }
+        }
+        return Some(cursor);
+    }
+    let raw_start = if bytes[i] == b'r' { Some(i) }
+        else if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'r') { Some(i + 1) }
+        else { None };
+    if let Some(start) = raw_start {
+        let mut quote = start + 1;
+        while bytes.get(quote) == Some(&b'#') { quote += 1; }
+        if bytes.get(quote) == Some(&b'"') {
+            let hashes = quote - start - 1;
+            let mut cursor = quote + 1;
+            while cursor < bytes.len() {
+                if bytes[cursor] == b'"'
+                    && bytes.get(cursor + 1..).is_some_and(|suffix| {
+                        suffix.len() >= hashes && suffix[..hashes].iter().all(|byte| *byte == b'#')
+                    })
+                {
+                    return Some(cursor + 1 + hashes);
+                }
+                cursor += 1;
+            }
+            return Some(bytes.len());
+        }
+    }
+    let quote = if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'\'') { i + 1 }
+        else if bytes[i] == b'\'' { i }
+        else { usize::MAX };
+    if quote != usize::MAX {
+        let content = quote + 1;
+        let end = if bytes.get(content) == Some(&b'\\') {
+            match bytes.get(content + 1) {
+                Some(b'u') if bytes.get(content + 2) == Some(&b'{') => {
+                    bytes[content + 3..].iter().position(|byte| *byte == b'}').map(|offset| content + 3 + offset + 1)
+                }
+                Some(b'x') => Some(content + 4),
+                Some(_) => Some(content + 2),
+                None => None,
+            }
+        } else {
+            source.get(content..).and_then(|rest| rest.chars().next()).map(|ch| content + ch.len_utf8())
+        };
+        if let Some(end) = end.filter(|end| bytes.get(*end) == Some(&b'\'')) {
+            return Some(end + 1);
+        }
+    }
+    let string_quote = if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'"') { i + 1 }
+        else if bytes[i] == b'"' { i }
+        else { usize::MAX };
+    if string_quote != usize::MAX {
+        let mut cursor = string_quote + 1;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'\\' { cursor = (cursor + 2).min(bytes.len()); }
+            else if bytes[cursor] == b'"' { return Some(cursor + 1); }
+            else { cursor += 1; }
+        }
+        return Some(bytes.len());
+    }
+    None
+}
+
 fn matching_brace(source: &str, open: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut depth = 0usize;
     let mut i = open;
     while i < bytes.len() {
-        if bytes[i..].starts_with(b"//") {
-            i = source[i..].find('\n').map_or(bytes.len(), |end| i + end);
-            continue;
-        }
-        if bytes[i..].starts_with(b"/*") {
-            i += 2;
-            let mut comments = 1usize;
-            while i < bytes.len() && comments > 0 {
-                if bytes[i..].starts_with(b"/*") { comments += 1; i += 2; }
-                else if bytes[i..].starts_with(b"*/") { comments -= 1; i += 2; }
-                else { i += 1; }
-            }
-            continue;
-        }
-        let raw_start = if bytes[i] == b'r' { Some(i) }
-            else if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'r') { Some(i + 1) }
-            else { None };
-        if let Some(start) = raw_start {
-            let mut quote = start + 1;
-            while bytes.get(quote) == Some(&b'#') { quote += 1; }
-            if bytes.get(quote) == Some(&b'"') {
-                let hashes = quote - start - 1;
-                let terminator = format!("\"{}", "#".repeat(hashes));
-                if let Some(end) = source[quote + 1..].find(&terminator) { i = quote + 1 + end + terminator.len(); continue; }
-                return None;
-            }
-        }
-        if bytes[i] == b'\'' || (bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'\'')) {
-            let quote = if bytes[i] == b'b' { i + 1 } else { i };
-            let content = quote + 1;
-            let end = if bytes.get(content) == Some(&b'\\') {
-                content + 2
-            } else {
-                source.get(content..).and_then(|s| s.chars().next()).map_or(content, |ch| content + ch.len_utf8())
-            };
-            if bytes.get(end) == Some(&b'\'') {
-                i = end + 1;
-                continue;
-            }
-        }
-        if bytes[i] == b'"' || (bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'"')) {
-            if bytes[i] == b'b' { i += 1; }
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' { i = (i + 2).min(bytes.len()); }
-                else if bytes[i] == b'"' { i += 1; break; }
-                else { i += 1; }
-            }
+        if let Some(end) = skip_non_code(source, i) {
+            i = end;
             continue;
         }
         match bytes[i] {
@@ -189,6 +245,22 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
 }
 
 fn contains_id(source: &str, id: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut code_start = 0;
+    while cursor < bytes.len() {
+        if let Some(end) = skip_non_code(source, cursor) {
+            if contains_id_in_code(&source[code_start..cursor], id) { return true; }
+            cursor = end;
+            code_start = end;
+        } else {
+            cursor += 1;
+        }
+    }
+    contains_id_in_code(&source[code_start..], id)
+}
+
+fn contains_id_in_code(source: &str, id: &str) -> bool {
     source.match_indices(id).any(|(start, _)| {
         let before = source[..start].chars().next_back();
         let after = source[start + id.len()..].chars().next();
@@ -223,8 +295,8 @@ mod tests {
         fs::create_dir_all(root.join("crates/a/tests/fixtures")).unwrap();
         let catalogue = root.join("requirements.json");
         fs::write(&catalogue, r#"[{"id":"REQ-001","chapter":"one"},{"id":"REQ-002","chapter":"one"},{"id":"REQ-003","chapter":"two"}]"#).unwrap();
-        fs::write(root.join("crates/a/src/lib.rs"), "const PROD: &str = \"REQ-002\"; #[cfg(test)] mod tests { const TEST: &str = \"{ REQ-001 }\"; }").unwrap();
-        fs::write(root.join("crates/a/tests/a.rs"), "const HELPER: &str = \"REQ-002\"; #[test] fn actual_test() { let _ = \"REQ-003\"; }").unwrap();
+        fs::write(root.join("crates/a/src/lib.rs"), "const PROD: &str = \"REQ-002\"; #[cfg(test)] mod tests { fn actual_test() { let _ = REQ-001; } }").unwrap();
+        fs::write(root.join("crates/a/tests/a.rs"), "const HELPER: &str = \"REQ-002\"; #[test] fn actual_test() { let _ = REQ-003; }").unwrap();
         fs::write(root.join("crates/a/tests/fixtures/ignored.rs"), "// REQ-002").unwrap();
         let result = cite_requirements(&catalogue, root).unwrap();
         assert_eq!(result.cited_ids, ["REQ-001", "REQ-003"].into_iter().map(str::to_owned).collect());
@@ -241,6 +313,24 @@ mod tests {
         assert!(selected[1].contains("REQ-AFTER"));
         assert!(test_code(Path::new("tests/integration.rs"), "const HELPER: &str = \"REQ-TESTS\"; #[test] fn actual() { let _ = \"REQ-TESTS\"; }").len() == 1);
         assert!(test_code(Path::new("tests/integration.rs"), "fn f() { // REQ-TESTS\n }").is_empty());
+    }
+
+    #[test]
+    fn commented_out_test_attribute_does_not_count_its_requirement_id() {
+        let source = "// #[test] fn disabled() { REQ-001 }";
+        let selected = test_code(Path::new("tests/integration.rs"), source);
+        assert!(!selected.iter().any(|code| contains_id(code, "REQ-001")));
+    }
+
+    #[test]
+    fn requirement_id_inside_test_string_does_not_count_as_citation() {
+        let cfg_string = r##""#[cfg(test)] mod fake { REQ-001 }""##;
+        let cfg_selected = test_code(Path::new("src/lib.rs"), cfg_string);
+        assert!(!cfg_selected.iter().any(|code| contains_id(code, "REQ-001")));
+
+        let test_source = r##"#[test] fn example() { let note = "REQ-001"; }"##;
+        let selected = test_code(Path::new("tests/integration.rs"), test_source);
+        assert!(!selected.iter().any(|code| contains_id(code, "REQ-001")));
     }
 
     #[test]
