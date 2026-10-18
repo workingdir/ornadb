@@ -186,7 +186,7 @@ fn save_with_emacs_temp_rename(path: &Path) {
 }
 
 struct EditorMount {
-    _mounted: MountedProcess,
+    mounted: MountedProcess,
     repository: orna_repository_v1::Repository,
     relation_id: [u8; 16],
     row_directory: PathBuf,
@@ -285,7 +285,7 @@ async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
     let row_directory = mountpoint.join("Music/london");
     let data_path = row_directory.join("data.orna");
     EditorMount {
-        _mounted: mounted,
+        mounted,
         repository,
         relation_id,
         row_directory,
@@ -306,7 +306,7 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     let row_directory = &fixture.row_directory;
     let data_path = &fixture.data_path;
     assert!(
-        std::fs::read_to_string(&data_path)
+        std::fs::read_to_string(data_path)
             .unwrap()
             .contains("Original")
     );
@@ -329,14 +329,14 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     drop(private_writer);
     drop(observer);
     assert!(
-        std::fs::read_to_string(&data_path)
+        std::fs::read_to_string(data_path)
             .unwrap()
             .contains("Original")
     );
-    write_and_sync(&data_path, "{ title: \"In place\", artist: \"Kieran\", }\n")
+    write_and_sync(data_path, "{ title: \"In place\", artist: \"Kieran\", }\n")
         .expect("in-place editor save must validate and sync");
     assert!(
-        std::fs::read_to_string(&data_path)
+        std::fs::read_to_string(data_path)
             .unwrap()
             .contains("In place")
     );
@@ -377,7 +377,7 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
         "rename must reject a scratch whose captured row baseline is stale",
     );
     assert!(
-        std::fs::read_to_string(&data_path)
+        std::fs::read_to_string(data_path)
             .unwrap()
             .contains("New baseline"),
         "stale rename must preserve the newer accepted row",
@@ -394,7 +394,7 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     drop(file);
     std::fs::rename(&temporary, &data_path).expect("editor atomically replaces data.orna");
     assert!(
-        std::fs::read_to_string(&data_path)
+        std::fs::read_to_string(data_path)
             .unwrap()
             .contains("Renamed")
     );
@@ -419,7 +419,7 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     assert!(rejected_draft.contains("title: 123"));
     drop(invalid);
     assert!(
-        std::fs::read_to_string(&data_path)
+        std::fs::read_to_string(data_path)
             .unwrap()
             .contains("Renamed")
     );
@@ -472,8 +472,7 @@ async fn real_editors_save_through_the_mounted_linux_vfs() {
         "real editor compatibility requires a mounted Linux FUSE view",
     );
     let fixture = start_editor_mount(false).await;
-    assert!(mountinfo_contains(&fixture._mounted.mountpoint));
-    record_editor_environment();
+    assert!(mountinfo_contains(&fixture.mounted.mountpoint));
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&fixture.repository);
     let engine_state = RuntimeState::open(&fixture.repository, runtime_identity, initial_digest)
@@ -518,8 +517,7 @@ async fn fsynced_temporary_scratch_survives_mount_restart() {
     let head_before_restart = fixture.repository.head().unwrap().unwrap();
     let repository = fixture.repository.clone();
     let relation_id = fixture.relation_id;
-    assert!(mountinfo_contains(&fixture._mounted.mountpoint));
-
+    assert!(mountinfo_contains(&fixture.mounted.mountpoint));
     let scratch_path = fixture.row_directory.join(".data.orna.persisted-scratch");
     let expected = b"durable editor scratch, not an accepted row";
     let mut scratch = OpenOptions::new()
@@ -534,7 +532,7 @@ async fn fsynced_temporary_scratch_survives_mount_restart() {
     drop(scratch);
 
     let EditorMount {
-        _mounted: previous_mount,
+        mounted: previous_mount,
         _mount_parent: mount_parent,
         _repository_directory: repository_directory,
         ..
