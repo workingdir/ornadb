@@ -16,7 +16,7 @@ fn second_declaration_under_one_name_is_rejected_as_an_identity_collision() {
         analysis
             .diagnostics
             .iter()
-            .any(|diagnostic| format!("{diagnostic:?}").contains(DIAG_DUPLICATE)),
+            .any(|diagnostic| diagnostic.code() == DIAG_DUPLICATE),
         "expected {DIAG_DUPLICATE} in {:?}",
         analysis.diagnostics
     );
