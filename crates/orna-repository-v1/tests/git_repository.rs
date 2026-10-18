@@ -1888,6 +1888,7 @@ fn checkout_rejects_a_full_commit_id_branch_name_without_mutating_state() {
 }
 
 #[test]
+/// ORNA-CHECKOUT-001: invalid/stale checkout plans leave accepted state and drafts unchanged.
 fn checkout_preflight_invalid_selector_is_strictly_non_mutating() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -2119,6 +2120,7 @@ fn checkout_force_authorization_rejects_changed_bytes_for_an_ignored_path() {
 }
 
 #[test]
+/// ORNA-BRANCH-002: same-commit branch selection preserves the worktree and staged index.
 fn same_commit_checkout_switches_attachment_without_discarding_local_state() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -2186,6 +2188,7 @@ fn same_commit_checkout_rejects_a_divergent_target_without_mutating_cwd() {
 }
 
 #[test]
+/// ORNA-BRANCH-003: divergent checkout carries nonconflicting Git state.
 fn divergent_checkout_carries_nonconflicting_git_state() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -2371,6 +2374,7 @@ fn divergent_checkout_rechecks_git_state_after_candidate_validation() {
 }
 
 #[test]
+/// ORNA-CHECKOUT-001, ORNA-BRANCH-003: conflicts fail without changing CWD, index, or HEAD.
 fn divergent_checkout_refuses_conflicting_git_state_without_mutating_cwd() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -2938,6 +2942,75 @@ fn interrupted_force_checkout_after_discard_journal_recovers_recorded_target() {
 }
 
 #[test]
+/// ORNA-CHECKOUT-002: recovery re-resolves moved refs and never rewinds a newer branch tip.
+fn checkout_recovery_preserves_an_external_branch_advance() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged local\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(43))
+        .unwrap();
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+        )
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+
+    let mut interrupt = || Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired);
+    assert!(matches!(
+        repo.execute_validated_force_checkout_after_discard_with_test_hook(
+            &discard,
+            &mut interrupt
+        ),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert!(repo.has_pending_pre_execution_checkout().unwrap());
+
+    let target = git(root.path(), &["rev-parse", "refs/heads/experiment"]);
+    let successor = git(
+        root.path(),
+        &[
+            "commit-tree",
+            "experiment^{tree}",
+            "-p",
+            "experiment",
+            "-m",
+            "external ref advance",
+        ],
+    );
+    git(
+        root.path(),
+        &["update-ref", "refs/heads/experiment", &successor, &target],
+    );
+    let before_recovery = git_state(&repo, root.path());
+
+    assert!(matches!(
+        repo.recover_pre_execution_checkout(),
+        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
+    ));
+    assert_eq!(
+        git(root.path(), &["rev-parse", "refs/heads/experiment"]),
+        successor
+    );
+    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
+    assert_eq!(git_state(&repo, root.path()), before_recovery);
+    assert!(repo.has_pending_pre_execution_checkout().unwrap());
+}
+
+#[test]
 fn interrupted_force_checkout_after_discard_journal_recovers_detached_target() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -3255,6 +3328,7 @@ fn conflicted_index_fails_closed_and_errors_redact_local_paths() {
 }
 
 #[test]
+/// ORNA-IMPL-001, ORNA-BRANCH-001: native Git branch operations preserve repository semantics without an implicit commit.
 fn explicit_snapshot_branch_and_remote_preserve_cwd() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
