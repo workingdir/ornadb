@@ -2190,6 +2190,7 @@ fn row_validation_preflights_source_items_and_steps_before_or_during_admission()
     assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
 }
 
+// ORNA-FN-011: module evaluation retains a function without executing its body; invocation evaluates it.
 #[test]
 fn bounded_evaluator_defers_invalid_function_bodies_until_explicit_invocation() {
     let pure_module = SourceUnit {
@@ -2558,6 +2559,7 @@ fn retained_functions_execute_closures_without_mutating_captures() {
     assert_eq!(diagnostic.message(), "<redacted>");
 }
 
+// ORNA-FN-001, ORNA-PIPE-004: invoking a retained callable executes it through a checked pipeline.
 #[test]
 fn retained_function_pipeline_executes_and_checks_its_result() {
     let module = SourceUnit {

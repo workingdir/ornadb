@@ -110,7 +110,7 @@ fn record_literal_punning_fixture_is_rejected() {
     assert!(!parse_module(RECORD_PUNNING_INVALID).diagnostics.is_empty());
 }
 
-// ORNA-ARROW-001, source/04-lexical.md:89-93.
+// ORNA-ARROW-001, ORNA-LAMBDA-005, source/04-lexical.md:89-93.
 #[test]
 fn anonymous_function_direct_braced_block_fixture_parses() {
     assert!(parse_module(ARROW_BLOCK).diagnostics.is_empty());
