@@ -194,6 +194,7 @@ fn mountinfo_contains(mountpoint: &Path) -> bool {
 }
 
 #[tokio::test]
+/// ORNA-VFS-002, ORNA-VFS-003, ORNA-VFS-005, and ORNA-VFS-018: the mounted view projects its pinned row and Blob data after HEAD advances, without retargeting the open snapshot.
 async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     if !fuse_test_available() {
         return;
@@ -499,6 +500,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
 }
 
 #[tokio::test]
+/// ORNA-VFS-005: workspace editing stays attached to the selected worktree snapshot after HEAD advances.
 async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     if !fuse_test_available() {
         return;
@@ -652,6 +654,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     assert_eq!(repository.head().unwrap().unwrap(), head_after_move);
 }
 #[tokio::test]
+/// ORNA-VFS-005: a historical snapshot mount cannot be retargeted or edited.
 async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     if !fuse_test_available() {
         return;
@@ -759,6 +762,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
 }
 
 #[tokio::test]
+/// ORNA-VFS-010 and ORNA-VFS-011: a content replacement updates the descriptor through the validated CAS path while preserving row identity.
 async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_identity() {
     if !fuse_test_available() {
         return;
@@ -914,6 +918,7 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     );
 }
 #[tokio::test]
+/// ORNA-VFS-018: corrupt backing Blob data is reported as an I/O error rather than decoded or substituted.
 async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
     if !fuse_test_available() {
         return;
@@ -1069,6 +1074,7 @@ async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
 }
 
 #[tokio::test]
+/// ORNA-VFS-016: an invalid duplicate-Blob row does not hide unrelated valid keys.
 async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values() {
     if !fuse_test_available() {
         return;
