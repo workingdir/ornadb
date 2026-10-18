@@ -2218,6 +2218,44 @@ mod graph_bridge_tests {
                 &scope,
             )
             .expect("measure rekey page writes");
+        assert_eq!(
+            rekey.logical_rekeys(),
+            &[crate::native_graph::LogicalRowRekey {
+                old_address: TypedKey::UInt(10),
+                new_address: TypedKey::UInt(50),
+            }],
+        );
+        assert!(matches!(
+            graph.maintain_row_index(
+                &[RowIndexMutation::Rekey {
+                    from: TypedKey::UInt(999),
+                    to: TypedKey::UInt(50),
+                }],
+                &scope,
+            ),
+            Err(crate::native_graph::GraphError::RowKeyAbsent)
+        ));
+        assert!(matches!(
+            graph.maintain_row_index(
+                &[RowIndexMutation::Rekey {
+                    from: TypedKey::UInt(10),
+                    to: TypedKey::UInt(11),
+                }],
+                &scope,
+            ),
+            Err(crate::native_graph::GraphError::DuplicateRowKey)
+        ));
+        let repeated_rekey = graph
+            .maintain_row_index(
+                &[RowIndexMutation::Rekey {
+                    from: TypedKey::UInt(10),
+                    to: TypedKey::UInt(50),
+                }],
+                &scope,
+            )
+            .expect("repeat rekey against the same pinned source");
+        assert_eq!(repeated_rekey.logical_rekeys(), rekey.logical_rekeys());
+        assert_eq!(repeated_rekey.logical_rekeys().len(), 1);
         assert_eq!(prepend.row_count(), 21);
         assert_eq!(delete.row_count(), 19);
         assert_eq!(rekey.row_count(), 20);
