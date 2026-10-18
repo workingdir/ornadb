@@ -4300,8 +4300,22 @@ impl SchemaDescriptor {
     ) -> Result<()> {
         validate_schema_stored_row(&self.0, relation_id, canonical_key, canonical_fields)
     }
+    /// Validates a stored row and binds every stored table reference to the database
+    /// of its containing snapshot. The repository remains responsible for
+    /// authenticating the descriptor and snapshot context.
+    pub fn validate_stored_row_in_context(
+        &self,
+        context: &Format3Context,
+        relation_id: [u8; 16],
+        canonical_key: &[u8],
+        canonical_fields: &[u8],
+    ) -> Result<()> {
+        context.inner.ensure_live()?;
+        self.validate_stored_row(relation_id, canonical_key, canonical_fields)?;
+        let fields = decode_canonical_storage_value(canonical_fields)?;
+        validate_reference_database(&fields, context.database_uuid())
+    }
     /// Validates one canonical ORP key against this descriptor and relation.
-    /// The repository owner remains responsible for authenticating the
     /// descriptor bytes and its snapshot.
     pub fn validate_stored_key(
         &self,
@@ -4366,6 +4380,35 @@ fn validate_schema_stored_row(
     Ok(())
 }
 
+fn validate_reference_database(value: &Raw, database_id: [u8; 16]) -> Result<()> {
+    match value {
+        Raw::Tag(60021, payload) => {
+            let fields = array(payload)?;
+            if fields.len() != 3 || uuid_array(&fields[0])? != database_id {
+                return Err(Error::InvalidValue);
+            }
+            for field in fields {
+                validate_reference_database(field, database_id)?;
+            }
+            Ok(())
+        }
+        Raw::Tag(_, payload) => validate_reference_database(payload, database_id),
+        Raw::Array(values) => {
+            for value in values {
+                validate_reference_database(value, database_id)?;
+            }
+            Ok(())
+        }
+        Raw::Map(entries) => {
+            for (key, value) in entries {
+                validate_reference_database(key, database_id)?;
+                validate_reference_database(value, database_id)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
 fn validate_schema_stored_key(
     schema: &Raw,
     relation_id: [u8; 16],
