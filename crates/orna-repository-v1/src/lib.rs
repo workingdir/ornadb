@@ -241,7 +241,7 @@ pub struct PrivateCommit {
 /// Opaque, repository-local review of one exact staged index generation.
 /// Construction is restricted to this crate so callers cannot forge a review.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ReviewedCandidateReview {
+pub struct ReviewedCandidateReview {
     database_id: Uuid,
     runtime_id: Uuid,
     pending_generation: u64,
@@ -256,11 +256,18 @@ pub(crate) struct ReviewedCandidateReview {
 }
 
 impl ReviewedCandidateReview {
-    pub(crate) fn token(&self) -> &[u8; 32] {
+    pub fn token(&self) -> &[u8; 32] {
         &self.token
     }
-}
 
+    pub fn index_tree(&self) -> &IndexTreeRef {
+        &self.index_tree
+    }
+
+    pub const fn pending_generation(&self) -> u64 {
+        self.pending_generation
+    }
+}
 fn append_cbor_head(bytes: &mut Vec<u8>, major: u8, value: u64) {
     let prefix = major << 5;
     match value {
@@ -3396,6 +3403,32 @@ impl Repository {
         Ok(())
     }
 
+    /// Reviews the exact index candidate using identity, generation, snapshot, and
+    /// format observations supplied by the durable runtime and this repository.
+    pub fn review_current_candidate(
+        &self,
+        capture: &orna_foundation_v1::CwdCapture,
+    ) -> Result<ReviewedCandidateReview, RepositoryError> {
+        let digits = capture.generation().to_u64_digits().1;
+        if digits.len() > 1 {
+            return Err(RepositoryError::LocalStateUnavailable);
+        }
+        let generation = digits.first().copied().unwrap_or(0);
+        let head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
+        let repository_format = self.open_pinned_format_context(head.as_str())
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?
+            .repository_format();
+        let descriptor = capture.snapshot().encode()
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        self.review_staged_candidate(
+            Uuid::from_bytes(capture.database_id()),
+            Uuid::from_bytes(capture.runtime_id()),
+            generation,
+            repository_format,
+            RuntimeGeneration::new(generation),
+            descriptor,
+        )
+    }
     /// Captures the actual index tree and CWD observation without mutating
     /// the ordinary index, worktree, or branch.
     pub(crate) fn review_staged_candidate(
@@ -3430,7 +3463,7 @@ impl Repository {
         Ok(review)
     }
 
-    pub(crate) fn commit_reviewed_candidate(
+    pub fn commit_reviewed_candidate(
         &self, review: &ReviewedCandidateReview, admitted_index_tree: &IndexTreeRef,
         pending_generation: u64, runtime_intent_id: [u8; 16], message: &str,
     ) -> Result<GitCommitRef, RepositoryError> {
