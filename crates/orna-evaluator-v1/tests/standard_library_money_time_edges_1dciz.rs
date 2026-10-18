@@ -19,6 +19,7 @@ fn pinned_session() -> AdmittedReplSession {
     session
 }
 
+/// ORNA-MONEY-006: minor-unit precision is applied at explicit settlement quantization, preserving intermediate precision.
 #[test]
 fn exact_money_rounding_covers_signed_ties_all_modes_and_allocation() {
     let mut session = pinned_session();
@@ -35,6 +36,21 @@ fn exact_money_rounding_covers_signed_ties_all_modes_and_allocation() {
     }
 }
 
+#[test]
+fn currency_formatting_uses_explicit_locale_and_rounding_context() {
+    let mut session = pinned_session();
+    let source = include_str!("fixtures/stdlib-money-format-values-rl767.orna");
+    for assertion in source.split("&&").map(str::trim) {
+        let parsed = orna_syntax_v1::parse_repl(assertion);
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+        let result = session.submit(assertion);
+        assert_eq!(
+            result,
+            Ok(Some(canonical(Raw::Bool(true)))),
+            "failed value assertion: {assertion}\n{result:?}"
+        );
+    }
+}
 #[test]
 fn timezone_gap_and_overlap_boundaries_preserve_offsets_and_nanoseconds() {
     let mut session = pinned_session();
