@@ -316,6 +316,7 @@ fn public_nominal_field_through_factory_is_accepted() {
 // ORNA-NOMINAL-005/-007: an imported constructor sees only public fields,
 // while declaration-backed required-field metadata prevents it from
 // manufacturing a value whose private representation is incomplete.
+// Specified: ORNA-NOMINAL-007; external construction rejects omitted private fields.
 #[test]
 fn imported_nominal_constructor_requires_private_fields() {
     let incomplete = analyze(&[
@@ -367,6 +368,7 @@ fn imported_nominal_constructor_requires_private_fields() {
     expect_diagnostics(&qualified_shadowed, &[DIAG_UNRESOLVED]);
 }
 
+// Specified: ORNA-NOMINAL-007; external construction is permitted only for publicly constructible fields.
 #[test]
 fn imported_nominal_constructor_accepts_complete_public_fields_and_defaults() {
     let complete = analyze(&[
@@ -785,6 +787,7 @@ fn unconstrained_nonself_nested_impl_parameter_requires_type_diagnostic() {
     expect_accepted(&constrained);
 }
 
+// Specified: ORNA-NOMINAL-006; the owning type nested implementation can read private target fields.
 #[test]
 fn nested_impl_body_can_read_private_target_fields() {
     expect_accepted(&analyze_main(include_str!(
@@ -792,6 +795,7 @@ fn nested_impl_body_can_read_private_target_fields() {
     )));
 }
 
+// Specified: ORNA-NOMINAL-006; a nested implementation cannot construct another nominal through its private fields.
 #[test]
 fn nested_impl_cannot_construct_other_nominal_private_fields() {
     let result = analyze_main(include_str!(
@@ -998,6 +1002,7 @@ fn differing_nonliteral_protocol_defaults_fail_closed() {
     expect_accepted(&identical);
 }
 
+// Specified: ORNA-NOMINAL-001; transparent aliases resolve to their existing type while nominal identity remains distinct.
 #[test]
 fn transparent_aliases_resolve_for_protocol_signatures_without_erasing_nominals() {
     let accepted = analyze_main(include_str!(
