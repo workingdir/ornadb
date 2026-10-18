@@ -558,7 +558,6 @@ fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
 #[tokio::test]
 /// Verifies that an independent offline copy retains the format-3 row-to-Blob
 /// graph and exact payload commitment. ORNA-BLOB-019, ORNA-OGB-001, and
-/// ORNA-OGB-004.
 async fn publish_then_history_then_offline_copy_carries_the_publication_commit() {
     let (root, repository, relation_id) = empty_format3_repository();
     let project: &Path = root.path();
