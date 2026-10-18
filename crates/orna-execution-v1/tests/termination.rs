@@ -184,6 +184,7 @@ fn ending_owner_fences_new_child_admission() {
     );
 }
 
+// ORNA-ERR-005: successful activation completion cancels and joins activation-owned child tasks before commit.
 #[test]
 fn success_cancels_and_joins_children_in_child_id_order_before_commit() {
     let (mut coordinator, owner) = active();
@@ -213,6 +214,7 @@ fn success_cancels_and_joins_children_in_child_id_order_before_commit() {
     assert_eq!(coordinator.phase(), TransactionPhase::Committed);
 }
 
+// ORNA-ERR-005: cancellation requests cleanup for all activation-owned children before joining any.
 #[test]
 fn requests_all_child_cancellations_before_joining_any_child() {
     let (mut coordinator, owner) = active();
@@ -242,6 +244,7 @@ fn requests_all_child_cancellations_before_joining_any_child() {
     );
 }
 
+// ORNA-ERR-005: cleanup still joins all children when cancellation itself reports errors.
 #[test]
 fn cancellation_errors_still_fan_out_joins() {
     let (mut coordinator, owner) = active();
@@ -382,6 +385,7 @@ fn rolled_back_owner_cannot_execute_publish_or_pass_its_fence() {
     assert_eq!(coordinator.phase(), TransactionPhase::RolledBack);
 }
 
+// ORNA-ERR-005: provider panic revokes the activation owner before unwind escapes.
 #[test]
 fn provider_panic_revokes_owner_before_unwind_escapes() {
     let (mut coordinator, owner) = active();
@@ -409,6 +413,7 @@ fn provider_panic_revokes_owner_before_unwind_escapes() {
     assert_eq!(store.commits, 0);
 }
 
+// ORNA-ERR-005: store panic revokes the activation owner before unwind escapes.
 #[test]
 fn store_panic_revokes_owner_before_unwind_escapes() {
     let (mut coordinator, owner) = active();

@@ -2190,6 +2190,7 @@ fn row_validation_preflights_source_items_and_steps_before_or_during_admission()
     assert_eq!(diagnostic.code(), "ORNA-EVAL-LIMIT");
 }
 
+// ORNA-FN-011: module evaluation retains a function without executing its body; invocation evaluates it.
 #[test]
 fn bounded_evaluator_defers_invalid_function_bodies_until_explicit_invocation() {
     let pure_module = SourceUnit {
