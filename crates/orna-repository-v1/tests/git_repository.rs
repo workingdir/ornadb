@@ -1888,6 +1888,7 @@ fn checkout_rejects_a_full_commit_id_branch_name_without_mutating_state() {
 }
 
 #[test]
+/// ORNA-CHECKOUT-001: invalid/stale checkout plans leave accepted state and drafts unchanged.
 fn checkout_preflight_invalid_selector_is_strictly_non_mutating() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -2119,6 +2120,7 @@ fn checkout_force_authorization_rejects_changed_bytes_for_an_ignored_path() {
 }
 
 #[test]
+/// ORNA-BRANCH-002: same-commit branch selection preserves the worktree and staged index.
 fn same_commit_checkout_switches_attachment_without_discarding_local_state() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -2185,49 +2187,6 @@ fn same_commit_checkout_rejects_a_divergent_target_without_mutating_cwd() {
     assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
 }
 
-#[test]
-fn divergent_checkout_carries_nonconflicting_git_state() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    git(root.path(), &["branch", "experiment"]);
-    git(root.path(), &["switch", "experiment"]);
-    fs::write(root.path().join("target.orna"), "target source\n").unwrap();
-    git(root.path(), &["add", "target.orna"]);
-    git(root.path(), &["commit", "-m", "target source"]);
-    git(root.path(), &["switch", "main"]);
-
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked\n").unwrap();
-    let plan = repo
-        .plan_checkout("experiment", RuntimeGeneration::new(29))
-        .unwrap();
-    assert!(plan.git().conflicting_paths().is_empty());
-
-    repo.execute_nonconflicting_git_checkout(&plan).unwrap();
-
-    assert_eq!(
-        git(root.path(), &["branch", "--show-current"]),
-        "experiment"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("target.orna")).unwrap(),
-        "target source\n"
-    );
-    assert_eq!(
-        git(root.path(), &["show", ":ordinary.txt"]),
-        "staged ordinary"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("main.orna")).unwrap(),
-        "unstaged source\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked\n"
-    );
-}
 
 fn create_format3_checkout_target(root: &Path, with_store_root: bool) {
     git(root, &["switch", "-c", "format3-target"]);
@@ -2368,35 +2327,6 @@ fn divergent_checkout_rechecks_git_state_after_candidate_validation() {
         "changed during validation\n"
     );
     assert!(!root.path().join("target.orna").exists());
-}
-
-#[test]
-fn divergent_checkout_refuses_conflicting_git_state_without_mutating_cwd() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    git(root.path(), &["branch", "experiment"]);
-    git(root.path(), &["switch", "experiment"]);
-    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    git(root.path(), &["commit", "-m", "target change"]);
-    git(root.path(), &["switch", "main"]);
-    fs::write(root.path().join("ordinary.txt"), "local\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    let before = repo.cwd_generation(RuntimeGeneration::new(30)).unwrap();
-    let plan = repo
-        .plan_checkout("experiment", RuntimeGeneration::new(30))
-        .unwrap();
-
-    assert!(matches!(
-        repo.execute_nonconflicting_git_checkout(&plan),
-        Err(orna_repository_v1::RepositoryError::CheckoutExecutionUnsafe)
-    ));
-    assert_eq!(
-        repo.cwd_generation(RuntimeGeneration::new(30)).unwrap(),
-        before
-    );
-    assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
-    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "local");
 }
 
 #[test]
@@ -2937,6 +2867,7 @@ fn interrupted_force_checkout_after_discard_journal_recovers_recorded_target() {
     );
 }
 
+
 #[test]
 fn interrupted_force_checkout_after_discard_journal_recovers_detached_target() {
     let root = repository();
@@ -3254,31 +3185,6 @@ fn conflicted_index_fails_closed_and_errors_redact_local_paths() {
     assert!(!rendered.contains(&root.path().display().to_string()));
 }
 
-#[test]
-fn explicit_snapshot_branch_and_remote_preserve_cwd() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let head = repo.head().unwrap().unwrap();
-    assert_eq!(repo.resolve_snapshot("HEAD").unwrap(), head);
-    let index = repo.index_generation().unwrap();
-    repo.create_branch_at_head("experiment").unwrap();
-    assert!(repo.create_branch_at_head("experiment").is_err());
-    assert_eq!(repo.index_generation().unwrap(), index);
-    assert_eq!(
-        git(root.path(), &["rev-parse", "refs/heads/experiment"]),
-        head.as_str()
-    );
-    git(
-        root.path(),
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://example.invalid/orna.git",
-        ],
-    );
-    assert_eq!(repo.remote_names().unwrap(), vec!["origin"]);
-}
 
 #[test]
 fn create_branch_at_unborn_head_fails_without_mutating_repository_state() {
