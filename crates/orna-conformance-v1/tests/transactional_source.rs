@@ -1086,6 +1086,7 @@ fn table_all_unique_decimal_primary_key_permits_distinct_values() {
     }
 }
 
+// ORNA-ERR-006: an unhandled activation failure rolls back all Orna-controlled candidate writes.
 #[test]
 fn module_every_exists_assertion_rolls_back_cross_table_candidate_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());

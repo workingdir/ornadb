@@ -2558,6 +2558,7 @@ fn retained_functions_execute_closures_without_mutating_captures() {
     assert_eq!(diagnostic.message(), "<redacted>");
 }
 
+// ORNA-FN-001, ORNA-PIPE-004: invoking a retained callable executes it through a checked pipeline.
 #[test]
 fn retained_function_pipeline_executes_and_checks_its_result() {
     let module = SourceUnit {

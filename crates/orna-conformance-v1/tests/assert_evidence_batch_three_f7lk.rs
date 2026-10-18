@@ -74,6 +74,7 @@ fn assert_017_legacy_repeated_owner_pipeline_receives_the_mapped_diagnostic_and_
     assert!(message.contains("remove the repeated table owner"), "{message}");
 }
 
+// ORNA-MODULE-002: only valid cross-table assertion plans are accepted at module scope.
 #[test]
 fn assert_024_module_assertion_is_a_closed_boolean_without_an_implicit_table_owner() {
     let analysis = analyze(&[ModuleInput::new("module-shapes.orna", MODULE_SHAPES)]);
