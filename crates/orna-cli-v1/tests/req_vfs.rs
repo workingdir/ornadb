@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+#[path = "support/media_commit.rs"]
+mod media_commit;
+
 // The shared media commit harness resolves the format-3 publication helper from
 // the integration-test crate root, including when VFS tests are nested here.
 #[path = "support/format3.rs"]
@@ -12,7 +15,6 @@ mod vfs_mount_integration;
 
 #[path = "vfs_editor_compat.rs"]
 mod vfs_editor_compat;
-
 #[test]
 /// ORNA-VFS-016: escaped key components round-trip without aliasing reserved names.
 fn typed_key_components_round_trip_reserved_and_escaped_names() {

@@ -2667,6 +2667,47 @@ impl NativeGraphContext {
         self.finish_protection(reference, pin_id, cleanup, protected_ref, scope)
     }
 
+    /// Durably pins an already-admitted Blob descriptor without reading or
+    /// hashing its payload. Use this only when a row save preserves that exact
+    /// Blob reference; new or replaced content must use `protect_verified_blob`
+    /// or `protect_captured_blob` so its bytes are verified before acceptance.
+    pub fn protect_admitted_blob_reference(
+        &self,
+        reference: &AdmittedBlobReference,
+        scope: &RepositoryReadScope,
+    ) -> Result<ProtectedContentPin, GraphError> {
+        scope.authorize(self)?;
+        if !reference.matches_context(self) {
+            return Err(GraphError::ContextMismatch);
+        }
+
+        let pin_id = *crate::Uuid::new_v4().as_bytes();
+        let protected_ref = accepted_content_ref(&self.owner_id, &pin_id);
+        let provisional_ref = scratch_content_ref(&self.owner_id, &pin_id);
+        let mut cleanup = PendingPrivateRefCleanup::new(
+            Arc::clone(&self.private_ref_owner),
+            provisional_ref,
+            reference.descriptor_oid.clone(),
+        );
+        self.create_protected_ref(&cleanup.reference, &reference.descriptor_oid)?;
+        scope.check_cancelled()?;
+        self.promote_protected_ref(
+            &cleanup.reference,
+            &protected_ref,
+            &reference.descriptor_oid,
+        )?;
+        cleanup.disarm();
+        // Preserve a possibly durable root if syncing its ref fails.
+        self.sync_git_ref(&protected_ref)?;
+        ProtectedContentPin::issue_after_durable_ref(
+            self.repository_id,
+            self.database_id,
+            pin_id,
+            reference,
+            protected_ref,
+        )
+    }
+
     /// Verifies and promotes a candidate produced by this exact graph owner.
     /// The candidate is consumed, so it cannot be accepted twice.
     pub fn protect_captured_blob(
