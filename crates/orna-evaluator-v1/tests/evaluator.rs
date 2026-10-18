@@ -7813,7 +7813,10 @@ fn fail_argument_propagates_a_return_transfer_before_error_matching() {
     );
 }
 
-// Specified: ORNA-RANGE-001, ORNA-RANGE-002, ORNA-RANGE-003, ORNA-RANGE-004, ORNA-RANGE-005, ORNA-RANGE-006; integer, decimal, and unbounded-endpoint range behavior is exercised by this and the neighboring range tests.
+// Specified: ORNA-RANGE-001, ORNA-RANGE-002, ORNA-RANGE-003, ORNA-RANGE-004,
+// ORNA-RANGE-005, ORNA-RANGE-006; exercised by this test,
+// decimal_ranges_are_canonical_membership_values_with_optional_bounds_and_ordering,
+// and range_ordering_validates_unbounded_endpoint_types_before_lexicographic_ordering.
 #[test]
 fn integer_ranges_are_canonical_membership_values_and_finite_iterables() {
     let half_open = Value::new(Raw::Tag(
