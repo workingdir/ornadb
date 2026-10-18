@@ -279,6 +279,8 @@ fn days_in_month(year: i32, month: u8) -> u8 {
 pub(super) struct RelationPlan {
     pub(super) source: String,
     pub(super) source_identity: RelationReadScope,
+    /// Union identity that distributed the trailing `SharedFilter` prefix.
+    pub(super) shared_filter_group: Option<RelationReadScope>,
     pub(super) source_union: Option<(Box<RelationPlan>, Box<RelationPlan>)>,
     /// Bounded, already-materialized rows produced by finite collection
     /// operators over a relation. Keeping these rows behind an Arc lets the
@@ -298,7 +300,17 @@ impl PartialEq for RelationPlan {
 
 impl Eq for RelationPlan {}
 
-type FilterContinuationScope = Option<RelationReadScope>;
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct FilterContinuationKey {
+    /// Relation source whose local continuation cache owns this join.
+    source: RelationReadScope,
+    /// Union boundary that distributed a common prefix to sibling leaves.
+    shared_group: Option<RelationReadScope>,
+    /// Union cascade currently appending a suffix to the prefix.
+    cascade: Option<RelationReadScope>,
+}
+
+type FilterContinuationScope = Option<FilterContinuationKey>;
 
 /// Ordered filter chunks shared when a cascade fans out through a union.
 #[derive(Debug)]
@@ -307,9 +319,9 @@ pub(super) struct FilterBatch {
     flattened: OnceLock<Vec<Arc<Vec<Value>>>>,
     // Weak entries allow cloned shared prefixes to reuse joins without cycles.
     continuations: Mutex<HashMap<(FilterContinuationScope, usize), Weak<FilterBatch>>>,
-    // Cloned leaf plans can carry equal, separately owned filter prefixes.
-    // Keep their joins shared within the same source identity when they append
-    // the same outer suffix.
+    // Equal prefixes from cloned plans are reused within their source identity.
+    // Arc-identical prefixes shared by a union may also reuse a join when a
+    // distinct outer cascade appends the same suffix.
     prefixed_batches: Mutex<Vec<(FilterContinuationScope, Weak<FilterBatch>)>>,
 }
 
@@ -361,12 +373,46 @@ impl FilterBatch {
         })
     }
 
+    #[cfg(test)]
     fn followed_by_shared_prefix(
         prefix: &Arc<Self>,
         next: &Arc<Self>,
         source_identity: RelationReadScope,
     ) -> Arc<Self> {
-        let scope = Some(source_identity);
+        Self::followed_by_shared_prefix_in_scope(
+            prefix,
+            next,
+            Some(FilterContinuationKey {
+                source: source_identity,
+                shared_group: None,
+                cascade: None,
+            }),
+        )
+    }
+
+    fn followed_by_shared_prefix_in_cascade(
+        prefix: &Arc<Self>,
+        next: &Arc<Self>,
+        source_identity: RelationReadScope,
+        shared_group: Option<RelationReadScope>,
+        cascade: RelationReadScope,
+    ) -> Arc<Self> {
+        Self::followed_by_shared_prefix_in_scope(
+            prefix,
+            next,
+            Some(FilterContinuationKey {
+                source: source_identity,
+                shared_group,
+                cascade: Some(cascade),
+            }),
+        )
+    }
+
+    fn followed_by_shared_prefix_in_scope(
+        prefix: &Arc<Self>,
+        next: &Arc<Self>,
+        scope: FilterContinuationScope,
+    ) -> Arc<Self> {
         let next_key = Arc::as_ptr(next) as usize;
         let mut continuations = prefix
             .continuations
@@ -374,10 +420,6 @@ impl FilterBatch {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let scoped_key = (scope, next_key);
         if let Some(batch) = continuations.get(&scoped_key).and_then(Weak::upgrade) {
-            // Cloned leaves already have an identity-keyed join; avoid taking
-            // the suffix's cross-prefix cache lock for this common path. The
-            // relation source scopes this identity so cloned unknowns cannot
-            // promote the continuation into a sibling source.
             return batch;
         }
         let equivalent_continuation = continuations
@@ -392,9 +434,6 @@ impl FilterBatch {
                     && (Arc::ptr_eq(suffix, next) || suffix.values().eq(next.values()))
             });
         if let Some(batch) = equivalent_continuation {
-            // Separately compiled suffixes with the same ordered filters are
-            // equivalent within this relation source; alias their scoped
-            // identity-keyed entries.
             continuations.insert(scoped_key, Arc::downgrade(&batch));
             return batch;
         }
@@ -404,9 +443,6 @@ impl FilterBatch {
             .prefixed_batches
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Nested union leaves can carry separately compiled but equivalent
-        // prefixes. Reuse their join when appending the same suffix so the
-        // shared batch identity survives those compilation boundaries.
         for (cached_scope, weak_batch) in prefixed_batches.iter().rev() {
             let Some(batch) = weak_batch.upgrade() else {
                 continue;
@@ -414,13 +450,22 @@ impl FilterBatch {
             let FilterBatchNode::Then(existing_prefix, suffix) = &batch.node else {
                 continue;
             };
-            let shared_prefix = Arc::ptr_eq(existing_prefix, prefix);
-            // A prefix already shared before a union split can reuse its join
-            // across the leaf source scopes. Equal but independently built
-            // prefixes remain local to their source scope.
+            let same_scope = cached_scope == &scope;
+            let shared_across_outer_cascade = match (cached_scope.as_ref(), scope.as_ref()) {
+                (Some(cached), Some(requested)) => {
+                    cached.shared_group.is_some()
+                        && cached.shared_group == requested.shared_group
+                        && cached.cascade.is_some()
+                        && cached.cascade == requested.cascade
+                        && cached.shared_group != cached.cascade
+                }
+                _ => false,
+            };
             if Arc::ptr_eq(suffix, next)
-                && (shared_prefix
-                    || (cached_scope == &scope && existing_prefix.values().eq(prefix.values())))
+                && ((same_scope
+                    && (Arc::ptr_eq(existing_prefix, prefix)
+                        || existing_prefix.values().eq(prefix.values())))
+                    || (shared_across_outer_cascade && Arc::ptr_eq(existing_prefix, prefix)))
             {
                 return batch;
             }
@@ -431,12 +476,19 @@ impl FilterBatch {
         batch
     }
 
-    fn prefixed_by(
+    fn prefixed_by_in_cascade(
         values: Vec<Value>,
         next: &Arc<Self>,
         source_identity: RelationReadScope,
+        cascade: RelationReadScope,
     ) -> Arc<Self> {
-        Self::followed_by_shared_prefix(&Self::from_values(values), next, source_identity)
+        Self::followed_by_shared_prefix_in_cascade(
+            &Self::from_values(values),
+            next,
+            source_identity,
+            None,
+            cascade,
+        )
     }
 
     pub(super) fn chunks(&self) -> &[Arc<Vec<Value>>] {
@@ -635,6 +687,7 @@ impl RelationPlan {
         Self {
             source,
             source_identity: next_relation_source_id(),
+            shared_filter_group: None,
             source_union: None,
             source_values: None,
             stages: Vec::new(),
@@ -645,6 +698,7 @@ impl RelationPlan {
         Self {
             source: String::new(),
             source_identity: next_relation_source_id(),
+            shared_filter_group: None,
             source_union: None,
             source_values: Some(Arc::new(values)),
             stages: Vec::new(),
@@ -660,6 +714,7 @@ impl RelationPlan {
         Self {
             source: String::new(),
             source_identity: next_relation_source_id(),
+            shared_filter_group: None,
             source_union: Some((Box::new(left), Box::new(right))),
             source_values: None,
             stages: Vec::new(),
@@ -679,6 +734,7 @@ impl RelationPlan {
                     Some(RelationStage::Filter(mut previous)) => {
                         previous.append(&mut predicates);
                         self.stages.push(RelationStage::Filter(previous));
+                        self.shared_filter_group = None;
                     }
                     Some(RelationStage::SharedFilter(previous)) => {
                         let next = FilterBatch::from_values(predicates);
@@ -688,26 +744,33 @@ impl RelationPlan {
                             // it is pushed into source-scoped leaves.
                             FilterBatch::joined(&previous, &next)
                         } else {
-                            FilterBatch::followed_by_shared_prefix(
+                            FilterBatch::followed_by_shared_prefix_in_scope(
                                 &previous,
                                 &next,
-                                self.source_identity,
+                                Some(FilterContinuationKey {
+                                    source: self.source_identity,
+                                    shared_group: self.shared_filter_group,
+                                    cascade: None,
+                                }),
                             )
                         };
-                        self.stages.push(RelationStage::SharedFilter(
-                            continuation,
-                        ));
+                        self.stages.push(RelationStage::SharedFilter(continuation));
                     }
                     Some(previous) => {
                         self.stages.push(previous);
                         self.stages.push(RelationStage::Filter(predicates));
+                        self.shared_filter_group = None;
                     }
-                    None => self.stages.push(RelationStage::Filter(predicates)),
+                    None => {
+                        self.stages.push(RelationStage::Filter(predicates));
+                        self.shared_filter_group = None;
+                    }
                 }
             }
             stage => {
                 self = self.flush_filter_cascade();
                 self.stages.push(stage);
+                self.shared_filter_group = None;
             }
         }
         self
@@ -728,20 +791,42 @@ impl RelationPlan {
                 return self;
             }
         };
+        let cascade_identity = self.source_identity;
         let (left, right) = self.source_union.take().expect("checked union source");
         self.source_union = Some((
-            Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
-            Box::new(right.push_filter_cascade(predicates)),
+            Box::new(left.push_filter_cascade(
+                Arc::clone(&predicates),
+                cascade_identity,
+                cascade_identity,
+            )),
+            Box::new(right.push_filter_cascade(
+                predicates,
+                cascade_identity,
+                cascade_identity,
+            )),
         ));
         self
     }
 
-    fn push_filter_cascade(mut self, predicates: Arc<FilterBatch>) -> Self {
+    fn push_filter_cascade(
+        mut self,
+        predicates: Arc<FilterBatch>,
+        cascade_identity: RelationReadScope,
+        shared_group: RelationReadScope,
+    ) -> Self {
         if let Some((left, right)) = self.source_union.take() {
             if self.stages.is_empty() {
                 self.source_union = Some((
-                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
-                    Box::new(right.push_filter_cascade(predicates)),
+                    Box::new(left.push_filter_cascade(
+                        Arc::clone(&predicates),
+                        cascade_identity,
+                        shared_group,
+                    )),
+                    Box::new(right.push_filter_cascade(
+                        predicates,
+                        cascade_identity,
+                        shared_group,
+                    )),
                 ));
                 return self;
             }
@@ -762,9 +847,18 @@ impl RelationPlan {
                     }
                     _ => unreachable!("checked filter stage"),
                 };
+                let shared_group = self.source_identity;
                 self.source_union = Some((
-                    Box::new(left.push_filter_cascade(Arc::clone(&predicates))),
-                    Box::new(right.push_filter_cascade(predicates)),
+                    Box::new(left.push_filter_cascade(
+                        Arc::clone(&predicates),
+                        cascade_identity,
+                        shared_group,
+                    )),
+                    Box::new(right.push_filter_cascade(
+                        predicates,
+                        cascade_identity,
+                        shared_group,
+                    )),
                 ));
                 return self;
             }
@@ -772,27 +866,35 @@ impl RelationPlan {
         }
         match self.stages.pop() {
             Some(RelationStage::Filter(previous)) => {
-                self.stages.push(RelationStage::SharedFilter(
-                    FilterBatch::prefixed_by(previous, &predicates, self.source_identity),
-                ));
+                let batch = FilterBatch::prefixed_by_in_cascade(
+                    previous,
+                    &predicates,
+                    self.source_identity,
+                    cascade_identity,
+                );
+                self.stages.push(RelationStage::SharedFilter(batch));
+                self.shared_filter_group = None;
             }
             Some(RelationStage::SharedFilter(previous)) => {
-                self.stages.push(RelationStage::SharedFilter(
-                    FilterBatch::followed_by_shared_prefix(
-                        &previous,
-                        &predicates,
-                        self.source_identity,
-                    ),
-                ));
+                let batch = FilterBatch::followed_by_shared_prefix_in_cascade(
+                    &previous,
+                    &predicates,
+                    self.source_identity,
+                    self.shared_filter_group,
+                    cascade_identity,
+                );
+                self.stages.push(RelationStage::SharedFilter(batch));
             }
             Some(previous) => {
                 self.stages.push(previous);
                 self.stages
                     .push(RelationStage::SharedFilter(predicates));
+                self.shared_filter_group = Some(shared_group);
             }
-            None => self
-                .stages
-                .push(RelationStage::SharedFilter(predicates)),
+            None => {
+                self.stages.push(RelationStage::SharedFilter(predicates));
+                self.shared_filter_group = Some(shared_group);
+            }
         }
         self
     }
