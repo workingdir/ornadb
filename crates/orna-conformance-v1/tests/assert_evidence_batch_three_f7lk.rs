@@ -40,6 +40,7 @@ fn mapped_semantic_diagnostic(source: &str) -> (String, String) {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-003.
 fn assert_003_table_assertion_plan_is_owned_by_its_lexical_table() {
     let source = include_str!("fixtures/reference/examples/valid/table-assertions.orna");
     let analysis = analyze(&[ModuleInput::new("table-assertions.orna", source)]);
@@ -50,6 +51,7 @@ fn assert_003_table_assertion_plan_is_owned_by_its_lexical_table() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-015.
 fn assert_015_table_and_module_assertions_see_one_coherent_cross_table_candidate() {
     let mut runtime = TransactionalEvaluator::new("coherent_candidate", Limits::default());
     let outcome = runtime.execute_source(&unit("coherent-candidate", COHERENT_CANDIDATE));
@@ -59,6 +61,7 @@ fn assert_015_table_and_module_assertions_see_one_coherent_cross_table_candidate
 }
 
 #[test]
+// Specified: ORNA-ASSERT-016.
 fn assert_016_legacy_self_pipeline_receives_the_mapped_diagnostic_and_specific_guidance() {
     let source = include_str!("fixtures/reference/examples/invalid/legacy-assert-self-pipe.orna");
     let (code, message) = mapped_semantic_diagnostic(source);
@@ -66,6 +69,7 @@ fn assert_016_legacy_self_pipeline_receives_the_mapped_diagnostic_and_specific_g
     assert!(message.contains("remove `self |`"), "{message}");
 }
 
+// Specified: ORNA-ASSERT-017.
 #[test]
 fn assert_017_legacy_repeated_owner_pipeline_receives_the_mapped_diagnostic_and_guidance() {
     let source = include_str!("fixtures/reference/examples/invalid/legacy-assert-owner-pipe.orna");
@@ -75,6 +79,7 @@ fn assert_017_legacy_repeated_owner_pipeline_receives_the_mapped_diagnostic_and_
 }
 
 #[test]
+// Specified: ORNA-ASSERT-024.
 fn assert_024_module_assertion_is_a_closed_boolean_without_an_implicit_table_owner() {
     let analysis = analyze(&[ModuleInput::new("module-shapes.orna", MODULE_SHAPES)]);
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
@@ -86,6 +91,7 @@ fn assert_024_module_assertion_is_a_closed_boolean_without_an_implicit_table_own
 }
 
 #[test]
+// Specified: ORNA-ASSERT-025.
 fn assert_025_module_assertion_rejects_a_forbidden_network_effect() {
     let analysis = analyze(&[ModuleInput::new("module-effect.orna", MODULE_EFFECT)]);
     assert!(
@@ -98,6 +104,7 @@ fn assert_025_module_assertion_rejects_a_forbidden_network_effect() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-028.
 fn assert_028_preserves_source_span_order_within_one_module() {
     let analysis = analyze(&[ModuleInput::new("module-shapes.orna", MODULE_SHAPES)]);
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
@@ -108,6 +115,7 @@ fn assert_028_preserves_source_span_order_within_one_module() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-030.
 fn assert_030_cross_table_assertion_has_module_not_table_ownership() {
     let source = include_str!("fixtures/reference/examples/valid/cross-table-assertion.orna");
     let analysis = analyze(&[ModuleInput::new("cross-table-assertion.orna", source)]);
@@ -118,6 +126,7 @@ fn assert_030_cross_table_assertion_has_module_not_table_ownership() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-055.
 fn assert_055_recognized_legacy_owner_form_has_specific_migration_guidance() {
     let source = include_str!("fixtures/reference/examples/invalid/legacy-assert-self-pipe.orna");
     let (_, message) = mapped_semantic_diagnostic(source);
@@ -125,6 +134,7 @@ fn assert_055_recognized_legacy_owner_form_has_specific_migration_guidance() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-056.
 fn assert_056_ordinary_relation_pipeline_remains_valid_outside_declaration_assertions() {
     let source = include_str!("fixtures/assert-evidence-batch-three/ordinary-pipeline.orna");
     let analysis = analyze(&[ModuleInput::new("ordinary-pipeline.orna", source)]);
