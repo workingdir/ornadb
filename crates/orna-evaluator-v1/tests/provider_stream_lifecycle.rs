@@ -539,6 +539,7 @@ fn provider_retry_redelivers_same_checkpoint_and_recover_requires_permission() {
     assert_eq!(exhausted.requests.len(), 2);
 }
 
+// ORNA-ERR-004: cancellation yields the dedicated cancellation completion, distinct from callback Error.
 #[test]
 fn callback_failure_and_cancellation_roll_back_the_blocked_checkpoint() {
     let mut callback_failure = ProviderHarness::new([
