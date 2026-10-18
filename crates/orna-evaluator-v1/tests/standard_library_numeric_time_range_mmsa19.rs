@@ -57,7 +57,7 @@ fn standard_session() -> AdmittedReplSession {
 #[test]
 fn float_arithmetic_preserves_source_evaluation_order() {
     let mut session = AdmittedReplSession::new(Limits::default());
-    let source = "((9007199254740992.0f + 1.0f) - 9007199254740992.0f) == 0.0f";
+    let source = "((10000000000000000.0f - 10000000000000000.0f) + 1.0f) == 1.0f";
     assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
 }
 
