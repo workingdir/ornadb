@@ -436,7 +436,7 @@ async fn publish_rejects_noncanonical_source_key_before_candidate_changes() {
 }
 
 #[tokio::test]
-async fn publish_projects_a_new_format3_row_from_its_typed_key_without_source_lookup() {
+async fn publish_stores_a_new_format3_row_from_its_typed_key_without_source_lookup() {
     let source = TempDir::new().unwrap();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),
@@ -496,7 +496,10 @@ async fn publish_projects_a_new_format3_row_from_its_typed_key_without_source_lo
         String::from_utf8_lossy(&published.stderr)
     );
     assert_ne!(head(root_path), source_commit.as_str());
-    assert!(projection.is_file());
+    assert!(
+        !projection.exists(),
+        "format-3 publication must not create a loose row projection"
+    );
     assert!(
         committed_store_rows(&repository, relation_id)
             .iter()

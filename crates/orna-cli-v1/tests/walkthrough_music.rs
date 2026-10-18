@@ -103,12 +103,12 @@ async fn repl_update() {
     let published = run(root, &["publish"]);
     assert_eq!(published.status.code(), Some(0), "initial publish failed: {}", stderr(&published));
     git(root, &["reset", "--quiet", "--hard", "HEAD"]);
-    std::fs::remove_file(root.join("music/london.orna")).unwrap();
+    assert!(!root.join("music/london.orna").exists(), "format-3 publication should keep rows in the store");
 
     let invalid = run_repl(root, r#"main.music.update("london", { title: 7 })"#);
     let invalid_output = format!("{}{}", String::from_utf8_lossy(&invalid.stdout), stderr(&invalid));
     assert!(invalid_output.contains("ORNA-S021-TYPE"), "invalid update should be rejected: {invalid_output}");
-    git(root, &["checkout", "--", "music/london.orna"]);
+    assert!(!root.join("music/london.orna").exists(), "invalid REPL update should not create a loose row file");
     let invalid_publish = run(root, &["publish"]);
     assert_eq!(invalid_publish.status.code(), Some(0), "invalid update left a publication: {}", stderr(&invalid_publish));
     let rows = committed_store_rows(&repository, relation_id);
@@ -116,15 +116,16 @@ async fn repl_update() {
     let fields = rows[0].value().encoded_fields().unwrap();
     let decoded = orna_value_v1::decode_canonical_storage_value(fields).unwrap();
     assert!(format!("{decoded:?}").contains("Old title"), "invalid update changed the committed row: {decoded:?}");
-    std::fs::remove_file(root.join("music/london.orna")).unwrap();
+    assert!(!root.join("music/london.orna").exists(), "committed row should not need a loose source file");
 
     let updated = run_repl(root, r#"main.music.update("london", { title: "New title" })"#);
     let stdout = String::from_utf8_lossy(&updated.stdout);
     assert!(!stdout.contains("ORNA-EVAL-TABLE-SNAPSHOT"), "REPL update must resolve the committed row snapshot: {stdout} {}", stderr(&updated));
     assert_eq!(updated.status.code(), Some(0), "REPL update failed: {stdout} {}", stderr(&updated));
-    git(root, &["checkout", "--", "music/london.orna"]);
+    assert!(!root.join("music/london.orna").exists(), "REPL update should remain store-only before publication");
     let published = run(root, &["publish"]);
     assert_eq!(published.status.code(), Some(0), "updated row publish failed: {}", stderr(&published));
+    assert!(!root.join("music/london.orna").exists(), "format-3 publication should keep rows in the store");
     let rows = committed_store_rows(&repository, relation_id);
     assert_eq!(rows.len(), 1);
     let fields = rows[0].value().encoded_fields().unwrap();

@@ -99,15 +99,16 @@ async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
     assert_eq!(committed[0].0, b"image".to_vec());
     assert_eq!(committed[1].0, b"song".to_vec());
 
-    // Publication must leave both loose row files in the committed tree: the
-    // explicit boundary is the only thing that advances the repository, and a
-    // read of the tree is what a second process sees.
+    // Format-3 publication is store-only: it must not create legacy loose-row
+    // projections in the committed tree. A second process reads the row map below.
     let tracked = git_output(directory.path(), &["ls-files"], None);
     let tracked = String::from_utf8(tracked).unwrap();
     for row in ["media/song.orna", "media/image.orna"] {
-        assert!(tracked.contains(row), "publication commits {row}");
+        assert!(
+            !tracked.contains(row),
+            "format-3 publication does not commit legacy loose path {row}"
+        );
     }
-
     // Both committed rows must also be reachable through the format-3 row map,
     // which is the store root the read path resolves (`open_format_context` ->
     // `load_row_map` -> `open_native_graph`). A row that lists through the

@@ -1164,16 +1164,13 @@ fn private_publication_file_changes(
 fn build_private_publication_candidate_with_store_root(
     repository: &Repository,
     expected_head: &GitCommitRef,
-    batch: &FrozenBatch,
     graph: &NativeGraphContext,
     store_root: &NativeOid,
     message: &str,
 ) -> Result<PrivateCommit, Error> {
-    let changes = private_publication_file_changes(batch)?;
     repository
         .build_private_commit_with_store_root(
             expected_head,
-            &changes,
             graph,
             store_root,
             message,
@@ -1845,10 +1842,10 @@ impl RuntimePublicationCoordinator {
     /// Reads the exact typed prefix named by `freeze` and reports the result as
     /// `None` when the frozen prefix is a no-op.
     ///
-    /// A prefix whose rows fold to the bytes already committed has no visible
-    /// change, so there is no publication to prepare. The caller completes the
-    /// frozen intent without a commit; a save that changed nothing stays
-    /// successful instead of failing on the empty batch.
+    /// A legacy prefix whose rows, or a format-3 prefix whose native store root,
+    /// are unchanged from the committed snapshot has no visible change. The caller
+    /// completes the frozen intent without a commit instead of preparing an empty
+    /// publication.
     pub async fn prepare_allow_noop(
         repository: &Repository,
         runtime: &RuntimeState,
@@ -1862,6 +1859,75 @@ impl RuntimePublicationCoordinator {
             .pending_table_mutations_through(freeze)
             .await
             .map_err(|_| Error::RuntimeUnavailable)?;
+        let format = repository
+            .open_format_context_at_selector(expected_head.as_str())
+            .map_err(|_| Error::RepositoryUnavailable)?;
+        if format.repository_format() == RepositoryFormat::Format3 {
+            if mutations.is_empty() || freeze.checkpoint.mutation_sequence == 0 {
+                return Err(Error::IncompleteStaging);
+            }
+            let current_store_root = format
+                .load_row_map(
+                    mutations[0]
+                        .table_object_id()
+                        .ok_or(Error::IncompleteStaging)?
+                        .bytes(),
+                )
+                .map_err(|_| Error::RepositoryUnavailable)?
+                .version()
+                .store_root()
+                .clone();
+            let (graph, store_root) =
+                build_frozen_publication_store_root(repository, expected_head, &mutations)?;
+            if store_root == current_store_root {
+                return Ok(None);
+            }
+            let candidate = build_private_publication_candidate_with_store_root(
+                repository,
+                expected_head,
+                &graph,
+                &store_root,
+                message,
+            )?;
+            // Store-only candidates still need a durable journal anchor. Keep
+            // the format metadata file unchanged rather than projecting row
+            // keys into legacy loose paths.
+            let marker = ManagedPath::new(".orna/database.orna")
+                .map_err(|_| Error::RepositoryUnavailable)?;
+            let paths = [marker.clone()];
+            let captured = repository
+                .capture_managed_publication_state(expected_head, &expected_index, &paths)
+                .map_err(map_publication_repository_error)?;
+            let expected = captured
+                .into_iter()
+                .next()
+                .ok_or(Error::RepositoryUnavailable)?;
+            let entry = PublicationJournalEntry::new(marker, expected.clone(), expected);
+            let base_index_tree = expected_index
+                .tree()
+                .cloned()
+                .ok_or(Error::IncompleteStaging)?;
+            let journal = PublicationJournal::new_with_runtime_intent(
+                expected_head.clone(),
+                candidate.commit().clone(),
+                base_index_tree,
+                freeze.intent_id,
+                vec![entry],
+            )
+            .and_then(|journal| journal.with_store_root(&store_root))
+            .map_err(|_| Error::RepositoryUnavailable)?;
+            let protected_source_mutations = mutations
+                .iter()
+                .filter(|mutation| !mutation.protected_content_transfers().is_empty())
+                .cloned()
+                .collect();
+            return Ok(Some(Self {
+                expected_index,
+                candidate,
+                journal,
+                protected_source_mutations,
+            }));
+        }
         let Some(batch) =
             lower_runtime_table_mutations_allow_empty(freeze, &mutations, path_for, |path| {
                 repository
@@ -1929,7 +1995,6 @@ impl RuntimePublicationCoordinator {
         let candidate = build_private_publication_candidate_with_store_root(
             repository,
             expected_head,
-            &batch,
             &graph,
             &store_root,
             message,
