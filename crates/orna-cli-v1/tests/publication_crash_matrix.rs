@@ -23,10 +23,7 @@ mod format3;
 use format3::*;
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
-const REIMPORT_FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/media/reimport-image-capture.orna"
-);
+const REIMPORT_FIXTURE: &str = include_str!("fixtures/media/reimport-image-capture.orna");
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 const CRASH_AT: &str = "ORNA_TEST_PUBLICATION_CRASH_AT";
 const CRASH_MARKER: &str = "ORNA_TEST_PUBLICATION_CRASH_MARKER";
@@ -236,7 +233,7 @@ async fn capture_crash_child() {
             let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
                 .with_filesystem_provider(filesystem)
                 .with_repository_capture_capability(capability);
-            let fixture = std::fs::read_to_string(REIMPORT_FIXTURE).unwrap();
+            let fixture = REIMPORT_FIXTURE;
             let root = format!("{:?}", source_root.to_string_lossy().as_ref());
             let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root);
             commit_capture(
@@ -281,7 +278,7 @@ async fn seeded_project() -> (
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let fixture = std::fs::read_to_string(REIMPORT_FIXTURE).unwrap();
+    let fixture = REIMPORT_FIXTURE;
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root);
     commit_capture(
@@ -482,7 +479,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let fixture = std::fs::read_to_string(REIMPORT_FIXTURE).unwrap();
+    let fixture = REIMPORT_FIXTURE;
     let media_root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
     commit_capture(
