@@ -23550,7 +23550,7 @@ fn infer_numeric_member(base: &Type, name: &str) -> Option<Type> {
 fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type> {
     match base {
         Type::Int | Type::Decimal
-            if scope.currency_types.contains(name) || is_currency_code(name) =>
+            if scope.currency_types.contains(name) =>
         {
             Some(Type::Applied {
                 base: "Money".into(),
