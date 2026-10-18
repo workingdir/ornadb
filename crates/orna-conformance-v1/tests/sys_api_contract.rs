@@ -112,7 +112,6 @@ fn sys_tokens(text: &str) -> impl Iterator<Item = &str> {
 
 #[test]
 fn portable_sys_api_has_exact_declared_counts_and_surface() {
-    // ORNA-SYS-002: the generated registry exposes the complete portable sys surface.
     let document = sys_api_document();
     assert_eq!(document["language_version"], "1.1.0");
     assert_eq!(document["sys_version"], "1.1");
