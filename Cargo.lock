@@ -1333,6 +1333,7 @@ dependencies = [
  "orna-sys-v1",
  "orna-value-v1",
  "parquet",
+ "rustix 0.38.44",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
