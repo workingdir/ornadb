@@ -2513,17 +2513,17 @@ impl Repository {
         self.build_private_commit_inner(expected_head, changes, None, message)
     }
 
-    /// Builds a private candidate from managed file changes and a validated
-    /// format-3 store root, without changing the behavior of file-only callers.
+    /// Builds a private format-3 candidate from a validated native store root.
+    /// Format-3 rows are persisted only in the store tree, so this operation
+    /// cannot accept loose-row file projections.
     pub fn build_private_commit_with_store_root(
         &self,
         expected_head: &GitCommitRef,
-        changes: &[ManagedFileChange],
         graph: &NativeGraphContext,
         store_root: &NativeOid,
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
-        self.build_private_commit_inner(expected_head, changes, Some((graph, store_root)), message)
+        self.build_private_commit_inner(expected_head, &[], Some((graph, store_root)), message)
     }
 
     fn build_private_commit_inner(
@@ -2533,7 +2533,7 @@ impl Repository {
         store_projection: Option<(&NativeGraphContext, &NativeOid)>,
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
-        if changes.is_empty() {
+        if changes.is_empty() && store_projection.is_none() {
             return Err(RepositoryError::NoManagedPaths);
         }
         if message.is_empty() || message.contains('\0') {
@@ -2663,30 +2663,12 @@ impl Repository {
     /// it, and the commit is a direct child of the captured `HEAD`. The
     /// symbolic branch and ordinary index are untouched; publication advances
     /// them later under its own lock and compare-and-set.
+
     pub fn build_frozen_publication_candidate(
         &self,
         expected_head: &GitCommitRef,
         graph: &NativeGraphContext,
         store_root: &NativeOid,
-        message: &str,
-    ) -> Result<PrivateCommit, RepositoryError> {
-        self.build_frozen_publication_candidate_with_changes(
-            expected_head,
-            graph,
-            store_root,
-            &[],
-            message,
-        )
-    }
-
-    /// Builds one frozen publication candidate with the new native store root
-    /// and its matching loose-row projections in the same Git tree.
-    pub fn build_frozen_publication_candidate_with_changes(
-        &self,
-        expected_head: &GitCommitRef,
-        graph: &NativeGraphContext,
-        store_root: &NativeOid,
-        changes: &[ManagedFileChange],
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
         if message.is_empty() || message.contains('\0') {
@@ -2704,14 +2686,6 @@ impl Repository {
                 actual: store_root.as_bytes().len(),
             }));
         }
-        let mut paths = HashSet::new();
-        for change in changes {
-            if !paths.insert(change.path.clone()) || change.path.as_path().to_str().is_none() {
-                return Err(RepositoryError::UnsafeManagedPath);
-            }
-        }
-        self.reject_final_loose_path_collisions(expected_head, changes)?;
-
         self.runtime.ensure_exists()?;
         fs::create_dir_all(self.runtime.locks())
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -2733,35 +2707,6 @@ impl Repository {
                 .env("GIT_INDEX_FILE", &index)
                 .args(["read-tree", expected_head.as_str()]);
             self.run(read_tree)?;
-
-            for change in changes {
-                if let Some(bytes) = change.bytes() {
-                    let object = self.hash_object(bytes)?;
-                    let cacheinfo = format!(
-                        "100644,{object},{}",
-                        change
-                            .path
-                            .as_path()
-                            .to_str()
-                            .ok_or(RepositoryError::UnsafeManagedPath)?
-                    );
-                    let mut update = self.command();
-                    update.env("GIT_INDEX_FILE", &index).args([
-                        "update-index",
-                        "--add",
-                        "--cacheinfo",
-                        &cacheinfo,
-                    ]);
-                    self.run(update)?;
-                } else {
-                    let mut update = self.command();
-                    update
-                        .env("GIT_INDEX_FILE", &index)
-                        .args(["update-index", "--force-remove", "--"])
-                        .arg(change.path.as_path());
-                    self.run(update)?;
-                }
-            }
 
             // The store root must be a real decodable OGS-1 tree, so a raw
             // object ID cannot be planted at the store position.
@@ -3898,7 +3843,6 @@ impl Repository {
             return Ok(None);
         };
         self.reclaim_abandoned_publication_index_lock(&journal)?;
-        let candidate = self.candidate_from_journal(&journal)?;
         let base_tree = journal
             .base_index_tree()
             .cloned()
@@ -3907,6 +3851,22 @@ impl Repository {
             head: Some(journal.old_head().clone()),
             tree: Some(base_tree),
         };
+        let commit_expression = format!("{}^{{commit}}", journal.new_head().as_str());
+        let candidate_commit = self.commit_optional(&commit_expression)?;
+        if journal.stage() == PublicationJournalStage::Prepared
+            && candidate_commit.is_none()
+            && self.head()?.as_ref() == Some(journal.old_head())
+        {
+            let actual = self.index_generation()?;
+            if actual == expected_index {
+                self.clear_publication_journal_locked()?;
+                return Ok(Some(actual));
+            }
+        }
+        let candidate = self.candidate_from_journal_with_commit(
+            &journal,
+            candidate_commit.ok_or(RepositoryError::InvalidPublicationJournal)?,
+        )?;
 
         if journal.stage() == PublicationJournalStage::Prepared
             && self.head()?.as_ref() == Some(journal.old_head())
@@ -4013,6 +3973,14 @@ impl Repository {
         let commit = self
             .commit_optional(&commit_expression)?
             .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        self.candidate_from_journal_with_commit(journal, commit)
+    }
+
+    fn candidate_from_journal_with_commit(
+        &self,
+        journal: &PublicationJournal,
+        commit: GitCommitRef,
+    ) -> Result<PrivateCommit, RepositoryError> {
         if &commit != journal.new_head() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
