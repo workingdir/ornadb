@@ -55,6 +55,7 @@ use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
 };
+pub use relation::{RelationPlanMetadata, RelationPlanNode};
 pub use repl::{ReplSession, parse_admitted_repl};
 #[cfg(feature = "system-host-bindings")]
 pub use sys_bindings::SysHostBindingRegistry;
@@ -777,7 +778,6 @@ pub trait EffectHandler {
     ) -> Result<Option<CanonicalValue>, EvaluationError>;
 
     /// Handle an effect while sharing the activation's step budget.
-    ///
     /// The default delegates to [`EffectHandler::handle`] so existing effect
     /// handlers remain source-compatible and retain their prior behavior.
     fn handle_with_budget(
@@ -1412,6 +1412,96 @@ pub fn evaluate_expression(
     evaluate_expression_with_functions(source, environment, &Functions::new(), limits)
 }
 
+/// Builds planner metadata for a typed relation query without executing its source scan.
+///
+/// Evaluation proceeds only far enough to construct the relation plan. Source reads,
+/// callbacks, and terminal operators that materialize rows are not run.
+#[must_use]
+pub fn planner_metadata(
+    source: &str,
+    environment: &Environment,
+    limits: Limits,
+) -> Result<RelationPlanMetadata, EvaluationError> {
+    check_limits(source, limits)?;
+    let parsed = parse_expression(source);
+    if !parsed.is_ok() {
+        return Err(error("ORNA-EVAL-PARSE"));
+    }
+    if !planner_metadata_relation_expression(&parsed.value) {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    validate_limits(limits)?;
+    let functions = Functions::new();
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: None,
+        namespace: None,
+        transfer: None,
+        cancellation: None,
+    };
+    let mut scope = Scope::from_environment(environment, &mut context)?;
+    let value = context.evaluate(&parsed.value, &mut scope, 0)?;
+    if context.transfer.is_some() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    match value {
+        Value::Relation(plan) => Ok(plan.metadata()),
+        _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+    }
+}
+fn planner_metadata_relation_expression(expression: &Expr) -> bool {
+    match expression {
+        Expr::Group { inner, .. } => planner_metadata_relation_expression(inner),
+        Expr::Binary { lhs, op, rhs, .. } if op == "|" => {
+            planner_metadata_relation_expression(lhs) && planner_metadata_lazy_stage(rhs)
+        }
+        _ => system_relation_source(expression).is_some(),
+    }
+}
+
+fn planner_metadata_lazy_stage(expression: &Expr) -> bool {
+    let (callee, arguments) = match expression {
+        Expr::Call { callee, arguments, .. } | Expr::GenericCall { callee, arguments, .. } => {
+            (callee, arguments)
+        }
+        Expr::Group { inner, .. } => return planner_metadata_lazy_stage(inner),
+        _ => return false,
+    };
+    let Some(name) = function_name(callee) else {
+        return false;
+    };
+    let operation = name
+        .strip_prefix("std.collection.")
+        .or_else(|| name.strip_prefix("std.query."))
+        .unwrap_or(&name);
+    if operation == "union" {
+        return arguments
+            .iter()
+            .all(|argument| planner_metadata_relation_expression(&argument.value));
+    }
+    matches!(
+        operation,
+        "filter"
+            | "map"
+            | "project"
+            | "flat_map"
+            | "sort_by"
+            | "bucket_by"
+            | "window"
+            | "distinct"
+            | "unique"
+            | "pairs"
+            | "take"
+            | "drop"
+    )
+}
 /// Evaluate one expression using OVB-2 context values at the boundary.
 ///
 /// Every environment value must carry the OVB-2 profile. Annotated Blobs are
