@@ -10,6 +10,10 @@ been published.
   loose-row path resolution, including no-op preparation. Legacy formats retain
   their existing loose-path resolution.
 
+- Explicit format-3 row rekeys retain their relation identity and canonical old/new
+  addresses in the publication journal so replay and recovery do not infer a move
+  from filenames or collapse it into delete-plus-insert.
+
 - Missing unrooted prepared publication commits can be discarded during recovery
   only when HEAD and the base index still match, preserving frozen runtime
   mutations for candidate rebuild and retry after Git garbage collection.

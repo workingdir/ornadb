@@ -888,6 +888,47 @@ fn take_optional_migration_identity_component(
     Ok(Some(value))
 }
 
+/// One stable relation identity's exact logical address change retained for
+/// publication recovery and downstream replay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationLogicalRowRekey {
+    relation_id: [u8; 16],
+    old_address: Vec<u8>,
+    new_address: Vec<u8>,
+}
+
+impl PublicationLogicalRowRekey {
+    pub fn new(
+        relation_id: [u8; 16],
+        old_address: Vec<u8>,
+        new_address: Vec<u8>,
+    ) -> Result<Self, RepositoryError> {
+        crate::row_store::TypedKey::decode_canonical(&old_address)
+            .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+        crate::row_store::TypedKey::decode_canonical(&new_address)
+            .map_err(|_| RepositoryError::InvalidPublicationJournal)?;
+        if old_address == new_address {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        Ok(Self {
+            relation_id,
+            old_address,
+            new_address,
+        })
+    }
+
+    pub const fn relation_id(&self) -> [u8; 16] {
+        self.relation_id
+    }
+
+    pub fn old_address(&self) -> &[u8] {
+        &self.old_address
+    }
+
+    pub fn new_address(&self) -> &[u8] {
+        &self.new_address
+    }
+}
 /// A restart-safe publication record stored in the private runtime area.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicationJournal {
@@ -899,6 +940,7 @@ pub struct PublicationJournal {
     store_root: Option<IndexTreeRef>,
     migration_continuity: Option<MigrationContinuityRecord>,
     migration_annotation_defaults: Option<MigrationAnnotationDefaults>,
+    logical_rekeys: Vec<PublicationLogicalRowRekey>,
     entries: Vec<PublicationJournalEntry>,
     stage: PublicationJournalStage,
     wire_version: u8,
@@ -963,6 +1005,7 @@ impl PublicationJournal {
             store_root: None,
             migration_continuity: None,
             migration_annotation_defaults: None,
+            logical_rekeys: Vec::new(),
             entries,
             stage: PublicationJournalStage::Prepared,
             wire_version: 5,
@@ -1023,6 +1066,29 @@ impl PublicationJournal {
 
     pub fn store_root(&self) -> Option<&IndexTreeRef> {
         self.store_root.as_ref()
+    }
+    /// Retains exact rekey identities in the restart journal for recovery and replay.
+    pub fn with_logical_rekeys(
+        mut self,
+        logical_rekeys: Vec<PublicationLogicalRowRekey>,
+    ) -> Result<Self, RepositoryError> {
+        if self.runtime_intent_id.is_none()
+            || self.stage != PublicationJournalStage::Prepared
+            || !self.logical_rekeys.is_empty()
+        {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        if logical_rekeys.is_empty() {
+            return Ok(self);
+        }
+        self.logical_rekeys = logical_rekeys;
+        self.wire_version = self.wire_version.max(9);
+        self.binding_version = self.binding_version.max(9);
+        Ok(self)
+    }
+
+    pub fn logical_rekeys(&self) -> &[PublicationLogicalRowRekey] {
+        &self.logical_rekeys
     }
 
     /// Binds the complete stream/checkpoint predecessor inventory to an
@@ -1230,6 +1296,16 @@ impl PublicationJournal {
         } else if self.migration_annotation_defaults.is_some() || self.store_root.is_some() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
+        if self.wire_version >= 9 {
+            put_u32(&mut bytes, self.logical_rekeys.len())?;
+            for rekey in &self.logical_rekeys {
+                bytes.extend_from_slice(&rekey.relation_id);
+                put_optional_bytes(&mut bytes, Some(rekey.old_address()))?;
+                put_optional_bytes(&mut bytes, Some(rekey.new_address()))?;
+            }
+        } else if !self.logical_rekeys.is_empty() {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
         bytes.push(self.stage.code());
         put_u32(&mut bytes, self.entries.len())?;
         for entry in &self.entries {
@@ -1266,7 +1342,7 @@ impl PublicationJournal {
         }
         let mut cursor = JOURNAL_MAGIC.len();
         let version = take_byte(bytes, &mut cursor)?;
-        if version != 5 && version != 6 && version != 7 && version != 8 {
+        if version != 5 && version != 6 && version != 7 && version != 8 && version != 9 {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         let old_head =
@@ -1319,6 +1395,31 @@ impl PublicationJournal {
         } else {
             None
         };
+        let logical_rekeys = if version >= 9 {
+            let count = take_u32(bytes, &mut cursor)? as usize;
+            if count == 0 {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+            let mut rekeys = Vec::with_capacity(count.min(1024));
+            for _ in 0..count {
+                let relation_id = take_fixed_array::<16>(bytes, &mut cursor)?;
+                let old_address = take_optional_bytes(bytes, &mut cursor)?
+                    .ok_or(RepositoryError::InvalidPublicationJournal)?;
+                let new_address = take_optional_bytes(bytes, &mut cursor)?
+                    .ok_or(RepositoryError::InvalidPublicationJournal)?;
+                rekeys.push(PublicationLogicalRowRekey::new(
+                    relation_id,
+                    old_address,
+                    new_address,
+                )?);
+            }
+            if runtime_intent_id.is_none() {
+                return Err(RepositoryError::InvalidPublicationJournal);
+            }
+            rekeys
+        } else {
+            Vec::new()
+        };
         if migration_continuity.is_some() && compact_manifest.is_some() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
@@ -1363,6 +1464,7 @@ impl PublicationJournal {
             store_root,
             migration_continuity,
             migration_annotation_defaults,
+            logical_rekeys,
             entries,
             stage,
             wire_version: version,
@@ -9276,6 +9378,36 @@ mod tests {
         ProcessStartObservation, process_owner_liveness,
     };
 
+    #[test]
+    fn publication_journal_round_trips_durable_logical_rekeys() {
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            GitCommitRef("a".repeat(40)),
+            GitCommitRef("b".repeat(40)),
+            super::IndexTreeRef::from_verified_tree("c".repeat(40), 40).unwrap(),
+            [1; 16],
+            vec![PublicationJournalEntry::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                None,
+                Some(b"committed".to_vec()),
+            )],
+        )
+        .unwrap();
+        let event = super::PublicationLogicalRowRekey::new(
+            [2; 16],
+            super::row_store::TypedKey::UInt(10)
+                .canonical_bytes()
+                .unwrap(),
+            super::row_store::TypedKey::UInt(50)
+                .canonical_bytes()
+                .unwrap(),
+        )
+        .unwrap();
+        journal = journal.with_logical_rekeys(vec![event.clone()]).unwrap();
+
+        let recovered = PublicationJournal::decode(&journal.encode().unwrap(), 40).unwrap();
+        assert_eq!(recovered.runtime_intent_id(), Some([1; 16]));
+        assert_eq!(recovered.logical_rekeys(), &[event]);
+    }
     #[test]
     fn managed_path_rejects_tracked_runtime_cache_path() {
         assert!(matches!(

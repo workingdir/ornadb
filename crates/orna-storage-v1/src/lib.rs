@@ -726,8 +726,8 @@ use orna_foundation_v1::{
 use orna_repository_v1::{
     CompactManifest, CompactPublicationPlan, CompactPublicationRecovery, GitCommitRef,
     IndexGeneration, ManagedFileChange, ManagedPath, NativeGraphContext, NativeOid, PrivateCommit,
-    PublicationJournal, PublicationJournalEntry, Repository, RepositoryError, RepositoryFormat,
-    RowIndexMutation, TypedKey, Uuid,
+    PublicationJournal, PublicationJournalEntry, PublicationLogicalRowRekey, Repository,
+    RepositoryError, RepositoryFormat, RowIndexMutation, TypedKey, Uuid,
 };
 use orna_runtime_v1::{
     PublicationCommitId, PublicationFreeze, PublicationTableIdentity, RuntimeError, RuntimeState,
@@ -1358,7 +1358,14 @@ fn build_frozen_publication_store_root(
     repository: &Repository,
     expected_head: &GitCommitRef,
     mutations: &[TableMutation],
-) -> Result<(NativeGraphContext, NativeOid), Error> {
+) -> Result<
+    (
+        NativeGraphContext,
+        NativeOid,
+        Vec<PublicationLogicalRowRekey>,
+    ),
+    Error,
+> {
     let format = repository
         .open_format_context_at_selector(expected_head.as_str())
         .map_err(|_| Error::RepositoryUnavailable)?;
@@ -1369,6 +1376,7 @@ fn build_frozen_publication_store_root(
     let mut relation_bases = BTreeMap::new();
     let mut projected_rows = BTreeMap::<([u8; 16], Vec<u8>), ProjectedStoreRow>::new();
     let mut operations_by_relation = BTreeMap::<[u8; 16], Vec<RowIndexMutation>>::new();
+    let mut logical_rekeys = Vec::new();
     for mutation in mutations {
         let relation_id = mutation
             .table_object_id()
@@ -1399,6 +1407,16 @@ fn build_frozen_publication_store_root(
         operations_by_relation.entry(relation_id).or_default();
 
         let projected = project_runtime_mutation(schema, relation_id, mutation, value_context)?;
+        if let Some(new_key) = projected.rekey_to.as_ref() {
+            logical_rekeys.push(
+                PublicationLogicalRowRekey::new(
+                    relation_id,
+                    projected.key.clone(),
+                    new_key.clone(),
+                )
+                .map_err(|_| Error::RepositoryUnavailable)?,
+            );
+        }
         let source = projected_rows
             .entry((relation_id, projected.key))
             .or_insert_with(|| ProjectedStoreRow {
@@ -1475,7 +1493,7 @@ fn build_frozen_publication_store_root(
         .maintain_relations_rows(&candidates, &scope)
         .map_err(|_| Error::RepositoryUnavailable)?;
     let (_, graph, _) = relation_candidates.swap_remove(0);
-    Ok((graph, store_root))
+    Ok((graph, store_root, logical_rekeys))
 }
 
 /// Converts the runtime's validated typed table prefix into the loose-row
@@ -1877,9 +1895,9 @@ impl RuntimePublicationCoordinator {
                 .version()
                 .store_root()
                 .clone();
-            let (graph, store_root) =
+            let (graph, store_root, logical_rekeys) =
                 build_frozen_publication_store_root(repository, expected_head, &mutations)?;
-            if store_root == current_store_root {
+            if store_root == current_store_root && logical_rekeys.is_empty() {
                 return Ok(None);
             }
             let candidate = build_private_publication_candidate_with_store_root(
@@ -1915,6 +1933,7 @@ impl RuntimePublicationCoordinator {
                 vec![entry],
             )
             .and_then(|journal| journal.with_store_root(&store_root))
+            .and_then(|journal| journal.with_logical_rekeys(logical_rekeys))
             .map_err(|_| Error::RepositoryUnavailable)?;
             let protected_source_mutations = mutations
                 .iter()
@@ -1990,15 +2009,8 @@ impl RuntimePublicationCoordinator {
         let captured = repository
             .capture_managed_publication_state(expected_head, &expected_index, &paths)
             .map_err(map_publication_repository_error)?;
-        let (graph, store_root) =
-            build_frozen_publication_store_root(repository, expected_head, runtime_mutations)?;
-        let candidate = build_private_publication_candidate_with_store_root(
-            repository,
-            expected_head,
-            &graph,
-            &store_root,
-            message,
-        )?;
+        let candidate =
+            build_private_publication_candidate(repository, expected_head, &batch, message)?;
         let entries = batch
             .mutations
             .iter()
@@ -2030,7 +2042,6 @@ impl RuntimePublicationCoordinator {
             freeze.intent_id,
             entries,
         )
-        .and_then(|journal| journal.with_store_root(&store_root))
         .map_err(|_| Error::RepositoryUnavailable)?;
         Ok(Self {
             expected_index,

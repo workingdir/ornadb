@@ -2225,6 +2225,26 @@ mod graph_bridge_tests {
                 new_address: TypedKey::UInt(50),
             }],
         );
+        assert!(matches!(
+            graph.maintain_row_index(
+                &[RowIndexMutation::Rekey {
+                    from: TypedKey::UInt(999),
+                    to: TypedKey::UInt(50),
+                }],
+                &scope,
+            ),
+            Err(crate::native_graph::GraphError::RowKeyAbsent)
+        ));
+        assert!(matches!(
+            graph.maintain_row_index(
+                &[RowIndexMutation::Rekey {
+                    from: TypedKey::UInt(10),
+                    to: TypedKey::UInt(11),
+                }],
+                &scope,
+            ),
+            Err(crate::native_graph::GraphError::DuplicateRowKey)
+        ));
         let repeated_rekey = graph
             .maintain_row_index(
                 &[RowIndexMutation::Rekey {
