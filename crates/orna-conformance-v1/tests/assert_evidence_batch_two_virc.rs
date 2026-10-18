@@ -72,6 +72,7 @@ fn assert_022_module_assertion_with_one_table_dependency_is_rejected() {
     assert!(analysis.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_ASSERTION_ONE_TABLE), "{:?}", analysis.diagnostics);
 }
 
+// ORNA-MODULE-002: rejects module assertions without a cross-table invariant dependency.
 #[test]
 fn assert_023_module_assertion_without_table_dependencies_is_rejected() {
     let source = include_str!("fixtures/reference/examples/invalid/module-zero-table-assertion.orna");
