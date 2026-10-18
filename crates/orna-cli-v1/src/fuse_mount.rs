@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -738,22 +738,36 @@ pub(super) fn edit_path(
         Err(error) => Err(format!("edit candidate was rejected or stale: {error}; draft retained at {}", draft_path.display())),
     }
 }
-pub(super) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
-    let mut value = [0_u8; 1];
-    let length = rustix::fs::getxattr(
+#[derive(Debug)]
+pub(super) enum UnmountPreparationError {
+    UnresolvedDrafts,
+    Operation(String),
+}
+
+pub(super) fn begin_unmount(mountpoint: &Path) -> Result<(), UnmountPreparationError> {
+    rustix::fs::setxattr(
         mountpoint,
-        "user.orna.unresolved-drafts",
-        &mut value,
+        "user.orna.unmount-quiesce",
+        b"1",
+        rustix::fs::XattrFlags::empty(),
     )
-    .map_err(|error| format!("could not read Orna mount draft state: {error}"))?;
-    if length != 1 {
-        return Err("Orna mount returned an invalid draft-state length".to_owned());
-    }
-    match value[0] {
-        b'0' => Ok(false),
-        b'1' => Ok(true),
-        _ => Err("Orna mount returned invalid draft state".to_owned()),
-    }
+    .map_err(|error| {
+        if error == rustix::io::Errno::BUSY {
+            UnmountPreparationError::UnresolvedDrafts
+        } else {
+            UnmountPreparationError::Operation(format!("could not quiesce Orna mount: {error}"))
+        }
+    })
+}
+
+pub(super) fn cancel_unmount(mountpoint: &Path) -> Result<(), String> {
+    rustix::fs::setxattr(
+        mountpoint,
+        "user.orna.unmount-quiesce",
+        b"0",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .map_err(|error| format!("could not resume Orna mount after failed unmount: {error}"))
 }
 
 pub(super) fn unmount_mountpoint(mountpoint: &Path) -> Result<(), String> {
@@ -799,12 +813,30 @@ enum OpenFile {
         Option<BlobField>,
     ),
 }
+/// Document drafts live only on their open handles and are discarded on release;
+/// replacement scratch drafts remain unresolved until their rename is accepted.
+#[derive(Default)]
+struct DraftState {
+    pending_truncates: HashMap<u64, u64>,
+    unresolved_handles: HashMap<u64, u64>,
+    retained_scratch: HashSet<u64>,
+    quiescing: bool,
+}
+
+impl DraftState {
+    fn has_unresolved_drafts(&self) -> bool {
+        !self.pending_truncates.is_empty()
+            || !self.unresolved_handles.is_empty()
+            || !self.retained_scratch.is_empty()
+    }
+}
 
 struct WorkspaceFilesystem {
     state: Mutex<FsBuilder>,
     open_files: Mutex<HashMap<u64, OpenFile>>,
     pending_truncates: Mutex<HashMap<u64, u64>>,
     unresolved_drafts: Mutex<HashMap<u64, u64>>,
+    draft_state: Mutex<DraftState>,
     next_handle: AtomicU64,
 }
 
@@ -874,6 +906,7 @@ impl WorkspaceFilesystem {
             open_files: Mutex::new(HashMap::new()),
             pending_truncates: Mutex::new(HashMap::new()),
             unresolved_drafts: Mutex::new(HashMap::new()),
+            draft_state: Mutex::new(DraftState::default()),
             next_handle: AtomicU64::new(1),
         })
     }
@@ -894,11 +927,15 @@ impl WorkspaceFilesystem {
         true
     }
     fn has_unresolved_drafts(&self) -> bool {
-        !self
-            .unresolved_drafts
+        self.draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
+            .has_unresolved_drafts()
+            || !self
+                .unresolved_drafts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
             || !self
                 .pending_truncates
                 .lock()
@@ -927,6 +964,43 @@ impl Filesystem for WorkspaceFilesystem {
             reply.data(value);
         } else {
             reply.error(Errno::ERANGE);
+        }
+    }
+    fn setxattr(
+        &self,
+        _request: &Request,
+        inode: INodeNo,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        position: u32,
+        reply: ReplyEmpty,
+    ) {
+        if inode.0 != ROOT_INODE || name != OsStr::new("user.orna.unmount-quiesce") {
+            reply.error(Errno::ENODATA);
+            return;
+        }
+        if flags != 0 || position != 0 {
+            reply.error(Errno::EINVAL);
+            return;
+        }
+        let has_unresolved_drafts = self.has_unresolved_drafts();
+        let mut draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if value == b"1" {
+            if draft_state.quiescing || has_unresolved_drafts {
+                reply.error(Errno::EBUSY);
+                return;
+            }
+            draft_state.quiescing = true;
+            reply.ok();
+        } else if value == b"0" {
+            draft_state.quiescing = false;
+            reply.ok();
+        } else {
+            reply.error(Errno::EINVAL);
         }
     }
     fn init(
