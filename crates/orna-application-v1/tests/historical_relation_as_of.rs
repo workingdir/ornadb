@@ -1,7 +1,7 @@
 use futures::executor::block_on;
 use orna_application_v1::{ApplicationAuthority, CommittedTableIdentity};
 use orna_evaluator_v1::{Environment, Limits, QueryReuseDecision, SysHostBindingRegistry};
-use orna_foundation_v1::{CanonicalValue, OvbRaw};
+use orna_foundation_v1::OvbRaw;
 use orna_runtime_v1::{RuntimeState, TableObjectId};
 use orna_semantic_v1::Catalogue;
 use orna_sys_v1::EnvironmentProvider;
@@ -16,7 +16,7 @@ use media_commit::SourceCaptureRow;
 
 const SOURCE: &str = r#"
 pub table note(id: Str) { value: Str, }
-pub fn main(snapshot: Str) = note.as_of(sys.snapshot(snapshot)) | one();
+pub fn main() = note.as_of(sys.snapshot("HEAD~10")) | one();
 "#;
 
 #[test]
@@ -51,7 +51,6 @@ fn committed_relation_read_returns_row_from_pre_mutation_commit() {
         "note",
         &before_capture,
     ));
-    let historical_commit = repository.head().unwrap().unwrap().to_string();
 
     fs::write(root.join("note/row.orna"), "{ value: \"after\", }\n").unwrap();
     format3::git(root, &["add", "note/row.orna"]);
@@ -76,6 +75,14 @@ fn committed_relation_read_returns_row_from_pre_mutation_commit() {
         &after_capture,
     ));
 
+    // One source-mutation commit plus nine empty commits pins the original row at HEAD~10.
+    for _ in 0..9 {
+        format3::git(
+            root,
+            &["commit", "--allow-empty", "--quiet", "-m", "advance history"],
+        );
+    }
+
     let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
     let application = authority
         .admit_module_with_committed_table_metadata(
@@ -85,12 +92,8 @@ fn committed_relation_read_returns_row_from_pre_mutation_commit() {
             [CommittedTableIdentity::new("note", TableObjectId::new(relation_id))],
         )
         .expect("source table identity is admitted");
-    let arguments = Environment::from([(
-        "snapshot".to_owned(),
-        CanonicalValue::new(OvbRaw::Text(historical_commit)).unwrap(),
-    )]);
     let result = authority
-        .evaluate_staged_with_repository(&application, &arguments, &repository)
+        .evaluate_staged_with_repository(&application, &Environment::new(), &repository)
         .expect("historical relation query succeeds");
 
     let OvbRaw::Map(fields) = result.value().raw() else {
