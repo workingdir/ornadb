@@ -194,7 +194,7 @@ fn mountinfo_contains(mountpoint: &Path) -> bool {
 }
 
 #[tokio::test]
-async fn mount_at_prior_commit_reads_path_changed_afterward() {
+async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     if !fuse_test_available() {
         return;
     }
@@ -266,7 +266,6 @@ async fn mount_at_prior_commit_reads_path_changed_afterward() {
     );
     let current = repository.head().unwrap().unwrap();
     let historical_commit = current.clone();
-    let historical_commit_selector = historical_commit.to_string();
     let revised_row = format!(
         "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
     );
@@ -289,6 +288,29 @@ async fn mount_at_prior_commit_reads_path_changed_afterward() {
         repository.head().unwrap().unwrap(),
         historical_commit
     );
+    let historical_commit_selector = "HEAD~1";
+    let (selected_commit, historical_format) = repository
+        .open_pinned_format_context_with_commit(historical_commit_selector)
+        .expect("resolve the same prior commit through the repository format context");
+    assert_eq!(selected_commit.as_str(), historical_commit.as_str());
+    let row_map = historical_format
+        .load_row_map(relation_id)
+        .expect("load the prior commit relation row map");
+    let graph = historical_format
+        .open_native_graph(&row_map)
+        .expect("open the prior commit native store graph");
+    let scope = graph.open_read_scope().expect("open a historical graph read scope");
+    let stored_row = graph
+        .lookup_row(
+            &orna_repository_v1::TypedKey::Text("london".to_owned()),
+            &scope,
+        )
+        .expect("read london from the historical graph")
+        .expect("the historical graph contains the mounted row");
+    assert!(
+        !stored_row.value().dependencies().is_empty(),
+        "the historical store row references the captured media objects"
+    );
     let schema = orna_project_v1::ProjectLoader::default()
         .resolve_committed_source_table_schema(
             &repository,
@@ -308,7 +330,7 @@ async fn mount_at_prior_commit_reads_path_changed_afterward() {
             "mount",
             mountpoint.to_str().unwrap(),
             "--at",
-            historical_commit_selector.as_str(),
+            historical_commit_selector,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
