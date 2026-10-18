@@ -32,6 +32,7 @@ fn admit(
 }
 
 #[test]
+// Specified: ORNA-AUTOID-001; the semantic table schema synthesizes the implicit Int `id` key.
 fn table_schema_exposes_automatic_id_and_checks_key_defaults_and_computed_self() {
     let analysis = analysis();
     assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
@@ -80,6 +81,7 @@ fn table_schema_exposes_automatic_id_and_checks_key_defaults_and_computed_self()
 }
 
 #[test]
+// Specified: ORNA-KEY-001, ORNA-KEY-002; row admission reconstructs declared key components in order.
 fn key_paths_reconstruct_ordered_composite_tuple_reference_and_enum_components() {
     let analysis = analysis();
     assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
