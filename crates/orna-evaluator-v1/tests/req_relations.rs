@@ -172,7 +172,7 @@ fn first_window_observes_only_its_bounded_source_prefix() {
     assert_eq!(effects.requests, vec![None, Some(vec![1]), Some(vec![2])]);
 }
 
-/// ORNA-ORDER-004: observing a window after an optimizer-capable relation pipeline retains declared order.
+/// This asserts the tested pipeline’s order; it does not demonstrate optimizer reordering.
 #[test]
 fn filtered_window_observes_source_order() {
     let mut effects = OrderedRows {
