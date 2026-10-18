@@ -5,8 +5,8 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Format-3 transaction validation resolves positional row values through the declared table fields before evaluating row assertions.
 - Blob annotation binding canonicalizes caller-supplied MIME-1 values (including
-  the preferred suffix) before storing the canonical wire annotation.
 - JSON encoding supports Money values when their registered nominal Currency metadata is available. It preserves the exact decimal amount as a string and emits the registered currency code.
 - Semantic quantities retain reduced dimension exponents, exact rational scale,
   and affine metadata through numeric aggregates. Integrating speed by elapsed

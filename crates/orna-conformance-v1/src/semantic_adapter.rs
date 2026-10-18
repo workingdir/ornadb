@@ -4308,6 +4308,7 @@ struct TransactionalTableCandidateValidator {
     cwd_generation: orna_repository_v1::CwdGeneration,
     table_assertions: TableAssertions,
     module_assertions: ModuleAssertions,
+    table_fields: TableFields,
     functions: Functions,
     limits: EvaluatorLimits,
     table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
@@ -4431,6 +4432,7 @@ impl TransactionalTableCandidateValidator {
             table_object_ids,
             table_assertions: table_assertions.clone(),
             module_assertions: module_assertions.clone(),
+            table_fields: table_fields.clone(),
             functions: lower_relation_bindings(functions, key_fields, float_fields, table_fields),
             limits,
             tables: tables.into_iter().collect(),
@@ -4482,7 +4484,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                     self.limits
                         .check_items(candidate_rows)
                         .map_err(|_| table_assertion_diagnostic())?;
-                    let row = Value::decode(encoded).map_err(|_| table_assertion_diagnostic())?;
+                    let row = candidate_assertion_row(table, encoded, &self.table_fields)?;
                     let environment = Environment::from([(binding.to_owned(), row)]);
                     let value = evaluate_with_functions_and_budget(
                         predicate,
@@ -6169,7 +6171,7 @@ impl TableFloatFields {
             .is_some_and(|fields| fields.contains(field))
     }
 }
-type TableFields = BTreeMap<String, BTreeSet<String>>;
+type TableFields = BTreeMap<String, Vec<String>>;
 /// Complete admission result for one transactional entry point: lowered
 /// functions plus every declared table and assertion surface.
 struct AdmittedTransaction {
@@ -9154,6 +9156,29 @@ enum TableAssertionKind {
     AllUnique,
 }
 
+fn candidate_assertion_row(
+    table: &str,
+    encoded: &[u8],
+    table_fields: &TableFields,
+) -> Result<Value, SafeDiagnostic> {
+    let row = Value::decode(encoded).map_err(|_| table_assertion_diagnostic())?;
+    let OvbRaw::Array(values) = row.raw() else {
+        return Ok(row);
+    };
+    let names = table_fields
+        .get(table)
+        .ok_or_else(table_assertion_diagnostic)?;
+    if names.len() != values.len() {
+        return Err(table_assertion_diagnostic());
+    }
+    let fields = names
+        .iter()
+        .zip(values)
+        .map(|(name, value)| (OvbRaw::Text(name.clone()), value.clone()))
+        .collect();
+    Value::new(OvbRaw::Map(fields)).map_err(|_| table_assertion_diagnostic())
+}
+
 fn table_assertion_predicate(
     assertion: &Expr,
 ) -> Result<(TableAssertionKind, &str, &Expr), EvaluationError> {
@@ -9817,7 +9842,9 @@ mod transaction_admission_tests {
                     )
                     .expect("valid Note key schema"),
                 )]);
-                let table_fields = BTreeMap::from([("Note".into(), BTreeSet::from(["id".into()]))]);
+                let table_fields = BTreeMap::from([
+                    ("Note".into(), vec!["id".into()]),
+                ]);
                 let mut mutations = Vec::new();
                 let limits = Limits::default();
                 let mut handler = TableEffectHandler {
@@ -10125,7 +10152,7 @@ mod transaction_admission_tests {
         let key_fields = BTreeMap::from([("Stock".into(), schema.clone())]);
         let table_fields = BTreeMap::from([(
             "Stock".into(),
-            BTreeSet::from(["location".into(), "sku".into()]),
+            vec!["location".into(), "sku".into()],
         )]);
         let rows = [
             (
@@ -10319,7 +10346,7 @@ mod transaction_admission_tests {
         let key_fields = BTreeMap::from([("Pair".into(), schema.clone())]);
         let table_fields = BTreeMap::from([(
             "Pair".into(),
-            BTreeSet::from(["left".into(), "right".into(), "label".into()]),
+            vec!["left".into(), "right".into(), "label".into()],
         )]);
         let row = |left: i64, right: i64, label: &str| {
             Value::new(OvbRaw::Map(vec![
