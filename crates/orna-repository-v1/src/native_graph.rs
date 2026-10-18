@@ -8073,6 +8073,7 @@ mod persisted_orp_tests {
         }
     }
 
+/// ORNA-CAP-001: newly captured row content is verified and protected by a durable native ref before acknowledgement.
     #[test]
     fn captured_blob_candidate_is_promoted_to_a_durable_pin() {
         let (directory, graph) = capture_test_context();
@@ -8102,6 +8103,7 @@ mod persisted_orp_tests {
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
     }
 
+/// ORNA-CAP-003: accepted pins transfer to an owner-scoped local ref namespace, never an ordinary remote ref.
     #[test]
     fn capture_acceptance_transfers_owner_scoped_scratch_to_annotated_pending_binding() {
         let (directory, graph) = capture_test_context();
@@ -9067,6 +9069,7 @@ mod persisted_orp_tests {
             .expect("accept the described pin");
     }
 
+/// ORNA-CAP-005: cancellation removes only unaccepted scratch and does not admit a dependent row.
     #[test]
     fn cancelled_captured_candidate_cleans_its_provisional_ref() {
         let (directory, graph) = capture_test_context();
@@ -9122,6 +9125,7 @@ mod persisted_orp_tests {
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
     }
 
+/// ORNA-CAP-006: reclamation coordinates with publication ownership before deleting protected Git objects.
     #[test]
     fn owner_pin_reclaim_defers_across_publication_journal_interleaving() {
         let (directory, graph) = capture_test_context();
@@ -9310,6 +9314,7 @@ mod persisted_orp_tests {
 
     /// Restart must keep refs named by durable accepted-pin evidence, reclaim
     /// unaccepted refs, and still read the accepted OGB-2 bytes after reopen.
+/// ORNA-CAP-004: restart recovery distinguishes accepted pending pins from unaccepted scratch.
     #[test]
     fn restart_preserves_accepted_pin_and_reclaims_unaccepted_pin() {
         if let Some(root) = std::env::var_os(KILLED_OWNER_ROOT) {
@@ -10204,6 +10209,7 @@ mod persisted_orp_tests {
         assert_eq!(promised_scope.payload_bytes_read(), 0);
     }
 
+/// ORNA-CAP-002: promisor evidence distinguishes inherited promised objects from unknown missing content.
     #[test]
     fn a_deferred_node_reads_as_promised_and_never_as_an_unknown_missing_object() {
         let (directory, graph) = capture_test_context();
