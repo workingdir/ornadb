@@ -53,6 +53,7 @@ fn collection_elements_and_record_fields_evaluate_left_to_right() {
 }
 
 // Coverage gap (partial evidence): ORNA-CASE-003/005 (source/06-expressions.md:121-125).
+// ORNA-CASE-007: a failing case guard propagates as ordinary failure; case is not exception handling.
 #[test]
 fn case_guards_run_after_pattern_match_and_arms_keep_source_order() {
     assert_eq!(
@@ -100,8 +101,7 @@ fn coalescing_chains_associate_to_the_right() {
     );
 }
 
-// Coverage gap (partial evidence): ORNA-PIPE-007/008 (source/06-expressions.md:324-330),
-// ORNA-ERR-011/012 (source/06-expressions.md:413-415).
+// ORNA-PIPE-007, ORNA-PIPE-012, ORNA-ERR-012: failures propagate and explicit `|?` recovery resumes the enclosing expression.
 #[test]
 fn pipelines_preserve_failure_and_successful_recovery_continues_once() {
     assert_eq!(
