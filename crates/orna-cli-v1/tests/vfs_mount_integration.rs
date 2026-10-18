@@ -5,7 +5,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Stdio},
@@ -633,7 +633,6 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
     assert!(status.success(), "mount exits cleanly after edit and unmount");
@@ -925,8 +924,8 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     );
 }
 #[tokio::test]
-/// ORNA-VFS-018: corrupt backing Blob data is reported as an I/O error rather than decoded or substituted.
-async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
+/// ORNA-VFS-010, ORNA-VFS-018: metadata-only saves do not fetch corrupt sibling content; reading that content reports I/O failure.
+async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
     if !fuse_test_available() {
         return;
     }
@@ -1055,6 +1054,19 @@ async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
     assert!(metadata.contains(
         "content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" }"
     ));
+
+    let data_path = mountpoint.join("Music/london/data.orna");
+    let replacement_document = "{\n    content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" },\n}\n";
+    let mut document = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&data_path)
+        .expect("open projected row document for metadata-only save");
+    document.write_all(replacement_document.as_bytes()).unwrap();
+    document
+        .sync_all()
+        .expect("metadata-only save must not fetch corrupt sibling payload");
+    drop(document);
 
     let mut blob = File::open(&blob_path).expect("open projected Blob");
     let mut byte = [0u8; 1];
