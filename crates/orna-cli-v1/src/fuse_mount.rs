@@ -1259,20 +1259,13 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            let blob_field = if is_replacement_scratch_name(name) {
-                None
-            } else {
-                save.blob_fields
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .iter()
-                    .find(|field| is_replacement_scratch_for(name, &field.file_name))
-                    .cloned()
-            };
-            if !is_replacement_scratch_name(name) && blob_field.is_none() {
-                reply.error(Errno::EROFS);
-                return;
-            }
+            let blob_field = save
+                .blob_fields
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .find(|field| is_replacement_scratch_for(name, &field.file_name))
+                .cloned();
             let baseline = save
                 .expected_baseline_row
                 .lock()
@@ -3028,10 +3021,6 @@ fn source_without_fields(source: &str, omitted: &[String]) -> Result<String, Str
     Ok(output)
 }
 
-fn is_replacement_scratch_name(name: &str) -> bool {
-    is_replacement_scratch_for(name, "data.orna")
-}
-
 fn is_replacement_scratch_for(name: &str, file_name: &str) -> bool {
     let Some(suffix) = name
         .strip_prefix('.')
@@ -3073,7 +3062,7 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::{
-        Expr, FsBuilder, NodeKind, ROOT_INODE, is_replacement_scratch_name, key_directory,
+        Expr, FsBuilder, NodeKind, ROOT_INODE, is_replacement_scratch_for, key_directory,
         parse_row, runtime_table_key_bytes, source_without_fields,
     };
     use orna_repository_v1::TypedKey;
@@ -3110,12 +3099,11 @@ mod tests {
     }
 
     #[test]
-    fn only_replacement_shaped_sibling_names_are_candidates() {
-        assert!(is_replacement_scratch_name(".data.orna.tmp"));
-        assert!(is_replacement_scratch_name(".data.orna.12345"));
-        assert!(!is_replacement_scratch_name("unrelated"));
-        assert!(!is_replacement_scratch_name("backup"));
-        assert!(!is_replacement_scratch_name(".data.orna."));
+    fn blob_replacement_scratch_names_stay_bound_to_their_target() {
+        assert!(is_replacement_scratch_for(".content.mp3.tmp", "content.mp3"));
+        assert!(is_replacement_scratch_for(".content.mp3.12345", "content.mp3"));
+        assert!(!is_replacement_scratch_for("unrelated", "content.mp3"));
+        assert!(!is_replacement_scratch_for(".content.mp3.", "content.mp3"));
     }
 
     #[test]
