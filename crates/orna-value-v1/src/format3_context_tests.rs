@@ -987,3 +987,68 @@ impl BlobResolver for ContextBoundResolver {
         Ok(bytes.to_vec())
     }
 }
+#[test]
+fn stored_table_reference_admission_binds_database_to_containing_snapshot_context() {
+    let int_type = Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]);
+    let schema_for_database = |database| {
+        let reference_type = Raw::Array(vec![
+            Raw::Int(6.into()),
+            uuid_raw(database),
+            uuid_raw([8; 16]),
+            Raw::Array(vec![int_type.clone()]),
+        ]);
+        SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid_raw([9; 16])),
+            (Raw::Int(2.into()), Raw::Array(vec![uuid_raw([1; 16])])),
+            (Raw::Int(3.into()), Raw::Array(vec![
+                Raw::Array(vec![
+                    uuid_raw([1; 16]),
+                    Raw::Text("id".into()),
+                    int_type.clone(),
+                    Raw::Int(0.into()),
+                    Raw::Array(vec![Raw::Int(0.into())]),
+                ]),
+                Raw::Array(vec![
+                    uuid_raw([2; 16]),
+                    Raw::Text("owner".into()),
+                    reference_type,
+                    Raw::Int(1.into()),
+                    Raw::Array(vec![Raw::Int(0.into())]),
+                ]),
+            ])),
+            (Raw::Int(4.into()), Raw::Array(vec![])),
+        ]))
+        .unwrap()
+    };
+    let row_key = encode_canonical_storage_value(&Raw::Int(3.into())).unwrap();
+    let referenced_value = Raw::Tag(60021, Box::new(Raw::Array(vec![
+        uuid_raw([1; 16]),
+        uuid_raw([8; 16]),
+        Raw::Int(3.into()),
+    ])));
+    let row_fields = encode_canonical_storage_value(&Raw::Array(vec![referenced_value])).unwrap();
+    let context = test_context(counting_resolver(b""));
+
+    let local_schema = schema_for_database([1; 16]);
+    assert!(local_schema
+        .validate_stored_row_in_context(&context, [9; 16], &row_key, &row_fields)
+        .is_ok());
+
+    let foreign_schema = schema_for_database([7; 16]);
+    let foreign_value = Raw::Tag(60021, Box::new(Raw::Array(vec![
+        uuid_raw([7; 16]),
+        uuid_raw([8; 16]),
+        Raw::Int(3.into()),
+    ])));
+    let foreign_fields =
+        encode_canonical_storage_value(&Raw::Array(vec![foreign_value])).unwrap();
+    assert!(foreign_schema
+        .validate_stored_row([9; 16], &row_key, &foreign_fields)
+        .is_ok());
+    assert_eq!(
+        foreign_schema
+            .validate_stored_row_in_context(&context, [9; 16], &row_key, &foreign_fields),
+        Err(Error::InvalidValue)
+    );
+}
