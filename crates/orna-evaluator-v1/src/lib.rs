@@ -6485,7 +6485,7 @@ impl Context<'_, '_> {
                         source,
                         scope,
                         after,
-                        1,
+                        self.limits.max_collection_items,
                         &mut budget,
                     )?
                 } else {
@@ -6495,7 +6495,13 @@ impl Context<'_, '_> {
                     Ok(Some(SourcePage::Contextual(page)))
                 } else {
                     effects
-                        .scan_relation_page_scoped(source, scope, after, 1, &mut budget)
+                        .scan_relation_page_scoped(
+                            source,
+                            scope,
+                            after,
+                            self.limits.max_collection_items,
+                            &mut budget,
+                        )
                         .map(|page| page.map(SourcePage::Canonical))
                 }
             });
@@ -6509,7 +6515,7 @@ impl Context<'_, '_> {
             SourcePage::Canonical(page) => page.rows.len(),
             SourcePage::Contextual(page) => page.rows.len(),
         };
-        if page_size > 1 {
+        if page_size > self.limits.max_collection_items {
             return Err(error("ORNA-EVAL-VALUE"));
         }
         let (rows, next) = match page {
