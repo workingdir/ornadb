@@ -50,19 +50,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             "E2300", "staged candidate could not be reviewed", "resolve candidate errors and retry; no commit was created", format!("{error:?}"),
         )
     })?;
-    let mut intent = [0_u8; 16];
-    getrandom::fill(&mut intent).map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2300", "commit intent could not be created", "retry the reviewed commit", format!("{error:?}"),
-        )
-    })?;
-    let commit = repository.commit_reviewed_candidate(
-        &review,
-        review.index_tree(),
-        review.pending_generation(),
-        intent,
-        message,
-    ).map_err(|error| {
+    let commit = repository.commit_reviewed_candidate(&review, message).map_err(|error| {
         Diagnostic::target_with_detail(
             "E2300", "reviewed candidate could not be committed", "candidate state may have changed; review it again before retrying", format!("{error:?}"),
         )
