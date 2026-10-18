@@ -37,6 +37,7 @@ fn assert_database_helper_summary(analysis: &Analysis) {
     );
 }
 
+/// ORNA-DEP-003: transitive dependency edges are retained in assertion planning.
 #[test]
 fn explicit_imported_helper_assertion_keeps_transitive_dependencies_and_effects() {
     let analysis = analyze(&[
