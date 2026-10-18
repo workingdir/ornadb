@@ -194,7 +194,7 @@ fn mountinfo_contains(mountpoint: &Path) -> bool {
 }
 
 #[tokio::test]
-/// ORNA-VFS-002, ORNA-VFS-003, ORNA-VFS-005, ORNA-VFS-018, and ORNA-VFS-023: a pinned view projects shared rows and Blob bytes, survives backing HEAD movement, and hides repository administration paths.
+/// ORNA-VFS-002, ORNA-VFS-003, ORNA-VFS-005, ORNA-VFS-017, ORNA-VFS-018, and ORNA-VFS-023: a pinned view projects rows through directory iteration and serves Blob bytes, survives backing HEAD movement, and hides repository administration paths.
 async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     if !fuse_test_available() {
         return;
