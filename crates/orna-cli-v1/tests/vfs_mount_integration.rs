@@ -194,7 +194,7 @@ fn mountinfo_contains(mountpoint: &Path) -> bool {
 }
 
 #[tokio::test]
-/// ORNA-VFS-002, ORNA-VFS-003, ORNA-VFS-005, and ORNA-VFS-018: the mounted view projects its pinned row and Blob data after HEAD advances, without retargeting the open snapshot.
+/// ORNA-VFS-002, ORNA-VFS-003, ORNA-VFS-005, ORNA-VFS-018, and ORNA-VFS-023: a pinned view projects shared rows and Blob bytes, survives backing HEAD movement, and hides repository administration paths.
 async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     if !fuse_test_available() {
         return;
@@ -398,6 +398,13 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     assert_eq!(document, expected_document);
 
     let options = mount_options(&mountpoint);
+    let root_entries = directory_entries(&mountpoint);
+    assert!(
+        !root_entries
+            .split_whitespace()
+            .any(|entry| matches!(entry, ".git" | ".orna")),
+        "the view must not expose repository administration paths: {root_entries}"
+    );
     for required in ["ro", "nodev", "nosuid", "noexec"] {
         assert!(
             options.split(',').any(|option| option == required),
