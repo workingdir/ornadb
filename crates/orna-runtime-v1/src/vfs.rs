@@ -3443,6 +3443,7 @@ mod tests {
         );
     }
 
+    /// ORNA-VFS-012: suffix selection updates only compatible hints and never implies byte transcoding or row rekeying.
     #[test]
     fn suffix_selection_is_mime1_compatible_and_preferred_hint_is_absent() {
         // A compatible non-preferred spelling is stored as that explicit hint,
@@ -3939,6 +3940,7 @@ mod tests {
         assert_eq!(sized(3 * 1024 * 1024 + 512 * 1024).human_size(), "3.5 MiB");
     }
 
+    /// ORNA-VFS-008 and ORNA-VFS-009: rejected draft sequences are serialized, retained with their diagnostic, and repeated sync does not replay activation.
     #[tokio::test]
     async fn rejected_draft_is_retained_and_repeated_fsync_is_idempotent() {
         let draft = EditDraft::open(fixture_image(), 1 << 20);
@@ -3975,6 +3977,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    /// ORNA-VFS-007 and ORNA-VFS-008: accepted fsync publishes before release, preserves old open handles, and repeat sync does not accept the same sequence twice.
     #[tokio::test]
     async fn accepted_fsync_advances_only_future_opens_and_release_never_commits() {
         let image = fixture_image();
@@ -4375,6 +4378,7 @@ mod tests {
         );
     }
 
+    /// ORNA-VFS-019: accepted API replacement invalidates shared directory, attribute, and sibling-handle projections without retargeting open handles.
     #[tokio::test]
     async fn accepted_rename_invalidates_shared_directory_attribute_and_handle_projections() {
         let repository = VfsRepositoryCache::new();
@@ -4762,6 +4766,7 @@ mod tests {
         }
     }
 
+    /// ORNA-VFS-021: durable temporary-save admission commits a replayable acknowledgement and rejects stale row baselines.
     #[tokio::test]
     async fn durable_temporary_rename_commits_and_refuses_changed_row_baseline() {
         let temp = tempfile::TempDir::new().unwrap();
