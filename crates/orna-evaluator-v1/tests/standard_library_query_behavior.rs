@@ -2,6 +2,7 @@ use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
+/// ORNA-LIB-003: portable standard operations execute with their specified observable results.
 #[test]
 fn pinned_query_exports_execute_their_source_bodies() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
