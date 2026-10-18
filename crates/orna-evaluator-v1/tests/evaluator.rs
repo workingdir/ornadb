@@ -8888,6 +8888,7 @@ fn record_payload(fields: Vec<(&str, Raw)>) -> Raw {
     )
 }
 
+// ORNA-ENUM-002: evaluates payload-free qualified variants alongside payload-bearing enum patterns.
 #[test]
 fn matches_enum_labels_payload_fields_and_interpolates_bound_strings() {
     let ready = enum_value(1, 2, None);
