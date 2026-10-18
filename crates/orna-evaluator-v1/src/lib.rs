@@ -5645,6 +5645,7 @@ impl Context<'_, '_> {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
+            shared_filter_group: plan.shared_filter_group,
             source_values: plan.source_values.clone(),
             stages: plan.stages[..bucket_index].to_vec(),
         };
@@ -5660,6 +5661,7 @@ impl Context<'_, '_> {
                 source: plan.source.clone(),
                 source_identity: plan.source_identity,
                 source_union: plan.source_union.clone(),
+                shared_filter_group: plan.shared_filter_group,
                 source_values: plan.source_values.clone(),
                 stages: plan.stages[..bucket_index + 1 + sort_pos].to_vec(),
             };
@@ -6401,6 +6403,7 @@ impl Context<'_, '_> {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
             source_union: plan.source_union.clone(),
+            shared_filter_group: plan.shared_filter_group,
             source_values: plan.source_values.clone(),
             stages: plan.stages[..sort_index].to_vec(),
         };
