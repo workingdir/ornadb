@@ -19,7 +19,7 @@ mod format3;
 
 #[path = "support/media_commit.rs"]
 mod media_commit;
-use media_commit::{commit_source_captures_for_table, SourceCaptureRow};
+use media_commit::{SourceCaptureRow, commit_source_captures_for_table};
 
 struct MountedProcess {
     child: Child,
@@ -81,7 +81,9 @@ fn require_fuse_or_skip() -> bool {
             || ["fusermount3", "fusermount"]
                 .into_iter()
                 .any(|helper| Command::new(helper).arg("-h").output().is_ok()));
-    if !available && std::env::var_os("ORNA_REQUIRE_FUSE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+    if !available
+        && std::env::var_os("ORNA_REQUIRE_FUSE").as_deref() == Some(std::ffi::OsStr::new("1"))
+    {
         panic!("required FUSE integration prerequisites are unavailable");
     }
     if !available {
@@ -94,6 +96,93 @@ fn write_and_sync(path: &Path, document: &str) -> std::io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(document.as_bytes())?;
     file.sync_all()
+}
+const IN_PLACE_SAVE_SETTINGS: &str =
+    "Vim: -u NONE -n -i NONE; backupcopy=yes, nobackup, nowritebackup, noswapfile, fsync";
+const TEMP_RENAME_SAVE_SETTINGS: &str = "Emacs: --batch -Q; file-precious-flag=t, write-region-inhibit-fsync=nil, make-backup-files=nil, auto-save-default=nil, create-lockfiles=nil";
+
+fn command_version(program: &str, argument: &str) -> String {
+    let output = Command::new(program)
+        .arg(argument)
+        .output()
+        .unwrap_or_else(|error| panic!("run {program} {argument}: {error}"));
+    assert!(
+        output.status.success(),
+        "{program} {argument} failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_else(|| panic!("{program} {argument} returned no version"))
+        .to_owned()
+}
+
+fn record_editor_environment() {
+    let kernel =
+        std::fs::read_to_string("/proc/sys/kernel/osrelease").expect("read Linux kernel release");
+    let vim = command_version("vi", "--version");
+    let emacs = command_version("emacs", "--version");
+    let libfuse = command_version("fusermount3", "--version");
+    eprintln!(
+        "VFS editor compatibility: kernel={}; libfuse={libfuse}; in-place={vim} [{IN_PLACE_SAVE_SETTINGS}]; temp/rename={emacs} [{TEMP_RENAME_SAVE_SETTINGS}]",
+        kernel.trim(),
+    );
+}
+
+fn save_with_vim_in_place(path: &Path) {
+    let output = Command::new("vi")
+        .args([
+            "-Es",
+            "-u",
+            "NONE",
+            "-n",
+            "-i",
+            "NONE",
+            "-c",
+            "set backupcopy=yes nobackup nowritebackup noswapfile fsync",
+            "-c",
+            "%s/Original/Vim in-place/",
+            "-c",
+            "write",
+            "-c",
+            "quit",
+        ])
+        .arg(path)
+        .output()
+        .expect("start the real Vim editor");
+    assert!(
+        output.status.success(),
+        "Vim in-place save failed ({}): stdout={}, stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn save_with_emacs_temp_rename(path: &Path) {
+    let output = Command::new("emacs")
+        .args([
+            "--batch",
+            "-Q",
+            "--eval",
+            "(setq file-precious-flag t write-region-inhibit-fsync nil make-backup-files nil auto-save-default nil create-lockfiles nil)",
+            "--visit",
+        ])
+        .arg(path)
+        .args([
+            "--eval",
+            "(progn (goto-char (point-min)) (search-forward \"Vim in-place\") (replace-match \"Emacs temp rename\") (save-buffer))",
+        ])
+        .output()
+        .expect("start the real Emacs editor");
+    assert!(
+        output.status.success(),
+        "Emacs temp/rename save failed ({}): stdout={}, stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 struct EditorMount {
@@ -187,7 +276,11 @@ async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
         assert!(Instant::now() < deadline, "mount did not expose data.orna");
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Original"));
+    assert!(
+        std::fs::read_to_string(&data_path)
+            .unwrap()
+            .contains("Original")
+    );
     EditorMount {
         _mounted: mounted,
         repository,
@@ -210,7 +303,11 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     let relation_id = fixture.relation_id;
     let row_directory = &fixture.row_directory;
     let data_path = &fixture.data_path;
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Original"));
+    assert!(
+        std::fs::read_to_string(&data_path)
+            .unwrap()
+            .contains("Original")
+    );
     let mut private_writer = OpenOptions::new()
         .read(true)
         .write(true)
@@ -229,19 +326,32 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     assert!(observer_view.contains("Original"));
     drop(private_writer);
     drop(observer);
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Original"));
-    write_and_sync(
-        &data_path,
-        "{ title: \"In place\", artist: \"Kieran\", }\n",
-    )
-    .expect("in-place editor save must validate and sync");
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("In place"));
-
+    assert!(
+        std::fs::read_to_string(&data_path)
+            .unwrap()
+            .contains("Original")
+    );
+    write_and_sync(&data_path, "{ title: \"In place\", artist: \"Kieran\", }\n")
+        .expect("in-place editor save must validate and sync");
+    assert!(
+        std::fs::read_to_string(&data_path)
+            .unwrap()
+            .contains("In place")
+    );
 
     let arbitrary = row_directory.join("unrelated");
+    let mut scratch =
+        File::create(&arbitrary).expect("unknown row-directory files are editor scratch");
+    scratch.write_all(b"private editor scratch").unwrap();
+    scratch
+        .sync_all()
+        .expect("scratch fsync preserves private bytes only");
+    drop(scratch);
     assert!(
-        File::create(&arbitrary).is_err(),
-        "an arbitrary sibling create must not become a row-save candidate",
+        std::fs::read_to_string(data_path)
+            .unwrap()
+            .contains("In place"),
+        "syncing arbitrary scratch must not replace the accepted row",
     );
 
     let stale_temporary = row_directory.join(".data.orna.stale-tmp");
@@ -265,7 +375,9 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
         "rename must reject a scratch whose captured row baseline is stale",
     );
     assert!(
-        std::fs::read_to_string(&data_path).unwrap().contains("New baseline"),
+        std::fs::read_to_string(&data_path)
+            .unwrap()
+            .contains("New baseline"),
         "stale rename must preserve the newer accepted row",
     );
     let temporary = row_directory.join(".data.orna.editor-tmp");
@@ -279,7 +391,11 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     file.sync_all().expect("editor syncs temporary file");
     drop(file);
     std::fs::rename(&temporary, &data_path).expect("editor atomically replaces data.orna");
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Renamed"));
+    assert!(
+        std::fs::read_to_string(&data_path)
+            .unwrap()
+            .contains("Renamed")
+    );
 
     let durable_before_rejection = format3::committed_store_rows(&repository, relation_id);
     let mut invalid = OpenOptions::new()
@@ -291,13 +407,20 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     invalid
         .write_all(b"{ title: 123, artist: \"Kieran\", }\n")
         .unwrap();
-    assert!(invalid.sync_all().is_err(), "invalid row must be rejected at sync");
+    assert!(
+        invalid.sync_all().is_err(),
+        "invalid row must be rejected at sync"
+    );
     invalid.seek(SeekFrom::Start(0)).unwrap();
     let mut rejected_draft = String::new();
     invalid.read_to_string(&mut rejected_draft).unwrap();
     assert!(rejected_draft.contains("title: 123"));
     drop(invalid);
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Renamed"));
+    assert!(
+        std::fs::read_to_string(&data_path)
+            .unwrap()
+            .contains("Renamed")
+    );
     let durable_after_rejection = format3::committed_store_rows(&repository, relation_id);
     assert_eq!(
         durable_after_rejection, durable_before_rejection,
@@ -327,8 +450,7 @@ async fn editor_saves_reject_a_foreign_writer_lease() {
     );
     let durable_after = format3::committed_store_rows(&fixture.repository, fixture.relation_id);
     assert_eq!(
-        durable_after,
-        durable_before,
+        durable_after, durable_before,
         "rejected save must preserve the durable row",
     );
 
@@ -340,4 +462,47 @@ async fn editor_saves_reject_a_foreign_writer_lease() {
         state.acquire_lease(runtime_identity.repository_id).await,
         Err(orna_runtime_v1::RuntimeError::LeaseHeld),
     ));
+}
+#[tokio::test]
+async fn real_editors_save_through_the_mounted_linux_vfs() {
+    assert!(
+        require_fuse_or_skip(),
+        "real editor compatibility requires a mounted Linux FUSE view",
+    );
+    let fixture = start_editor_mount(false).await;
+    assert!(mountinfo_contains(&fixture._mounted.mountpoint));
+    record_editor_environment();
+
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&fixture.repository);
+    let engine_state = RuntimeState::open(&fixture.repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let pending_before = engine_state.pending_count().await.unwrap();
+    save_with_vim_in_place(&fixture.data_path);
+    assert!(
+        std::fs::read_to_string(&fixture.data_path)
+            .unwrap()
+            .contains("Vim in-place"),
+        "Vim's in-place save must be visible through the mounted view",
+    );
+    let vim_pending = engine_state.pending_count().await.unwrap();
+    assert_eq!(
+        vim_pending,
+        pending_before + 1,
+        "Vim's accepted save must add one durable engine mutation",
+    );
+
+    save_with_emacs_temp_rename(&fixture.data_path);
+    assert!(
+        std::fs::read_to_string(&fixture.data_path)
+            .unwrap()
+            .contains("Emacs temp rename"),
+        "Emacs's temp/rename save must be visible through the mounted view",
+    );
+    let emacs_pending = engine_state.pending_count().await.unwrap();
+    assert_eq!(
+        emacs_pending,
+        vim_pending + 1,
+        "Emacs's accepted save must add one durable engine mutation",
+    );
 }
