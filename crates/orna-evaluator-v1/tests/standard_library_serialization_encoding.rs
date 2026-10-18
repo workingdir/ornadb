@@ -96,6 +96,31 @@ fn money_value(coefficient: i64, exponent10: i64, currency: [u8; 16]) -> Canonic
 }
 
 #[test]
+fn money_json_uses_currency_registry_code_and_exact_decimal_string() {
+    let currency = [0x47; 16];
+    let definitions = NominalDefinitions::from([(
+        "GBP".to_owned(),
+        NominalDefinition::new(currency, None, Vec::new()).with_currency("GBP", 2),
+    )]);
+    let environment = Environment::from([(
+        "amount".to_owned(),
+        money_value(1234, -2, currency),
+    )]);
+
+    let parsed = orna_syntax_v1::parse_expression("std.encoding.json.encode(amount)");
+    assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
+    assert_eq!(
+        evaluate_with_functions_and_nominals(
+            &parsed.value,
+            &environment,
+            &pinned_functions(),
+            &definitions,
+            Limits::default(),
+        ),
+        Ok(text_value("{\"amount\":\"12.34\",\"currency\":\"GBP\"}")),
+    );
+}
+#[test]
 fn pinned_encoding_modules_compute_canonical_values_and_reject_noncanonical_input() {
     let _ = pinned_functions();
     let mut with_std = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
