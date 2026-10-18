@@ -30,6 +30,14 @@ pub struct AdmittedLooseRow {
 
 pub type RowResult<T> = Result<T, Box<Diagnostic>>;
 
+/// Snapshot identity supplied by the caller for stored-reference admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RowAdmissionIdentity {
+    pub database_id: [u8; 16],
+    /// Tables and keys present in the caller's snapshot.
+    pub tables: BTreeMap<[u8; 16], (TableOwner, Vec<Vec<Value>>)>,
+}
+
 /// Reject resource-invalid project input before semantic/module or row parsing.
 pub fn preflight_project_rows(project: &ProjectUnit, limits: Limits) -> RowResult<()> {
     let units = project
@@ -62,14 +70,21 @@ pub fn preflight_project_rows(project: &ProjectUnit, limits: Limits) -> RowResul
 pub fn admit_project_rows(
     project: &ProjectUnit,
     analysis: &Analysis,
+    identity: &RowAdmissionIdentity,
     limits: Limits,
 ) -> RowResult<Vec<AdmittedLooseRow>> {
     preflight_project_rows(project, limits)?;
-    project
+    let rows = project
         .loose_rows
         .iter()
         .map(|row| admit_project_row(project, analysis, row, limits))
-        .collect()
+        .collect::<RowResult<Vec<_>>>()?;
+    for row in &rows {
+        for value in row.body.values() {
+            validate_stored_references(value.raw(), identity)?;
+        }
+    }
+    Ok(rows)
 }
 
 fn admit_project_row(
@@ -277,7 +292,41 @@ fn admit_row(
     }
     Ok(AdmittedLooseRow { owner, key, body })
 }
+fn validate_stored_references(raw: &Raw, identity: &RowAdmissionIdentity) -> RowResult<()> {
+    match raw {
+        Raw::Tag(60021, value) => {
+            let Raw::Array(parts) = value.as_ref() else { return Err(stored_reference_error()); };
+            let [database, table, key] = parts.as_slice() else { return Err(stored_reference_error()); };
+            if raw_uuid(database) != Some(identity.database_id) { return Err(stored_reference_error()); }
+            let Some(table_id) = raw_uuid(table) else { return Err(stored_reference_error()); };
+            let Some((_, target_keys)) = identity.tables.get(&table_id) else { return Err(stored_reference_error()); };
+            let exists = target_keys.iter().any(|target_key| match (target_key.as_slice(), key) {
+                ([only], raw) => only.raw() == raw,
+                (values, Raw::Array(keys)) => values.iter().map(Value::raw).eq(keys.iter()),
+                _ => false,
+            });
+            if !exists { return Err(stored_reference_error()); }
+        }
+        Raw::Array(values) => for value in values { validate_stored_references(value, identity)?; },
+        Raw::Map(entries) => for (key, value) in entries {
+            validate_stored_references(key, identity)?;
+            validate_stored_references(value, identity)?;
+        },
+        Raw::Tag(_, value) => validate_stored_references(value, identity)?,
+        _ => {}
+    }
+    Ok(())
+}
 
+fn raw_uuid(raw: &Raw) -> Option<[u8; 16]> {
+    let Raw::Tag(37, bytes) = raw else { return None; };
+    let Raw::Bytes(bytes) = bytes.as_ref() else { return None; };
+    bytes.as_slice().try_into().ok()
+}
+
+fn stored_reference_error() -> Box<Diagnostic> {
+    row_error("ORNA-CONFORMANCE-ROW-REFERENCE", "stored table reference target does not exist in this snapshot")
+}
 fn decode_key(text: &str, ty: &Type) -> RowResult<Value> {
     let raw = match ty {
         Type::Text => Raw::Text(text.into()),
@@ -394,4 +443,28 @@ fn row_error(code: &str, message: &str) -> Box<Diagnostic> {
         .expect("static row admission diagnostic")
         .redacted(),
     )
+}
+#[cfg(test)]
+mod stored_reference_tests {
+    use super::*;
+
+    fn uuid(id: [u8; 16]) -> Raw {
+        Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
+    }
+
+    #[test]
+    fn stored_reference_requires_database_table_and_key_in_snapshot() {
+        let owner = TableOwner { namespace: Namespace(Vec::new()), table: "Target".into() };
+        let key = Value::new(Raw::Int(7.into())).expect("canonical key");
+        let identity = RowAdmissionIdentity {
+            database_id: [1; 16],
+            tables: BTreeMap::from([([8; 16], (owner, vec![vec![key]]))]),
+        };
+        let reference = |database, table, key| Raw::Tag(60021, Box::new(Raw::Array(vec![uuid(database), uuid(table), key])));
+
+        assert!(validate_stored_references(&reference([1; 16], [8; 16], Raw::Int(7.into())), &identity).is_ok());
+        assert!(validate_stored_references(&reference([1; 16], [8; 16], Raw::Int(9.into())), &identity).is_err());
+        assert!(validate_stored_references(&reference([2; 16], [8; 16], Raw::Int(7.into())), &identity).is_err());
+        assert!(validate_stored_references(&reference([1; 16], [9; 16], Raw::Int(7.into())), &identity).is_err());
+    }
 }

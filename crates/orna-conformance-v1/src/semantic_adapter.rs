@@ -1050,7 +1050,7 @@ impl RuntimeEvaluator for BoundedEvaluator {
         project: &ProjectUnit,
         analysis: &orna_semantic_v1::Analysis,
     ) -> StageOutcome<Diagnostic> {
-        match admit_project_rows(project, analysis, self.limits) {
+        match admit_project_rows(project, analysis, &crate::row_admission::RowAdmissionIdentity { database_id: [0; 16], tables: std::collections::BTreeMap::new() }, self.limits) {
             Ok(_) => StageOutcome::Passed,
             Err(diagnostic) => StageOutcome::Failed(*diagnostic),
         }
