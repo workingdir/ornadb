@@ -23,6 +23,22 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
         .any(|diagnostic| diagnostic.code() == code)
 }
 
+// ORNA-TYPE-005: closed variants are declared as nominal enums, while pipe-separated types are rejected.
+#[test]
+fn closed_variants_are_nominal_enums_not_type_unions() {
+    let declared_enum = analyze(&[ModuleInput::new(
+        "enum.orna",
+        "pub enum State { queued, completed }\npub fn state(value: State) = value;",
+    )]);
+    assert!(declared_enum.is_ok(), "{:?}", declared_enum.diagnostics);
+
+    let type_union = analyze(&[ModuleInput::new(
+        "union.orna",
+        "pub fn choose(value: Int | Text) = value;",
+    )]);
+    assert!(!type_union.is_ok(), "a type union must not be admitted");
+}
+
 #[test]
 fn unresolved_legacy_result_plumbing_uses_the_targeted_diagnostic() {
     for source in [
