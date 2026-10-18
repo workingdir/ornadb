@@ -1418,6 +1418,11 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         "orna unmount left the orphaned FUSE mount in /proc/self/mountinfo"
     );
     assert_eq!(repository.mount_status().unwrap().len(), 0);
+    run_unmount_from(
+        repository_directory.path(),
+        mount_parent.path(),
+        Path::new("library"),
+    );
     assert_eq!(
         dead_mount_error.map(|error| error.kind()),
         Some(std::io::ErrorKind::NotConnected),

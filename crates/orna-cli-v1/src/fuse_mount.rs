@@ -742,6 +742,7 @@ pub(super) fn edit_path(
 pub(super) enum UnmountPreparationError {
     UnresolvedDrafts,
     ReadOnlyMount,
+    Disconnected,
     Operation(String),
 }
 
@@ -758,6 +759,8 @@ pub(super) fn begin_unmount(mountpoint: &Path) -> Result<(), UnmountPreparationE
             UnmountPreparationError::UnresolvedDrafts
         } else if error == rustix::io::Errno::ROFS {
             UnmountPreparationError::ReadOnlyMount
+        } else if error == rustix::io::Errno::NOTCONN {
+            UnmountPreparationError::Disconnected
         } else {
             UnmountPreparationError::Operation(format!("could not quiesce Orna mount: {error}"))
         }
@@ -996,7 +999,7 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if value == b"1" {
-            if draft_state.quiescing || draft_state.has_unresolved_drafts() {
+            if draft_state.has_unresolved_drafts() {
                 reply.error(Errno::EBUSY);
                 return;
             }
