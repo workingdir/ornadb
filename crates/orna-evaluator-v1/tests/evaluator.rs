@@ -1914,6 +1914,7 @@ fn legacy_effect_handler_keeps_existing_budget_behavior() {
     assert_eq!(effects.calls, vec![vec![Value::int(1.into())]]);
 }
 
+// ORNA-TYPE-002: a failed expression returns an Error diagnostic, not a success value.
 #[test]
 fn fail_reemits_the_original_error_instead_of_returning_a_value() {
     let result = evaluate_expression(
