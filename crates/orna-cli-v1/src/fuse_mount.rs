@@ -174,7 +174,7 @@ impl MountWriter {
                     let pin = row
                         .source
                         .graph
-                        .protect_verified_blob(&field.reference, &scope)
+                        .protect_admitted_blob_reference(&field.reference, &scope)
                         .map_err(|_| {
                             orna_runtime_v1::TableActivationError::Runtime(
                                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
