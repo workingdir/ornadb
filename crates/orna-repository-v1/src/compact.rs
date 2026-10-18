@@ -3302,7 +3302,7 @@ impl Repository {
         let candidate = self.candidate_from_journal(journal)?;
         self.verify_compact_publication_binding(journal, &candidate)?;
         let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
-        if !self.compact_commit_is_ancestor(journal.new_head(), &current_head)? {
+        if &current_head != journal.new_head() {
             return Err(RepositoryError::StaleHead);
         }
         Ok(CompactRuntimeCompletionFence {
@@ -3418,7 +3418,7 @@ impl Repository {
         let candidate = self.candidate_from_journal(journal)?;
         self.verify_compact_publication_binding(journal, &candidate)?;
         let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
-        if !self.compact_commit_is_ancestor(journal.new_head(), &current_head)? {
+        if &current_head != journal.new_head() {
             return Err(RepositoryError::StaleHead);
         }
         journal.advance(PublicationJournalStage::RuntimeCompleted)?;
