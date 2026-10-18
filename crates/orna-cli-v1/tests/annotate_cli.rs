@@ -71,6 +71,7 @@ fn assert_fixture_blob(source_name: &str, media_type: &str) {
 }
 
 #[test]
+/// A concrete declared MIME value is encoded in the produced annotated Blob.
 fn annotates_real_song_fixture_without_opening_a_repository() {
     assert_fixture_blob("tone.wav", "audio/wav");
 }
@@ -81,6 +82,7 @@ fn annotates_real_image_fixture_without_opening_a_repository() {
 }
 
 #[test]
+/// Confirms a compatible explicit suffix is retained when it is not preferred. ORNA-MIME-003.
 fn preserves_explicit_nonpreferred_suffix_in_ovb2_output() {
     let directory = TempDir::new().unwrap();
     // The declared MIME is an annotation, not a content-format validation.
@@ -123,6 +125,7 @@ fn preserves_existing_destination_and_removes_staging_file() {
 }
 
 #[test]
+/// Rejects a known-type incompatible suffix before output is created. ORNA-MIME-004.
 fn rejects_incompatible_suffix_without_creating_output() {
     let directory = TempDir::new().unwrap();
     let output_path = directory.path().join("annotated.ovb2");
