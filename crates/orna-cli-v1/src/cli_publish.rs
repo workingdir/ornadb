@@ -79,11 +79,9 @@ fn row_path(
     )
 }
 
-/// Validates format-3 mutations against the pinned graph and its committed
-/// source binding, then derives their loose projection from the typed key.
-/// Resolving a committed loose row by scanning source paths is reserved for
-/// legacy repository formats; format-3 keys remain independent of host filename
-/// rules (ORNA-KEY-004).
+/// Validates format-3 mutations against the pinned graph and committed source
+/// binding, while resolving legacy row paths only for legacy repository formats.
+/// Format-3 keys remain independent of host filename rules (ORNA-KEY-004).
 fn validate_candidate_source_rows(
     repository: &orna_repository_v1::Repository,
     head: &orna_repository_v1::GitCommitRef,
@@ -99,8 +97,18 @@ fn validate_candidate_source_rows(
             )
         })?;
     let mut row_paths = BTreeMap::new();
+    let is_format3 = format.repository_format() == orna_repository_v1::RepositoryFormat::Format3;
+    let mut format3_mutation_ids = is_format3.then(std::collections::BTreeSet::new);
     for mutation in mutations {
-        let path = if format.repository_format() != orna_repository_v1::RepositoryFormat::Format3 {
+        if let Some(mutation_ids) = format3_mutation_ids.as_mut()
+            && !mutation_ids.insert(mutation.id())
+        {
+            return Err(publish_error(
+                "source rows have duplicate mutation identities",
+                "the frozen range cannot be mapped unambiguously to committed source keys; the pending range was preserved",
+            ));
+        }
+        let path = if !is_format3 {
             let projection = loader
                 .resolve_committed_loose_row_projection(repository, head, mutation)
                 .map_err(|error| {
@@ -179,14 +187,13 @@ fn validate_candidate_source_rows(
                 )
             })?;
             let key_bytes = projected.key;
-            let key = orna_repository_v1::TypedKey::decode_canonical(&key_bytes).map_err(
-                |error| {
+            orna_repository_v1::TypedKey::decode_canonical(&key_bytes)
+                .map_err(|error| {
                     publish_error(
                         "source row key is not canonical",
                         format!("{error:?}; the pending range was preserved"),
                     )
-                },
-            )?;
+                })?;
             match projected.value.as_deref() {
                 Some(fields) => {
                     binding
@@ -253,18 +260,7 @@ fn validate_candidate_source_rows(
                 ));
             }
 
-            let leaves = typed_key_path_leaves(&key).ok_or_else(|| {
-                publish_error(
-                    "source row key cannot be projected to a loose path",
-                    "the admitted typed key has no path projection; the pending range was preserved",
-                )
-            })?;
-            LoosePath::for_key(mutation.table(), &leaves).map_err(|error| {
-                publish_error(
-                    "source row could not be admitted for publication",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?
+            continue;
         };
         if row_paths.insert(mutation.id(), path).is_some() {
             return Err(publish_error(
@@ -276,30 +272,6 @@ fn validate_candidate_source_rows(
     Ok(row_paths)
 }
 
-fn typed_key_path_leaves(key: &orna_repository_v1::TypedKey) -> Option<Vec<String>> {
-    fn append(key: &orna_repository_v1::TypedKey, leaves: &mut Vec<String>) -> Option<()> {
-        use orna_repository_v1::TypedKey;
-        match key {
-            TypedKey::Text(value) => leaves.push(value.clone()),
-            TypedKey::Int(value) => leaves.push(value.to_string()),
-            TypedKey::UInt(value) => leaves.push(value.to_string()),
-            TypedKey::Bool(value) => leaves.push(value.to_string()),
-            TypedKey::Bytes(value) => {
-                leaves.push(value.iter().map(|byte| format!("{byte:02x}")).collect())
-            }
-            TypedKey::Tuple(values) => {
-                for value in values {
-                    append(value, leaves)?;
-                }
-            }
-            TypedKey::Null => return None,
-        }
-        Some(())
-    }
-    let mut leaves = Vec::new();
-    append(key, &mut leaves)?;
-    (!leaves.is_empty()).then_some(leaves)
-}
 
 /// Test-only subprocess barrier. When unset, publication has no extra work.
 /// Integration tests set an exact boundary and marker path; the parent then
@@ -814,8 +786,9 @@ mod tests {
             row_key.canonical_bytes().expect("canonical row-map key")
         );
         assert_eq!(
-            typed_key_path_leaves(&row_key).as_deref(),
-            Some(["london".to_owned()].as_slice())
+            orna_repository_v1::TypedKey::decode_canonical(mutation.key())
+                .expect("canonical typed key"),
+            row_key
         );
     }
     #[test]

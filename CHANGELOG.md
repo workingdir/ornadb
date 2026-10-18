@@ -6,6 +6,14 @@ been published.
 
 ## Unreleased
 
+- Format-3 store-only publication validates canonical row keys without legacy
+  loose-row path resolution, including no-op preparation. Legacy formats retain
+  their existing loose-path resolution.
+
+- Missing unrooted prepared publication commits can be discarded during recovery
+  only when HEAD and the base index still match, preserving frozen runtime
+  mutations for candidate rebuild and retry after Git garbage collection.
+
 - Publication reconciliation materializes native-store changes from the candidate
   tree and clears obsolete skip-worktree flags, keeping user edits visible to Git
   after recovery.
