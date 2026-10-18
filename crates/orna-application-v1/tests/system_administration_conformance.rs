@@ -144,6 +144,7 @@ fn explicit_admin_capability_returns_host_outcome_for_fixture_source() {
     runtime.cleanup();
 }
 
+
 #[test]
 fn ordinary_application_evaluation_cannot_dispatch_admin_effects() {
     // Chapter 16 (source/16-administration.md:5-7) says accepting Orna source
