@@ -84,6 +84,10 @@ changes the durable row, and supports editors that write a sibling temporary
 file, sync it, then rename it over `data.orna`. The command stays in the
 foreground until `orna unmount DIR` releases the kernel mount and view record.
 
+`orna edit --row /path/to/mount/Table/key` opens the row’s `data.orna` in
+`$EDITOR`. Its absolute row-directory path must be inside the active Orna FUSE
+mount; the edit is validated before the durable row changes.
+
 `orna mount DIR --at SELECTOR` attaches a read-only snapshot record for one
 resolved selector without starting a host FUSE mount. `orna mount status`
 reports attached views in human or `--json` form. Host FUSE mounts are supported
