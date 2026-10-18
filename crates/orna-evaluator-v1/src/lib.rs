@@ -15183,7 +15183,7 @@ mod tests {
             Box::new(Raw::Array(vec![
                 Raw::Bytes(b"image".to_vec()),
                 Raw::Text("image/png".to_owned()),
-                Raw::Text("png".to_owned()),
+                Raw::Null,
             ])),
         );
         let tuple = Raw::Tag(60015, Box::new(Raw::Array(vec![blob])));
@@ -15235,7 +15235,7 @@ mod tests {
                     Box::new(Raw::Array(vec![
                         Raw::Bytes(b"captured".to_vec()),
                         Raw::Text("image/png".to_owned()),
-                        Raw::Text("png".to_owned()),
+                        Raw::Null,
                     ])),
                 );
                 Ok(Some(
