@@ -5333,9 +5333,6 @@ impl Context<'_, '_> {
         }
         let values = named_arguments("decimal.divide", arguments, values, 0, false)?;
         match values.as_slice() {
-            [Value::Decimal(divisor)] => {
-                self.checked_decimal(numerator.divide(divisor)?).map(Value::Decimal)
-            }
             [Value::Decimal(divisor), Value::Int(scale), Value::String(rounding)] => {
                 if scale.is_negative() {
                     return Err(error("ORNA-EVAL-VALUE"));
@@ -12844,7 +12841,6 @@ fn named_arguments(
         "normalise" => &["value", "form"],
         "offset_at" => &["instant", "zone"],
         "decimal.divide" => match values.len() {
-            1 => &["value"],
             3 => &["value", "scale", "rounding"],
             _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         },
