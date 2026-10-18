@@ -62,6 +62,9 @@ async fn local_embedded_state_rolls_back_row_and_checkpoint_together() {
         .unwrap();
     let state_db = repository.runtime_paths().state_db();
     assert!(state_db.starts_with(repository.runtime_paths().root()));
+    assert!(fs::read(&state_db)
+        .unwrap()
+        .starts_with(b"SQLite format 3\0"));
 
     let lease = runtime.acquire_lease(owner_id).await.unwrap();
     let before = runtime.capture().await.unwrap();
@@ -191,5 +194,52 @@ async fn replacement_runtime_fences_stale_writer_before_accepting_mutations() {
     assert_eq!(
         replacement.committed_table_row("Contact", b"alice").await.unwrap(),
         Some(b"Alice".to_vec())
+    );
+}
+
+/// ORNA-TURSO-004: losing the response after durable owner acquisition releases the lock on
+/// process exit, while preserving the owner record for safe replacement recovery.
+#[cfg(target_os = "linux")]
+#[test]
+fn owner_lock_recovers_after_lost_acquisition_response() {
+    use std::os::unix::process::ExitStatusExt;
+
+    const REPOSITORY_ENV: &str = "ORNA_OWNER_LOST_RESPONSE_REPOSITORY";
+    const OWNER_ENV: &str = "ORNA_OWNER_LOST_RESPONSE_ID";
+    const TEST_FILTER: &str = "owner_lock_recovers_after_lost_acquisition_response";
+    if let (Ok(path), Ok(owner)) = (std::env::var(REPOSITORY_ENV), std::env::var(OWNER_ENV)) {
+        let owner = owner.parse::<u8>().unwrap();
+        let repository = Repository::discover(path).unwrap();
+        let _lock = repository
+            .acquire_runtime_owner_lock([owner; 16])
+            .unwrap();
+        std::process::abort();
+    }
+
+    let (root, repository) = repository();
+    let binary = std::env::current_exe().unwrap();
+    let status = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("ulimit -c 0 2>/dev/null; exec \"$0\" \"$@\"")
+        .arg(binary)
+        .args([TEST_FILTER, "--nocapture", "--test-threads=1"])
+        .env(REPOSITORY_ENV, root.path())
+        .env(OWNER_ENV, "21")
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.signal(),
+        Some(6),
+        "owner process must die before acknowledging acquisition"
+    );
+
+    let replacement = repository.acquire_runtime_owner_lock([22; 16]).unwrap();
+    assert_eq!(replacement.previous_owner(), Some([21; 16]));
+    assert_eq!(replacement.departed_owners(), &[[21; 16]]);
+    assert_eq!(
+        replacement
+            .reclaim_departed_owner_pins(&Default::default())
+            .unwrap(),
+        Some(0)
     );
 }

@@ -202,7 +202,6 @@ fn plan(
         .unwrap()
 }
 
-/// ORNA-TURSO-001: the runtime opens a local embedded state database in the worktree without a server.
 #[tokio::test]
 async fn recovery_uses_persisted_receipt_after_runtime_consumes_prefix() {
     let (_temp, repository) = repository();
@@ -216,10 +215,6 @@ async fn recovery_uses_persisted_receipt_after_runtime_consumes_prefix() {
     )
     .await
     .unwrap();
-    let state_db = repository.runtime_paths().state_db();
-    let header = fs::read(&state_db).unwrap();
-    assert!(header.starts_with(b"SQLite format 3\0"));
-
     let lease = runtime.acquire_lease([74; 16]).await.unwrap();
     let context = runtime.begin_activation().await.unwrap();
     runtime
