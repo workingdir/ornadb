@@ -96,6 +96,7 @@ fn bounded_stream_channel_preserves_values_through_backpressure() {
     );
 }
 
+/// ORNA-LIB-002: core execution remains available without optional standard modules.
 #[test]
 fn core_assertions_work_without_the_optional_concurrent_snapshot() {
     let mut core = AdmittedReplSession::new(Limits::default());

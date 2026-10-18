@@ -32,6 +32,8 @@ fn pinned_collection_count_source_handles_empty_lists() {
     );
 }
 
+/// ORNA-LIB-005: failures in collection callbacks propagate through the ordinary failure channel.
+/// ORNA-ORDER-003: stable sort, distinct-first, and left-then-right union preserve specified order.
 #[test]
 fn pinned_core_collection_source_executes_the_documented_list_operations() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
