@@ -126,12 +126,12 @@ fn portable_sys_api_has_exact_declared_counts_and_surface() {
         ("reference_aliases", 78),
         ("value_types", 35),
         ("relations", 78),
-        ("functions", 67),
-        ("failure_codes", 49),
+        ("functions", 82),
+        ("failure_codes", 67),
     ] {
         assert_eq!(array_len(&document, name), expected, "{name} count");
     }
-    assert_eq!(object_keys(&document, "enums").len(), 44, "enums count");
+    assert_eq!(object_keys(&document, "enums").len(), 42, "enums count");
 
     let value_type_names = document["value_types"]
         .as_array()
