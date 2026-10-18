@@ -5855,7 +5855,11 @@ impl Context<'_, '_> {
             }
             "first" => {
                 let mut first = None;
-                self.for_each_relation_value(plan, depth, |_, value| {
+                self.for_each_relation_value_with_page_limit(
+                    plan,
+                    depth,
+                    1,
+                    |_, value| {
                     first = Some(value);
                     Ok(false)
                 })?;
@@ -5864,7 +5868,11 @@ impl Context<'_, '_> {
             "one" => {
                 let predicate = arguments.first();
                 let mut found = None;
-                self.for_each_relation_value(plan, depth, |context, value| {
+                self.for_each_relation_value_with_page_limit(
+                    plan,
+                    depth,
+                    1,
+                    |context, value| {
                     if let Some(predicate) = predicate {
                         context.step()?;
                         match context.invoke_predicate(predicate, value.clone(), depth + 1)? {
@@ -6042,6 +6050,21 @@ impl Context<'_, '_> {
         &mut self,
         plan: &RelationPlan,
         depth: usize,
+        visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
+    ) -> Result<(), EvaluationError> {
+        self.for_each_relation_value_with_page_limit(
+            plan,
+            depth,
+            self.limits.max_collection_items,
+            visit,
+        )
+    }
+
+    fn for_each_relation_value_with_page_limit(
+        &mut self,
+        plan: &RelationPlan,
+        depth: usize,
+        page_limit: usize,
         mut visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         if plan
@@ -6059,7 +6082,7 @@ impl Context<'_, '_> {
             .map(|_| None)
             .collect::<Vec<Option<RelationWindowState>>>();
         let mut seen = 0usize;
-        self.for_each_relation_source_value(plan, depth, &mut |context, value| {
+        self.for_each_relation_source_value(plan, depth, page_limit, &mut |context, value| {
             context.step()?;
             seen = seen
                 .checked_add(1)
@@ -6094,18 +6117,27 @@ impl Context<'_, '_> {
         &mut self,
         plan: &RelationPlan,
         depth: usize,
+        page_limit: usize,
         visit: &mut dyn FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
         if let Some((left, right)) = &plan.source_union {
             let mut keep_going = true;
-            self.for_each_relation_value(left, depth, |context, value| {
+            self.for_each_relation_value_with_page_limit(
+                left,
+                depth,
+                page_limit,
+                |context, value| {
                 keep_going = visit(context, value)?;
                 Ok(keep_going)
             })?;
             if !keep_going {
                 return Ok(());
             }
-            self.for_each_relation_value(right, depth, |context, value| {
+            self.for_each_relation_value_with_page_limit(
+                right,
+                depth,
+                page_limit,
+                |context, value| {
                 keep_going = visit(context, value)?;
                 Ok(keep_going)
             })?;
@@ -6132,6 +6164,7 @@ impl Context<'_, '_> {
                 &plan.source,
                 plan.source_identity,
                 after.as_deref(),
+                page_limit,
                 depth,
             )?;
             let page_len = rows.len();
@@ -6516,6 +6549,7 @@ impl Context<'_, '_> {
         source: &str,
         scope: RelationReadScope,
         after: Option<&[u8]>,
+        page_limit: usize,
         depth: usize,
     ) -> Result<(Vec<Value>, Option<Vec<u8>>), EvaluationError> {
         enum SourcePage {
@@ -6535,7 +6569,7 @@ impl Context<'_, '_> {
                         source,
                         scope,
                         after,
-                        self.limits.max_collection_items,
+                        page_limit,
                         &mut budget,
                     )?
                 } else {
@@ -6549,7 +6583,7 @@ impl Context<'_, '_> {
                             source,
                             scope,
                             after,
-                            self.limits.max_collection_items,
+                            page_limit,
                             &mut budget,
                         )
                         .map(|page| page.map(SourcePage::Canonical))
@@ -14587,6 +14621,7 @@ mod tests {
             BTreeSet::new(),
         );
         let mut registered = 0;
+        let mut stub_candidates = 0;
         for (path, source) in orna_standard::reference_standard_sources_v1() {
             let parsed = orna_syntax_v1::parse_module(&source);
             assert!(parsed.is_ok(), "{path}: {:?}", parsed.diagnostics);
@@ -14603,6 +14638,7 @@ mod tests {
                 if !format!("{body:?}").contains("requires its") {
                     continue;
                 }
+                stub_candidates += 1;
                 let qualified = format!("std.{namespace}.{}", signature.name);
                 let call = orna_syntax_v1::parse_expression(&format!("{qualified}()"));
                 assert!(call.is_ok(), "{qualified}: {:?}", call.diagnostics);
@@ -14622,9 +14658,14 @@ mod tests {
                 }
             }
         }
+        assert_eq!(
+            stub_candidates,
+            30,
+            "pinned std snapshot has 30 explicit host-binding stubs"
+        );
         assert!(
-            registered >= 80,
-            "expected the registered pinned host surface, got {registered}"
+            registered >= 4,
+            "expected the pinned intrinsic/sys-host subset, got {registered} registered of {stub_candidates} explicit stubs"
         );
     }
 
