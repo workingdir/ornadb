@@ -441,6 +441,7 @@ fn sys_context_view_schemas_match_the_published_contract() {
 
 #[test]
 fn foundation_typed_reference_aliases_match_published_targets() {
+    // ORNA-SYS-001: structural references use the declared typed aliases and targets.
     let document = sys_api_document();
     let aliases = document["reference_aliases"]
         .as_array()
