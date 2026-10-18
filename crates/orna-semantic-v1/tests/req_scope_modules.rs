@@ -62,6 +62,16 @@ fn importing_module_does_not_evaluate_unreferenced_function_bodies() {
     assert!(library.exports.contains_key("fail_if_evaluated"));
 }
 
+/// ORNA-PATTERN-001: record-pattern shorthand resolves its name as a local semantic binding.
+#[test]
+fn record_pattern_shorthand_resolves_as_semantic_binding() {
+    let result = analyze(&[module(
+        "main.orna",
+        r#"pub fn dispatch({ related }: { related: fn(): Bool }): Bool = related();"#,
+    )]);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics.iter().map(|diagnostic| (diagnostic.code(), diagnostic.message())).collect::<Vec<_>>());
+}
+
 /// ORNA-IMPORT-007: multiple wildcard providers make an unresolved name ambiguous regardless of order.
 #[test]
 fn conflicting_wildcard_imports_are_ambiguous() {
@@ -96,4 +106,18 @@ fn exact_decimal_currency_constructor_has_money_type() {
     let implicit_source = include_str!("fixtures/traceability-money-exact-decimal.orna").replace("12.34.GBP", "12.34");
     let implicit_money = analyze(&[ModuleInput::new("implicit_money.orna", implicit_source)]);
     assert!(implicit_money.diagnostics.iter().any(|diagnostic| diagnostic.code() == orna_semantic_v1::DIAG_TYPE), "a bare decimal must not implicitly construct Money");
+}
+
+/// ORNA-LIT-007: decimal suffix construction rejects a nominal type without a Currency implementation.
+#[test]
+fn currency_suffix_rejects_nominal_without_currency_implementation() {
+    let non_currency_source = include_str!("fixtures/traceability-money-exact-decimal.orna")
+        .replace("Currency", "NotCurrency")
+        .replace("GBP", "USD");
+    let analysis = analyze(&[ModuleInput::new("not-currency.orna", non_currency_source)]);
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| diagnostic.code() == orna_semantic_v1::DIAG_TYPE),
+        "decimal suffix construction must require a Currency implementation: {:?}",
+        analysis.diagnostics.iter().map(|diagnostic| (diagnostic.code(), diagnostic.message())).collect::<Vec<_>>(),
+    );
 }
