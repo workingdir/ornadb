@@ -408,20 +408,19 @@ impl FilterBatch {
         // prefixes. Reuse their join when appending the same suffix so the
         // shared batch identity survives those compilation boundaries.
         for (cached_scope, weak_batch) in prefixed_batches.iter().rev() {
-            if cached_scope != &scope {
-                continue;
-            }
             let Some(batch) = weak_batch.upgrade() else {
                 continue;
             };
             let FilterBatchNode::Then(existing_prefix, suffix) = &batch.node else {
                 continue;
             };
-            // Cloned plans retain prefix identity; use that hot path before
-            // flattening independently compiled batches for value equality.
+            let shared_prefix = Arc::ptr_eq(existing_prefix, prefix);
+            // A prefix already shared before a union split can reuse its join
+            // across the leaf source scopes. Equal but independently built
+            // prefixes remain local to their source scope.
             if Arc::ptr_eq(suffix, next)
-                && (Arc::ptr_eq(existing_prefix, prefix)
-                    || existing_prefix.values().eq(prefix.values()))
+                && (shared_prefix
+                    || (cached_scope == &scope && existing_prefix.values().eq(prefix.values())))
             {
                 return batch;
             }
@@ -1111,6 +1110,53 @@ mod tests {
         assert_eq!(
             batches[0].values().cloned().collect::<Vec<_>>(),
             vec![Value::Bool(true), Value::String("equal nested continuation".into())]
+        );
+    }
+
+    #[test]
+    fn shared_union_prefix_reuses_batch_across_distinct_leaf_scopes() {
+        let unknown_first = Value::Bool(true);
+        let unknown_second = Value::Bool(false);
+        let outer_first = Value::Int(8.into());
+        let outer_second = Value::Int(9.into());
+        let unknown_batch = RelationPlan::union(
+            RelationPlan::new("UnknownLeft".into()),
+            RelationPlan::new("UnknownRight".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![unknown_first.clone()]))
+        .with_stage(RelationStage::Filter(vec![unknown_second.clone()]));
+        let plan = RelationPlan::union(
+            unknown_batch,
+            RelationPlan::new("UnknownTail".into()),
+        )
+        .with_stage(RelationStage::Filter(vec![outer_first.clone()]))
+        .with_stage(RelationStage::Filter(vec![outer_second.clone()]))
+        .flush_filter_cascade();
+
+        let (unknown_union, unknown_tail) = plan.source_union.as_ref().expect("outer union");
+        let (left, right) = unknown_union
+            .source_union
+            .as_ref()
+            .expect("unknown operand union");
+        let batch_for = |leaf: &RelationPlan| match leaf.stages.as_slice() {
+            [RelationStage::SharedFilter(batch)] => Arc::clone(batch),
+            stages => panic!("expected one shared batch, got {stages:?}"),
+        };
+        let left_batch = batch_for(left);
+        let right_batch = batch_for(right);
+        assert!(Arc::ptr_eq(&left_batch, &right_batch));
+        assert_eq!(
+            left_batch.values().cloned().collect::<Vec<_>>(),
+            vec![
+                unknown_first,
+                unknown_second,
+                outer_first.clone(),
+                outer_second.clone(),
+            ]
+        );
+        assert_eq!(
+            batch_for(unknown_tail).values().cloned().collect::<Vec<_>>(),
+            vec![outer_first, outer_second]
         );
     }
 }
