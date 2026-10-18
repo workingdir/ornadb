@@ -353,10 +353,10 @@ pub enum Type {
     Text,
     Bool,
     Null,
-    /// A completed no-value expression; distinct from the portable `null` value.
+    /// A completed no-value expression; distinct from the portable null value.
     Unit,
     List(Box<Type>),
-    /// A bounded numeric range.  This semantic-only value retains its bound
+    /// A bounded numeric range. This semantic-only value retains its bound
     /// type without constructing an iterator or admitting generic ranges.
     Range(Box<Type>),
     /// A composable table/query value. This is a semantic summary only; it
@@ -367,16 +367,25 @@ pub enum Type {
     Record(BTreeMap<String, Type>),
     Tuple(Vec<Type>),
     Optional(Box<Type>),
-    /// A named type constructor with its statically resolved arguments.  This
+    /// A named type constructor with its statically resolved arguments. This
     /// retains enough identity for closed collection rules without treating a
     /// parameterized type as an untyped nominal name.
     Applied {
         base: String,
         arguments: Vec<Type>,
     },
+    /// A numeric quantity resolved from a source unit; its structural
+    /// dimensions and exact conversion metadata survive dimensional algebra.
+    Quantity {
+        numeric: Box<Type>,
+        dimension_basis: BTreeMap<SourceDimensionIdentity, i64>,
+        scale: SourceUnitRational,
+        offset: SourceUnitRational,
+        affine: bool,
+    },
     /// The one rate shape needed by the exact money rule. This is not a
     /// general dimensional-algebra representation: unsupported products still
-    /// remain `Error` and are never treated as dynamic values.
+    /// remain Error and are never treated as dynamic values.
     MoneyPerUnit {
         currency: Box<Type>,
         unit: Box<Type>,
@@ -393,11 +402,11 @@ pub enum Type {
         result: Box<Type>,
     },
     Named(String),
-    /// An expression that cannot complete successfully.  This is a valid
-    /// successful-result subtype for contextual checking, unlike `Error`,
+    /// An expression that cannot complete successfully. This is a valid
+    /// successful-result subtype for contextual checking, unlike Error,
     /// which records that semantic analysis already emitted a diagnostic.
     Bottom,
-    /// A diagnostic has already been emitted; this is never a dynamic `Any`.
+    /// A diagnostic has already been emitted; this is never a dynamic Any.
     Error,
 }
 
@@ -2398,6 +2407,15 @@ fn analyze_retaining_context(
             &dependency_summaries,
             &mut result.diagnostics,
         );
+        scope.current_namespace = Some(namespace.clone());
+        let mut visible_unit_namespaces = BTreeSet::from([namespace.clone()]);
+        visible_unit_namespaces.extend(scope.modules.values().cloned());
+        scope.source_units = result
+            .source_units
+            .iter()
+            .filter(|(identity, _)| visible_unit_namespaces.contains(&identity.namespace))
+            .map(|(identity, metadata)| (identity.clone(), metadata.clone()))
+            .collect();
         scope
             .payload_enum_types
             .extend(imported_payload_enum_bindings(
@@ -3211,14 +3229,24 @@ fn resolve_type_aliases(
             Type::Optional(Box::new(resolve_type_aliases(inner, aliases, resolving)))
         }
         Type::Applied { base, arguments } => Type::Applied {
-            // Generic aliases require substitution, which this closed map
-            // does not provide. Resolve their arguments but preserve the
-            // applied constructor identity.
             base: base.clone(),
             arguments: arguments
                 .iter()
                 .map(|argument| resolve_type_aliases(argument, aliases, resolving))
                 .collect(),
+        },
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            offset,
+            affine,
+        } => Type::Quantity {
+            numeric: Box::new(resolve_type_aliases(numeric, aliases, resolving)),
+            dimension_basis: dimension_basis.clone(),
+            scale: scale.clone(),
+            offset: offset.clone(),
+            affine: *affine,
         },
         Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
             currency: Box::new(resolve_type_aliases(currency, aliases, resolving)),
@@ -3253,7 +3281,108 @@ fn resolve_type_aliases(
 }
 
 fn canonicalize_type(ty: &Type, scope: &Scope) -> Type {
-    canonicalize_type_with_identities(ty, &scope.nominal_identities)
+    fn source_quantity_type(numeric: Type, unit_type: &Type, scope: &Scope) -> Option<Type> {
+        let Type::Named(unit_name) = unit_type else {
+            return None;
+        };
+        let path = unit_name.split('.').map(str::to_owned).collect::<Vec<_>>();
+        let unit = source_unit_for_path(&path, scope)?;
+        Some(Type::Quantity {
+            numeric: Box::new(numeric),
+            dimension_basis: unit.dimension_basis.clone(),
+            scale: unit.scale.clone(),
+            offset: unit.offset.clone(),
+            affine: unit.affine,
+        })
+    }
+
+    fn normalize_source_quantities(ty: &Type, scope: &Scope) -> Type {
+        match ty {
+            Type::List(inner) => Type::List(Box::new(normalize_source_quantities(inner, scope))),
+            Type::Range(inner) => Type::Range(Box::new(normalize_source_quantities(inner, scope))),
+            Type::Relation(inner) => {
+                Type::Relation(Box::new(normalize_source_quantities(inner, scope)))
+            }
+            Type::Stream(inner) => Type::Stream(Box::new(normalize_source_quantities(inner, scope))),
+            Type::Record(fields) => Type::Record(
+                fields
+                    .iter()
+                    .map(|(name, field)| {
+                        (name.clone(), normalize_source_quantities(field, scope))
+                    })
+                    .collect(),
+            ),
+            Type::Tuple(elements) => Type::Tuple(
+                elements
+                    .iter()
+                    .map(|element| normalize_source_quantities(element, scope))
+                    .collect(),
+            ),
+            Type::Optional(inner) => {
+                Type::Optional(Box::new(normalize_source_quantities(inner, scope)))
+            }
+            Type::Applied { base, arguments } => {
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| normalize_source_quantities(argument, scope))
+                    .collect::<Vec<_>>();
+                let quantity = match base.as_str() {
+                    "Int" if arguments.len() == 1 => {
+                        source_quantity_type(Type::Int, &arguments[0], scope)
+                    }
+                    "Decimal" if arguments.len() == 1 => {
+                        source_quantity_type(Type::Decimal, &arguments[0], scope)
+                    }
+                    "Float" if arguments.len() == 1 => {
+                        source_quantity_type(Type::Float, &arguments[0], scope)
+                    }
+                    "Quantity" if arguments.len() == 2 => {
+                        source_quantity_type(arguments[0].clone(), &arguments[1], scope)
+                    }
+                    _ => None,
+                };
+                quantity.unwrap_or_else(|| Type::Applied {
+                    base: base.clone(),
+                    arguments,
+                })
+            }
+            Type::Quantity {
+                numeric,
+                dimension_basis,
+                scale,
+                offset,
+                affine,
+            } => Type::Quantity {
+                numeric: Box::new(normalize_source_quantities(numeric, scope)),
+                dimension_basis: dimension_basis.clone(),
+                scale: scale.clone(),
+                offset: offset.clone(),
+                affine: *affine,
+            },
+            Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
+                currency: Box::new(normalize_source_quantities(currency, scope)),
+                unit: Box::new(normalize_source_quantities(unit, scope)),
+            },
+            Type::Function {
+                parameters,
+                parameter_names,
+                default_parameters,
+                result,
+            } => Type::Function {
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| normalize_source_quantities(parameter, scope))
+                    .collect(),
+                parameter_names: parameter_names.clone(),
+                default_parameters: default_parameters.clone(),
+                result: Box::new(normalize_source_quantities(result, scope)),
+            },
+            _ => ty.clone(),
+        }
+    }
+
+    let canonical = canonicalize_type_with_identities(ty, &scope.nominal_identities);
+    normalize_source_quantities(&canonical, scope)
 }
 
 fn canonicalize_type_with_identities(ty: &Type, identities: &BTreeMap<String, String>) -> Type {
@@ -3300,6 +3429,19 @@ fn canonicalize_type_with_identities(ty: &Type, identities: &BTreeMap<String, St
                 .iter()
                 .map(|argument| canonicalize_type_with_identities(argument, identities))
                 .collect(),
+        },
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            offset,
+            affine,
+        } => Type::Quantity {
+            numeric: Box::new(canonicalize_type_with_identities(numeric, identities)),
+            dimension_basis: dimension_basis.clone(),
+            scale: scale.clone(),
+            offset: offset.clone(),
+            affine: *affine,
         },
         Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
             currency: Box::new(canonicalize_type_with_identities(currency, identities)),
@@ -3575,6 +3717,8 @@ fn primitive(name: &str) -> Option<Type> {
 #[derive(Clone, Default)]
 struct Scope {
     names: BTreeMap<String, Symbol>,
+    current_namespace: Option<Namespace>,
+    source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
     /// Per-module summaries used while resolving table provenance through
     /// pure helper calls. This remains semantic-loader state rather than a
     /// public Symbol field so existing catalogue/value contracts stay stable.
@@ -3688,6 +3832,8 @@ fn resolve_imports_with_dependencies(
 ) -> Scope {
     let mut scope = Scope {
         names: header.symbols.clone(),
+        current_namespace: None,
+        source_units: BTreeMap::new(),
         function_dependencies: RefCell::new(BTreeMap::new()),
         ambiguous: BTreeSet::new(),
         nominal_identities: BTreeMap::new(),
@@ -5258,12 +5404,13 @@ fn static_type_is_known(ty: &Type, scope: &Scope) -> bool {
         Type::Applied { base, arguments } => {
             (matches!(
                 base.as_str(),
-                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Float" | "Decimal"
+                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Float" | "Decimal" | "Quantity"
             ) || system_api::embedded_system_api().describes_type(base))
                 && arguments
                     .iter()
                     .all(|argument| static_type_is_known(argument, scope))
         }
+        Type::Quantity { numeric, .. } => static_type_is_known(numeric, scope),
         Type::MoneyPerUnit { currency, unit } => {
             static_type_is_known(currency, scope) && static_type_is_known(unit, scope)
         }
@@ -6445,9 +6592,31 @@ fn dimensional_argument_is_declared(
         return false;
     }
     annotation_type_name_is_declared(path, scope, generic_names)
+        || source_unit_for_path(path, scope).is_some()
         || path
             .last()
             .is_some_and(|name| is_currency_code(name) || is_implicit_unit(name))
+}
+
+fn source_unit_for_path<'a>(path: &[String], scope: &'a Scope) -> Option<&'a SourceUnitMetadata> {
+    let name = path.last()?;
+    if path.len() > 1 {
+        return scope.source_units.get(&SourceUnitIdentity {
+            namespace: Namespace(path[..path.len() - 1].to_vec()),
+            name: name.clone(),
+        });
+    }
+    if let Some(namespace) = &scope.current_namespace
+        && let Some(unit) = scope.source_units.get(&SourceUnitIdentity {
+            namespace: namespace.clone(),
+            name: name.clone(),
+        })
+    {
+        return Some(unit);
+    }
+    let mut candidates = scope.source_units.values().filter(|unit| unit.identity.name == *name);
+    let candidate = candidates.next()?;
+    candidates.next().is_none().then_some(candidate)
 }
 
 fn is_implicit_unit(name: &str) -> bool {
@@ -6783,6 +6952,7 @@ fn type_mentions_generic(ty: &Type, generic_names: &BTreeSet<String>) -> bool {
         Type::Applied { arguments, .. } => arguments
             .iter()
             .any(|argument| type_mentions_generic(argument, generic_names)),
+        Type::Quantity { numeric, .. } => type_mentions_generic(numeric, generic_names),
         Type::MoneyPerUnit { currency, unit } => {
             type_mentions_generic(currency, generic_names)
                 || type_mentions_generic(unit, generic_names)
@@ -6853,6 +7023,19 @@ fn substitute_generic_type(ty: &Type, substitutions: &BTreeMap<String, Type>) ->
                 .iter()
                 .map(|argument| substitute_generic_type(argument, substitutions))
                 .collect(),
+        },
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            offset,
+            affine,
+        } => Type::Quantity {
+            numeric: Box::new(substitute_generic_type(numeric, substitutions)),
+            dimension_basis: dimension_basis.clone(),
+            scale: scale.clone(),
+            offset: offset.clone(),
+            affine: *affine,
         },
         Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
             currency: Box::new(substitute_generic_type(currency, substitutions)),
@@ -9730,6 +9913,7 @@ fn type_contains_error(ty: &Type) -> bool {
         Type::Tuple(elements) => elements.iter().any(type_contains_error),
         Type::Record(fields) => fields.values().any(type_contains_error),
         Type::Applied { arguments, .. } => arguments.iter().any(type_contains_error),
+        Type::Quantity { numeric, .. } => type_contains_error(numeric),
         Type::MoneyPerUnit { currency, unit } => {
             type_contains_error(currency) || type_contains_error(unit)
         }
@@ -11162,6 +11346,7 @@ fn checkpoint_snapshot_maps_are_valid(ty: &Type) -> bool {
             parameters.iter().all(checkpoint_snapshot_maps_are_valid)
                 && checkpoint_snapshot_maps_are_valid(result)
         }
+        Type::Quantity { numeric, .. } => checkpoint_snapshot_maps_are_valid(numeric),
         Type::MoneyPerUnit { currency, unit } => {
             checkpoint_snapshot_maps_are_valid(currency)
                 && checkpoint_snapshot_maps_are_valid(unit)
@@ -12483,6 +12668,7 @@ fn is_sort_key_type(ty: &Type) -> bool {
         | Type::Bool
         | Type::Named(_)
         | Type::Applied { .. } => true,
+        Type::Quantity { numeric, .. } => is_sort_key_type(numeric),
         Type::Range(element) => is_sort_key_type(element),
         Type::Tuple(elements) => elements.iter().all(is_sort_key_type),
         Type::List(_)
@@ -12624,8 +12810,8 @@ fn infer_finite_list_numeric_aggregate(
 }
 
 fn is_sum_element_type(element: &Type) -> bool {
-    matches!(element, Type::Int | Type::Decimal | Type::Float)
-        || matches!(element, Type::Applied { base, .. } if base == "Money")
+    matches!(element, Type::Applied { base, .. } if base == "Money")
+        || is_statistics_numeric_type(element)
 }
 
 fn infer_finite_list_aggregate_rows(
@@ -13377,7 +13563,13 @@ fn infer_relation_statistics_call(
         | "standard_deviation" | "rate" | "integrate" => {
             Type::Optional(Box::new(if matches!(operation, "rate" | "integrate") {
                 match element {
-                    Type::Tuple(parts) if parts.len() == 2 => parts[1].clone(),
+                    Type::Tuple(parts) if parts.len() == 2 => {
+                        if operation == "integrate" {
+                            integrate_quantity_type(&parts[1], scope, diagnostics)
+                        } else {
+                            parts[1].clone()
+                        }
+                    }
                     _ => Type::Error,
                 }
             } else {
@@ -13392,9 +13584,80 @@ fn infer_relation_statistics_call(
     })
 }
 
+fn integrate_quantity_type(
+    value: &Type,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Type {
+    let Type::Quantity {
+        numeric,
+        dimension_basis,
+        scale,
+        offset,
+        affine,
+    } = value
+    else {
+        return value.clone();
+    };
+    let time_dimensions = dimension_basis
+        .keys()
+        .filter(|dimension| dimension.name == "Time")
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let time_dimension = match time_dimensions.len() {
+        1 => time_dimensions.into_iter().next(),
+        0 => {
+            let time_dimensions = scope
+                .source_units
+                .values()
+                .flat_map(|unit| unit.dimension_basis.keys())
+                .filter(|dimension| dimension.name == "Time")
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            (time_dimensions.len() == 1)
+                .then(|| time_dimensions.into_iter().next())
+                .flatten()
+        }
+        _ => None,
+    };
+    let Some(time_dimension) = time_dimension else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "std.stats.integrate requires one unambiguous declared Time dimension for source-unit quantities",
+        ));
+        return Type::Error;
+    };
+    let Some(time_exponent) = dimension_basis
+        .get(&time_dimension)
+        .copied()
+        .unwrap_or_default()
+        .checked_add(1)
+    else {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "std.stats.integrate unit dimension exponent exceeds the supported range",
+        ));
+        return Type::Error;
+    };
+    let mut dimension_basis = dimension_basis.clone();
+    if time_exponent == 0 {
+        dimension_basis.remove(&time_dimension);
+    } else {
+        dimension_basis.insert(time_dimension, time_exponent);
+    }
+    Type::Quantity {
+        numeric: numeric.clone(),
+        dimension_basis,
+        scale: scale.clone(),
+        offset: offset.clone(),
+        affine: *affine,
+    }
+}
+
 fn is_statistics_numeric_type(ty: &Type) -> bool {
     matches!(ty, Type::Int | Type::Decimal | Type::Float)
-        || matches!(ty, Type::Applied { base, .. } if base == "Float")
+        || matches!(ty, Type::Applied { base, arguments } if matches!(base.as_str(), "Int" | "Decimal" | "Float") && arguments.len() == 1)
+        || matches!(ty, Type::Quantity { numeric, .. } if is_statistics_numeric_type(numeric))
 }
 
 fn is_optional_stat_argument(ty: &Type, inner: &Type) -> bool {
@@ -15065,6 +15328,7 @@ fn is_default_float_equality_type(ty: &Type) -> bool {
         Type::Applied { base, arguments } => {
             base == "Float" || arguments.iter().any(is_default_float_equality_type)
         }
+        Type::Quantity { numeric, .. } => is_default_float_equality_type(numeric),
         Type::List(element) | Type::Optional(element) | Type::Range(element) => {
             is_default_float_equality_type(element)
         }
@@ -16379,6 +16643,7 @@ fn contains_type_error(ty: &Type) -> bool {
         Type::Record(fields) => fields.values().any(contains_type_error),
         Type::Tuple(elements) => elements.iter().any(contains_type_error),
         Type::Applied { arguments, .. } => arguments.iter().any(contains_type_error),
+        Type::Quantity { numeric, .. } => contains_type_error(numeric),
         Type::MoneyPerUnit { currency, unit } => {
             contains_type_error(currency) || contains_type_error(unit)
         }
@@ -16413,6 +16678,7 @@ fn contains_tuple_type(ty: &Type) -> bool {
         | Type::Optional(element) => contains_tuple_type(element),
         Type::Record(fields) => fields.values().any(contains_tuple_type),
         Type::Applied { arguments, .. } => arguments.iter().any(contains_tuple_type),
+        Type::Quantity { numeric, .. } => contains_tuple_type(numeric),
         Type::Function {
             parameters, result, ..
         } => parameters.iter().any(contains_tuple_type) || contains_tuple_type(result),
@@ -19153,11 +19419,11 @@ fn collect_snapshot_ref_binder_ids(ty: &Type, into: &mut BTreeSet<String>) {
                 collect_snapshot_ref_binder_ids(argument, into);
             }
         }
+        Type::Quantity { numeric, .. } => collect_snapshot_ref_binder_ids(numeric, into),
         Type::MoneyPerUnit { currency, unit } => {
             collect_snapshot_ref_binder_ids(currency, into);
             collect_snapshot_ref_binder_ids(unit, into);
         }
-        // A callable nested inside a parameter has its own lexical scope.
         _ => {}
     }
 }
@@ -23487,6 +23753,7 @@ fn contains_secret_value_type(ty: &Type) -> bool {
         Type::MoneyPerUnit { currency, unit } => {
             contains_secret_value_type(currency) || contains_secret_value_type(unit)
         }
+        Type::Quantity { numeric, .. } => contains_secret_value_type(numeric),
         Type::Function {
             parameters, result, ..
         } => {
@@ -23840,6 +24107,7 @@ fn is_lawful_all_unique_key_type(ty: &Type, scope: &Scope) -> bool {
             | Type::Stream(_)
             | Type::Function { .. }
             | Type::MoneyPerUnit { .. } => false,
+            Type::Quantity { numeric, .. } => visit(numeric, scope, expanding),
             Type::Named(name) => {
                 if !expanding.insert(name.clone()) {
                     return true;
