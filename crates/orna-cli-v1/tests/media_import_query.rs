@@ -1,10 +1,19 @@
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+use std::{
+    fs::File,
+    io::{self, Read, Write},
+    process::Command,
+    thread,
+    time::Instant,
+};
+
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_repository_v1::{KeyRange, Repository, RowRevision, TypedKey};
+use orna_repository_v1::{KeyRange, NativeObjectKind, OrpBlobBinding, Repository, RowRevision, TypedKey};
 use orna_runtime_v1::{
-    RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation, TableObjectId,
-    TerminalOutcome,
+    NoFault, RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation,
+    TableObjectId, TerminalOutcome,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{
@@ -2103,4 +2112,345 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         "the refusal states the flag class it rejected: {refusal}"
     );
     drop(directory);
+}
+
+#[cfg(target_os = "linux")]
+const GATE_B_LARGE_PAYLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+struct CountingReader<R> {
+    reader: R,
+    bytes_read: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let count = self.reader.read(output)?;
+        self.bytes_read = self
+            .bytes_read
+            .checked_add(u64::try_from(count).expect("read count fits u64"))
+            .expect("input byte counter fits u64");
+        Ok(count)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_high_entropy_fixture(path: &Path) -> [u8; 32] {
+    let mut random = File::open("/dev/urandom").expect("open operating-system random source");
+    let mut output = File::create(path).expect("create disposable high-entropy fixture");
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut remaining = GATE_B_LARGE_PAYLOAD_BYTES;
+    let mut digest = Sha256::new();
+    while remaining != 0 {
+        let count = usize::try_from(remaining.min(buffer.len() as u64))
+            .expect("bounded fixture chunk fits usize");
+        random
+            .read_exact(&mut buffer[..count])
+            .expect("read high-entropy fixture bytes");
+        output
+            .write_all(&buffer[..count])
+            .expect("write high-entropy fixture bytes");
+        digest.update(&buffer[..count]);
+        remaining -= u64::try_from(count).expect("bounded fixture chunk fits u64");
+    }
+    output.sync_all().expect("flush high-entropy fixture");
+    digest.finalize().into()
+}
+
+#[cfg(target_os = "linux")]
+fn scratch_tree_bytes(root: &Path) -> u64 {
+    let mut pending = vec![root.to_path_buf()];
+    let mut total = 0_u64;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).expect("read scratch directory") {
+            let entry = entry.expect("read scratch entry");
+            let kind = entry.file_type().expect("read scratch entry type");
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                total = total
+                    .checked_add(entry.metadata().expect("read scratch file size").len())
+                    .expect("scratch storage total fits u64");
+            }
+        }
+    }
+    total
+}
+
+#[cfg(target_os = "linux")]
+fn process_peak_rss_bytes() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").expect("read process status");
+    let kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("Linux VmHWM is available");
+    kib.checked_mul(1024).expect("RSS bytes fit u64")
+}
+
+#[cfg(target_os = "linux")]
+fn git_object_count(root: &Path) -> usize {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["cat-file", "--batch-check", "--batch-all-objects"])
+        .output()
+        .expect("count repository objects");
+    assert!(output.status.success(), "git object enumeration succeeds");
+    String::from_utf8(output.stdout)
+        .expect("git object enumeration is UTF-8")
+        .lines()
+        .count()
+}
+
+#[cfg(target_os = "linux")]
+async fn commit_captured_binding(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: orna_runtime_v1::WriterLease,
+    binding: OrpBlobBinding,
+    key: &str,
+    ordinal: u8,
+    relation_id: [u8; 16],
+    insert_only: bool,
+) {
+    let request_identity = RequestIdentity {
+        session_id: [ordinal; 16],
+        request_id: [ordinal + 1; 16],
+    };
+    let fingerprint = [ordinal + 2; 32];
+    let (_, admission) = state
+        .reserve_request_with_admission(request_identity, fingerprint)
+        .await
+        .unwrap();
+    state
+        .start_request_with_owner_and_admission(
+            request_identity,
+            fingerprint,
+            writer,
+            admission.expect("new request returns admission capability"),
+        )
+        .await
+        .unwrap();
+    let context = state.begin_activation().await.unwrap();
+    let key_bytes = key.as_bytes().to_vec();
+    let row_id = [ordinal + 3; 16];
+    let mutation = if insert_only {
+        TableMutation::insert(row_id, "media", key_bytes, Vec::new())
+    } else {
+        TableMutation::new(row_id, "media", key_bytes, Some(Vec::new()))
+    }
+    .unwrap()
+    .with_table_object_id(TableObjectId::new(relation_id))
+    .with_orp_blob_binding(binding)
+    .unwrap();
+    let committed = state
+        .commit_table_request_activation(
+            writer,
+            request_identity,
+            fingerprint,
+            &context,
+            &[mutation],
+            [ordinal + 4; 32],
+            TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
+            &NoFault,
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.request.state, RequestState::Completed);
+    publish_media_row(repository, state, key, ordinal + 0x10).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let source = TempDir::new_in(directory.path()).expect("create disposable input directory");
+    for name in ["tone.wav", "pixel.png"] {
+        std::fs::copy(
+            Path::new(MEDIA_FIXTURES).join(name),
+            source.path().join(name),
+        )
+        .unwrap();
+    }
+
+    let runtime_identity = RuntimeIdentity {
+        database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+        repository_id: [0x61; 16],
+    };
+    let state = RuntimeState::open(&repository, runtime_identity, [0x62; 32])
+        .await
+        .unwrap();
+    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    for (key, ordinal) in [("song", 0x70_u8), ("image", 0x80_u8)] {
+        let fixture = if key == "image" {
+            IMAGE_IMPORT_FIXTURE
+        } else {
+            SONG_IMPORT_FIXTURE
+        };
+        let expression = import_expression(fixture, source.path());
+        import_media(
+            &repository,
+            &state,
+            writer,
+            &mut bindings,
+            &expression,
+            key,
+            ordinal,
+            true,
+            relation_id,
+        )
+        .await;
+    }
+    drop(bindings);
+
+    let large_path = source.path().join("high-entropy.bin");
+    let expected_sha256 = write_high_entropy_fixture(&large_path);
+    assert_eq!(
+        std::fs::metadata(&large_path).unwrap().len(),
+        GATE_B_LARGE_PAYLOAD_BYTES
+    );
+    let object_count_before = git_object_count(directory.path());
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback source");
+    let address = listener.local_addr().unwrap();
+    let sender_path = large_path.clone();
+    let sender = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept local payload reader");
+        let mut file = File::open(sender_path).expect("open generated payload");
+        io::copy(&mut file, &mut socket).expect("stream payload over loopback")
+    });
+    let socket = std::net::TcpStream::connect(address).expect("connect local payload reader");
+    let mut network_source = CountingReader {
+        reader: socket,
+        bytes_read: 0,
+    };
+    let started = Instant::now();
+    // Capture completes before an activation request is opened: the long read
+    // only produces a protected candidate; the row is installed afterwards.
+    let candidate = capability
+        .capture_blob_candidate(&mut network_source, GATE_B_LARGE_PAYLOAD_BYTES)
+        .expect("stream the network payload into the owned OGB-2 writer");
+    let network_bytes_read = network_source.bytes_read;
+    let graph_payload_bytes_read = capability.payload_bytes_read();
+    let graph_payload_bytes_written = capability.payload_bytes_written();
+    let graph_objects_read = capability.objects_read();
+    let identity = candidate.content_identity();
+    assert_eq!(identity.length(), GATE_B_LARGE_PAYLOAD_BYTES);
+    assert_eq!(identity.sha256(), expected_sha256);
+    assert_eq!(network_bytes_read, GATE_B_LARGE_PAYLOAD_BYTES);
+    assert_eq!(
+        graph_payload_bytes_written,
+        GATE_B_LARGE_PAYLOAD_BYTES,
+        "the owned writer accounts exactly the captured media bytes"
+    );
+    assert_eq!(sender.join().expect("payload sender completes"), GATE_B_LARGE_PAYLOAD_BYTES);
+    let binding = capability
+        .accept_captured_blob(candidate, "application/octet-stream", None)
+        .unwrap();
+    commit_captured_binding(
+        &repository,
+        &state,
+        writer,
+        binding,
+        "payload",
+        0x90,
+        relation_id,
+        true,
+    )
+    .await;
+    let import_elapsed = started.elapsed();
+
+    // Rebind the committed descriptor with a new MIME annotation. Pinning an
+    // admitted reference is a metadata-only update; it never reads payload.
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let row = graph
+        .lookup_row(&TypedKey::Text("payload".to_owned()), &scope)
+        .unwrap()
+        .expect("the large payload row was published");
+    let descriptor = row
+        .value()
+        .dependencies()
+        .into_iter()
+        .find(|dependency| dependency.kind() == NativeObjectKind::Tree)
+        .expect("the row names its Blob descriptor")
+        .oid()
+        .clone();
+    let reference = graph.admit_blob_reference(&row, &descriptor, &scope).unwrap();
+    let pin = graph
+        .protect_admitted_blob_reference(&reference, &scope)
+        .unwrap();
+    let updated_binding = graph
+        .accept_protected_blob_pin_with_annotation(pin, "application/pdf", Some("pdf"))
+        .unwrap();
+    assert_eq!(updated_binding.content_identity().sha256(), expected_sha256);
+    assert_eq!(scope.payload_bytes_read(), 0);
+    assert_eq!(scope.payload_bytes_written(), 0);
+    commit_captured_binding(
+        &repository,
+        &state,
+        writer,
+        updated_binding,
+        "payload",
+        0xa0,
+        relation_id,
+        false,
+    )
+    .await;
+    assert_eq!(scope.payload_bytes_read(), 0);
+    assert_eq!(scope.payload_bytes_written(), 0);
+
+    let relation = relation_hex(relation_id);
+    let report = query_json(directory.path(), &[&relation, "--format", "json"]);
+    assert_eq!(report["media_payload_bytes_read"], 0);
+    let listings = report["listings"].as_array().unwrap();
+    assert_eq!(listings.len(), 3);
+    let large = listings
+        .iter()
+        .find(|listing| listing["key"] == "payload")
+        .expect("the large row is returned from metadata");
+    assert_eq!(large["media_type"], "application/pdf");
+    assert_eq!(large["length"], GATE_B_LARGE_PAYLOAD_BYTES);
+    assert_eq!(large["sha256"], hex(&expected_sha256));
+    assert_eq!(large["hydrated"], false);
+
+    let point = query_json(directory.path(), &[&relation, "--key", "payload"]);
+    assert_eq!(point["media_payload_bytes_read"], 0);
+    assert_eq!(point["listings"][0]["sha256"], hex(&expected_sha256));
+    let summary = run_query(directory.path(), &[&relation]);
+    assert_eq!(summary.status.code(), Some(0));
+    assert!(
+        String::from_utf8(summary.stdout)
+            .unwrap()
+            .contains("media payload bytes read: 0")
+    );
+
+    let peak_rss = process_peak_rss_bytes();
+    let scratch_bytes = scratch_tree_bytes(directory.path());
+    let object_count_after = git_object_count(directory.path());
+    let temporary_storage_bound = 2 * GATE_B_LARGE_PAYLOAD_BYTES + 1024 * 1024 * 1024;
+    assert!(
+        peak_rss < 512 * 1024 * 1024,
+        "10 GiB import exceeded bounded RSS: {peak_rss} bytes"
+    );
+    assert!(
+        scratch_bytes <= temporary_storage_bound,
+        "scratch storage exceeded source + owned content + bounded metadata: {scratch_bytes}"
+    );
+    eprintln!(
+        "Gate B: small fixture rows=2; large network bytes={network_bytes_read}; graph payload bytes read={graph_payload_bytes_read}, written={graph_payload_bytes_written}; native objects read={graph_objects_read}; remote Git objects=0; new Git objects={}; elapsed_ms={}; peak_rss_bytes={peak_rss}; scratch_storage_bytes={scratch_bytes}",
+        object_count_after.saturating_sub(object_count_before),
+        import_elapsed.as_millis(),
+    );
 }
