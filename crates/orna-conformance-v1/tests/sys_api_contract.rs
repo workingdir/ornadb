@@ -124,7 +124,7 @@ fn portable_sys_api_has_exact_declared_counts_and_surface() {
         ("singletons", 4),
         ("opaque_identifiers", 21),
         ("reference_aliases", 78),
-        ("value_types", 34),
+        ("value_types", 35),
         ("relations", 78),
         ("functions", 67),
         ("failure_codes", 49),
@@ -272,6 +272,8 @@ fn sys_admin_effects_match_the_administration_contract() {
         let name = function["name"].as_str().expect("sys.admin function name");
         let expected_effect = if name.starts_with("sys.admin.plan_checkout") {
             plan_checkout_entries += 1;
+            "read"
+        } else if name == "sys.admin.review_commit" {
             "read"
         } else {
             admin_entries += 1;
