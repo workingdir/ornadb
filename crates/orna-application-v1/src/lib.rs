@@ -3432,6 +3432,17 @@ mod tests {
         assert_eq!(allowed.disclosed_data(), &["source", "dependency snapshot", "query"]);
     }
     #[test]
+    fn remote_analysis_explicit_deny_has_no_disclosure() {
+        let denied = remote_analysis_request(
+            RemoteAnalysisPolicy::LocalOnly,
+            "snapshot:sha256:source-deps-resources-toolchain-abi",
+            Vec::new(),
+        );
+        assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
+        assert!(!denied.is_allowed());
+        assert!(denied.disclosed_data().is_empty());
+    }
+    #[test]
     fn source_admission_reaches_real_evaluator() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
