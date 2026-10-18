@@ -42,6 +42,8 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  migrate copy exit status: 0 prepared/recovered; 1 migration conflict; 2 missing or invalid coordinates",
     "  publish [--message MESSAGE]                    commit the durable runtime tail as one publication commit",
     "  publish exit status: 0 published or nothing to publish; 1 repository, runtime, or publication conflict",
+    "  commit -m MESSAGE                           review and publish exactly the staged candidate",
+    "  commit exit status: 0 committed; 1 candidate validation or stale-review conflict",
     "Editor tooling:",
     "  semantic-legend [--json|--markdown|--format csv|--quiet] [--limit N]",
     "  semantic-legend                  token types and modifiers as text",
