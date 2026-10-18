@@ -10,7 +10,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use fuser::{
     Config, Errno, FileAttr, FileType, Filesystem, Generation, INodeNo, MountOption, RenameFlags,
     ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyWrite, Request,
+    ReplyWrite, ReplyXattr, Request,
 };
 use orna_conformance_v1::transactional_loaded_project_candidate_validator;
 use orna_evaluator_v1::Limits as EvaluatorLimits;
@@ -738,6 +738,24 @@ pub(super) fn edit_path(
         Err(error) => Err(format!("edit candidate was rejected or stale: {error}; draft retained at {}", draft_path.display())),
     }
 }
+pub(super) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
+    let mut value = [0_u8; 1];
+    let length = rustix::fs::getxattr(
+        mountpoint,
+        "user.orna.unresolved-drafts",
+        &mut value,
+    )
+    .map_err(|error| format!("could not read Orna mount draft state: {error}"))?;
+    if length != 1 {
+        return Err("Orna mount returned an invalid draft-state length".to_owned());
+    }
+    match value[0] {
+        b'0' => Ok(false),
+        b'1' => Ok(true),
+        _ => Err("Orna mount returned invalid draft state".to_owned()),
+    }
+}
+
 pub(super) fn unmount_mountpoint(mountpoint: &Path) -> Result<(), String> {
     let output = Command::new(fusermount_program())
         .args(["-u", "--"])
@@ -786,6 +804,7 @@ struct WorkspaceFilesystem {
     state: Mutex<FsBuilder>,
     open_files: Mutex<HashMap<u64, OpenFile>>,
     pending_truncates: Mutex<HashMap<u64, u64>>,
+    unresolved_drafts: Mutex<HashMap<u64, u64>>,
     next_handle: AtomicU64,
 }
 
@@ -854,6 +873,7 @@ impl WorkspaceFilesystem {
             state: Mutex::new(builder),
             open_files: Mutex::new(HashMap::new()),
             pending_truncates: Mutex::new(HashMap::new()),
+            unresolved_drafts: Mutex::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
         })
     }
@@ -873,9 +893,42 @@ impl WorkspaceFilesystem {
         current.extend_from_slice(bytes);
         true
     }
+    fn has_unresolved_drafts(&self) -> bool {
+        !self
+            .unresolved_drafts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+            || !self
+                .pending_truncates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+    }
 }
 
 impl Filesystem for WorkspaceFilesystem {
+    fn getxattr(
+        &self,
+        _request: &Request,
+        inode: INodeNo,
+        name: &OsStr,
+        size: u32,
+        reply: ReplyXattr,
+    ) {
+        if inode.0 != ROOT_INODE || name != OsStr::new("user.orna.unresolved-drafts") {
+            reply.error(Errno::ENODATA);
+            return;
+        }
+        let value = if self.has_unresolved_drafts() { b"1" } else { b"0" };
+        if size == 0 {
+            reply.size(1);
+        } else if size >= 1 {
+            reply.data(value);
+        } else {
+            reply.error(Errno::ERANGE);
+        }
+    }
     fn init(
         &mut self,
         _request: &Request,
@@ -1032,6 +1085,12 @@ impl Filesystem for WorkspaceFilesystem {
                     handle,
                     OpenFile::Temporary(save, target, scratch, blob_field),
                 );
+            if truncate_size.is_some() {
+                self.unresolved_drafts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(handle, inode.0);
+            }
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
@@ -1050,6 +1109,12 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(handle, OpenFile::Document(save, draft));
+        if truncate_size.is_some() {
+            self.unresolved_drafts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(handle, inode.0);
+        }
         reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
     }
     fn create(
@@ -1307,6 +1372,10 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EIO);
             return;
         }
+        self.unresolved_drafts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, dirty_inode| *dirty_inode != source_inode);
         state.nodes.remove(&source_inode);
         reply.ok();
     }
@@ -1451,6 +1520,12 @@ impl Filesystem for WorkspaceFilesystem {
         if result.is_err() {
             reply.error(Errno::EIO);
         } else {
+            if !data.is_empty() {
+                self.unresolved_drafts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(handle.0, inode.0);
+            }
             if let Some(bytes) = candidate_bytes {
                 self.update_writable_bytes(inode.0, &bytes);
             }
@@ -1472,6 +1547,7 @@ impl Filesystem for WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&handle.0)
             .cloned();
+        let is_document = matches!(&open_file, Some(OpenFile::Document(_, _)));
         let result = match open_file {
             Some(OpenFile::Document(save, draft)) => {
                 let result = save.commit_document(&draft);
@@ -1494,6 +1570,12 @@ impl Filesystem for WorkspaceFilesystem {
             None => Err("file handle is not open".to_owned()),
         };
         if result.is_ok() {
+            if is_document {
+                self.unresolved_drafts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&handle.0);
+            }
             reply.ok();
         } else {
             reply.error(Errno::EIO);
@@ -1578,6 +1660,10 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(Errno::EIO);
                     return;
                 }
+                self.unresolved_drafts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(handle.0, inode.0);
                 if let Some(bytes) = candidate_bytes {
                     self.update_writable_bytes(inode.0, &bytes);
                 }
