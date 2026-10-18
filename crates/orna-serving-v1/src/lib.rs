@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use orna_protocol_v1::{Envelope, Message, TargetKind};
 
+pub mod media_preview;
 pub type Id = [u8; 16];
 
 /// All limits are explicit so a host cannot accidentally create unbounded
