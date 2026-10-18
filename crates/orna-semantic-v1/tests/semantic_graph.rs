@@ -948,6 +948,7 @@ fn closure_lists_do_not_erase_incompatible_return_types() {
     assert!(compatible.is_ok(), "{:?}", compatible.diagnostics);
 }
 
+/// ORNA-EQ-001: relation equality is rejected because sequence and row-set equality differ.
 #[test]
 fn relation_comparisons_require_an_explicit_comparison_operation() {
     for expression in [
@@ -2735,6 +2736,7 @@ fn historical_callable_context_survives_namespace_decomposition() {
     );
 }
 
+/// ORNA-HIST-004: callable values from distinct historical snapshot contexts cannot be mixed.
 #[test]
 fn distinct_historical_callable_contexts_cannot_be_mixed() {
     let source = include_str!("fixtures/historical-closure-context-mixed.orna");
@@ -16532,6 +16534,7 @@ fn finite_list_distinct_and_union_preserve_types_and_reject_invalid_inputs() {
     );
 }
 
+/// ORNA-QUERY-001: a reusable live relation calculation is an ordinary function.
 #[test]
 fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks() {
     let valid = analyze(&[ModuleInput::new(
