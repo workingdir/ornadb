@@ -185,7 +185,7 @@ fn mounted_edit_path(path: &Path, row: bool) -> Result<std::path::PathBuf, Diagn
     }
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")
         .map_err(|error| mount_error("Mount table could not be read", error.to_string()))?;
-    let mut matched: Option<(usize, std::path::PathBuf)> = None;
+    let mut matched: Option<(usize, std::path::PathBuf, bool)> = None;
     for line in mountinfo.lines() {
         let Some((mount_fields, filesystem_fields)) = line.split_once(" - ") else {
             continue;
@@ -199,6 +199,10 @@ fn mounted_edit_path(path: &Path, row: bool) -> Result<std::path::PathBuf, Diagn
         {
             continue;
         }
+        let read_only = mount_fields
+            .split_whitespace()
+            .nth(5)
+            .is_some_and(|options| options.split(',').any(|option| option == "ro"));
         let mountpoint = std::path::PathBuf::from(std::ffi::OsString::from_vec(
             unescape_mountinfo_path(mountpoint),
         ));
@@ -208,19 +212,34 @@ fn mounted_edit_path(path: &Path, row: bool) -> Result<std::path::PathBuf, Diagn
         let depth = mountpoint.components().count();
         if matched
             .as_ref()
-            .is_none_or(|(current_depth, _)| depth > *current_depth)
+            .is_none_or(|(current_depth, _, _)| depth > *current_depth)
         {
-            matched = Some((depth, relative.to_path_buf()));
+            matched = Some((depth, relative.to_path_buf(), read_only));
         }
     }
-    matched.map(|(_, relative)| if row { relative.join("data.orna") } else { relative })
-        .filter(|relative| !relative.as_os_str().is_empty())
-        .ok_or_else(|| {
-            mount_error(
-                "Edit was not accepted",
-                "absolute edit path must name an entry inside an active Orna workspace mount",
-            )
-        })
+    let (_, relative, read_only) = matched.ok_or_else(|| {
+        mount_error(
+            "Edit was not accepted",
+            "absolute edit path must name an entry inside an active Orna workspace mount",
+        )
+    })?;
+    if read_only {
+        return Err(mount_error(
+            "Edit was not accepted",
+            "the selected workspace mount is read-only",
+        ));
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(mount_error(
+            "Edit was not accepted",
+            "absolute edit path must name an entry inside an active Orna workspace mount",
+        ));
+    }
+    Ok(if row {
+        relative.join("data.orna")
+    } else {
+        relative
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
