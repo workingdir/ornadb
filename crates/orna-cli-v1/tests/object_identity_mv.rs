@@ -371,6 +371,7 @@ fn mv_rolls_back_when_source_write_fails() {
     assert!(!directory.path().join("Archive").exists());
 }
 #[test]
+/// ORNA-CLI-001: CLI `mv` preserves table and child-field identities at the production binary boundary.
 fn mv_renames_a_committed_table_and_preserves_table_and_child_field_ids() {
     let (directory, initial_manifest) = initialized_project();
     let repository = Repository::discover(directory.path()).expect("repository");

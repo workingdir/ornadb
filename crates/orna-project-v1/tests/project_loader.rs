@@ -184,6 +184,7 @@ fn legacy_database_sidecar_does_not_hide_committed_source_rows() {
 }
 
 
+/// ORNA-REPO-001, ORNA-REPO-002, ORNA-REPO-003: only module-graph-reachable source enters the loaded program.
 #[test]
 fn loads_only_reachable_modules_in_deterministic_logical_order() {
     let (_directory, repository) = repository(&[
@@ -911,6 +912,7 @@ fn rejects_unreachable_symlinks_during_metadata_preflight() {
     ));
 }
 
+/// ORNA-REPO-004: rows for reachable tables are discovered through the production loader.
 #[test]
 fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
     let (directory, repository) = repository(&[
