@@ -436,20 +436,35 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                     ));
                 }
             };
-            if attached_view.is_some() {
-                let unresolved = crate::fuse_mount::has_unresolved_drafts(&mountpoint)
-                    .map_err(|error| mount_error("Mount draft state could not be read", error))?;
-                if unresolved {
-                    return Err(Diagnostic::target_with_detail(
-                        "E2000",
-                        "Unmount was refused",
-                        "unresolved workspace drafts remain; accept them with fsync or recover them before unmounting",
-                        "the FUSE mount and its repository view remain attached",
-                    ));
+            let quiesced = if attached_view.is_some() {
+                match crate::fuse_mount::begin_unmount(&mountpoint) {
+                    Ok(()) => true,
+                    Err(crate::fuse_mount::UnmountPreparationError::UnresolvedDrafts) => {
+                        return Err(Diagnostic::target_with_detail(
+                            "E2000",
+                            "Unmount was refused",
+                            "unresolved workspace drafts remain; accept them with fsync or recover them before unmounting",
+                            "the FUSE mount and its repository view remain attached",
+                        ));
+                    }
+                    Err(crate::fuse_mount::UnmountPreparationError::Operation(error)) => {
+                        return Err(mount_error("Mount draft state could not be quiesced", error));
+                    }
                 }
+            } else {
+                false
+            };
+            if let Err(error) = crate::fuse_mount::unmount_mountpoint(&mountpoint) {
+                if quiesced {
+                    crate::fuse_mount::cancel_unmount(&mountpoint).map_err(|resume_error| {
+                        mount_error(
+                            "FUSE unmount failed and the mount could not resume",
+                            format!("{error}; {resume_error}"),
+                        )
+                    })?;
+                }
+                return Err(mount_error("FUSE unmount failed", error));
             }
-            crate::fuse_mount::unmount_mountpoint(&mountpoint)
-                .map_err(|error| mount_error("FUSE unmount failed", error))?;
             if let Some((attached_view, status)) = attached_view {
                 attached_view.detach().map_err(|error| {
                     mount_error("Mount view could not be detached", error.to_string())
