@@ -3254,6 +3254,7 @@ mod tests {
         }
     }
 
+    /// ORNA-CLI-006: supported terminals receive safe OSC 8 status-path hyperlinks.
     #[test]
     fn human_status_links_safe_paths_only_for_supported_terminal_capabilities() {
         const FIXTURE: &str = include_str!("../tests/fixtures/function-expression.orna");
