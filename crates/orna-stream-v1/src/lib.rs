@@ -1457,6 +1457,42 @@ mod tests {
             successor: position(successor),
         }
     }
+    #[test]
+    /// Delivery identity equality covers the typed natural key and excludes the successor position.
+    fn failure_identity_is_the_exact_typed_delivery_composite() {
+        let base = delivery("opaque-position", "successor-one");
+        let same_delivery = delivery("opaque-position", "successor-two");
+        assert_eq!(
+            FailureIdentity(base.clone()),
+            FailureIdentity(same_delivery)
+        );
+
+        let assert_distinct = |changed: DeliveryIdentity| {
+            assert_ne!(FailureIdentity(base.clone()), FailureIdentity(changed));
+        };
+
+        let mut changed = base.clone();
+        changed.consumer.function = component("fn-b");
+        assert_distinct(changed);
+        let mut changed = base.clone();
+        changed.source_format = component("source-format-b");
+        assert_distinct(changed);
+        let mut changed = base.clone();
+        changed.source = component("source-b");
+        assert_distinct(changed);
+        let mut changed = base.clone();
+        changed.partition_format = component("partition-format-b");
+        assert_distinct(changed);
+        let mut changed = base.clone();
+        changed.partition = Some(component("partition-b"));
+        assert_distinct(changed);
+        let mut changed = base.clone();
+        changed.position_format = component("offset-v2");
+        assert_distinct(changed);
+        let mut changed = base.clone();
+        changed.position = position("another-position");
+        assert_distinct(changed);
+    }
     fn expected(
         backend: &InMemoryCheckpointBackend,
         delivery: &DeliveryIdentity,
