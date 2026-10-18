@@ -101,6 +101,7 @@ fn coalescing_chains_associate_to_the_right() {
     );
 }
 
+// Coverage gap (partial evidence): ORNA-PIPE-007/008 (source/06-expressions.md:324-330).
 // ORNA-PIPE-007, ORNA-PIPE-012, ORNA-ERR-012: failures propagate and explicit |? recovery resumes the enclosing expression.
 // ORNA-ERR-011/012 (source/06-expressions.md:413-415).
 #[test]
