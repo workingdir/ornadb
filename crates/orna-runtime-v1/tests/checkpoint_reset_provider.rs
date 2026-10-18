@@ -187,6 +187,44 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
     assert!(audits[2].safe_arguments.contains("expected_version=0"));
 }
 
+/// ORNA-CP-004: a live owner receives the incompatible position-format rejection without changing the checkpoint.
+#[tokio::test]
+async fn provider_key_format_mismatch_with_live_owner_is_rejected_before_mutation() {
+    let (_directory, state, writer, key) = fixture().await;
+    let before = state.stream_checkpoint(&key).await.unwrap();
+    let before_audits = state.admin_invocation_audits().await.unwrap();
+    let mut mismatched_key = key.clone();
+    mismatched_key.position_format = Component::new("position-format-v2").unwrap();
+    let provider = provider(mismatched_key, true);
+
+    let rejected = state
+        .reset_checkpoint_with_provider(
+            writer,
+            CheckpointResetRequest {
+                key: key.clone(),
+                expected: expected_initial(),
+                to: position("format-mismatch"),
+                reason: "format mismatch".into(),
+            },
+            &provider,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        rejected.public_code(),
+        Some("sys.checkpoint.not_replayable")
+    );
+    assert_eq!(provider.validations.load(Ordering::Relaxed), 0);
+    assert_eq!(state.stream_checkpoint(&key).await.unwrap(), before);
+    let audits = state.admin_invocation_audits().await.unwrap();
+    assert_eq!(audits.len(), before_audits.len() + 1);
+    assert_eq!(
+        audits.last().unwrap().terminal_outcome,
+        "failure:checkpoint_not_replayable"
+    );
+}
+
 #[tokio::test]
 async fn stale_owner_is_rejected_before_provider_validation_without_failed_audit() {
     let (_directory, state, stale_writer, key) = fixture().await;

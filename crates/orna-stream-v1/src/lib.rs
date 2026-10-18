@@ -1457,12 +1457,15 @@ mod tests {
             successor: position(successor),
         }
     }
-#[test]
+    #[test]
     /// ORNA-FAIL-005: failure identity equality uses the complete typed delivery composite, not its successor token.
     fn failure_identity_is_the_exact_typed_delivery_composite() {
         let base = delivery("opaque-position", "successor-one");
         let same_delivery = delivery("opaque-position", "successor-two");
-        assert_eq!(FailureIdentity(base.clone()), FailureIdentity(same_delivery));
+        assert_eq!(
+            FailureIdentity(base.clone()),
+            FailureIdentity(same_delivery)
+        );
 
         let assert_distinct = |changed: DeliveryIdentity| {
             assert_ne!(FailureIdentity(base.clone()), FailureIdentity(changed));
