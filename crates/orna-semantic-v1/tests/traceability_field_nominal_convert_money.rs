@@ -116,7 +116,7 @@ fn from_implementation_is_not_applied_implicitly() {
 // Exists: exact-decimal and inexact-Float constructor fixtures.
 // Specified: ORNA-MONEY-010, source/05-types.md:298; the fixture checks exact 12.34.GBP construction and rejects the Float path.
 // Passed is bounded to exact Money construction and Float rejection.
-// Specified: ORNA-NUM-003; Money construction rejects an inexact Float source unless explicit decimal conversion and rounding are used.
+// Specified: ORNA-MONEY-003; Money construction rejects an inexact Float source unless explicit decimal conversion, scale, and rounding are used.
 #[test]
 fn money_construction_keeps_decimal_exactness() {
     let exact = analyze(&[ModuleInput::new(
