@@ -1591,6 +1591,7 @@ fn qualified_collection_requires_an_admitted_optional_module() {
 }
 
 // Specified: ORNA-NOMINAL-003 and ORNA-REFINE-003; verifies refined nominal identity, owner assertions, and static construction.
+// ORNA-TYPE-007: refined type declarations preserve nominal identity and enforce owner assertions.
 #[test]
 fn refined_aliases_check_owner_assertions_and_expose_static_constructors() {
     let result = analyze(&[ModuleInput::new(
@@ -1887,6 +1888,7 @@ fn relation_extrema_preserve_element_type_as_optional_values() {
     }
 }
 
+// ORNA-TYPE-008: omitted annotations still produce inferred static types or diagnostics.
 #[test]
 fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
     let result = analyze(&[ModuleInput::new(
@@ -2222,6 +2224,7 @@ fn legacy_system_admin_methods_are_rejected_with_published_messages() {
     ));
 }
 
+// ORNA-TYPE-007: distinct nominal declarations preserve distinct type identities.
 #[test]
 fn distinct_nominal_types_require_named_conversions() {
     let result = analyze(&[ModuleInput::new(
@@ -15136,6 +15139,7 @@ fn recovery_pipeline_replaces_handled_failure_effect() {
 }
 
 // ORNA-FAILURE-001: `fail` has Bottom as its successful result and remains fallible.
+// ORNA-TYPE-002: the failure payload is typed as Error and carried separately from the Bottom success type.
 #[test]
 fn fail_has_bottom_success_type_and_accepts_error_values() {
     let result = analyze(&[ModuleInput::new(
@@ -15155,6 +15159,7 @@ fn fail_has_bottom_success_type_and_accepts_error_values() {
     assert!(module.symbols["abort"].effects.may_fail);
 }
 
+// ORNA-TYPE-002: recovery consumes the separate failure channel without converting it to a source Result.
 #[test]
 fn fail_bottom_is_compatible_with_expected_results_and_recovery() {
     let result = analyze(&[ModuleInput::new(
