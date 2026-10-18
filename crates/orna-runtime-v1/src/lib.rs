@@ -44146,6 +44146,7 @@ mod tests {
         );
     }
 
+// ORNA-ERR-007: after an external-effect marker, fault recovery reports uncertainty rather than claiming reversal.
     #[tokio::test]
     async fn external_effect_marker_keeps_fault_recovery_uncertain() {
         let (_temp, repo) = repository();
@@ -47832,6 +47833,7 @@ mod tests {
         );
     }
 
+// ORNA-FAILURE-009: failed run observations retain a safe diagnostic and distinguish failure from cancellation/completion.
     #[tokio::test]
     async fn observed_request_lifecycle_admits_before_work_and_keeps_terminals_distinct() {
         let (_temp, repo) = repository();
@@ -49647,6 +49649,7 @@ mod tests {
         assert!(!completed.live);
     }
 
+// ORNA-FAILURE-009: stream failure persists as a sys.Failure reference.
     #[tokio::test]
     async fn stream_observation_projects_nullable_partition_and_failure_sys_dto_across_reopen() {
         let (_temp, repo) = repository();

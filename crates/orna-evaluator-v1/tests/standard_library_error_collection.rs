@@ -35,6 +35,7 @@ fn submit(session: &mut AdmittedReplSession, source: &str, contract: &str) -> Ca
         .expect("proof expression returns a value")
 }
 
+// ORNA-ERR-002, ORNA-FAILURE-004, ORNA-FAILURE-005: recovery receives the original inspectable Error and its full nested cause chain.
 #[test]
 fn pinned_error_and_collection_edge_contracts_return_documented_values() {
     let mut session = pinned_error_collection_std::session();

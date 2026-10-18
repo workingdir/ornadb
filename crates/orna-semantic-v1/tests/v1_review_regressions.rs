@@ -149,6 +149,22 @@ fn direct_return_ends_body_before_later_statement() {
 }
 
 #[test]
+fn reachable_return_and_block_tail_contribute_to_inferred_result() {
+    let result = analyze_main("pub fn inferred(flag: Bool) { if flag { return 1; } 2 }");
+    expect_accepted(&result);
+    let symbol = result
+        .modules
+        .values()
+        .next()
+        .and_then(|module| module.symbols.get("inferred"))
+        .expect("inferred function");
+    assert!(matches!(
+        &symbol.ty,
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
+}
+
+#[test]
 fn nested_return_in_fallthrough_control_flow_is_supported() {
     let result = analyze_main(include_str!(
         "fixtures/inline-v1_review_regressions/26126de3f0e9.orna"
