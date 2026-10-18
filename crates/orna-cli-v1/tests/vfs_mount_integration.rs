@@ -499,6 +499,266 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
 }
 
 #[tokio::test]
+async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+            "Music/london.orna",
+            initial,
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
+    let writer = state.acquire_lease(runtime_identity.repository_id).await.unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: Some(initial),
+            ordinal: 0x92,
+            insert_only: true,
+        }],
+    )
+    .await;
+    let table = orna_runtime_v1::RuntimeTableIdentity::new(
+        "Music",
+        orna_runtime_v1::TableObjectId::new(relation_id),
+    )
+    .unwrap();
+    let tables = [table];
+    let before = state
+        .begin_admitted_table_activation(&tables)
+        .await
+        .unwrap()
+        .query_exact("Music", b"london")
+        .unwrap()
+        .unwrap()
+        .to_vec();
+    drop(state);
+
+    let pinned_commit = repository.head().unwrap().unwrap();
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let row_path = mountpoint.join("Music/london");
+    let document_path = row_path.join("data.orna");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !document_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return;
+            }
+            panic!("mount exited {status}: {stderr}");
+        }
+        assert!(Instant::now() < deadline, "FUSE mount did not expose the row document");
+        thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::write(
+        repository_directory.path().join("main.orna"),
+        "invalid @@@ source\n",
+    )
+    .unwrap();
+    format3::git(repository_directory.path(), &["add", "main.orna"]);
+    format3::git(
+        repository_directory.path(),
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "advance HEAD while workspace mount stays pinned",
+        ],
+    );
+    let head_after_move = repository.head().unwrap().unwrap();
+    assert_ne!(head_after_move, pinned_commit);
+    let scripts = TempDir::new().unwrap();
+    let editor = scripts.path().join("editor");
+    std::fs::write(&editor, "#!/bin/sh\nprintf '%s\n' '{ title: \"after\", }' > \"$1\"\n").unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "edit",
+            "--row",
+        ])
+        .arg(&row_path)
+        .env("EDITOR", &editor)
+        .output()
+        .expect("run edit --row against mounted absolute row directory");
+    assert!(
+        output.status.success(),
+        "edit --row failed; stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    run_unmount(repository_directory.path(), &mountpoint);
+    let status = mounted.child.wait().unwrap();
+    assert!(status.success(), "mount exits cleanly after edit and unmount");
+    let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
+    let after = state
+        .begin_admitted_table_activation(&tables)
+        .await
+        .unwrap()
+        .query_exact("Music", b"london")
+        .unwrap()
+        .unwrap()
+        .to_vec();
+    assert_eq!(
+        orna_value_v1::Value::decode(&before)
+            .expect("decode the original admitted row")
+            .raw(),
+        &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("before".to_owned())]),
+    );
+    assert_eq!(
+        orna_value_v1::Value::decode(&after)
+            .expect("decode the edited admitted row")
+            .raw(),
+        &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("after".to_owned())]),
+    );
+    assert_eq!(repository.head().unwrap().unwrap(), head_after_move);
+}
+#[tokio::test]
+async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+            "Music/london.orna",
+            initial,
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
+    let writer = state.acquire_lease(runtime_identity.repository_id).await.unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: Some(initial),
+            ordinal: 0x93,
+            insert_only: true,
+        }],
+    )
+    .await;
+    let head_before = repository.head().unwrap().unwrap();
+    let rows_before = format3::committed_store_rows(&repository, relation_id);
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("history");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--at",
+            "HEAD",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --at HEAD");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let row_path = mountpoint.join("Music/london");
+    let document_path = row_path.join("data.orna");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !document_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return;
+            }
+            panic!("historical mount exited {status}: {stderr}");
+        }
+        assert!(Instant::now() < deadline, "historical mount did not expose the row document");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let scripts = TempDir::new().unwrap();
+    let editor = scripts.path().join("editor");
+    let marker = scripts.path().join("editor-was-run");
+    std::fs::write(&editor, "#!/bin/sh\nprintf invoked > \"$ORNA_EDIT_MARKER\"\n").unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "edit",
+            "--row",
+        ])
+        .arg(&row_path)
+        .env("EDITOR", &editor)
+        .env("ORNA_EDIT_MARKER", &marker)
+        .output()
+        .expect("run edit --row on read-only historical mount");
+    assert!(
+        !output.status.success(),
+        "edit --row must refuse a read-only --at mount"
+    );
+    assert!(!marker.exists(), "read-only refusal must happen before launching the editor");
+    assert_eq!(repository.head().unwrap().unwrap(), head_before);
+    assert_eq!(format3::committed_store_rows(&repository, relation_id), rows_before);
+
+    run_unmount(repository_directory.path(), &mountpoint);
+    let status = mounted.child.wait().unwrap();
+    assert!(status.success(), "historical mount exits cleanly after unmount");
+}
+
+#[tokio::test]
 async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_identity() {
     if !fuse_test_available() {
         return;
