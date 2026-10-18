@@ -725,7 +725,19 @@ impl NativeGraphContext {
         scope: &RepositoryReadScope,
     ) -> Result<Option<crate::row_store::AdmittedRow>, GraphError> {
         scope.authorize(self)?;
-        let version = self.row_snapshot.version();
+        self.lookup_row_in_version(self.row_snapshot.version(), key, scope)
+    }
+
+    fn lookup_row_in_version(
+        &self,
+        version: &crate::row_store::RowMapVersion,
+        key: &crate::row_store::TypedKey,
+        scope: &RepositoryReadScope,
+    ) -> Result<Option<crate::row_store::AdmittedRow>, GraphError> {
+        scope.authorize(self)?;
+        if version.database_id() != &self.database_id {
+            return Err(GraphError::ContextMismatch);
+        }
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
         let root = version.primary_root().clone();
         let domain = rows_domain_for_version(version);
@@ -758,6 +770,153 @@ impl NativeGraphContext {
         Ok(Some(crate::row_store::AdmittedRow::issue(
             version, key, value,
         )))
+    }
+
+    /// Resolves a stored table reference through the containing row's immutable
+    /// repository snapshot. The referenced relation and key are looked up under
+    /// the same repository read scope, never through the current worktree state.
+    pub fn resolve_table_reference(
+        &self,
+        containing_row: &crate::row_store::AdmittedRow,
+        encoded_reference: &[u8],
+        scope: &RepositoryReadScope,
+    ) -> Result<Option<crate::row_store::AdmittedRow>, GraphError> {
+        scope.authorize(self)?;
+        let owner_version = containing_row.version();
+        if owner_version.database_id() != &self.database_id
+            || self.lookup_row_in_version(owner_version, containing_row.key(), scope)?
+                .as_ref()
+                != Some(containing_row)
+        {
+            return Err(GraphError::ContextMismatch);
+        }
+        let CborValue::Tag(60021, payload) = decode_canonical_cbor(encoded_reference)? else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let CborValue::Array(fields) = *payload else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let [database, relation, key] = fields.as_slice() else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let database = stored_uuid(database)?;
+        let relation = stored_uuid(relation)?;
+        if database != *owner_version.database_id() {
+            return Ok(None);
+        }
+        let key = crate::row_store::TypedKey::decode_canonical(&canonical_value_bytes(key))
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let target_version = if relation == *owner_version.relation_id() {
+            owner_version.clone()
+        } else {
+            self.row_map_version_for_relation(
+                owner_version.store_root(),
+                *owner_version.database_id(),
+                relation,
+                owner_version.generation(),
+                scope,
+            )?
+        };
+        self.lookup_row_in_version(&target_version, &key, scope)
+    }
+
+    fn row_map_version_for_relation(
+        &self,
+        store_root: &NativeOid,
+        database_id: [u8; 16],
+        relation_id: [u8; 16],
+        generation: u64,
+        scope: &RepositoryReadScope,
+    ) -> Result<crate::row_store::RowMapVersion, GraphError> {
+        scope.authorize(self)?;
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let store = self.read_native_node(store_root, scope, &mut objects)?;
+        let NodeData::StoreRoot { relation_map } = store else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::StoreRoot,
+                actual: store.kind(),
+            });
+        };
+        let relations_domain = canonical_domain(vec![
+            CborValue::Text("relations".to_owned()),
+            CborValue::Bytes(database_id.to_vec()),
+        ]);
+        let relation_key = crate::row_store::TypedKey::Bytes(relation_id.to_vec());
+        let relation_node = self.read_native_node(&relation_map, scope, &mut objects)?;
+        let relation_entry = {
+            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
+            find_ordered_entry_with(
+                &mut read_node,
+                relation_node,
+                &relations_domain,
+                None,
+                None,
+                &relation_key,
+            )?
+        }
+        .ok_or(GraphError::ContextMismatch)?;
+        let (schema_oid, primary_root, _secondary_root, row_count) =
+            decode_relation_value(&relation_entry.value, self.algorithm)?;
+        let schema_node = self.read_native_node(&schema_oid, scope, &mut objects)?;
+        let NodeData::Schema {
+            encoded_length,
+            schema_digest,
+            byte_root,
+        } = schema_node
+        else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::Schema,
+                actual: schema_node.kind(),
+            });
+        };
+        let mut schema_bytes = Vec::new();
+        let capacity = usize::try_from(encoded_length).map_err(|_| GraphError::ReadQuotaExceeded)?;
+        if encoded_length > scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES) {
+            return Err(GraphError::ReadQuotaExceeded);
+        }
+        schema_bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| GraphError::ReadQuotaExceeded)?;
+        self.read_full_index_bytes(
+            &byte_root,
+            encoded_length,
+            None,
+            scope,
+            &mut objects,
+            &mut schema_bytes,
+        )?;
+        let actual_schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        if actual_schema_digest != schema_digest {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
+        let descriptor = SchemaDescriptor::decode(&schema_bytes)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        if schema_relation_id(&descriptor)? != relation_id {
+            return Err(GraphError::ContextMismatch);
+        }
+        let schema = crate::row_store::SchemaGeneration::issue(
+            database_id,
+            relation_id,
+            schema_oid,
+            schema_digest,
+            generation,
+        );
+        crate::row_store::RowMapVersion::issue(
+            database_id,
+            relation_id,
+            store_root.clone(),
+            schema,
+            primary_root,
+            generation,
+            Some(row_count),
+        )
+        .map_err(|_| GraphError::ContextMismatch)
     }
 
     /// Reads a bounded logical-key interval from the pinned primary ORP root.
@@ -1592,6 +1751,12 @@ impl NativeGraphContext {
                     60112,
                     Box::new(CborValue::Array(fields.into_iter().take(4).collect())),
                 ))
+            }
+            CborValue::Tag(60021, payload) => {
+                if !matches!(payload.as_ref(), CborValue::Array(fields) if fields.len() == 3) {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                Ok(CborValue::Tag(60021, payload))
             }
             CborValue::Tag(60113, payload) => {
                 let oid = overflow_tag_oid(&payload, self.algorithm)?;
@@ -10061,6 +10226,121 @@ mod persisted_orp_tests {
         );
         assert_eq!(plain_error.exit_code(), 3);
     }
+
+    #[test]
+    fn stored_table_reference_resolves_against_containing_row_snapshot_after_rekey() {
+        let (directory, mut graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let original = graph.row_snapshot.version().clone();
+        let old_key = TypedKey::Text("old-address".to_owned());
+        let new_key = TypedKey::Text("new-address".to_owned());
+        let owner_key = TypedKey::Text("owner".to_owned());
+        let reference_value = CborValue::Tag(
+            60021,
+            Box::new(CborValue::Array(vec![
+                CborValue::Tag(37, Box::new(CborValue::Bytes(original.database_id().to_vec()))),
+                CborValue::Tag(37, Box::new(CborValue::Bytes(original.relation_id().to_vec()))),
+                CborValue::Text("old-address".to_owned()),
+            ])),
+        );
+        let owner_fields = canonical_value_bytes(&CborValue::Array(vec![
+            reference_value.clone(),
+        ]));
+        row_fields_dependencies(&owner_fields)
+            .expect("stored table reference has no native-object dependencies");
+        let owner_value = RowValue::inline(owner_fields, Vec::new())
+            .expect("canonical owner row with a stored table reference");
+        let target_value = RowValue::decode_canonical_fields(vec![0x80])
+            .expect("canonical empty target row");
+        let initial = [
+            RowIndexMutation::Insert {
+                key: old_key.clone(),
+                value: target_value,
+            },
+            RowIndexMutation::Insert {
+                key: owner_key.clone(),
+                value: owner_value,
+            },
+        ];
+        let seeded = graph
+            .maintain_row_index(&initial, &scope)
+            .expect("seed owner and target rows");
+        let seeded_root = graph
+            .maintain_relations_rows(&[(&original, &seeded)], &scope)
+            .expect("publish seeded rows");
+        let seeded_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            seeded_root.clone(),
+            *original.database_id(),
+            graph.snapshot_id,
+            *original.relation_id(),
+        )
+        .expect("load seeded snapshot");
+        graph.store_root = seeded_root;
+        graph.row_snapshot = seeded_snapshot;
+        let owner_before_rekey = graph
+            .lookup_row(&owner_key, &scope)
+            .expect("read owner row")
+            .expect("owner exists");
+        let target_before_rekey = graph
+            .lookup_row(&old_key, &scope)
+            .expect("read referenced row")
+            .expect("target exists");
+        let encoded_reference = canonical_value_bytes(&reference_value);
+        assert_eq!(
+            graph
+                .resolve_table_reference(&owner_before_rekey, &encoded_reference, &scope)
+                .expect("resolve before rekey"),
+            Some(target_before_rekey.clone())
+        );
+
+        let rekey = [RowIndexMutation::Rekey {
+            from: old_key.clone(),
+            to: new_key.clone(),
+        }];
+        let current_version = graph.row_snapshot.version().clone();
+        let maintenance = graph
+            .maintain_row_index(&rekey, &scope)
+            .expect("prepare target rekey");
+        let current_root = graph
+            .maintain_relations_rows(&[(&current_version, &maintenance)], &scope)
+            .expect("publish target rekey");
+        let current_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            current_root.clone(),
+            *original.database_id(),
+            graph.snapshot_id,
+            *original.relation_id(),
+        )
+        .expect("load rekeyed snapshot");
+        graph.store_root = current_root;
+        graph.row_snapshot = current_snapshot;
+
+        assert_eq!(
+            graph
+                .resolve_table_reference(&owner_before_rekey, &encoded_reference, &scope)
+                .expect("resolve in the containing row's older snapshot"),
+            Some(target_before_rekey)
+        );
+        let owner_after_rekey = graph
+            .lookup_row(&owner_key, &scope)
+            .expect("read current owner row")
+            .expect("owner remains present");
+        assert!(graph
+            .resolve_table_reference(&owner_after_rekey, &encoded_reference, &scope)
+            .expect("resolve the old address in current snapshot")
+            .is_none());
+        assert!(graph
+            .lookup_row(&new_key, &scope)
+            .expect("read moved target")
+            .is_some());
+        drop(maintenance);
+        drop(seeded);
+        drop(directory);
+    }
+
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -10852,7 +11132,7 @@ fn collect_overflow_oids(
         CborValue::Tag(60113, payload) => {
             output.insert(overflow_tag_oid(payload, algorithm)?);
         }
-        CborValue::Tag(60111, _) => {}
+        CborValue::Tag(60111 | 60021, _) => {}
         CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
         CborValue::Array(values) => {
             for value in values {
@@ -10901,6 +11181,16 @@ fn bind_candidate_blob_annotation(
         return Err(GraphError::InvalidBlobAnnotation);
     }
     Ok(())
+}
+
+fn stored_uuid(value: &CborValue) -> Result<[u8; 16], GraphError> {
+    let CborValue::Tag(37, payload) = value else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    let CborValue::Bytes(bytes) = payload.as_ref() else {
+        return Err(GraphError::NonCanonicalData);
+    };
+    bytes.as_slice().try_into().map_err(|_| GraphError::NonCanonicalData)
 }
 
 pub(crate) fn row_fields_dependencies(value: &[u8]) -> Result<Vec<NativeDependency>, GraphError> {
@@ -10979,6 +11269,18 @@ fn collect_row_dependencies(
                 oid_from_width(oid_bytes)?,
                 NativeObjectKind::Tree,
             )?;
+        }
+        CborValue::Tag(60021, payload) => {
+            let CborValue::Array(fields) = payload.as_ref() else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            let [database, relation, key] = fields.as_slice() else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            stored_uuid(database)?;
+            stored_uuid(relation)?;
+            crate::row_store::TypedKey::decode_canonical(&canonical_value_bytes(key))
+                .map_err(|_| GraphError::NonCanonicalData)?;
         }
         CborValue::Tag(60110 | 60112, _) => return Err(GraphError::NonCanonicalData),
         CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
@@ -11229,7 +11531,7 @@ impl<'a> CborReader<'a> {
                 Ok(CborValue::Map(entries))
             }
             6 => {
-                if !matches!(length, 60013 | 60110..=60113) {
+                if !matches!(length, 37 | 60013 | 60021 | 60110..=60113) {
                     return Err(GraphError::NonCanonicalData);
                 }
                 Ok(CborValue::Tag(length, Box::new(self.value()?)))
