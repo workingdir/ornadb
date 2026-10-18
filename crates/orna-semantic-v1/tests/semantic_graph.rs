@@ -44,6 +44,7 @@ fn unresolved_legacy_result_plumbing_uses_the_targeted_diagnostic() {
     }
 }
 
+// Specified: ORNA-TYPE-006; confirms Result and Ok remain ordinary user declarations rather than compiler-reserved names.
 #[test]
 fn declared_result_and_ok_names_remain_ordinary_user_declarations() {
     for source in [
@@ -1573,6 +1574,7 @@ fn qualified_collection_requires_an_admitted_optional_module() {
     assert!(bare_core.is_ok(), "{:?}", bare_core.diagnostics);
 }
 
+// Specified: ORNA-NOMINAL-003 and ORNA-REFINE-003; verifies refined nominal identity, owner assertions, and static construction.
 #[test]
 fn refined_aliases_check_owner_assertions_and_expose_static_constructors() {
     let result = analyze(&[ModuleInput::new(
@@ -1888,6 +1890,7 @@ fn omitted_numeric_function_parameters_are_inferred_without_dynamic_fallback() {
     );
 }
 
+// Specified: ORNA-UNIT-004 and ORNA-UNIT-005; incompatible dimensions fail and affine absolute temperatures reject addition.
 #[test]
 fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
     let key = analyze(&[ModuleInput::new(
@@ -1951,6 +1954,7 @@ fn display_implementations_reject_database_writes() {
     }));
 }
 
+// Specified: ORNA-CONVERT-003; rejects overlapping conversions that would make target selection ambiguous.
 #[test]
 fn nominal_targets_reject_overlapping_protocol_implementations() {
     let distinct = analyze(&[ModuleInput::new(
@@ -2093,6 +2097,7 @@ fn system_commit_rows_reject_mutation() {
     );
 }
 
+// Specified: ORNA-MONEY-003; the exact money-rate unit expression is resolved before rejecting an unqualified Float calculation.
 #[test]
 fn money_rate_unit_resolves_before_float_exactness_check() {
     let analysis = analyze(&[ModuleInput::new(
@@ -14926,6 +14931,7 @@ fn historical_callables_are_read_effect_only() {
     }
 }
 
+// Specified: ORNA-UNIT-008; qualified unit suffixes resolve to the same imported unit identity.
 #[test]
 fn qualified_kwh_units_share_the_closed_cross_database_identity() {
     let result = analyze(&[ModuleInput::new(
@@ -17800,6 +17806,7 @@ fn contextual_empty_instant_ranges_are_rejected() {
     }));
 }
 
+// Specified: ORNA-UNIT-007; affine absolute aggregates admit mean and extrema operations according to their algebra.
 #[test]
 fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
     let valid = analyze(&[ModuleInput::new(
@@ -17953,6 +17960,7 @@ fn numeric_nested_lambdas_infer_omitted_parameters_without_dynamic_fallback() {
     assert!(has(&underconstrained, "ORNA-S020-ANNOTATION"));
 }
 
+// Specified: ORNA-TYPE-001; verifies static types for optional values and closed enum patterns.
 #[test]
 fn reference_values_module_infers_closed_enum_optional_and_interpolation_cases() {
     let result = analyze(&[ModuleInput::new(

@@ -1,5 +1,6 @@
 use orna_semantic_v1::{ModuleInput, Namespace, Type, analyze};
 
+// Specified: ORNA-NOMINAL-006; owning-type constructor access remains available inside nested implementations with generic protocol bounds.
 #[test]
 fn local_private_nominal_constructor_satisfies_generic_protocol_bounds() {
     let analysis = analyze(&[ModuleInput::new(
