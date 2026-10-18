@@ -134,6 +134,7 @@ fn assert_relation_routes(
     }
 }
 
+/// ORNA-ATTACH-002: independently pinned attachments are read-only, so no cross-database atomic writes are claimed.
 #[test]
 fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
     let (_primary_dir, primary_repository, primary_commit) = repository(&[(

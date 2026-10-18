@@ -631,6 +631,13 @@ fn named_function(name: &str) -> Expr {
         span,
     }
 }
+fn zero_argument_call(name: &str) -> Expr {
+    Expr::Call {
+        callee: Box::new(named_function(name)),
+        arguments: Vec::new(),
+        span: span(),
+    }
+}
 
 fn integer_literal(value: i64) -> Expr {
     let span = span();
@@ -1076,6 +1083,7 @@ fn relation_page_rejects_empty_nonterminal_pages() {
     assert_eq!(effects.cursors, vec![None]);
 }
 
+/// ORNA-ORDER-002: flat-map concatenates each callback result in input and inner order.
 #[test]
 fn flat_map_preserves_page_then_inner_order_from_fixture_functions() {
     // ORNA-ORDER-002: input page order precedes each callback's emitted order.
@@ -1099,6 +1107,7 @@ fn flat_map_preserves_page_then_inner_order_from_fixture_functions() {
     assert_eq!(effects.cursors, vec![None, Some(vec![1])]);
 }
 
+/// ORNA-ORDER-003: stable sort preserves source order across equal-key page boundaries.
 #[test]
 fn stable_sort_keeps_equal_keys_in_source_order_across_pages() {
     // ORNA-ORDER-003: sort_by is stable even when equal keys cross a page edge.
@@ -1118,6 +1127,9 @@ fn stable_sort_keeps_equal_keys_in_source_order_across_pages() {
     assert_eq!(effects.cursors, vec![None, Some(vec![1])]);
 }
 
+/// ORNA-REL-001: the relation pipeline remains composable without full materialization.
+/// ORNA-REL-002: a bounded observation does not enumerate the whole relation.
+/// ORNA-ORDER-002: filter and map preserve input order and take observes only its prefix.
 #[test]
 fn filtered_mapped_take_stops_after_the_requested_prefix() {
     // ORNA-REL-001/002 and ORNA-ORDER-002: compose stages lazily and do not
@@ -1144,6 +1156,101 @@ fn filtered_mapped_take_stops_after_the_requested_prefix() {
     assert!(effects.requested_limits.iter().all(|limit| *limit > 0));
 }
 
+/// ORNA-QUERY-002: an unpinned live calculation reads the current relation context.
+/// ORNA-QUERY-003 / ORNA-CALL-002: matching live-query calls are executed independently.
+#[test]
+fn repeated_live_relation_function_calls_are_not_collapsed() {
+    let combined = relation_stage(
+        zero_argument_call("readings"),
+        "union",
+        vec![zero_argument_call("readings")],
+    );
+    let body = terminal(combined, "count");
+    let functions = Functions::from([
+        (
+            "readings".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: relation_source("Rows"),
+                environment: Environment::new(),
+            },
+        ),
+        (
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body,
+                environment: Environment::new(),
+            },
+        ),
+    ]);
+    let mut effects = PagedSource::new(vec![
+        page(&[1], Some(vec![1])),
+        page(&[2], None),
+        page(&[3], Some(vec![2])),
+        page(&[4], None),
+    ]);
+
+    assert_eq!(
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        )
+        .unwrap(),
+        integer(4)
+    );
+    assert_eq!(
+        effects.cursors,
+        vec![None, Some(vec![1]), None, Some(vec![2])],
+        "each invocation scans the current relation independently"
+    );
+}
+/// ORNA-CALL-003: pure-call behavior preserves results without promising an evaluation count.
+/// ORNA-CALL-001: equivalent pure calls in one activation produce equal results.
+#[test]
+fn repeated_pure_function_calls_are_observationally_equal() {
+    let span = span();
+    let body = Expr::Binary {
+        lhs: Box::new(zero_argument_call("answer")),
+        op: "==".into(),
+        rhs: Box::new(zero_argument_call("answer")),
+        span,
+    };
+    let functions = Functions::from([
+        (
+            "answer".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body: integer_literal(42),
+                environment: Environment::new(),
+            },
+        ),
+        (
+            "run".into(),
+            PureFunction {
+                parameters: Vec::new(),
+                body,
+                environment: Environment::new(),
+            },
+        ),
+    ]);
+    let mut effects = PagedSource::new(Vec::new());
+
+    assert_eq!(
+        invoke_named_with_effects(
+            "run",
+            &functions,
+            &Environment::new(),
+            Limits::default(),
+            &mut effects,
+        ),
+        Ok(CanonicalValue::new(Raw::Bool(true)).unwrap())
+    );
+    assert!(effects.cursors.is_empty());
+}
 fn incremental_scoped_view_body() -> Expr {
     let left = relation_stage(
         relation_stage(
@@ -1197,6 +1304,8 @@ fn paired_scoped_view_refresh_body() -> Expr {
     terminal(mapped, "sum")
 }
 
+/// ORNA-PLAN-001: repeated refreshes retain the logical query result over each batch set.
+/// ORNA-PLAN-003: paged source scans remain the correct reference fallback for refresh.
 #[test]
 fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
     let mut first_refresh = ScopedPagedSource::new([
@@ -1210,7 +1319,8 @@ fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
         ),
     ]);
     assert_eq!(
-        run_with_fixture_functions(incremental_scoped_view_body(), &mut first_refresh).unwrap(),
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut first_refresh)
+            .unwrap_or_else(|error| panic!("incremental view refresh failed with {}", error.to_string())),
         integer(18),
         "left odd rows and right even rows each retain their source filter across both pages"
     );
