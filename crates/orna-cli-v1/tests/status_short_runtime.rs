@@ -13,6 +13,7 @@ fn git_status(directory: &std::path::Path) -> Output {
         .expect("Git short status process")
 }
 
+/// ORNA-CLI-004: short status preserves Git's compact rows and appends a stable runtime code.
 #[test]
 fn short_status_preserves_git_rows_and_appends_runtime_summary() {
     let directory = tempdir().expect("temporary Git repository");
