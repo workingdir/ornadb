@@ -1757,6 +1757,7 @@ mod tests {
         );
     }
 
+    // ORNA-TYPE-003: a failed delivery remains explicit until the stream retry succeeds or fails.
     #[test]
     fn retry_can_succeed_or_fail() {
         let mut backend = InMemoryCheckpointBackend::default();

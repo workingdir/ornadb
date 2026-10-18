@@ -125,6 +125,7 @@ fn three_source_rows_lower_to_distinct_canonical_keys_and_full_fields() {
     assert_eq!(keys.len(), 3);
 }
 
+// ORNA-TYPE-004: Blob payload and Float<MiB> source size use distinct byte and quantity types.
 #[test]
 fn canonical_object_blob_row_keeps_source_size_for_owner_binding() {
     let modules = [ModuleInput::new(
