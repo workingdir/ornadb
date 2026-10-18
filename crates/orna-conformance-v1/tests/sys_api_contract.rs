@@ -112,6 +112,7 @@ fn sys_tokens(text: &str) -> impl Iterator<Item = &str> {
 
 #[test]
 fn portable_sys_api_has_exact_declared_counts_and_surface() {
+    // ORNA-SYS-002: the generated registry exposes the complete portable sys surface.
     let document = sys_api_document();
     assert_eq!(document["language_version"], "1.1.0");
     assert_eq!(document["sys_version"], "1.1");
@@ -439,6 +440,7 @@ fn sys_context_view_schemas_match_the_published_contract() {
 
 #[test]
 fn foundation_typed_reference_aliases_match_published_targets() {
+    // ORNA-SYS-001: structural references use the declared typed aliases and targets.
     let document = sys_api_document();
     let aliases = document["reference_aliases"]
         .as_array()
