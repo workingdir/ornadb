@@ -1,0 +1,3 @@
+pub fn model(): Int = 4;
+pub fn render(): Str = "rendered by Orna";
+pub fn client(): Str = render();
