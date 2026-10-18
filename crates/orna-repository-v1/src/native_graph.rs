@@ -936,7 +936,7 @@ impl NativeGraphContext {
             (nodes, payload, rows)
         };
 
-        apply_row_index_mutations(&mut rows, mutations)?;
+        let logical_rekeys = apply_row_index_mutations(&mut rows, mutations)?;
         if rows.len() as u64 > MAX_SIGNED_LENGTH {
             return Err(GraphError::InvalidCount(rows.len()));
         }
@@ -1073,6 +1073,7 @@ impl NativeGraphContext {
             previous_root: root,
             primary_root,
             row_count,
+            logical_rekeys,
             objects_written: written.into_iter().collect(),
             index_objects_created,
             index_objects_reused,
@@ -4745,6 +4746,13 @@ impl RowIndexMutation {
         Ok(Self::Insert { key, value })
     }
 }
+/// One explicit logical address change emitted by an ordered row-index apply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicalRowRekey {
+    pub old_address: crate::row_store::TypedKey,
+    pub new_address: crate::row_store::TypedKey,
+}
+
 /// The measured outcome of one ORP-1 index maintenance pass.
 ///
 /// The object sets are disjoint by construction, so a caller can attribute new
@@ -4758,6 +4766,7 @@ pub struct IndexMaintenance {
     previous_root: NativeOid,
     primary_root: NativeOid,
     row_count: u64,
+    logical_rekeys: Vec<LogicalRowRekey>,
     objects_written: Vec<NativeOid>,
     index_objects_created: Vec<NativeOid>,
     index_objects_reused: Vec<NativeOid>,
@@ -4780,7 +4789,12 @@ impl IndexMaintenance {
         self.row_count
     }
 
-    /// Every object this pass wrote, for the caller's durability barrier.
+    /// Explicit logical row address changes produced by this apply, in mutation order.
+    pub fn logical_rekeys(&self) -> &[LogicalRowRekey] {
+        &self.logical_rekeys
+    }
+
+    /// Every object this pass wrote, for the caller’s durability barrier.
     pub fn objects_written(&self) -> &[NativeOid] {
         &self.objects_written
     }
@@ -6739,7 +6753,8 @@ struct BranchCandidate {
 fn apply_row_index_mutations(
     rows: &mut Vec<(crate::row_store::TypedKey, crate::row_store::RowValue)>,
     mutations: &[RowIndexMutation],
-) -> Result<(), GraphError> {
+) -> Result<Vec<LogicalRowRekey>, GraphError> {
+    let mut logical_rekeys = Vec::new();
     for mutation in mutations {
         let RowIndexMutation::Delete { key } = mutation else {
             continue;
@@ -6758,6 +6773,10 @@ fn apply_row_index_mutations(
         let (_, value) = rows.remove(index);
         let insertion = locate_insertion(rows, to);
         rows.insert(insertion, (to.clone(), value));
+        logical_rekeys.push(LogicalRowRekey {
+            old_address: from.clone(),
+            new_address: to.clone(),
+        });
     }
     for mutation in mutations {
         let RowIndexMutation::Insert { key, value } = mutation else {
@@ -6772,7 +6791,7 @@ fn apply_row_index_mutations(
         }
         rows.insert(insertion, (key.clone(), value.clone()));
     }
-    Ok(())
+    Ok(logical_rekeys)
 }
 
 fn locate_row(
