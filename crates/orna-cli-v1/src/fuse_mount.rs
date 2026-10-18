@@ -636,13 +636,15 @@ pub(super) fn spawn_editor(
     fuser::spawn_mount(filesystem, mountpoint, &config)
         .map_err(|error| format!("FUSE editor mount could not be created: {error}"))
 }
-pub(super) fn edit_path(repository: &Repository, path: &str, grouped_row: bool) -> Result<(), String> {
-    let context = repository
-        .open_format_context_at_selector("HEAD")
-        .map_err(|error| format!("workspace snapshot could not be pinned: {error:?}"))?;
-    let commit = context.commit().clone();
-    let writer = MountWriter::open(repository, &commit)?;
-    let filesystem = WorkspaceFilesystem::from_snapshot(repository, &commit, &context, Some(writer.clone()))?;
+pub(super) fn edit_path(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    context: &HistoricalFormatContext,
+    path: &str,
+    grouped_row: bool,
+) -> Result<(), String> {
+    let writer = MountWriter::open(repository, commit)?;
+    let filesystem = WorkspaceFilesystem::from_snapshot(repository, commit, context, Some(writer.clone()))?;
     let relative = Path::new(path);
     if relative.is_absolute() {
         return Err("edit path must be relative to the projected row tree".into());
