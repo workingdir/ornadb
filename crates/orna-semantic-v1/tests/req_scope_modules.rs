@@ -1,4 +1,4 @@
-use orna_semantic_v1::{analyze, Catalogue, ModuleInput, Namespace, StandardDependencyProfile, Type};
+use orna_semantic_v1::{analyze, analyze_with_catalogue, Catalogue, ModuleInput, Namespace, StandardDependencyProfile, Type};
 
 fn module(path: &str, source: &str) -> ModuleInput {
     ModuleInput::new(path, source)
@@ -14,15 +14,24 @@ fn filename_stem_and_root_main_determine_namespaces() {
     assert!(result.modules.contains_key(&Namespace(vec!["sub".into()])));
 }
 
-/// ORNA-NS-006 and ORNA-NS-007: sys is protected; std may be supplied by an implementation.
+/// ORNA-NS-006 and ORNA-NS-007: sys is protected; std is optional, reserved when present, and replaceable.
 #[test]
-fn sys_cannot_be_shadowed_but_std_is_replaceable() {
+fn sys_is_protected_and_std_is_optional_replaceable_and_reserved() {
     let sys = analyze(&[module("sys/main.orna", "fn replacement(): Int = 1;")]);
     assert!(sys.diagnostics.iter().any(|diagnostic| diagnostic.code() == orna_semantic_v1::DIAG_RESERVED));
-    let standard_source = "pub fn replacement() = 1;";
+
+    let std_shadow = analyze(&[module("std/main.orna", "pub fn answer(): Int = 42;")]);
+    assert!(std_shadow.diagnostics.iter().any(|diagnostic| diagnostic.code() == orna_semantic_v1::DIAG_RESERVED));
+
+    let source = module("main.orna", "use std as s; fn run(): Int = s.answer();");
+    assert!(!analyze(&[source.clone()]).is_ok(), "std is absent from the default catalogue");
+
+    let standard_source = "pub fn answer(): Int = 42;";
     let profile = StandardDependencyProfile::from_sources("std/replacement-v1", [("std/main.orna".into(), standard_source.into())]).expect("profile");
     let std = Catalogue::from_standard_sources(&profile, [("std/main.orna".into(), standard_source.into())]).expect("replaceable std catalogue");
     assert!(std.standard_dependency_profile().is_some());
+    let replacement = analyze_with_catalogue(&[source], &std);
+    assert!(replacement.diagnostics.is_empty(), "{:?}", replacement.diagnostics.iter().map(|diagnostic| diagnostic.code()).collect::<Vec<_>>());
 }
 
 /// ORNA-IMPORT-002: an alias scopes the imported namespace under the requested name.
@@ -39,14 +48,18 @@ fn glob_import_exposes_public_name_to_lexical_scope() {
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics.iter().map(|diagnostic| diagnostic.code()).collect::<Vec<_>>());
 }
 
-/// ORNA-IMPORT-005 and ORNA-IMPORT-006: import analysis is declarative; no module code executes.
+/// ORNA-IMPORT-005: resolving an ordinary module does not evaluate an uncalled function body.
 #[test]
-fn prelude_import_only_binds_pinned_exports_without_execution() {
-    let source = module("main.orna", "use lib as _; fn run(): Int = answer();");
-    let mut imported = module("lib.orna", "pub fn answer(): Int = 42;");
-    imported.prelude_exports.insert("answer".into());
-    let result = analyze(&[source, imported]);
-    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics.iter().map(|diagnostic| diagnostic.code()).collect::<Vec<_>>());
+fn importing_module_does_not_evaluate_unreferenced_function_bodies() {
+    let source = module("main.orna", "use lib as x; fn run(): Int = x.answer();");
+    let imported = module(
+        "lib.orna",
+        "pub fn answer(): Int = 42; pub fn fail_if_evaluated(): Int = 1 / 0;",
+    );
+    let result = analyze_with_catalogue(&[source, imported], &Catalogue::authoritative_fixture());
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics.iter().map(|diagnostic| (diagnostic.code(), diagnostic.message())).collect::<Vec<_>>());
+    let library = &result.modules[&Namespace(vec!["lib".into()])];
+    assert!(library.exports.contains_key("fail_if_evaluated"));
 }
 
 /// ORNA-IMPORT-007: multiple wildcard providers make an unresolved name ambiguous regardless of order.
@@ -80,4 +93,7 @@ fn exact_decimal_currency_constructor_has_money_type() {
                 arguments: vec![Type::Named("exact-money.GBP".into())],
             }
     ));
+    let implicit_source = include_str!("fixtures/traceability-money-exact-decimal.orna").replace("12.34.GBP", "12.34");
+    let implicit_money = analyze(&[ModuleInput::new("implicit_money.orna", implicit_source)]);
+    assert!(implicit_money.diagnostics.iter().any(|diagnostic| diagnostic.code() == orna_semantic_v1::DIAG_TYPE), "a bare decimal must not implicitly construct Money");
 }
