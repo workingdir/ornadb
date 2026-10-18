@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
 use fuser::{
@@ -24,7 +24,8 @@ use orna_repository_v1::{
     RowMapSnapshot, RuntimeGeneration, TypedKey,
 };
 use orna_runtime_v1::{
-    NoFault, RuntimeState, RuntimeTableIdentity, TableObjectId,
+    NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
+    TableObjectId,
     vfs::{
         EditDraft, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave, VfsDurableSave,
         VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate,
@@ -39,6 +40,8 @@ struct MountWriter {
     state: RuntimeState,
     repository: Repository,
     project: Arc<orna_project_v1::LoadedProject>,
+    runtime_commit: GitCommitRef,
+    mount_snapshot: OnceLock<RuntimeTableActivationSnapshot>,
     cache: Arc<VfsRepositoryCache>,
     owner_id: [u8; 16],
 }
@@ -56,6 +59,10 @@ impl MountWriter {
         let state = runtime
             .block_on(RuntimeState::open(repository, identity, initial_digest))
             .map_err(|error| format!("mounted editor runtime could not be opened: {error:?}"))?;
+        let runtime_commit = repository
+            .head()
+            .map_err(|error| format!("mounted editor runtime source commit is unavailable: {error:?}"))?
+            .unwrap_or_else(|| commit.clone());
         let project = ProjectLoader::default()
             .load_committed_snapshot(repository, commit)
             .map_err(|error| format!("committed source project could not be loaded: {error:?}"))?;
@@ -64,9 +71,21 @@ impl MountWriter {
             state,
             repository: repository.clone(),
             project: Arc::new(project),
+            runtime_commit,
+            mount_snapshot: OnceLock::new(),
             cache: Arc::new(VfsRepositoryCache::new()),
             owner_id,
         }))
+    }
+
+    fn capture_mount_activation(&self, tables: &[RuntimeTableIdentity]) -> Result<(), String> {
+        let snapshot = self
+            .runtime
+            .block_on(self.state.begin_admitted_table_activation(tables))
+            .map_err(|error| format!("mounted editor row admission failed: {error:?}"))?;
+        self.mount_snapshot
+            .set(snapshot)
+            .map_err(|_| "mounted editor runtime snapshot was already captured".to_owned())
     }
 
     fn cwd_generation(&self) -> Result<orna_repository_v1::CwdGeneration, String> {
@@ -83,22 +102,17 @@ impl MountWriter {
             })
     }
 
-    fn row_baseline(
-        &self,
+    fn row_baseline<'a>(
+        &'a self,
         table: &RuntimeTableIdentity,
         key: &[u8],
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Option<&'a [u8]>, String> {
         let snapshot = self
-            .runtime
-            .block_on(
-                self.state
-                    .begin_admitted_table_activation(std::slice::from_ref(table)),
-            )
-            .map_err(|error| format!("mounted editor row admission failed: {error:?}"))?;
-        snapshot
-            .query_exact(table.table(), key)
-            .map(|row| row.map(<[u8]>::to_vec))
-            .map_err(|error| format!("mounted editor row baseline is unavailable: {error:?}"))
+            .mount_snapshot
+            .get()
+            .ok_or_else(|| "mounted editor runtime snapshot was not captured".to_owned())?;
+        runtime_row_baseline_from_rows(snapshot.table_rows(), table, key)
+            .ok_or_else(|| format!("runtime table {} was not admitted", table.table()))
     }
 
     fn candidate(
@@ -327,6 +341,89 @@ fn runtime_table_key_bytes(key: &TypedKey) -> Result<Vec<u8>, String> {
             .map_err(|error| format!("committed row key cannot be encoded: {error:?}")),
     }
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StoredFieldShape {
+    field_id: [u8; 16],
+    field_type: Raw,
+}
+
+#[derive(Clone, Debug)]
+struct StoredFieldLayout {
+    fields: Vec<StoredFieldShape>,
+    indexes: HashMap<[u8; 16], usize>,
+}
+
+impl StoredFieldLayout {
+    fn field_type(&self, field_id: &[u8; 16]) -> Option<&Raw> {
+        self.indexes
+            .get(field_id)
+            .and_then(|index| self.fields.get(*index))
+            .map(|field| &field.field_type)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RowProjectionSource {
+    RuntimeSnapshot,
+    PinnedSnapshot,
+}
+
+fn runtime_row_for_exact_key<'a>(
+    rows: &'a [(Vec<u8>, Vec<u8>)],
+    key: &[u8],
+) -> Option<&'a [u8]> {
+    rows.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+        .ok()
+        .map(|index| rows[index].1.as_slice())
+}
+
+fn runtime_row_baseline_from_rows<'a>(
+    rows: &'a RuntimeTableRows,
+    table: &RuntimeTableIdentity,
+    key: &[u8],
+) -> Option<Option<&'a [u8]>> {
+    Some(runtime_row_for_exact_key(rows.get(table.table())?, key))
+}
+
+fn runtime_row_matches_layout(
+    runtime_fields: &Raw,
+    pinned_layout: &[StoredFieldShape],
+    runtime_layout: &[StoredFieldShape],
+    row_field_ids: impl Iterator<Item = [u8; 16]>,
+) -> bool {
+    let Raw::Array(values) = runtime_fields else {
+        return false;
+    };
+    runtime_layout == pinned_layout
+        && values.len() == pinned_layout.len()
+        && pinned_layout
+            .iter()
+            .map(|field| field.field_id)
+            .eq(row_field_ids)
+}
+
+fn select_runtime_row_fields(
+    runtime_row: Option<&[u8]>,
+    pinned_fields: Raw,
+    pinned_layout: &[StoredFieldShape],
+    runtime_layout: Option<&[StoredFieldShape]>,
+    row_field_ids: impl Iterator<Item = [u8; 16]>,
+) -> (Raw, RowProjectionSource) {
+    if let (Some(runtime_row), Some(runtime_layout)) = (runtime_row, runtime_layout)
+        && let Ok(runtime_fields) = decode_canonical_storage_value(runtime_row)
+        && runtime_row_matches_layout(
+            &runtime_fields,
+            pinned_layout,
+            runtime_layout,
+            row_field_ids,
+        )
+    {
+        return (runtime_fields, RowProjectionSource::RuntimeSnapshot);
+    }
+    (pinned_fields, RowProjectionSource::PinnedSnapshot)
+}
+
 fn row_save_context(
     writer: &Arc<MountWriter>,
     source: &Arc<TableSource>,
@@ -345,7 +442,13 @@ fn row_save_context(
     )
     .map_err(|error| format!("committed table identity is invalid: {error:?}"))?;
     let key_bytes = runtime_table_key_bytes(key)?;
-    let expected_baseline_row = writer.row_baseline(&table, &key_bytes)?;
+    let expected_baseline_row = source
+        .runtime_table
+        .as_ref()
+        .map(|runtime_table| writer.row_baseline(runtime_table, &key_bytes))
+        .transpose()?
+        .flatten()
+        .map(|row| row.to_vec());
     let mut components = Vec::new();
     flatten_key_components(key, &mut components)?;
     let Some((leaf, prefixes)) = components.split_last() else {
@@ -889,6 +992,28 @@ impl WorkspaceFilesystem {
                 })
                 .collect(),
         );
+        let mut runtime_tables = BTreeMap::new();
+        if let Some(writer) = &builder.writer {
+            let mut activation_tables = Vec::with_capacity(tables.len());
+            for (relation_id, _) in &tables {
+                let Ok(runtime_schema) = loader.resolve_committed_source_table_schema(
+                    repository,
+                    &writer.runtime_commit,
+                    TableObjectId::new(*relation_id),
+                ) else {
+                    continue;
+                };
+                let runtime_table = RuntimeTableIdentity::new(
+                    runtime_schema.declaration_name(),
+                    TableObjectId::new(*relation_id),
+                )
+                .map_err(|error| format!("runtime table identity is invalid: {error:?}"))?;
+                let runtime_field_layout = stored_field_layout(runtime_schema.descriptor())?;
+                activation_tables.push(runtime_table.clone());
+                runtime_tables.insert(*relation_id, (runtime_table, runtime_field_layout));
+            }
+            writer.capture_mount_activation(&activation_tables)?;
+        }
 
         for (relation_id, qualified_name) in tables {
             let schema = loader
@@ -913,6 +1038,10 @@ impl WorkspaceFilesystem {
             let value_context = context.open_value_context(relation_id).map_err(|error| {
                 format!("committed row value context could not be opened: {error:?}")
             })?;
+            let (runtime_table, runtime_field_layout) = runtime_tables
+                .remove(&relation_id)
+                .map(|(table, layout)| (Some(table), Some(layout)))
+                .unwrap_or((None, None));
             builder.add_table_rows(
                 table_directory,
                 graph,
@@ -920,6 +1049,8 @@ impl WorkspaceFilesystem {
                 &schema,
                 value_context,
                 &field_names,
+                runtime_table,
+                runtime_field_layout,
             )?;
         }
 
@@ -2031,7 +2162,10 @@ impl FsBuilder {
         schema: &ResolvedTableSchema,
         value_context: Format3Context,
         field_names: &HashMap<[u8; 16], String>,
+        runtime_table: Option<RuntimeTableIdentity>,
+        runtime_field_layout: Option<StoredFieldLayout>,
     ) -> Result<(), String> {
+        let pinned_field_layout = stored_field_layout(schema.descriptor())?;
         let source = Arc::new(TableSource {
             graph,
             rows,
@@ -2039,7 +2173,9 @@ impl FsBuilder {
             schema: schema.clone(),
             value_context,
             field_names: field_names.clone(),
-            field_types: stored_field_types(schema.descriptor())?,
+            pinned_field_layout,
+            runtime_table,
+            runtime_field_layout,
         });
         let node = self
             .nodes
@@ -2413,24 +2549,40 @@ impl FsBuilder {
             .map_err(|error| format!("committed row fields could not be decoded: {error:?}"))?;
         let pinned_fields = decode_canonical_storage_value(decoded.canonical_fields())
             .map_err(|error| format!("committed row values could not be decoded: {error:?}"))?;
-        let runtime_fields = if let Some(writer) = &self.writer {
-            let table = RuntimeTableIdentity::new(
-                source.schema.declaration_name(),
-                TableObjectId::new(*source.binding.relation_id()),
-            )
-            .map_err(|error| format!("runtime table identity is invalid: {error:?}"))?;
-            let runtime_key = runtime_table_key_bytes(key)?;
-            writer
-                .row_baseline(&table, &runtime_key)?
-                .and_then(|row| decode_canonical_storage_value(&row).ok())
-                .filter(|value| matches!(value, Raw::Array(values) if values.len() == decoded.fields().len()))
-        } else {
-            None
+        // Runtime rows are joined by current table identity and the exact pinned
+        // key. Rekeys have no row-lineage metadata, so they remain pinned here.
+        let runtime_row = match (&self.writer, &source.runtime_table) {
+            (Some(writer), Some(table)) => {
+                let runtime_key = runtime_table_key_bytes(key)?;
+                let canonical_key = key
+                    .canonical_bytes()
+                    .map_err(|error| format!("committed row key cannot be encoded: {error:?}"))?;
+                writer
+                    .row_baseline(table, &runtime_key)?
+                    .filter(|row| {
+                        source
+                            .schema
+                            .descriptor()
+                            .validate_stored_row(
+                                *source.binding.relation_id(),
+                                &canonical_key,
+                                row,
+                            )
+                            .is_ok()
+                    })
+            }
+            _ => None,
         };
-        // Runtime activation values are useful for projecting accepted edits only
-        // when they have the same canonical field-array shape as the pinned row.
-        // Otherwise retain the pinned native graph's validated field values.
-        let canonical_fields = runtime_fields.unwrap_or(pinned_fields);
+        let (canonical_fields, _projection_source) = select_runtime_row_fields(
+            runtime_row,
+            pinned_fields,
+            &source.pinned_field_layout.fields,
+            source
+                .runtime_field_layout
+                .as_ref()
+                .map(|layout| layout.fields.as_slice()),
+            decoded.fields().iter().map(|field| *field.field_id()),
+        );
         let Raw::Array(values) = canonical_fields else {
             return Err("committed row values are not a canonical field array".into());
         };
@@ -2447,8 +2599,8 @@ impl FsBuilder {
                 .get(field.field_id())
                 .ok_or_else(|| "committed field has no source identity".to_owned())?;
             let field_type = source
-                .field_types
-                .get(field.field_id())
+                .pinned_field_layout
+                .field_type(field.field_id())
                 .ok_or_else(|| "committed field has no schema type".to_owned())?;
             if let Some(metadata) = field.blob_metadata() {
                 let value_oid = metadata
@@ -2731,7 +2883,9 @@ struct TableSource {
     schema: ResolvedTableSchema,
     value_context: Format3Context,
     field_names: HashMap<[u8; 16], String>,
-    field_types: HashMap<[u8; 16], Raw>,
+    pinned_field_layout: StoredFieldLayout,
+    runtime_table: Option<RuntimeTableIdentity>,
+    runtime_field_layout: Option<StoredFieldLayout>,
 }
 struct DirectoryEntry {
     inode: u64,
@@ -2775,7 +2929,7 @@ fn field_names_for_table(
         .collect()
 }
 
-fn stored_field_types(descriptor: &SchemaDescriptor) -> Result<HashMap<[u8; 16], Raw>, String> {
+fn stored_field_layout(descriptor: &SchemaDescriptor) -> Result<StoredFieldLayout, String> {
     let Raw::Map(schema) = descriptor.raw() else {
         return Err("committed table schema is not a canonical map".into());
     };
@@ -2788,7 +2942,8 @@ fn stored_field_types(descriptor: &SchemaDescriptor) -> Result<HashMap<[u8; 16],
         return Err("committed table schema fields are not an array".into());
     };
     let stored_role = Raw::Int(1.into());
-    let mut types = HashMap::with_capacity(fields.len());
+    let mut stored_fields = Vec::with_capacity(fields.len());
+    let mut indexes = HashMap::with_capacity(fields.len());
     for field in fields {
         let Raw::Array(parts) = field else {
             return Err("committed table schema field is not an array".into());
@@ -2806,11 +2961,19 @@ fn stored_field_types(descriptor: &SchemaDescriptor) -> Result<HashMap<[u8; 16],
             .as_slice()
             .try_into()
             .map_err(|_| "committed field identity has the wrong width")?;
-        if types.insert(identity, field_type.clone()).is_some() {
+        let index = stored_fields.len();
+        if indexes.insert(identity, index).is_some() {
             return Err("committed table schema repeats a stored field".into());
         }
+        stored_fields.push(StoredFieldShape {
+            field_id: identity,
+            field_type: field_type.clone(),
+        });
     }
-    Ok(types)
+    Ok(StoredFieldLayout {
+        fields: stored_fields,
+        indexes,
+    })
 }
 
 fn is_optional_field(field_type: &Raw) -> bool {
@@ -3091,11 +3254,158 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::{
-        Expr, FsBuilder, NodeKind, ROOT_INODE, is_replacement_scratch_name, key_directory,
-        parse_row, runtime_table_key_bytes, source_without_fields,
+        Expr, FsBuilder, NodeKind, ROOT_INODE, RowProjectionSource, StoredFieldShape,
+        is_replacement_scratch_name, key_directory, parse_row, runtime_row_baseline_from_rows,
+        runtime_table_key_bytes, select_runtime_row_fields, source_without_fields,
     };
     use orna_repository_v1::TypedKey;
-    use orna_runtime_v1::vfs::project_component;
+    use orna_runtime_v1::{
+        RuntimeTableIdentity, RuntimeTableRows, TableObjectId, vfs::project_component,
+    };
+    use orna_value_v1::{Raw, Value};
+    fn encode_fields(fields: Vec<Raw>) -> Vec<u8> {
+        Value::new(Raw::Array(fields)).unwrap().encode().unwrap()
+    }
+
+    #[test]
+    fn renamed_tables_use_current_identity_while_rekeys_keep_the_pinned_boundary() {
+        let id = [1; 16];
+        let current_table =
+            RuntimeTableIdentity::new("Renamed", TableObjectId::new(id)).unwrap();
+        let pinned_table =
+            RuntimeTableIdentity::new("OldName", TableObjectId::new(id)).unwrap();
+        let layout = [StoredFieldShape {
+            field_id: id,
+            field_type: Raw::Text("Str".into()),
+        }];
+        let pinned = Raw::Array(vec![Raw::Text("pinned value".into())]);
+        let current_bytes = encode_fields(vec![Raw::Text("current value".into())]);
+        let renamed_rows: RuntimeTableRows = [(
+            "Renamed".to_owned(),
+            vec![(b"same-key".to_vec(), current_bytes.clone())],
+        )]
+        .into();
+
+        let current_row =
+            runtime_row_baseline_from_rows(&renamed_rows, &current_table, b"same-key").unwrap();
+        assert_eq!(current_row, Some(current_bytes.as_slice()));
+        let (projected, source) = select_runtime_row_fields(
+            current_row,
+            pinned.clone(),
+            &layout,
+            Some(&layout),
+            [id].into_iter(),
+        );
+        assert_eq!(source, RowProjectionSource::RuntimeSnapshot);
+        assert_eq!(
+            projected,
+            Raw::Array(vec![Raw::Text("current value".into())])
+        );
+        assert_eq!(
+            runtime_row_baseline_from_rows(&renamed_rows, &pinned_table, b"same-key"),
+            None
+        );
+
+        let rekeyed_rows: RuntimeTableRows = [(
+            "Renamed".to_owned(),
+            vec![(b"new-key".to_vec(), current_bytes)],
+        )]
+        .into();
+        let current =
+            runtime_row_baseline_from_rows(&rekeyed_rows, &current_table, b"old-key").unwrap();
+        assert_eq!(current, None);
+        let (projected, source) = select_runtime_row_fields(
+            current,
+            pinned.clone(),
+            &layout,
+            Some(&layout),
+            [id].into_iter(),
+        );
+        assert_eq!(source, RowProjectionSource::PinnedSnapshot);
+        assert_eq!(projected, pinned);
+    }
+
+    #[test]
+    fn equal_length_field_order_and_schema_changes_reject_runtime_rows() {
+        let pinned_layout = [
+            StoredFieldShape {
+                field_id: [1; 16],
+                field_type: Raw::Text("Str".into()),
+            },
+            StoredFieldShape {
+                field_id: [2; 16],
+                field_type: Raw::Text("Int".into()),
+            },
+        ];
+        let runtime_bytes = encode_fields(vec![Raw::Text("title".into()), Raw::Int(7.into())]);
+        let pinned_fields = Raw::Array(vec![Raw::Text("old title".into()), Raw::Int(6.into())]);
+        let reordered_layout = [pinned_layout[1].clone(), pinned_layout[0].clone()];
+        let changed_schema_layout = [
+            pinned_layout[0].clone(),
+            StoredFieldShape {
+                field_id: [2; 16],
+                field_type: Raw::Text("Bool".into()),
+            },
+        ];
+
+        for runtime_layout in [&reordered_layout[..], &changed_schema_layout[..]] {
+            let (projected, source) = select_runtime_row_fields(
+                Some(&runtime_bytes),
+                pinned_fields.clone(),
+                &pinned_layout,
+                Some(runtime_layout),
+                [[1; 16], [2; 16]].into_iter(),
+            );
+            assert_eq!(source, RowProjectionSource::PinnedSnapshot);
+            assert_eq!(projected, pinned_fields);
+        }
+    }
+
+    #[test]
+    fn lazy_row_lookups_share_the_captured_runtime_generation() {
+        let generation_one: RuntimeTableRows = [(
+            "Music".to_owned(),
+            vec![
+                (b"one".to_vec(), encode_fields(vec![Raw::Text("one-v1".into())])),
+                (b"two".to_vec(), encode_fields(vec![Raw::Text("two-v1".into())])),
+            ],
+        )]
+        .into();
+        let generation_two: RuntimeTableRows = [(
+            "Music".to_owned(),
+            vec![
+                (b"one".to_vec(), encode_fields(vec![Raw::Text("one-v2".into())])),
+                (b"two".to_vec(), encode_fields(vec![Raw::Text("two-v2".into())])),
+            ],
+        )]
+        .into();
+        let table = RuntimeTableIdentity::new("Music", TableObjectId::new([3; 16])).unwrap();
+        let mount_snapshot = std::sync::OnceLock::new();
+        assert!(mount_snapshot.set(generation_one).is_ok());
+
+        let first = runtime_row_baseline_from_rows(mount_snapshot.get().unwrap(), &table, b"one")
+            .unwrap()
+            .unwrap();
+        let second = runtime_row_baseline_from_rows(mount_snapshot.get().unwrap(), &table, b"two")
+            .unwrap()
+            .unwrap();
+        let later_second = runtime_row_baseline_from_rows(&generation_two, &table, b"two")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Value::decode(first).unwrap().raw(),
+            &Raw::Array(vec![Raw::Text("one-v1".into())]),
+        );
+        assert_eq!(
+            Value::decode(second).unwrap().raw(),
+            &Raw::Array(vec![Raw::Text("two-v1".into())]),
+        );
+        assert_eq!(
+            Value::decode(later_second).unwrap().raw(),
+            &Raw::Array(vec![Raw::Text("two-v2".into())]),
+        );
+    }
+
     #[test]
     fn runtime_table_keys_use_persisted_text_bytes_and_typed_encoding_otherwise() {
         assert_eq!(
