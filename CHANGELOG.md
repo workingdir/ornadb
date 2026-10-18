@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
 - JSON encoding supports Money values when their registered nominal Currency metadata is available. It preserves the exact decimal amount as a string and emits the registered currency code.
 - Semantic quantities retain reduced dimension exponents, exact rational scale,
   and affine metadata through numeric aggregates. Integrating speed by elapsed
