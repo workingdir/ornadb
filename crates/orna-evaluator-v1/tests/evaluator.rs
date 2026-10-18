@@ -4144,7 +4144,8 @@ fn std_collection_float_sum_accepts_direct_named_pipeline_and_function_calls() {
     );
 }
 
-// Specified: ORNA-FLOAT-005; this test exercises left-to-right Float accumulation and canonical-NaN propagation.
+// Specified: ORNA-FLOAT-005 for left-to-right accumulation; ORNA-FLOAT-007
+// for canonical-NaN propagation.
 #[test]
 fn std_collection_float_sum_folds_left_to_right_and_propagates_canonical_nan() {
     let rows = float_rows(&[
@@ -4265,7 +4266,8 @@ fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separa
     );
 }
 
-// Specified: ORNA-FLOAT-005; verifies NaN propagation and empty identities for Float aggregation.
+// Specified: ORNA-FLOAT-005 for empty identities; ORNA-FLOAT-007 for
+// canonical-NaN propagation in Float min and max.
 #[test]
 fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
     let environment = Environment::from([(
