@@ -1494,6 +1494,7 @@ fn project_row_admission_resolves_declared_owner_path_key_and_evaluated_body() {
     let rows = orna_conformance_v1::row_admission::admit_project_rows(
         &project,
         &analysis,
+        &orna_conformance_v1::row_admission::RowAdmissionIdentity { database_id: [0; 16], tables: std::collections::BTreeMap::new() },
         Limits::default(),
     )
     .expect("project-context row admission");
@@ -1731,6 +1732,7 @@ fn project_row_admission_accepts_exact_current_container_forms() {
     let rows = orna_conformance_v1::row_admission::admit_project_rows(
         &project,
         &analysis,
+        &orna_conformance_v1::row_admission::RowAdmissionIdentity { database_id: [0; 16], tables: std::collections::BTreeMap::new() },
         Limits::default(),
     )
     .expect("container row admission");
