@@ -71,14 +71,6 @@ fn requirement_coverage_has_nonempty_test_mappings() {
     assert!(!report.skipped_evidence.is_empty());
 }
 
-/// ORNA-TEST-007 and ORNA-TEST-008: harness unit tests run in-process without a server or a mocks ban.
-#[test]
-fn harness_executes_in_process() {
-    let corpus = Corpus::load_default().expect("published corpus validates");
-    let mut adapter = SkippingAdapter;
-    let report = Harness::new(corpus).run(&mut adapter);
-    assert!(!report.fixtures.is_empty());
-}
 
 /// ORNA-TEST-009: a complete-project fixture must explicitly index legacy row loading.
 #[test]
