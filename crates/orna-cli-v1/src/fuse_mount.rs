@@ -39,6 +39,7 @@ struct MountWriter {
     runtime: tokio::runtime::Runtime,
     state: RuntimeState,
     repository: Repository,
+    identities: ObjectIdentityManifest,
     project: Arc<orna_project_v1::LoadedProject>,
     cache: Arc<VfsRepositoryCache>,
     owner_id: [u8; 16],
@@ -57,6 +58,8 @@ impl MountWriter {
         let state = runtime
             .block_on(RuntimeState::open(repository, identity, initial_digest))
             .map_err(|error| format!("mounted editor runtime could not be opened: {error:?}"))?;
+        let identities = ObjectIdentityManifest::read_committed(repository, commit)
+            .map_err(|error| format!("committed source identities could not be loaded: {error:?}"))?;
         let project = ProjectLoader::default()
             .load_committed_snapshot(repository, commit)
             .map_err(|error| format!("committed source project could not be loaded: {error:?}"))?;
@@ -64,6 +67,7 @@ impl MountWriter {
             runtime,
             state,
             repository: repository.clone(),
+            identities,
             project: Arc::new(project),
             cache: Arc::new(VfsRepositoryCache::new()),
             owner_id,
@@ -282,6 +286,7 @@ impl MountWriter {
         .map_err(orna_runtime_v1::TableActivationError::Runtime)?;
         let validator = transactional_loaded_project_candidate_validator(
             &self.project,
+            &self.identities,
             coordinates.cwd_generation().clone(),
             Arc::clone(&row.table_object_ids),
             EvaluatorLimits::default(),
