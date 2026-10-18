@@ -1511,6 +1511,7 @@ mod tests {
         fail(backend, lease)
     }
 
+    // ORNA-FAIL-005: delivery identity includes the complete typed position, not a digest alone.
     #[test]
     fn identity_is_canonical_and_stable() {
         let first = delivery("receipt:opaque-a", "resume:opaque-b");
@@ -1662,6 +1663,7 @@ mod tests {
         ));
     }
 
+    // ORNA-SYS-066: retained payload material is redacted from diagnostic formatting.
     #[test]
     fn retained_provider_payload_debug_output_is_redacted() {
         let plaintext = StreamFailurePayload::Plaintext(b"provider-secret-payload".to_vec());
@@ -1683,6 +1685,8 @@ mod tests {
         assert!(!protected_debug.contains("7, 7, 7"));
     }
 
+    // ORNA-FAIL-001: repeated failures for one delivery update its stable failure record.
+    // ORNA-FAIL-001: repeated processing failures update the one durable failure identity.
     #[test]
     fn repeated_failures_update_one_stable_row() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -1729,6 +1733,7 @@ mod tests {
         ));
     }
 
+    // ORNA-CP-006: a divergent successor is rejected rather than advancing beyond a blocked delivery.
     #[test]
     fn divergent_checkpoint_position_is_rejected() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -1758,6 +1763,7 @@ mod tests {
     }
 
     // ORNA-TYPE-003: a failed delivery remains explicit until the stream retry succeeds or fails.
+    // ORNA-SYS-122: retry transitions preserve one failure identity and checkpoint semantics.
     #[test]
     fn retry_can_succeed_or_fail() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -1803,6 +1809,7 @@ mod tests {
         assert!(scheduled.version < backend.failure(&FailureIdentity(item)).unwrap().version);
     }
 
+    // ORNA-SYS-121: retry admission checks failure preconditions before user work executes.
     #[test]
     fn retry_admission_preserves_attempts_when_interrupted() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -1829,6 +1836,7 @@ mod tests {
         assert_eq!(recovered.attempts, 2);
     }
 
+    // ORNA-FAIL-003: explicit skip records the delivery and advances to its provider successor.
     #[test]
     fn skip_advances_exactly_one_position() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -2098,6 +2106,7 @@ mod tests {
         );
     }
 
+    // ORNA-SYS-124: a blocking open failure cannot be resolved without success or skip.
     #[test]
     fn resolve_requires_success_or_skip() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -2187,6 +2196,7 @@ mod tests {
         ));
     }
 
+    // ORNA-FAIL-002: an unresolved failure blocks later ordered delivery instead of discarding it.
     #[test]
     fn failed_delivery_blocks_later_ordered_delivery_until_administration() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -2294,6 +2304,7 @@ mod tests {
         ));
     }
 
+    // ORNA-CP-004: reset treats positions as opaque and requires matching preconditions.
     #[test]
     fn reset_is_opaque_and_compare_and_set() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -2553,6 +2564,7 @@ mod tests {
         ));
     }
 
+    // ORNA-SYS-063: retry admission compares both expected checkpoint version and typed position.
     #[test]
     fn retry_rejects_a_stale_blocking_checkpoint() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -2586,6 +2598,7 @@ mod tests {
         assert_eq!(backend.failure(&failure.identity).unwrap(), &failure);
     }
 
+    // ORNA-SYS-062: cancellation leaves committed progress unchanged and creates no failure.
     #[test]
     fn cancellation_is_rollback_shaped_and_does_not_create_a_failure() {
         let mut backend = InMemoryCheckpointBackend::default();

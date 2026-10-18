@@ -302,6 +302,7 @@ fn delivery(source: &str, checkpoint: u8, event_time: i64, value: &str) -> Plann
     }
 }
 
+// ORNA-BACKPRESSURE-001: provider polling respects the configured bounded buffer while consuming real values.
 #[test]
 fn provider_buffer_bounds_polls_and_commits_real_source_values() {
     let mut provider = ProviderHarness::new([
@@ -349,6 +350,7 @@ fn provider_rejects_empty_nonterminal_page_without_watermark_progress() {
     assert_eq!(provider.requests.len(), 2);
 }
 
+// ORNA-STREAM-004: each configured ordered batch commits its writes and final checkpoint together.
 #[test]
 fn provider_batch_commits_a_short_final_group_with_its_last_checkpoint() {
     let mut provider = ProviderHarness::new([
@@ -540,6 +542,7 @@ fn provider_retry_redelivers_same_checkpoint_and_recover_requires_permission() {
 }
 
 // ORNA-ERR-004: cancellation yields the dedicated cancellation completion, distinct from callback Error.
+// ORNA-CANCEL-001: callback cancellation rolls back the interrupted delivery and its checkpoint.
 #[test]
 fn callback_failure_and_cancellation_roll_back_the_blocked_checkpoint() {
     let mut callback_failure = ProviderHarness::new([
