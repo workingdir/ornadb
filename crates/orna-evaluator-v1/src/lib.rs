@@ -55,6 +55,7 @@ use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
 };
+pub use relation::{RelationPlanMetadata, RelationPlanNode};
 pub use repl::{ReplSession, parse_admitted_repl};
 #[cfg(feature = "system-host-bindings")]
 pub use sys_bindings::SysHostBindingRegistry;
@@ -1410,6 +1411,48 @@ pub fn evaluate_expression(
     limits: Limits,
 ) -> Result<CanonicalValue, EvaluationError> {
     evaluate_expression_with_functions(source, environment, &Functions::new(), limits)
+}
+
+/// Builds planner metadata for a typed relation query without executing its source scan.
+///
+/// Evaluation proceeds only far enough to construct the relation plan. Source reads,
+/// callbacks, and terminal operators that materialize rows are not run.
+#[must_use]
+pub fn planner_metadata(
+    source: &str,
+    environment: &Environment,
+    limits: Limits,
+) -> Result<RelationPlanMetadata, EvaluationError> {
+    check_limits(source, limits)?;
+    let parsed = parse_expression(source);
+    if !parsed.is_ok() {
+        return Err(error("ORNA-EVAL-PARSE"));
+    }
+    validate_limits(limits)?;
+    let functions = Functions::new();
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: None,
+        namespace: None,
+        transfer: None,
+        cancellation: None,
+    };
+    let mut scope = Scope::from_environment(environment, &mut context)?;
+    let value = context.evaluate(&parsed.value, &mut scope, 0)?;
+    if context.transfer.is_some() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    match value {
+        Value::Relation(plan) => Ok(plan.metadata()),
+        _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+    }
 }
 
 /// Evaluate one expression using OVB-2 context values at the boundary.
