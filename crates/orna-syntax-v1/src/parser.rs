@@ -5027,12 +5027,35 @@ impl Parser {
         }
     }
     fn parse_dimension_expression(&mut self) -> Option<DimensionExpr> {
+        let parse_dimension_term = |parser: &mut Self| -> Option<TypeExpr> {
+            let token = parser.current().clone();
+            if !matches!(token.kind, TokenKind::Identifier { .. }) {
+                parser.error_here("ORNA-PARSE-001", "expected dimension name");
+                return None;
+            }
+            let mut path = vec![token.text];
+            parser.bump();
+            while parser.is_punct(".") {
+                parser.bump();
+                if !parser.contextual() {
+                    parser.error_here("ORNA-PARSE-001", "expected dimension path segment");
+                    return None;
+                }
+                path.push(parser.current().text.clone());
+                parser.bump();
+            }
+            Some(TypeExpr::Name {
+                path,
+                arguments: Vec::new(),
+                span: token.span.join(parser.previous().span.clone()),
+            })
+        };
         let start = self.current().span.clone();
         let mut terms = Vec::new();
         let mut operators = Vec::new();
         loop {
             let term_start = self.current().span.clone();
-            let ty = self.parse_type_expr()?;
+            let ty = parse_dimension_term(self)?;
             let exponent = if self.is_punct("^") {
                 self.bump();
                 let sign = if self.is_punct("+") || self.is_punct("-") {

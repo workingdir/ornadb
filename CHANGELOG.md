@@ -5,6 +5,10 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Semantic quantities retain reduced dimension exponents, exact rational scale,
+  and affine metadata through numeric aggregates. Integrating speed by elapsed
+  time adds the Time exponent and returns a length quantity. Dimension expressions
+  parse qualified names without consuming multiplication or division operators.
 
 - Format-3 store-only publication validates canonical row keys without legacy
   loose-row path resolution, including no-op preparation. Legacy formats retain
