@@ -37,6 +37,7 @@ use orna_syntax_v1::{
     TableMember, parse_module_with_file, parse_repl,
 };
 use sha2::{Digest, Sha256};
+pub use orna_security_v1::{RemoteAnalysisDecision, RemoteAnalysisPolicy, RemoteAnalysisRequest};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -45,6 +46,17 @@ use std::{
     sync::{Arc, Mutex},
     time::UNIX_EPOCH,
 };
+/// Applies explicit remote-analysis consent and records the source/snapshot disclosure boundary.
+/// This method only authorizes/records; integrations must call a remote provider only when
+/// `request.is_allowed()` is true. Local evaluation does not depend on this decision.
+#[must_use]
+pub fn remote_analysis_request(
+    policy: RemoteAnalysisPolicy,
+    admitted_snapshot_identity: impl Into<String>,
+    disclosed_data: impl IntoIterator<Item = String>,
+) -> RemoteAnalysisRequest {
+    RemoteAnalysisRequest::new(policy, admitted_snapshot_identity, disclosed_data)
+}
 
 mod repl_transaction;
 pub use repl_transaction::ReplTransactionScope;
@@ -3399,6 +3411,37 @@ fn put_bytes(digest: &mut Sha256, bytes: &[u8]) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn remote_analysis_is_denied_by_default_without_disclosure() {
+        let denied = remote_analysis_request(RemoteAnalysisPolicy::default(), "snapshot:sha256:source-deps-resources-toolchain-abi", Vec::new());
+        assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
+        assert!(!denied.is_allowed());
+        assert!(denied.disclosed_data().is_empty());
+        assert_eq!(denied.source_snapshot(), "snapshot:sha256:source-deps-resources-toolchain-abi");
+    }
+
+    #[test]
+    fn remote_analysis_requires_explicit_policy_and_records_disclosed_boundary() {
+        let allowed = remote_analysis_request(
+            RemoteAnalysisPolicy::AllowRemoteDisclosure,
+            "snapshot:sha256:source-deps-resources-toolchain-abi",
+            ["source", "dependency snapshot", "query"].map(str::to_owned),
+        );
+        assert_eq!(allowed.decision(), RemoteAnalysisDecision::AllowedByUserPolicy);
+        assert!(allowed.is_allowed());
+        assert_eq!(allowed.disclosed_data(), &["source", "dependency snapshot", "query"]);
+    }
+    #[test]
+    fn remote_analysis_explicit_deny_has_no_disclosure() {
+        let denied = remote_analysis_request(
+            RemoteAnalysisPolicy::LocalOnly,
+            "snapshot:sha256:source-deps-resources-toolchain-abi",
+            Vec::new(),
+        );
+        assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
+        assert!(!denied.is_allowed());
+        assert!(denied.disclosed_data().is_empty());
+    }
     #[test]
     fn source_admission_reaches_real_evaluator() {
         let authority =
