@@ -71,15 +71,15 @@ impl VfsScratchStore {
                 ));
             }
         };
-        if !created {
+        if created {
+            Self::sync_directory(runtime_root)?;
+        } else {
             let metadata = fs::symlink_metadata(&directory).map_err(|error| {
                 format!("temporary scratch directory could not be inspected: {error}")
             })?;
             if !metadata.file_type().is_dir() {
                 return Err("temporary scratch directory is not a real directory".into());
             }
-        } else {
-            Self::sync_directory(runtime_root)?;
         }
         Self::sync_directory(&directory)?;
         Ok(Self { directory })
@@ -147,7 +147,7 @@ impl VfsScratchStore {
             }
             let record = Self::read_record(&entry.path())?;
             Self::validate_identity(&record.identity)?;
-            if self.record_name(&record.identity) != name {
+            if Self::record_name(&record.identity) != name {
                 return Err("temporary scratch record identity does not match its filename".into());
             }
             records.push(record);
@@ -176,10 +176,10 @@ impl VfsScratchStore {
     }
 
     fn record_path(&self, identity: &TemporaryScratchIdentity) -> PathBuf {
-        self.directory.join(self.record_name(identity))
+        self.directory.join(Self::record_name(identity))
     }
 
-    fn record_name(&self, identity: &TemporaryScratchIdentity) -> String {
+    fn record_name(identity: &TemporaryScratchIdentity) -> String {
         let mut digest = Sha256::new();
         Self::update_digest(&mut digest, identity.logical_path.as_bytes());
         digest.update(identity.relation_id);
@@ -1340,7 +1340,7 @@ impl WorkspaceFilesystem {
             .collect::<Vec<_>>();
         let loader = ProjectLoader::default();
         let mut builder = FsBuilder::new();
-        builder.writer = writer.clone();
+        builder.writer.clone_from(&writer);
         builder.table_object_ids = Arc::new(
             tables
                 .iter()
@@ -1850,12 +1850,9 @@ impl Filesystem for WorkspaceFilesystem {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            let key = match runtime_table_key_bytes(&save.key) {
-                Ok(key) => key,
-                    Err(_) => {
-                        reply.error(Errno::EIO);
-                        return;
-                    }
+            let Ok(key) = runtime_table_key_bytes(&save.key) else {
+                reply.error(Errno::EIO);
+                return;
             };
             let identity = Arc::new(TemporaryScratchIdentity {
                 logical_path: save.logical_path.clone(),
@@ -1864,12 +1861,9 @@ impl Filesystem for WorkspaceFilesystem {
                 name: name.to_owned(),
                 blob_field_name: blob_field.as_ref().map(|field| field.name.clone()),
             });
-            let target = match save.temporary_target(blob_field.as_ref()) {
-                Ok(target) => target,
-                Err(_) => {
-                    reply.error(Errno::EIO);
-                    return;
-                }
+            let Ok(target) = save.temporary_target(blob_field.as_ref()) else {
+                reply.error(Errno::EIO);
+                return;
             };
             let scratch = Arc::new(
                 save.writer
@@ -1960,29 +1954,27 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            let (save, target, scratch, blob_field, baseline, identity) =
-                match state.nodes.get(&source_inode).map(|node| &node.kind) {
-                    Some(NodeKind::Temporary {
-                        save,
-                        target,
-                        scratch,
-                        blob_field,
-                        baseline,
-                        identity,
-                        ..
-                    }) => (
-                        Arc::clone(save),
-                        Arc::clone(target),
-                        Arc::clone(scratch),
-                        blob_field.clone(),
-                        baseline.clone(),
-                        Arc::clone(identity),
-                    ),
-                    _ => {
-                        reply.error(Errno::EROFS);
-                        return;
-                    }
-                };
+            let Some(NodeKind::Temporary {
+                save,
+                target,
+                scratch,
+                blob_field,
+                baseline,
+                identity,
+                ..
+            }) = state.nodes.get(&source_inode).map(|node| &node.kind)
+            else {
+                reply.error(Errno::EROFS);
+                return;
+            };
+            let (save, target, scratch, blob_field, baseline, identity) = (
+                Arc::clone(save),
+                Arc::clone(target),
+                Arc::clone(scratch),
+                blob_field.clone(),
+                baseline.clone(),
+                Arc::clone(identity),
+            );
             let expected_name = blob_field
                 .as_ref()
                 .map_or("data.orna", |field| field.file_name.as_str());
