@@ -1,5 +1,6 @@
 use orna_semantic_v1::{DIAG_TYPE, ModuleInput, analyze};
 
+// ORNA-ENUM-005: payload-free variants are accepted as primary-key components.
 #[test]
 fn payload_free_enum_is_a_primary_key_type() {
     let source = include_str!("fixtures/enum-primary-key-unit-variant.orna");
