@@ -15197,7 +15197,6 @@ fn user_defined_fail_shadows_the_intrinsic() {
     assert!(!module.symbols["call"].effects.may_fail);
 }
 
-// ORNA-FAILURE-005: constructed Error values have an ordinary inspectable static type.
 #[test]
 fn error_constructor_returns_an_inspectable_error_value() {
     let result = analyze(&[ModuleInput::new(

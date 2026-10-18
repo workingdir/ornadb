@@ -136,13 +136,12 @@ fn expected_semantic_failure(name: &str) -> Option<&'static [&'static str]> {
 // Executable positive compile-path witnesses include the enum/case, function, generic protocol,
 // lambda, control-flow, coalescing, member-access, and pipeline fixtures. This asserts parser,
 // name-resolution, and type-check acceptance only; runtime semantics are covered by focused tests.
-// ORNA-FN-005, ORNA-FN-006, ORNA-FN-008, ORNA-ENUM-001, ORNA-ENUM-002, ORNA-ENUM-004,
-// ORNA-ENUM-006, ORNA-CASE-001, ORNA-CASE-002, ORNA-CASE-004, ORNA-CASE-005,
+// ORNA-FN-005, ORNA-FN-006, ORNA-FN-008, ORNA-ENUM-001, ORNA-ENUM-002,
+// ORNA-ENUM-006, ORNA-CASE-001, ORNA-CASE-002, ORNA-CASE-004,
 // ORNA-GENERIC-003, ORNA-GENERIC-005, ORNA-GENERIC-008, ORNA-GENERIC-009, ORNA-GENERIC-012,
-// ORNA-GENERIC-013, ORNA-GENERIC-015, ORNA-CFLOW-004, ORNA-CFLOW-007, ORNA-CFLOW-008,
-// ORNA-CFLOW-009, ORNA-LAMBDA-001, ORNA-LAMBDA-002, ORNA-LAMBDA-003, ORNA-PIPE-004,
-// ORNA-PIPE-006, ORNA-PIPE-008, ORNA-PIPE-011, ORNA-COALESCE-001, ORNA-COMPARE-002,
-// ORNA-MEMBER-001, ORNA-MEMBER-002, ORNA-MEMBER-003, ORNA-MEMBER-004, ORNA-MEMBER-006.
+// ORNA-GENERIC-013, ORNA-CFLOW-004, ORNA-CFLOW-007,
+// ORNA-LAMBDA-001, ORNA-LAMBDA-002, ORNA-LAMBDA-003, ORNA-PIPE-004,
+// ORNA-PIPE-011, ORNA-MEMBER-001, ORNA-MEMBER-002, ORNA-MEMBER-004.
 #[test]
 fn every_valid_fixture_parses_resolves_names_and_type_checks() {
     let catalogue = Catalogue::authoritative_fixture();
