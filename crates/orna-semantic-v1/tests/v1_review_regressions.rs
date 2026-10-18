@@ -1019,6 +1019,7 @@ fn differing_nonliteral_protocol_defaults_fail_closed() {
 }
 
 // Specified: ORNA-NOMINAL-001; transparent aliases resolve to their existing type while nominal identity remains distinct.
+// ORNA-TYPE-007: transparent aliases resolve while nominal declarations retain distinct identity.
 #[test]
 fn transparent_aliases_resolve_for_protocol_signatures_without_erasing_nominals() {
     let accepted = analyze_main(include_str!(
