@@ -199,6 +199,7 @@ async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
     }
 }
 
+/// ORNA-VFS-006: edits submitted from the editor path use the normal validated VFS admission path.
 #[tokio::test]
 async fn editor_saves_use_the_validated_vfs_row_path() {
     if !require_fuse_or_skip() {
@@ -304,6 +305,7 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     );
 }
 
+/// ORNA-VFS-006: a writer without the selected worktree lease cannot submit an edit.
 #[tokio::test]
 async fn editor_saves_reject_a_foreign_writer_lease() {
     if !require_fuse_or_skip() {
