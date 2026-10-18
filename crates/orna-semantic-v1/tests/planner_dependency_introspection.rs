@@ -3,6 +3,8 @@ use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 const SYS_INTROSPECTION_SOURCE: &str =
     include_str!("fixtures/planner-dependency-introspection.orna");
 
+/// ORNA-PLAN-002: `sys.explain` exposes plans through the typed planner API.
+/// ORNA-DEP-001/002: dependency queries use typed `sys.Object` references and call-kind filters.
 #[test]
 fn portable_sys_sources_resolve_planner_and_dependency_introspection() {
     let analysis = analyze_with_catalogue(
