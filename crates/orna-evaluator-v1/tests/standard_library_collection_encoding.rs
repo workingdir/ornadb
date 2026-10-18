@@ -461,6 +461,7 @@ fn structural_record_roundtrip_uses_the_declared_field_schema() {
     );
 }
 
+/// ORNA-LIB-001: standard-library behavior is captured by the selected dependency snapshot.
 #[test]
 fn map_and_set_bodies_are_bound_to_the_published_std_snapshot() {
     let sources = orna_evaluator_v1::reference_standard_sources();

@@ -82,6 +82,7 @@ fn piped_relation_flat_map_rejects_wrong_argument_names_and_respects_shadowing()
     assert!(shadowed.is_ok(), "{:#?}", shadowed.diagnostics);
 }
 
+/// ORNA-LIB-004: relational callbacks are effect-checked before a plan can use them.
 #[test]
 fn relational_callbacks_preserve_effects_and_failure_before_planning() {
     let result = analyze_with_catalogue(

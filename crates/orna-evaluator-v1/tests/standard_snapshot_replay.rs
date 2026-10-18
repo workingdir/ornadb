@@ -3076,6 +3076,7 @@ fn module_upgrade_sessions_replay_with_their_captured_standard_snapshot() {
     );
 }
 
+/// ORNA-HIST-002: a function through a historical project resolves its historical definition.
 #[test]
 fn project_module_executes_a_real_function_from_its_gitlink_pinned_std_snapshot() {
     let (

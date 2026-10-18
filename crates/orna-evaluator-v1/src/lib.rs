@@ -16465,6 +16465,7 @@ mod tests {
         assert_eq!(callbacks, 1);
     }
 
+    /// ORNA-ORDER-004: filter-fusion optimization retains callback order and does not cross a map.
     #[test]
     fn relation_plan_fuses_adjacent_filters_in_order_without_crossing_map() {
         let first = Value::Bool(true);
