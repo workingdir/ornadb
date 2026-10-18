@@ -1,57 +1,33 @@
-use std::collections::BTreeMap;
-
-use orna_evaluator_v1::{
-    Environment, Functions, Limits, PureFunction, evaluate_expression_with_functions,
-};
+use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
+use orna_value_v1::Raw;
 
-fn pinned_functions() -> Functions {
-    let mut functions = BTreeMap::new();
-    for (path, source) in orna_evaluator_v1::reference_standard_sources() {
-        let parsed = orna_syntax_v1::parse_module(&source);
-        assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
-        let module = path
-            .strip_prefix("std/")
-            .and_then(|path| path.strip_suffix(".orna"))
-            .expect("pinned std paths have std/ prefix and .orna suffix")
-            .replace('/', ".");
-        for item in parsed.value.items {
-            if let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration {
-                let name = format!("std.{module}.{}", signature.name);
-                assert!(
-                    functions
-                        .insert(
-                            name.clone(),
-                            PureFunction {
-                                parameters: signature.parameters,
-                                body,
-                                environment: Environment::new(),
-                            },
-                        )
-                        .is_none(),
-                    "duplicate pinned standard function {name}"
-                );
-            }
-        }
-    }
-    functions
+fn session() -> AdmittedReplSession {
+    AdmittedReplSession::with_reference_standard(Limits::default())
+        .expect("production reference standard modules are admitted")
 }
 
-fn evaluate(source: &str) -> Result<CanonicalValue, orna_evaluator_v1::EvaluationError> {
-    evaluate_expression_with_functions(
-        source,
-        &Environment::new(),
-        &pinned_functions(),
-        Limits::default(),
-    )
+fn submit(session: &mut AdmittedReplSession, source: &str) -> CanonicalValue {
+    session
+        .submit(source)
+        .unwrap_or_else(|error| panic!("{source}: {}", error.code()))
+        .expect("codec expression returns a value")
 }
 
-/// ORNA-CODEC-001: the real evaluator exposes typed `std.encoding.orna.encode` and `decode(..., as: T)` operations.
+fn canonical(raw: Raw) -> CanonicalValue {
+    CanonicalValue::new(raw).expect("expected canonical test value")
+}
+
+/// ORNA-CODEC-001: the admitted evaluator exposes typed `std.encoding.orna.encode` and `decode(..., as: T)` operations.
 #[test]
 fn orna_codec_round_trips_a_typed_integer_through_the_language_entry_point() {
+    let mut repl = session();
     assert_eq!(
-        evaluate("std.encoding.orna.decode(std.encoding.orna.encode(42), as: Int)"),
-        evaluate("42"),
+        submit(
+            &mut repl,
+            "std.encoding.orna.decode(std.encoding.orna.encode(42), as: Int)",
+        ),
+        canonical(Raw::Int(42.into())),
     );
 }
 
@@ -60,13 +36,27 @@ fn orna_codec_round_trips_a_typed_integer_through_the_language_entry_point() {
 fn orna_codec_is_deterministic_unambiguous_and_preserves_large_integer_precision() {
     let large_integer = "123456789012345678901234567890123456789";
     let encode_large = format!("std.encoding.orna.encode({large_integer})");
-    assert_eq!(evaluate(&encode_large), evaluate(&encode_large));
+    let mut repl = session();
+
+    let first_encoding = submit(&mut repl, &encode_large);
+    let second_encoding = submit(&mut repl, &encode_large);
+    let canonical_text = canonical(Raw::Text(format!("{large_integer}\n")));
+    assert_eq!(first_encoding, canonical_text);
+    assert_eq!(second_encoding, canonical_text);
 
     let encode_as_string = format!("std.encoding.orna.encode(\"{large_integer}\")");
-    assert_ne!(evaluate(&encode_large), evaluate(&encode_as_string));
+    let encoded_string = submit(&mut repl, &encode_as_string);
+    assert_eq!(
+        encoded_string,
+        canonical(Raw::Text(format!("\"{large_integer}\"\n"))),
+    );
+    assert_ne!(first_encoding, encoded_string);
 
     let round_trip = format!(
         "std.encoding.orna.decode(std.encoding.orna.encode({large_integer}), as: Int)"
     );
-    assert_eq!(evaluate(&round_trip), evaluate(large_integer));
+    assert_eq!(
+        submit(&mut repl, &round_trip),
+        canonical(Raw::Int(large_integer.parse().expect("large integer parses"))),
+    );
 }
