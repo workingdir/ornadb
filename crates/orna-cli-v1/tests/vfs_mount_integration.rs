@@ -769,7 +769,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
 }
 
 #[tokio::test]
-/// ORNA-VFS-010 and ORNA-VFS-011: a content replacement updates the descriptor through the validated CAS path while preserving row identity.
+/// ORNA-VFS-011: replacing content through a scratch rename compares the captured baseline and preserves row identity.
 async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_identity() {
     if !fuse_test_available() {
         return;
