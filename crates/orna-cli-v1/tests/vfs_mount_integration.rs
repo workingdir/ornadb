@@ -499,7 +499,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
 }
 
 #[tokio::test]
-async fn cwd_mount_edit_row_accepts_absolute_mounted_directory() {
+async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     if !fuse_test_available() {
         return;
     }
@@ -548,6 +548,7 @@ async fn cwd_mount_edit_row_accepts_absolute_mounted_directory() {
         .to_vec();
     drop(state);
 
+    let pinned_commit = repository.head().unwrap().unwrap();
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
@@ -585,6 +586,23 @@ async fn cwd_mount_edit_row_accepts_absolute_mounted_directory() {
         assert!(Instant::now() < deadline, "FUSE mount did not expose the row document");
         thread::sleep(Duration::from_millis(20));
     }
+    std::fs::write(
+        repository_directory.path().join("main.orna"),
+        "invalid @@@ source\n",
+    )
+    .unwrap();
+    format3::git(repository_directory.path(), &["add", "main.orna"]);
+    format3::git(
+        repository_directory.path(),
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "advance HEAD while workspace mount stays pinned",
+        ],
+    );
+    let head_after_move = repository.head().unwrap().unwrap();
+    assert_ne!(head_after_move, pinned_commit);
     let scripts = TempDir::new().unwrap();
     let editor = scripts.path().join("editor");
     std::fs::write(&editor, "#!/bin/sh\nprintf '%s\n' '{ title: \"after\", }' > \"$1\"\n").unwrap();
@@ -620,17 +638,18 @@ async fn cwd_mount_edit_row_accepts_absolute_mounted_directory() {
         .unwrap()
         .to_vec();
     assert_eq!(
-            orna_value_v1::Value::decode(&before)
-                .expect("decode the original admitted row")
-                .raw(),
-            &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("before".to_owned())]),
-        );
-        assert_eq!(
-            orna_value_v1::Value::decode(&after)
-                .expect("decode the edited admitted row")
-                .raw(),
-            &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("after".to_owned())]),
-        );
+        orna_value_v1::Value::decode(&before)
+            .expect("decode the original admitted row")
+            .raw(),
+        &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("before".to_owned())]),
+    );
+    assert_eq!(
+        orna_value_v1::Value::decode(&after)
+            .expect("decode the edited admitted row")
+            .raw(),
+        &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("after".to_owned())]),
+    );
+    assert_eq!(repository.head().unwrap().unwrap(), head_after_move);
 }
 #[tokio::test]
 async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
