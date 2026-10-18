@@ -23,8 +23,8 @@ use orna_syntax_v1::{
     PatternField, ReplInput, Statement, StringSegment, parse_expression, parse_repl,
 };
 use orna_value_v1::{
-    CANONICAL_NAN_BITS, ContextValue, Error as ValueError, ErrorValue as CanonicalErrorValue,
-    Format3Context, OVB2_BLOB_TAG, ROV3_BLOB_TAG, SOV3_BLOB_TAG, Raw, ValueFormat,
+    CANONICAL_NAN_BITS, ContextValue, ErrorValue as CanonicalErrorValue,
+    Format3Context, OVB2_BLOB_TAG, ROV3_BLOB_TAG, SOV3_BLOB_TAG, Raw, Snapshot, ValueFormat,
     domain_digest, float_max, float_min, float_ordinary_eq, float_total_cmp,
 };
 use serde::{
@@ -873,7 +873,7 @@ pub trait EffectHandler {
         _source: &str,
         _snapshot: &CanonicalValue,
     ) -> Result<(), EvaluationError> {
-        Err(error("ORNA-EVAL-UNSUPPORTED"))
+        Err(error("ORNA-EVAL-HIST-INCOMPLETE"))
     }
 
     /// Supplies a bounded page from the exact snapshot pinned on the relation.
@@ -1035,7 +1035,7 @@ pub trait Ovb2EffectHandler {
         _source: &str,
         _snapshot: &CanonicalValue,
     ) -> Result<(), EvaluationError> {
-        Err(error("ORNA-EVAL-UNSUPPORTED"))
+        Err(error("ORNA-EVAL-HIST-INCOMPLETE"))
     }
 
     /// Supplies one historical context-preserving relation page. `None` does
@@ -1592,8 +1592,9 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
     effects,
     namespace: None,
     transfer: None,
-    cancellation, };
-    let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
+        cancellation,
+        query_cache: QueryCache::default(), };
+        let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
     if context.transfer.is_some() {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -1697,7 +1698,8 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
     effects: Some(effects),
     namespace: None,
     transfer: None,
-    cancellation, };
+    cancellation,
+    query_cache: QueryCache::default(), };
     context.items(functions.len())?;
     let mut scope = Scope::from_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
@@ -1832,7 +1834,8 @@ fn evaluate_with_functions_and_nominals_and_budget(
     effects: None,
     namespace: None,
     transfer: None,
-    cancellation: None, };
+    cancellation: None,
+    query_cache: QueryCache::default(), };
     let result = (|| {
         context.items(functions.len())?;
         let mut scope =
@@ -1871,7 +1874,8 @@ pub fn evaluate_function(
     effects: None,
     namespace: None,
     transfer: None,
-    cancellation: None, };
+    cancellation: None,
+    query_cache: QueryCache::default(), };
     let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
     invoke_pure(&mut context, parameters, body, captured, supplied, 0).and_then(Value::canonical)
@@ -1916,7 +1920,8 @@ pub fn invoke_named_with_nominals(
     effects: None,
     namespace: function_namespace(name),
     transfer: None,
-    cancellation: None, };
+    cancellation: None,
+    query_cache: QueryCache::default(), };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
     let supplied = supplied_arguments(arguments, nominal_definitions, &mut context)?;
@@ -1959,7 +1964,8 @@ pub fn invoke_named_with_effects_and_budget(
     effects: Some(effects),
     namespace: function_namespace(name),
     transfer: None,
-    cancellation: None, };
+    cancellation: None,
+    query_cache: QueryCache::default(), };
     let result = (|| {
         context.items(functions.len())?;
         let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -2036,7 +2042,8 @@ pub fn invoke_named_with_context_effects(
         effects: Some(&mut profiled_effects),
         namespace: function_namespace(name),
         transfer: None,
-        cancellation: None, };
+        cancellation: None,
+    query_cache: QueryCache::default(), };
         let result = (|| {
             context.items(functions.len())?;
             let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -3609,6 +3616,118 @@ impl Scope {
     }
 }
 
+const MAX_QUERY_CACHE_ENTRIES: usize = 64;
+const MAX_QUERY_CACHE_ARGUMENTS: usize = 32;
+const MAX_QUERY_CACHE_INTEGER_BITS: u64 = 256;
+const MAX_QUERY_CACHE_DECIMAL_BITS: u64 = 256;
+const MAX_QUERY_CACHE_STRING_BYTES: usize = 256;
+
+#[derive(Default)]
+struct QueryCache {
+    entries: Vec<QueryCacheEntry>,
+}
+
+struct QueryCacheEntry {
+    function_id: usize,
+    arguments: Vec<Value>,
+    value: Value,
+}
+
+impl QueryCache {
+    fn can_store(&self) -> bool {
+        self.entries.len() < MAX_QUERY_CACHE_ENTRIES
+    }
+
+    fn get(&self, function_id: usize, arguments: &[Value]) -> Option<&Value> {
+        self.entries
+            .iter()
+            .find(|entry| {
+                entry.function_id == function_id && entry.arguments.as_slice() == arguments
+            })
+            .map(|entry| &entry.value)
+    }
+
+    fn insert(&mut self, function_id: usize, arguments: &[Value], value: &Value) -> bool {
+        if !self.can_store() {
+            return false;
+        }
+        self.entries.push(QueryCacheEntry {
+            function_id,
+            arguments: arguments.to_vec(),
+            value: value.clone(),
+        });
+        true
+    }
+}
+
+fn query_cacheable_function(
+    function: &PureFunction,
+    nominal_definitions: &NominalDefinitions,
+    arguments: &[Value],
+) -> bool {
+    if !function.environment.is_empty()
+        || !nominal_definitions.is_empty()
+        || arguments.len() != function.parameters.len()
+        || arguments.len() > MAX_QUERY_CACHE_ARGUMENTS
+    {
+        return false;
+    }
+
+    for (index, (parameter, argument)) in function.parameters.iter().zip(arguments).enumerate() {
+        let Pattern::Name(name, _) = &parameter.pattern else {
+            return false;
+        };
+        if name == "_"
+            || parameter.default.is_some()
+            || function.parameters[..index].iter().any(|previous| {
+                matches!(&previous.pattern, Pattern::Name(previous_name, _) if previous_name == name)
+            })
+            || !query_cacheable_value(argument)
+        {
+            return false;
+        }
+    }
+
+    query_cacheable_expression(&function.body, &function.parameters)
+}
+
+fn query_cacheable_expression(expression: &Expr, parameters: &[Parameter]) -> bool {
+    match expression {
+        Expr::Name { text, .. } => parameters.iter().any(|parameter| {
+            matches!(&parameter.pattern, Pattern::Name(name, _) if name == text)
+        }),
+        Expr::Literal { .. } => true,
+        Expr::Unary { op, rhs, .. } => {
+            matches!(op.as_str(), "+" | "-" | "!" | "not")
+                && query_cacheable_expression(rhs, parameters)
+        }
+        Expr::Binary { lhs, op, rhs, .. } => {
+            matches!(
+                op.as_str(),
+                "+" | "-" | "*" | "/" | "%" | "==" | "!=" | "<" | "<=" | ">" | ">="
+                    | "and" | "or" | "&&" | "||"
+            ) && query_cacheable_expression(lhs, parameters)
+                && query_cacheable_expression(rhs, parameters)
+        }
+        Expr::Group { inner, .. } => query_cacheable_expression(inner, parameters),
+        _ => false,
+    }
+}
+
+
+fn query_cacheable_value(value: &Value) -> bool {
+    match value {
+        Value::Unit | Value::Null | Value::Bool(_) | Value::Float(_) => true,
+        Value::Int(value) => value.bits() <= MAX_QUERY_CACHE_INTEGER_BITS,
+        Value::Decimal(value) => {
+            value.coefficient.bits() <= MAX_QUERY_CACHE_DECIMAL_BITS
+                && value.exponent10.bits() <= MAX_QUERY_CACHE_INTEGER_BITS
+        }
+        Value::String(value) => value.len() <= MAX_QUERY_CACHE_STRING_BYTES,
+        _ => false,
+    }
+}
+
 struct Context<'functions, 'effects> {
     limits: Limits,
     steps: u64,
@@ -3622,6 +3741,7 @@ struct Context<'functions, 'effects> {
     namespace: Option<String>,
     transfer: Option<Transfer>,
     cancellation: Option<&'functions CancellationToken>,
+    query_cache: QueryCache,
 }
 
 /// An evaluator-only non-local control transfer. It never crosses the public
@@ -3701,7 +3821,8 @@ fn invoke_task_callback(
         .map(|handler| handler as &mut dyn EffectHandler),
     namespace: None,
     transfer: None,
-    cancellation: Some(&cancellation), };
+    cancellation: Some(&cancellation),
+    query_cache: QueryCache::default(), };
     context.invoke_callable(&callback, Vec::new(), depth)
 }
 
@@ -5595,8 +5716,11 @@ impl Context<'_, '_> {
                 let Some(snapshot) = arguments.next() else {
                     return Err(error("ORNA-EVAL-ARGUMENT"));
                 };
+                let snapshot = snapshot.canonical()?;
+                Snapshot::decode(snapshot.raw())
+                    .map_err(|_| error("ORNA-EVAL-TYPE"))?;
                 return Ok(Value::Relation(
-                    plan.with_snapshot(snapshot.canonical()?)
+                    plan.with_snapshot(snapshot)
                         .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?,
                 ));
             }
@@ -6318,6 +6442,7 @@ impl Context<'_, '_> {
             return Ok(());
         }
 
+        self.validate_relation_plan_sources(plan)?;
         let mut after = None;
         loop {
             // Relation work has its own cancellation checkpoints. A plan
@@ -6727,10 +6852,15 @@ impl Context<'_, '_> {
 
         let remaining = self.limits.max_steps.saturating_sub(self.steps);
         let mut budget = StepBudget::new(remaining);
+        let missing_handler = if snapshot.is_some() {
+            "ORNA-EVAL-HIST-INCOMPLETE"
+        } else {
+            "ORNA-EVAL-UNSUPPORTED"
+        };
         let result = self
             .effects
             .as_deref_mut()
-            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
+            .ok_or_else(|| error(missing_handler))
             .and_then(|effects| {
                 if let Some(snapshot) = snapshot {
                     let contextual = if let Some(handler) = effects.ovb2_binding() {
@@ -6791,7 +6921,7 @@ impl Context<'_, '_> {
             .steps
             .checked_add(debited)
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-        let page = result?.ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        let page = result?.ok_or_else(|| error(missing_handler))?;
         let page_size = match &page {
             SourcePage::Canonical(page) => page.rows.len(),
             SourcePage::Contextual(page) => page.rows.len(),
@@ -6810,7 +6940,7 @@ impl Context<'_, '_> {
                 let (format, accepts_context_values) = {
                     let handler = self
                         .ovb2_effects()
-                        .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+                        .ok_or_else(|| error(missing_handler))?;
                     (handler.value_format(), handler.accepts_context_values())
                 };
                 let rows = page
@@ -6846,10 +6976,15 @@ impl Context<'_, '_> {
         } else if plan.source_values.is_some() {
             Ok(())
         } else {
+            let missing_handler = if plan.snapshot.is_some() {
+                "ORNA-EVAL-HIST-INCOMPLETE"
+            } else {
+                "ORNA-EVAL-UNSUPPORTED"
+            };
             let effects = self
                 .effects
                 .as_deref_mut()
-                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+                .ok_or_else(|| error(missing_handler))?;
             if let Some(snapshot) = plan.snapshot.as_deref() {
                 if let Some(handler) = effects.ovb2_binding() {
                     handler.validate_relation_source_at_snapshot(&plan.source, snapshot)
@@ -7778,6 +7913,38 @@ impl Context<'_, '_> {
                 }
                 supplied.insert(key, value);
             }
+            let cache = match &callable {
+                Value::Function { name, nominal_definitions }
+                    if self.effects.is_some() && !session_owned =>
+                {
+                    let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+                    let cache_arguments = parameters
+                        .iter()
+                        .enumerate()
+                        .map(|(index, parameter)| {
+                            supplied.get(&parameter_key(parameter, index)).cloned()
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    cache_arguments
+                        .filter(|values| {
+                            supplied.len() == parameters.len()
+                                && query_cacheable_function(function, nominal_definitions, values)
+                        })
+                        .map(|values| {
+                            (function as *const PureFunction as usize, name.clone(), values)
+                        })
+                }
+                _ => None,
+            };
+            if let Some((function_id, function_name, arguments)) = cache.as_ref()
+                && let Some(value) = self.query_cache.get(*function_id, arguments).cloned()
+            {
+                if let Some(effects) = self.effects.as_deref_mut() {
+                    effects.observe_query_reuse(function_name, QueryReuseDecision::Reused);
+                }
+                return Ok(value);
+            }
+            let cache_arguments = cache.filter(|_| self.query_cache.can_store());
             let previous_repl_bindings = self.repl_bindings;
             self.repl_bindings = session_owned;
             let previous_namespace = self.namespace.clone();
@@ -7785,6 +7952,17 @@ impl Context<'_, '_> {
             let result = invoke_pure(self, parameters, body, captured, supplied, depth + 1);
             self.namespace = previous_namespace;
             self.repl_bindings = previous_repl_bindings;
+            if let (Some((function_id, function_name, arguments)), Ok(value)) =
+                (cache_arguments.as_ref(), &result)
+                && query_cacheable_value(value)
+                && self.query_cache.insert(*function_id, arguments, value)
+                && let Some(effects) = self.effects.as_deref_mut()
+            {
+                effects.observe_query_reuse(
+                    function_name,
+                    QueryReuseDecision::ComputedAndStored,
+                );
+            }
             return result;
         }
         let math = native_math.or_else(|| {
@@ -11791,7 +11969,9 @@ impl Context<'_, '_> {
         arguments: Vec<Value>,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        let (parameters, body, mut captured, session_owned, namespace) = match callable {
+        self.depth(depth + 1)?;
+        self.items(arguments.len())?;
+        let (parameters, body, mut captured, session_owned, namespace, cache) = match callable {
             Value::Function {
                 name,
                 nominal_definitions,
@@ -11800,6 +11980,30 @@ impl Context<'_, '_> {
                     .functions
                     .get(name)
                     .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+                let session_owned = self
+                    .session_functions
+                    .is_some_and(|functions| functions.contains(name));
+                let cache_key = if self.effects.is_some()
+                    && !session_owned
+                    && query_cacheable_function(function, nominal_definitions, &arguments)
+                {
+                    Some((function as *const PureFunction as usize, name.as_str()))
+                } else {
+                    None
+                };
+                if let Some((function_id, function_name)) = cache_key
+                    && let Some(value) = self.query_cache.get(function_id, &arguments).cloned()
+                {
+                    if let Some(effects) = self.effects.as_deref_mut() {
+                        effects.observe_query_reuse(function_name, QueryReuseDecision::Reused);
+                    }
+                    return Ok(value);
+                }
+                let cache_arguments = if cache_key.is_some() && self.query_cache.can_store() {
+                    Some(arguments.clone())
+                } else {
+                    None
+                };
                 (
                     function.parameters.clone(),
                     function.body.clone(),
@@ -11808,9 +12012,9 @@ impl Context<'_, '_> {
                         nominal_definitions,
                         self,
                     )?,
-                    self.session_functions
-                        .is_some_and(|functions| functions.contains(name)),
+                    session_owned,
                     function_namespace(name),
+                    cache_key.zip(cache_arguments),
                 )
             }
             Value::Closure(closure) => (
@@ -11819,11 +12023,10 @@ impl Context<'_, '_> {
                 closure.captured.clone(),
                 self.repl_bindings,
                 closure.namespace.clone(),
+                None,
             ),
             _ => return Err(error("ORNA-EVAL-TYPE")),
         };
-        self.depth(depth + 1)?;
-        self.items(arguments.len())?;
         if arguments.len() > parameters.len() {
             return Err(error("ORNA-EVAL-ARGUMENT"));
         }
@@ -11844,6 +12047,19 @@ impl Context<'_, '_> {
         let result = invoke_pure(self, &parameters, &body, captured, supplied, depth + 1);
         self.namespace = previous_namespace;
         self.repl_bindings = previous_repl_bindings;
+        if let (Some(((function_id, function_name), arguments)), Ok(value)) =
+            (cache.as_ref(), &result)
+            && query_cacheable_value(value)
+            && self
+                .query_cache
+                .insert(*function_id, arguments, value)
+            && let Some(effects) = self.effects.as_deref_mut()
+        {
+            effects.observe_query_reuse(
+                function_name,
+                QueryReuseDecision::ComputedAndStored,
+            );
+        }
         result
     }
     fn invoke_predicate(
@@ -14014,6 +14230,7 @@ fn relation_named_arguments(
         "group_by" | "rank" => &["values", "key"],
         "zip" | "zip_exact" => &["left", "right"],
         "asof_join" => &["left", "right", "time", "by"],
+        "as_of" => &["rows", "snapshot"],
         "bucket_by" => match values.len() {
             2 => &["rows", "period"],
             3 => &["rows", "period", "zone"],
@@ -14901,7 +15118,9 @@ mod tests {
         effects: None,
         namespace: None,
         transfer: None,
-        cancellation: None, }
+        cancellation: None,
+            query_cache: QueryCache::default(),
+        }
     }
 
     #[test]
@@ -16019,6 +16238,377 @@ mod tests {
     }
 
     #[test]
+    fn proven_scalar_function_calls_reuse_and_report_the_result() {
+        struct ReuseObserver(Vec<(String, QueryReuseDecision)>);
+
+        impl EffectHandler for ReuseObserver {
+            fn handle(
+                &mut self,
+                _callee: &Expr,
+                _arguments: &[CanonicalValue],
+            ) -> Result<Option<CanonicalValue>, EvaluationError> {
+                Ok(None)
+            }
+
+            fn observe_query_reuse(&mut self, function: &str, decision: QueryReuseDecision) {
+                self.0.push((function.to_owned(), decision));
+            }
+        }
+
+        let parsed = orna_syntax_v1::parse_module(
+            "fn increment(value: Int) = value + 1; fn main() = increment(4) + increment(4);",
+        );
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let functions = parsed
+            .value
+            .items
+            .into_iter()
+            .map(|item| {
+                let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration
+                else {
+                    panic!("function expected")
+                };
+                (
+                    signature.name,
+                    PureFunction {
+                        parameters: signature.parameters,
+                        body,
+                        environment: Environment::new(),
+                    },
+                )
+            })
+            .collect();
+        let mut observer = ReuseObserver(Vec::new());
+
+        assert_eq!(
+            invoke_named_with_effects(
+                "main",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut observer,
+            )
+            .expect("pure scalar calls succeed"),
+            integer(10),
+        );
+        assert_eq!(
+            observer.0,
+            vec![
+                ("increment".to_owned(), QueryReuseDecision::ComputedAndStored),
+                ("increment".to_owned(), QueryReuseDecision::Reused),
+            ],
+        );
+    }
+
+    #[test]
+    fn function_calls_with_effects_are_never_reused() {
+        struct Effects {
+            calls: usize,
+            reuse: Vec<QueryReuseDecision>,
+        }
+
+        impl EffectHandler for Effects {
+            fn handle(
+                &mut self,
+                _callee: &Expr,
+                _arguments: &[CanonicalValue],
+            ) -> Result<Option<CanonicalValue>, EvaluationError> {
+                self.calls += 1;
+                Ok(Some(integer(2)))
+            }
+
+            fn observe_query_reuse(&mut self, _function: &str, decision: QueryReuseDecision) {
+                self.reuse.push(decision);
+            }
+        }
+
+        let parsed = orna_syntax_v1::parse_module(
+            "fn effectful(value: Int) = sys.test.observe(value); fn main() = effectful(1) + effectful(1);",
+        );
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let functions = parsed
+            .value
+            .items
+            .into_iter()
+            .map(|item| {
+                let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration
+                else {
+                    panic!("function expected")
+                };
+                (
+                    signature.name,
+                    PureFunction {
+                        parameters: signature.parameters,
+                        body,
+                        environment: Environment::new(),
+                    },
+                )
+            })
+            .collect();
+        let mut effects = Effects {
+            calls: 0,
+            reuse: Vec::new(),
+        };
+
+        assert_eq!(
+            invoke_named_with_effects(
+                "main",
+                &functions,
+                &Environment::new(),
+                Limits::default(),
+                &mut effects,
+            )
+            .expect("effectful calls succeed"),
+            integer(4),
+        );
+        assert_eq!(effects.calls, 2);
+        assert!(effects.reuse.is_empty());
+    }
+    #[test]
+    fn relation_as_of_reads_the_exact_snapshot_pin() {
+        struct HistoricalReads {
+            expected: CanonicalValue,
+            validated: usize,
+            pages: usize,
+            current_validations: usize,
+            current_pages: usize,
+        }
+
+        impl EffectHandler for HistoricalReads {
+            fn handle(
+                &mut self,
+                _callee: &Expr,
+                _arguments: &[CanonicalValue],
+            ) -> Result<Option<CanonicalValue>, EvaluationError> {
+                Ok(None)
+            }
+
+            fn validate_relation_source(&mut self, _source: &str) -> Result<(), EvaluationError> {
+                self.current_validations += 1;
+                Ok(())
+            }
+
+            fn validate_relation_source_at_snapshot(
+                &mut self,
+                source: &str,
+                snapshot: &CanonicalValue,
+            ) -> Result<(), EvaluationError> {
+                assert_eq!(source, "sys.Storage");
+                assert_eq!(snapshot, &self.expected);
+                self.validated += 1;
+                Ok(())
+            }
+
+            fn scan_relation_page_at_snapshot_scoped(
+                &mut self,
+                source: &str,
+                _scope: RelationReadScope,
+                snapshot: &CanonicalValue,
+                _after: Option<&[u8]>,
+                _limit: usize,
+                budget: &mut StepBudget,
+            ) -> Result<Option<RelationPage>, EvaluationError> {
+                assert_eq!(source, "sys.Storage");
+                assert_eq!(snapshot, &self.expected);
+                budget.debit(1)?;
+                self.pages += 1;
+                Ok(Some(RelationPage {
+                    rows: vec![integer(17)],
+                    next: None,
+                }))
+            }
+
+            fn scan_relation_page(
+                &mut self,
+                _source: &str,
+                _after: Option<&[u8]>,
+                _limit: usize,
+                _budget: &mut StepBudget,
+            ) -> Result<Option<RelationPage>, EvaluationError> {
+                self.current_pages += 1;
+                Ok(Some(RelationPage {
+                    rows: vec![integer(99)],
+                    next: None,
+                }))
+            }
+        }
+
+        let snapshot = CanonicalValue::new(
+            Snapshot::cwd([0x31; 16], [0x32; 16], 9.into())
+                .expect("valid CWD snapshot")
+                .raw(),
+        )
+        .expect("canonical snapshot value");
+        let mut environment = Environment::new();
+        environment.insert("pin".to_owned(), snapshot.clone());
+        let functions = Functions::new();
+        let mut effects = HistoricalReads {
+            expected: snapshot.clone(),
+            validated: 0,
+            pages: 0,
+            current_validations: 0,
+            current_pages: 0,
+        };
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            restrict_function_names: false,
+            reject_unhandled_field_calls: false,
+            effects: Some(&mut effects),
+            namespace: None,
+            transfer: None,
+            cancellation: None,
+            query_cache: QueryCache::default(),
+        };
+        let parsed = parse_expression("sys.Storage.as_of(pin)");
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let mut scope = Scope::from_environment(&environment, &mut context)
+            .expect("snapshot pin is admitted");
+        let Value::Relation(plan) = context
+            .evaluate(&parsed.value, &mut scope, 0)
+            .expect("as_of builds a relation plan")
+        else {
+            panic!("as_of must return a relation")
+        };
+        assert_eq!(plan.snapshot.as_deref(), Some(&snapshot));
+
+        assert_eq!(
+            context
+                .collect_relation_values(&plan, 0)
+                .expect("historical relation is readable"),
+            vec![Value::Int(17.into())],
+        );
+        drop(context);
+        assert_eq!(effects.validated, 1);
+        assert_eq!(effects.pages, 1);
+        assert_eq!(effects.current_validations, 0);
+        assert_eq!(effects.current_pages, 0);
+    }
+
+    #[test]
+    fn missing_historical_page_never_falls_back_to_current_data() {
+        struct CurrentOnly {
+            current_validations: usize,
+            current_pages: usize,
+        }
+
+        impl EffectHandler for CurrentOnly {
+            fn handle(
+                &mut self,
+                _callee: &Expr,
+                _arguments: &[CanonicalValue],
+            ) -> Result<Option<CanonicalValue>, EvaluationError> {
+                Ok(None)
+            }
+
+            fn validate_relation_source_at_snapshot(
+                &mut self,
+                _source: &str,
+                _snapshot: &CanonicalValue,
+            ) -> Result<(), EvaluationError> {
+                Ok(())
+            }
+
+            fn validate_relation_source(&mut self, _source: &str) -> Result<(), EvaluationError> {
+                self.current_validations += 1;
+                Ok(())
+            }
+
+            fn scan_relation_page(
+                &mut self,
+                _source: &str,
+                _after: Option<&[u8]>,
+                _limit: usize,
+                _budget: &mut StepBudget,
+            ) -> Result<Option<RelationPage>, EvaluationError> {
+                self.current_pages += 1;
+                Ok(Some(RelationPage {
+                    rows: vec![integer(99)],
+                    next: None,
+                }))
+            }
+        }
+
+        let snapshot = CanonicalValue::new(
+            Snapshot::cwd([0x41; 16], [0x42; 16], 12.into())
+                .expect("valid CWD snapshot")
+                .raw(),
+        )
+        .expect("canonical snapshot value");
+        let functions = Functions::new();
+        let mut effects = CurrentOnly {
+            current_validations: 0,
+            current_pages: 0,
+        };
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            restrict_function_names: false,
+            reject_unhandled_field_calls: false,
+            effects: Some(&mut effects),
+            namespace: None,
+            transfer: None,
+            cancellation: None,
+            query_cache: QueryCache::default(),
+        };
+        let plan = RelationPlan::new("sys.Storage".to_owned())
+            .with_snapshot(snapshot)
+            .expect("source relation can be snapshot-pinned");
+
+        assert_eq!(
+            context
+                .collect_relation_values(&plan, 0)
+                .expect_err("a missing historical page is incomplete" )
+                .code(),
+            "ORNA-EVAL-HIST-INCOMPLETE",
+        );
+        drop(context);
+        assert_eq!(effects.current_validations, 0);
+        assert_eq!(effects.current_pages, 0);
+    }
+
+    #[test]
+    fn relation_as_of_rejects_non_snapshot_values() {
+        let environment = BTreeMap::from([("pin".to_owned(), integer(3))]);
+        let functions = Functions::new();
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            restrict_function_names: false,
+            reject_unhandled_field_calls: false,
+            effects: None,
+            namespace: None,
+            transfer: None,
+            cancellation: None,
+            query_cache: QueryCache::default(),
+        };
+        let parsed = parse_expression("sys.Storage.as_of(pin)");
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let mut scope = Scope::from_environment(&environment, &mut context)
+            .expect("integer pin is admitted as a value");
+
+        assert_eq!(
+            context
+                .evaluate(&parsed.value, &mut scope, 0)
+                .expect_err("as_of requires an OVB Snapshot")
+                .code(),
+            "ORNA-EVAL-TYPE",
+        );
+    }
+
+    #[test]
     fn recovery_pipelines_handle_ordinary_failures_and_skip_successes() {
         assert_eq!(
             evaluate_recovery("(1 / 0) |? (failure => if failure == failure { 42 } else { 0 })"),
@@ -16373,7 +16963,8 @@ mod tests {
         effects: None,
         namespace: None,
         transfer: None,
-        cancellation: None, };
+    cancellation: None,
+    query_cache: QueryCache::default(), };
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -16444,7 +17035,8 @@ mod tests {
         effects: Some(effects),
         namespace: None,
         transfer: None,
-        cancellation: None, };
+    cancellation: None,
+    query_cache: QueryCache::default(), };
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -16591,7 +17183,8 @@ mod tests {
         effects: Some(effects),
         namespace: None,
         transfer: None,
-        cancellation, };
+    cancellation,
+    query_cache: QueryCache::default(), };
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -16733,7 +17326,8 @@ mod tests {
         effects: Some(&mut effects),
         namespace: None,
         transfer: None,
-        cancellation: None, };
+    cancellation: None,
+    query_cache: QueryCache::default(), };
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -16765,7 +17359,8 @@ mod tests {
         effects: Some(&mut effects),
         namespace: None,
         transfer: None,
-        cancellation: None, };
+    cancellation: None,
+    query_cache: QueryCache::default(), };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
 
@@ -17228,7 +17823,8 @@ mod tests {
         effects: Some(&mut effects),
         namespace: None,
         transfer: None,
-        cancellation: Some(&cancellation), };
+    cancellation: Some(&cancellation),
+    query_cache: QueryCache::default(), };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
 
@@ -17258,7 +17854,8 @@ mod tests {
         effects: Some(&mut effects),
         namespace: None,
         transfer: None,
-        cancellation: Some(&cancellation), };
+    cancellation: Some(&cancellation),
+    query_cache: QueryCache::default(), };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
 
@@ -17287,7 +17884,8 @@ mod tests {
         effects: None,
         namespace: None,
         transfer: None,
-        cancellation: Some(&cancellation), };
+    cancellation: Some(&cancellation),
+    query_cache: QueryCache::default(), };
         let mut callbacks = 0;
         let mut distinct_seen = Vec::new();
         let mut pair_previous = Vec::new();

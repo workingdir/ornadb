@@ -10,7 +10,7 @@ use orna_value_v1::{ContextValue, Format3Context, Raw, ValueFormat};
 
 use crate::{
     CancellationToken, Context, Environment, EvaluationError, Functions, Limits, PureFunction,
-    Scope, bind, error, pattern_names, validate_limits,
+    QueryCache, Scope, bind, error, pattern_names, validate_limits,
 };
 
 /// A bounded ephemeral module for one interactive Orna session.
@@ -320,6 +320,7 @@ impl ReplSession {
             namespace: None,
             transfer: None,
             cancellation,
+            query_cache: QueryCache::default(),
         };
         context.items(self.functions.len())?;
         let mut scope = Scope::from_repl_environment(
@@ -451,6 +452,7 @@ impl ReplSession {
             namespace: None,
             transfer: None,
             cancellation,
+            query_cache: QueryCache::default(),
         };
         let mut scope = Scope::from_repl_environment(
             &environment,
